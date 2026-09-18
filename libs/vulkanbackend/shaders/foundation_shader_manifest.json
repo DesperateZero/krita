@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "foundationAbi": 1,
+  "status": "build-generated",
+  "requiredAssets": [
+    "foundation.buffer_checksum"
+  ],
+  "assets": [
+    {
+      "descriptorBindings": [
+        {
+          "binding": 0,
+          "kind": "storage-buffer-readonly",
+          "set": 0
+        },
+        {
+          "binding": 1,
+          "kind": "storage-buffer-readwrite",
+          "set": 0
+        }
+      ],
+      "entryPoint": "main",
+      "id": "foundation.buffer_checksum",
+      "pushConstantBytes": 4,
+      "semanticAbi": 1,
+      "source": "foundation_checksum.comp",
+      "stage": "compute",
+      "workgroupSize": [
+        64,
+        1,
+        1
+      ]
+    }
+  ],
+  "readiness": {
+    "canSeal": true,
+    "reason": "The build seals this manifest after SPIR-V validation and reflection ABI checks."
+  }
+}

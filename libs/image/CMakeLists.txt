@@ -28,6 +28,22 @@ foreach(_obj IN LISTS __per_arch_circle_mask_generator_objs _per_arch_processor_
 endforeach()
 
 set(kritaimage_LIB_SRCS
+   gpustroke/KisPageWorkCompiler.cpp
+   gpustroke/KisStrokeCoordinator.cpp
+   pagestore/KisBackendServiceRegistry.cpp
+   pagestore/KisCompletionRegistry.cpp
+   pagestore/KisDocumentGpuSession.cpp
+   pagestore/KisDerivedSurfaceCache.cpp
+   pagestore/KisEvaluationGraphTypes.cpp
+   pagestore/KisEvaluationGraphLowerer.cpp
+   pagestore/KisEvaluationPlanner.cpp
+   pagestore/KisPageReplicaProvider.cpp
+   pagestore/KisPageStateMachine.cpp
+   pagestore/KisPageStore.cpp
+   pagestore/KisResidencyController.cpp
+   pagestore/KisSurfaceRegistry.cpp
+   pagestore/KisSurfaceCodecRegistry.cpp
+   pagestore/KisUnifiedSsdPageStore.cpp
    tiles3/kis_tile.cc
    tiles3/kis_tile_data.cc
    tiles3/kis_tile_data_store.cc
@@ -418,6 +434,8 @@ endif ()
 
 target_include_directories(kritaimage
     PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/gpustroke>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/pagestore>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/brushengine>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/filter>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/generator>

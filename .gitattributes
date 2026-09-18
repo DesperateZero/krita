@@ -8,3 +8,7 @@
 # Patch files must be checked out in CRLF on Windows for patch to work
 *.patch text=auto
 *.diff text=auto
+
+# Keep the vendored VMA header byte-for-byte compatible with its upstream
+# release; its upstream formatting intentionally contains trailing spaces.
+3rdparty_vendor/vma/include/vk_mem_alloc.h -whitespace

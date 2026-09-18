@@ -140,6 +140,16 @@ workflow:
     - if [[ ! -f .clang-format && ! -f _clang-format ]]; then wget -O .clang-format https://invent.kde.org/frameworks/extra-cmake-modules/-/raw/master/kde-modules/clang-format.cmake; fi
     - ./ci-utilities/run-clang-format.py
 
+vulkan-architecture:
+  stage: build
+  image: invent-registry.kde.org/sysadmin/ci-images/suse-qt69:latest
+  tags:
+    - Linux
+  extends:
+    - .ci-always-job-mixin
+  script:
+    - bash build-tools/ci-scripts/check-vulkan-architecture.sh
+
 
 include:
   - local: /build-tools/ci-scripts/linux.yml

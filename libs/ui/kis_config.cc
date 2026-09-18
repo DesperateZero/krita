@@ -3166,4 +3166,3 @@ QDebug operator<<(QDebug debug, const KisConfig::CanvasSurfaceBitDepthMode &mode
 
     return debug.space();
 }
-

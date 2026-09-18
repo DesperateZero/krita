@@ -331,6 +331,16 @@ add_feature_info("Lock free hash table" USE_LOCK_FREE_HASH_TABLE "Use lock free 
 option(FOUNDATION_BUILD "A Foundation build is a binary release build that can package some extra things like color themes. Linux distributions that build and install Krita into a default system location should not define this option to true." OFF)
 add_feature_info("Foundation Build" FOUNDATION_BUILD "A Foundation build is a binary release build that can package some extra things like color themes. Linux distributions that build and install Krita into a default system location should not define this option to true.")
 
+option(BUILD_VULKAN_FOUNDATION "Build the isolated Vulkan backend foundation and its validation targets" OFF)
+add_feature_info("Vulkan Foundation" BUILD_VULKAN_FOUNDATION "Builds the internal Vulkan backend foundation without enabling a product entry point")
+
+option(BUILD_VULKAN_UI_ADAPTER "Build the internal, non-installed Vulkan UI adapter" OFF)
+add_feature_info("Vulkan UI Adapter" BUILD_VULKAN_UI_ADAPTER "Builds the downstream Vulkan UI adapter for dependency-boundary validation")
+
+if(BUILD_VULKAN_UI_ADAPTER AND NOT BUILD_VULKAN_FOUNDATION)
+    message(FATAL_ERROR "BUILD_VULKAN_UI_ADAPTER requires BUILD_VULKAN_FOUNDATION=ON")
+endif()
+
 option(KRITA_ENABLE_BROKEN_TESTS "Enable tests that are marked as broken" OFF)
 add_feature_info("Enable Broken Tests" KRITA_ENABLE_BROKEN_TESTS "Runs broken test when \"make test\" is invoked (use -DKRITA_ENABLE_BROKEN_TESTS=ON to enable).")
 
@@ -1392,6 +1402,55 @@ set_package_properties(LibMyPaint PROPERTIES
     PURPOSE "Required for the MyPaint brush engine")
 macro_bool_to_01(LibMyPaint_FOUND HAVE_LIBMYPAINT)
 configure_file(config-mypaint.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config-mypaint.h )
+
+##
+## Look for Vulkan only when the isolated foundation is requested. Keeping this
+## block closed by default is the BR0 CPU-only configuration contract.
+##
+set(HAVE_VULKAN FALSE)
+if(BUILD_VULKAN_FOUNDATION)
+    find_package(Vulkan REQUIRED)
+    message(STATUS "Found Vulkan: ${Vulkan_LIBRARY} (version ${Vulkan_VERSION})")
+    set(HAVE_VULKAN TRUE)
+
+    find_program(KRITA_GLSLC_EXECUTABLE
+        NAMES glslc
+        HINTS "$ENV{VULKAN_SDK}/bin")
+    find_program(KRITA_SPIRV_VAL_EXECUTABLE
+        NAMES spirv-val
+        HINTS "$ENV{VULKAN_SDK}/bin")
+    find_program(KRITA_SPIRV_CROSS_EXECUTABLE
+        NAMES spirv-cross
+        HINTS "$ENV{VULKAN_SDK}/bin")
+    foreach(_vulkan_tool
+            KRITA_GLSLC_EXECUTABLE
+            KRITA_SPIRV_VAL_EXECUTABLE
+            KRITA_SPIRV_CROSS_EXECUTABLE)
+        if(NOT DEFINED ${_vulkan_tool} OR NOT EXISTS "${${_vulkan_tool}}")
+            message(FATAL_ERROR
+                "BUILD_VULKAN_FOUNDATION requires ${_vulkan_tool}")
+        endif()
+    endforeach()
+
+    # Check for required Vulkan extensions at compile time
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES ${Vulkan_INCLUDE_DIRS})
+    check_cxx_source_compiles("
+        #include <vulkan/vulkan.h>
+        int main() {
+            VkPhysicalDeviceSparseProperties sp;
+            (void)sp;
+            return 0;
+        }
+    " VULKAN_HAS_SPARSE_PROPERTIES)
+
+    if(NOT VULKAN_HAS_SPARSE_PROPERTIES)
+        message(FATAL_ERROR "Vulkan SDK found but missing sparse binding support headers")
+    endif()
+else()
+    message(STATUS "Vulkan foundation disabled; Vulkan SDK and shader tools are not required")
+endif()
+configure_file(config-vulkan.h.cmake ${CMAKE_CURRENT_BINARY_DIR}/config-vulkan.h)
 
 ##
 ## Look for OpenGL
