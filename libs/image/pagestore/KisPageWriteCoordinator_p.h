@@ -178,6 +178,10 @@ public:
     explicit KisBackingBudgetController(const KisPageBackingLimits &limits = {});
 
     KisBackingBudgetReservation reserve(const KisBackingBudgetDelta &, QString *error);
+    // Reserves positive per-bucket destinations while durable capacity uses
+    // only the net SSD growth of the signed physical move/reclassification.
+    KisBackingBudgetReservation reserveChange(const KisBackingBudgetDelta &,
+                                               QString *error);
     void commitReservation(KisBackingBudgetReservation &&reservation,
                            const KisBackingBudgetDelta &installed) noexcept;
     KisPageBackingUsage usage() const;
@@ -188,6 +192,9 @@ public:
 private:
     struct ReservationSlot {
         KisBackingBudgetDelta delta;
+        std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
+            aggregateBytes{};
+        quint64 durableBytes = 0;
         quint32 generation = 0;
         bool active = false;
     };
@@ -215,6 +222,11 @@ private:
     bool reservationCovers(quint64 cookie, KisBackingBudgetClass,
                            KisPageAccessDomain, quint64 bytes) const;
     bool reservationCovers(quint64 cookie, const KisBackingBudgetDelta &) const;
+    KisBackingBudgetReservation reserveImpl(const KisBackingBudgetDelta &,
+                                             const std::array<quint64,
+                                                 static_cast<size_t>(KisBackingBudgetClass::Count)> &aggregateBytes,
+                                             quint64 durableBytes,
+                                             QString *error);
 
     mutable QMutex m_mutex;
     KisPageBackingLimits m_limits;

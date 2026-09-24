@@ -9,6 +9,8 @@
 
 #include <QRandomGenerator>
 
+#include <utility>
+
 #include "kis_debug.h"
 
 #include "kis_image_config.h"
@@ -58,7 +60,7 @@ void KisSwappedDataStoreTest::testRoundTrip()
         // TODO: check num clones
 
         // FIXME: take a lock of the tile data
-        store.swapInTileData(td);
+        QVERIFY(store.swapInTileData(td));
         QVERIFY(memoryIsFilled(COLUMN2COLOR(i), td->data(), TILESIZE));
     }
 
@@ -80,7 +82,7 @@ void KisSwappedDataStoreTest::processTileData(qint32 column, KisTileData *td, Ki
     else {
         // TODO: check num clones
         // FIXME: take a lock of the tile data
-        store.swapInTileData(td);
+        QVERIFY(store.swapInTileData(td));
         QVERIFY(memoryIsFilled(COLUMN2COLOR(column), td->data(), TILESIZE));
     }
 }
@@ -121,5 +123,37 @@ void KisSwappedDataStoreTest::testRandomAccess()
         delete tileDataList[i];
 }
 
-SIMPLE_TEST_MAIN(KisSwappedDataStoreTest)
+void KisSwappedDataStoreTest::testCapacityFailurePreservesResidentTile()
+{
+    KisImageConfig config(false);
+    config.setMaxSwapSize(1);
+    config.setSwapSlabSize(1);
+    config.setSwapWindowSize(1);
 
+    KisSwappedDataStore store;
+    const qint32 pixelSize = 16;
+    const quint8 defaultPixel[16] = {};
+    QRandomGenerator rng(0x5a17);
+    QList<KisTileData *> swapped;
+    bool rejected = false;
+    for (int i = 0; i < 32; ++i) {
+        auto *tile = new KisTileData(
+            pixelSize, defaultPixel, KisTileDataStore::instance());
+        const qsizetype bytes = qsizetype(pixelSize)
+            * KisTileData::WIDTH * KisTileData::HEIGHT;
+        for (qsizetype byte = 0; byte < bytes; ++byte)
+            tile->data()[byte] = quint8(rng.generate());
+        if (!store.trySwapOutTileData(tile)) {
+            rejected = true;
+            QVERIFY(tile->data());
+            delete tile;
+            break;
+        }
+        swapped.append(tile);
+    }
+    QVERIFY(rejected);
+    for (KisTileData *tile : std::as_const(swapped))
+        delete tile;
+}
+
+SIMPLE_TEST_MAIN(KisSwappedDataStoreTest)

@@ -16,6 +16,8 @@
 
 class KisBackingBudgetController;
 class KisBackingBudgetReservation;
+class KisPageOwnerDomainAdmission;
+class KisPageOwnerLedger;
 enum class KisBackingBudgetClass : quint8;
 
 struct KisBackingClassChange
@@ -23,6 +25,31 @@ struct KisBackingClassChange
     KisReplicaHandle replica;
     KisBackingBudgetClass before;
     KisBackingBudgetClass after;
+};
+
+/**
+ * One-shot owner reservation for a frozen set of backing-class changes.
+ * Destruction cancels the budget reservation and releases the physical claims.
+ */
+class KRITAIMAGE_EXPORT KisBackingClassChangeReservation final
+{
+public:
+    KisBackingClassChangeReservation() = default;
+    ~KisBackingClassChangeReservation();
+    KisBackingClassChangeReservation(KisBackingClassChangeReservation &&) noexcept;
+    KisBackingClassChangeReservation &operator=(KisBackingClassChangeReservation &&) noexcept;
+    KisBackingClassChangeReservation(const KisBackingClassChangeReservation &) = delete;
+    KisBackingClassChangeReservation &operator=(const KisBackingClassChangeReservation &) = delete;
+
+    bool isValid() const;
+    void release() noexcept;
+
+private:
+    KisBackingClassChangeReservation(KisPageOwnerLedger *owner, quint64 cookie);
+    KisPageOwnerLedger *m_owner = nullptr;
+    quint64 m_cookie = 0;
+
+    friend class KisPageOwnerLedger;
 };
 
 /**
@@ -57,12 +84,11 @@ public:
                                          KisBackingBudgetReservation &reservation,
                                          QString *error = nullptr);
     bool synchronizeBackingDomains(QString *error = nullptr);
-    KisBackingBudgetReservation prepareBackingChanges(
-        QVector<KisBackingClassChange> *changes,
+    KisBackingClassChangeReservation prepareBackingChanges(
+        QVector<KisBackingClassChange> changes,
         const QVector<KisPageTransitionEffect> &retirementEffects,
         QString *error = nullptr);
-    void commitBackingChanges(KisBackingBudgetReservation &&reservation,
-                              const QVector<KisBackingClassChange> &changes) noexcept;
+    void commitBackingChanges(KisBackingClassChangeReservation &&reservation) noexcept;
     /**
      * Pre-admit every owned replica emitted by a local metadata transition to
      * RetirementDebt. The returned cookie freezes the exact backing classes;
@@ -135,12 +161,16 @@ private:
                                KisBackingBudgetClass budgetClass,
                                KisBackingBudgetReservation *reservation,
                                QString *error);
+    void commitPreparedBackingChanges(quint64 cookie) noexcept;
+    void cancelPreparedBackingChanges(quint64 cookie) noexcept;
     bool bindProviderOperationImpl(KisPageOperationId operation,
                                    const KisReplicaOperation &result,
                                    bool detachedRetirement,
                                    QString *error);
     class Private;
     QScopedPointer<Private> d;
+    friend class KisPageOwnerDomainAdmission;
+    friend class KisBackingClassChangeReservation;
 };
 
 #endif // KIS_PAGE_OWNER_LEDGER_H

@@ -102,6 +102,9 @@ public:
     QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override;
     void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                         quint64 revision) override;
+    bool registerBackingDomainAdmission(
+        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        QString *error = nullptr) override;
     KisReplicaOperation prepareSynchronousWriteCopy(
         KisPageOperationId operation,
         const KisReplicaHandle &source,

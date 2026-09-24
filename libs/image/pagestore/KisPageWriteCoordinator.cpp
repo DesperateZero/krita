@@ -169,7 +169,68 @@ KisBackingBudgetController::KisBackingBudgetController(const KisPageBackingLimit
 {
 }
 
-KisBackingBudgetReservation KisBackingBudgetController::reserve(const KisBackingBudgetDelta &delta, QString *error)
+KisBackingBudgetReservation KisBackingBudgetController::reserve(
+    const KisBackingBudgetDelta &delta, QString *error)
+{
+    std::array<quint64, budgetClassCount> aggregateBytes{};
+    quint64 durableBytes = 0;
+    for (size_t i = 0; i < delta.buckets.size(); ++i) {
+        const auto &bucket = delta.buckets[i];
+        for (qint64 value : components(bucket)) {
+            if (value < 0) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("backing reservation contains a negative prepare delta"));
+                return {};
+            }
+            aggregateBytes[i] = saturatedAdd(
+                aggregateBytes[i], quint64(value));
+        }
+        if (bucket.ssd > 0)
+            durableBytes = saturatedAdd(durableBytes, quint64(bucket.ssd));
+    }
+    return reserveImpl(delta, aggregateBytes, durableBytes, error);
+}
+
+KisBackingBudgetReservation KisBackingBudgetController::reserveChange(
+    const KisBackingBudgetDelta &change, QString *error)
+{
+    KisBackingBudgetDelta prepared;
+    std::array<quint64, budgetClassCount> aggregateBytes{};
+    qint64 durableChange = 0;
+    for (size_t i = 0; i < change.buckets.size(); ++i) {
+        const auto values = components(change.buckets[i]);
+        auto target = components(prepared.buckets[i]);
+        qint64 aggregateChange = 0;
+        for (size_t domain = 0; domain < values.size(); ++domain)
+            target[domain] = std::max(qint64(0), values[domain]);
+        for (qint64 value : values) {
+            if (__builtin_add_overflow(aggregateChange, value,
+                                       &aggregateChange)) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("backing transition aggregate delta overflows"));
+                return {};
+            }
+        }
+        prepared.buckets[i] = {
+            target[0], target[1], target[2], target[3]};
+        aggregateBytes[i] = aggregateChange > 0
+            ? quint64(aggregateChange) : 0;
+        if (__builtin_add_overflow(durableChange, change.buckets[i].ssd,
+                                   &durableChange)) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("backing transition SSD delta overflows"));
+            return {};
+        }
+    }
+    return reserveImpl(prepared, aggregateBytes,
+                       durableChange > 0 ? quint64(durableChange) : 0,
+                       error);
+}
+
+KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
+    const KisBackingBudgetDelta &delta,
+    const std::array<quint64, budgetClassCount> &aggregateBytes,
+    quint64 durableBytes, QString *error)
 {
     QMutexLocker lock(&m_mutex);
     const auto reject = [&](const QString &message) {
@@ -192,12 +253,14 @@ KisBackingBudgetReservation KisBackingBudgetController::reserve(const KisBacking
                 || reserved[domain] > limit - addition - live[domain])
                 return reject(QStringLiteral("backing reservation exceeds its hard budget"));
         }
-        std::array<quint64, 4> positiveRequested{};
-        for (size_t domain = 0; domain < requested.size(); ++domain)
-            positiveRequested[domain] = quint64(requested[domain]);
         const quint64 liveTotal = sumComponents(live);
-        const quint64 reservedTotal = sumComponents(reserved);
-        const quint64 requestedTotal = sumComponents(positiveRequested);
+        quint64 reservedTotal = 0;
+        for (const ReservationSlot &slot : m_slots) {
+            if (slot.active)
+                reservedTotal = saturatedAdd(
+                    reservedTotal, slot.aggregateBytes[bucketIndex]);
+        }
+        const quint64 requestedTotal = aggregateBytes[bucketIndex];
         const quint64 limit = aggregateLimit(m_limits, budgetClass);
         if (requestedTotal > limit || liveTotal > limit - requestedTotal
             || reservedTotal > limit - requestedTotal - liveTotal)
@@ -206,15 +269,16 @@ KisBackingBudgetReservation KisBackingBudgetController::reserve(const KisBacking
 
     quint64 liveSsd = 0;
     quint64 reservedSsd = 0;
-    quint64 requestedSsd = 0;
+    for (const ReservationSlot &slot : m_slots) {
+        if (slot.active)
+            reservedSsd = saturatedAdd(reservedSsd, slot.durableBytes);
+    }
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
         liveSsd = saturatedAdd(liveSsd, m_usage.buckets[bucketIndex].live.ssd);
-        reservedSsd = saturatedAdd(reservedSsd, m_usage.buckets[bucketIndex].reserved.ssd);
-        requestedSsd = saturatedAdd(requestedSsd, quint64(delta.buckets[bucketIndex].ssd));
     }
     const quint64 durableLimit = m_limits.durableStoreCapacity;
-    if (requestedSsd > durableLimit || liveSsd > durableLimit - requestedSsd
-        || reservedSsd > durableLimit - requestedSsd - liveSsd)
+    if (durableBytes > durableLimit || liveSsd > durableLimit - durableBytes
+        || reservedSsd > durableLimit - durableBytes - liveSsd)
         return reject(QStringLiteral("backing reservation exceeds durable store capacity"));
 
     quint32 slotIndex = 0;
@@ -235,6 +299,8 @@ KisBackingBudgetReservation KisBackingBudgetController::reserve(const KisBacking
     if (!slot.generation)
         ++slot.generation;
     slot.delta = delta;
+    slot.aggregateBytes = aggregateBytes;
+    slot.durableBytes = durableBytes;
     slot.active = true;
 
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
@@ -373,9 +439,25 @@ bool KisBackingBudgetController::commitRetaining(
         m_usage.buckets[bucketIndex].reserved = fromComponents(reserved);
     }
     slot->delta = retained;
+    slot->aggregateBytes = {};
+    slot->durableBytes = 0;
+    for (size_t i = 0; i < retained.buckets.size(); ++i) {
+        const auto &bucket = retained.buckets[i];
+        for (qint64 value : components(bucket)) {
+            if (value > 0) {
+                slot->aggregateBytes[i] = saturatedAdd(
+                    slot->aggregateBytes[i], quint64(value));
+            }
+        }
+        if (bucket.ssd > 0)
+            slot->durableBytes = saturatedAdd(
+                slot->durableBytes, quint64(bucket.ssd));
+    }
     const bool retainedReservation = hasPositiveBytes(retained);
     if (!retainedReservation) {
         slot->active = false;
+        slot->aggregateBytes = {};
+        slot->durableBytes = 0;
         m_freeSlots.push_back(slotIndex);
     }
     return retainedReservation;

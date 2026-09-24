@@ -28,9 +28,8 @@
 class KisTileDataStoreIterator
 {
 public:
-    KisTileDataStoreIterator(ConcurrentMap<int, KisTileData*> &map, KisTileDataStore *store)
-        : m_map(map),
-          m_store(store)
+    explicit KisTileDataStoreIterator(ConcurrentMap<int, KisTileData*> &map)
+        : m_map(map)
     {
         m_iterator.setMap(m_map);
     }
@@ -52,26 +51,16 @@ public:
         return m_iterator.isValid();
     }
 
-    inline bool trySwapOut(KisTileData *td)
-    {
-        if (td == m_iterator.getValue()) {
-            m_iterator.next();
-        }
-
-        return m_store->trySwapTileData(td);
-    }
-
 private:
     ConcurrentMap<int, KisTileData*> &m_map;
     ConcurrentMap<int, KisTileData*>::Iterator m_iterator;
-    KisTileDataStore *m_store;
 };
 
 class KisTileDataStoreReverseIterator : public KisTileDataStoreIterator
 {
 public:
-    KisTileDataStoreReverseIterator(ConcurrentMap<int, KisTileData*> &map, KisTileDataStore *store)
-        : KisTileDataStoreIterator(map, store)
+    explicit KisTileDataStoreReverseIterator(ConcurrentMap<int, KisTileData*> &map)
+        : KisTileDataStoreIterator(map)
     {
     }
 };
@@ -80,12 +69,16 @@ class KisTileDataStoreClockIterator
 {
 public:
     KisTileDataStoreClockIterator(ConcurrentMap<int, KisTileData*> &map,
-                                  int startIndex,
-                                  KisTileDataStore *store)
-        : m_map(map),
-          m_store(store)
+                                  int startIndex)
+        : m_map(map)
     {
         m_iterator.setMap(m_map);
+        if (!m_iterator.isValid()) {
+            m_finalPosition = startIndex;
+            m_startItem = nullptr;
+            m_endReached = true;
+            return;
+        }
         m_finalPosition = m_iterator.getValue()->m_tileNumber;
         m_startItem = m_map.get(startIndex);
 
@@ -124,16 +117,9 @@ public:
 
     inline bool hasNext() const
     {
+        if (!m_iterator.isValid() && !m_startItem)
+            return false;
         return !(m_endReached && m_iterator.getValue() == m_startItem);
-    }
-
-    inline bool trySwapOut(KisTileData *td)
-    {
-        if (td == m_iterator.getValue()) {
-            m_iterator.next();
-        }
-
-        return m_store->trySwapTileData(td);
     }
 
 private:
@@ -152,9 +138,7 @@ private:
     ConcurrentMap<int, KisTileData*>::Iterator m_iterator;
     KisTileData *m_startItem;
     bool m_endReached;
-    KisTileDataStore *m_store;
     int m_finalPosition;
 };
 
 #endif /* KIS_TILE_DATA_STORE_ITERATORS_H_ */
-

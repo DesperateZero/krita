@@ -668,9 +668,9 @@ public:
     // Reused terminal evidence for successful synchronous host work; this is
     // not an operation sequence number and never mutates the registry.
     KisCompletionTicket readyHostCompletion;
-    KisPageOwnerLedger owner;
     // Outlives metadata/owner so their final arena/backing charges can settle.
     KisBackingBudgetController backingBudget;
+    KisPageOwnerLedger owner;
     KisPageMetadataCoordinator metadata;
     KisImageEpochReferenceModel epochs;
     KisPageWriteAdmission writeAdmission;

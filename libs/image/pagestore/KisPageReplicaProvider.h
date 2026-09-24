@@ -327,6 +327,29 @@ struct KRITAIMAGE_EXPORT KisReplicaBackingDomainChange
     }
 };
 
+/** Move-independent owner claim prepared before a physical residency change.
+ * Destruction cancels an uncommitted claim. commit() cannot perform capacity
+ * admission; all fallible budget work happened in prepare(). */
+class KRITAIMAGE_EXPORT KisReplicaBackingDomainReservation
+{
+public:
+    virtual ~KisReplicaBackingDomainReservation() = default;
+    virtual void commit(quint64 targetRevision) noexcept = 0;
+};
+
+class KRITAIMAGE_EXPORT KisReplicaBackingDomainAdmission
+{
+public:
+    virtual ~KisReplicaBackingDomainAdmission() = default;
+    virtual QSharedPointer<KisReplicaBackingDomainReservation> prepare(
+        const KisReplicaPhysicalSlotIdentity &physical,
+        quint64 bytes,
+        KisPageAccessDomain sourceDomain,
+        quint64 sourceRevision,
+        KisPageAccessDomain targetDomain,
+        QString *error) = 0;
+};
+
 /**
  * Backend-neutral physical replica interface. PageStore is the only intended
  * caller; consumers receive leases instead of provider-owned allocations.
@@ -383,6 +406,11 @@ public:
     virtual QVector<KisReplicaBackingDomainChange> backingDomainChanges() const;
     virtual void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                                 quint64 revision);
+    // Mutable-domain providers retain weak references only. Fixed-domain
+    // providers accept this no-op registration for a uniform owner path.
+    virtual bool registerBackingDomainAdmission(
+        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        QString *error = nullptr);
 
     /**
      * Optional fused allocation + preserve initialization. The owner protects

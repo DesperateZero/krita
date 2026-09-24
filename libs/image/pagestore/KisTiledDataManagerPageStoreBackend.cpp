@@ -10,6 +10,7 @@
 #include "KisPageStoreIteratorReadScope_p.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
+#include "kis_image_config.h"
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
 
@@ -36,6 +37,73 @@ qint32 pageCoordinate(qint32 pixel, qint32 pageExtent)
     qint32 coordinate = pixel / pageExtent;
     if (pixel % pageExtent < 0) --coordinate;
     return coordinate;
+}
+
+struct ProductBackingPolicy
+{
+    quint64 providerBytes = 0;
+    KisPageBackingLimits limits;
+};
+
+bool configMiBToBytes(int value, const char *name, quint64 *bytes,
+                      QString *error)
+{
+    constexpr quint64 bytesPerMiB = quint64(1) << 20;
+    if (!bytes || value < 0
+        || quint64(value) > std::numeric_limits<quint64>::max() / bytesPerMiB) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("PageStore %1 limit is invalid")
+                       .arg(QString::fromLatin1(name)));
+        return false;
+    }
+    *bytes = quint64(value) * bytesPerMiB;
+    return true;
+}
+
+bool deriveProductBackingPolicy(ProductBackingPolicy *policy, QString *error)
+{
+    if (!policy) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("PageStore backing policy output is missing"));
+        return false;
+    }
+    const KisImageConfig config(true);
+    quint64 ramBytes = 0;
+    quint64 poolBytes = 0;
+    quint64 swapBytes = 0;
+    if (!configMiBToBytes(config.tilesHardLimit(), "RAM", &ramBytes, error)
+        || !configMiBToBytes(config.poolLimit(), "pool", &poolBytes, error)
+        || !configMiBToBytes(config.maxSwapSize(), "swap", &swapBytes, error)) {
+        return false;
+    }
+    if (swapBytes > std::numeric_limits<quint64>::max() - ramBytes
+        || poolBytes > std::numeric_limits<quint64>::max() - ramBytes) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("PageStore configured memory limits overflow"));
+        return false;
+    }
+    const quint64 logicalBytes = ramBytes + swapBytes;
+    const quint64 internalCpuBytes = ramBytes + poolBytes;
+    ProductBackingPolicy result;
+    result.providerBytes = logicalBytes;
+    result.limits.logicalCurrentBytes = logicalBytes;
+    result.limits.retainedHistoryBytes = logicalBytes;
+    result.limits.residentCurrentBytes = {ramBytes, 0, 0, swapBytes};
+    result.limits.residentHistoryBytes = result.limits.residentCurrentBytes;
+    result.limits.activePendingBytes = ramBytes;
+    // BR1 has no GPU transfer provider. Rejecting this bucket prevents a
+    // finite product configuration from advertising unimplemented capacity.
+    result.limits.inFlightReplicaBytes = 0;
+    result.limits.retirementDebtBytes = logicalBytes;
+    // These allocations are outside the tiles payload allocator. Their class
+    // ceilings therefore use the configured RAM total (tiles plus pool). The
+    // default zero-sized pool must not disable required default-page reads.
+    result.limits.optionalCacheBytes = internalCpuBytes;
+    result.limits.metadataArenaBytes = internalCpuBytes;
+    result.limits.durableStoreCapacity = swapBytes;
+    *policy = result;
+    KisPageStoreDetail::setError(error, {});
+    return true;
 }
 
 bool updateSnapshotDerivedExtent(KisImageEpochSnapshot *snapshot,
@@ -196,6 +264,9 @@ class KisTiledDataManagerPageStoreBackend::Private
 public:
     bool prepareStore(const KisImageEpochSnapshot &initial, QString *error)
     {
+        ProductBackingPolicy policy;
+        if (!deriveProductBackingPolicy(&policy, error))
+            return false;
         const auto completions = QSharedPointer<KisCompletionRegistry>::create();
         provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
         KisCpuResidentReplicaProviderConfig providerConfig;
@@ -203,10 +274,11 @@ public:
             KisPageStoreDetail::allocateMonotonicId<KisReplicaProviderId>(
                 &nextTiles3ProviderId);
         providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
-        providerConfig.budgetBytes = std::numeric_limits<quint64>::max() / 4;
+        providerConfig.budgetBytes = policy.providerBytes;
         store.reset(new KisPageStore);
         history.reset(new KisPageStoreMementoManager);
         return provider->configure(providerConfig, completions, error) &&
+               store->configureBackingLimits(policy.limits, error) &&
                store->configure(initial, completions, 64, error) &&
                store->registerReplicaProvider(provider);
     }

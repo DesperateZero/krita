@@ -124,8 +124,7 @@ public:
     QVector<PreparedDescriptorChange> descriptorChanges;
     KisCompletionTicket completion;
     QVector<KisPageTransitionEffect> publicationRetirements;
-    QVector<KisBackingClassChange> backingChanges;
-    KisBackingBudgetReservation backingReservation;
+    KisBackingClassChangeReservation backingReservation;
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     KisImageEpochCommitResult result;
 };
@@ -188,10 +187,10 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall()
         : owner.m_epochs.installCommit(std::move(candidate.epoch), &candidate, installMetadata);
 
     if (candidate.result.isCommitted()) {
-        owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation),
-                                           candidate.backingChanges);
+        owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation));
         ++owner.m_statistics.installedMutationCommits;
     } else {
+        candidate.backingReservation.release();
         ++owner.m_statistics.cancelledMutationCommits;
     }
     candidate.owner = nullptr;
@@ -207,6 +206,7 @@ void KisPagePublicationCoordinator::KisPreparedMutationCommit::cancel() noexcept
     data->metadata = {};
     data->epoch = {};
     data->restoreEpoch = {};
+    data->backingReservation.release();
     data->owner = nullptr;
     if (owner)
         ++owner->m_statistics.cancelledMutationCommits;
@@ -753,7 +753,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         if (!backingInputsValid)
             return {};
         auto backingReservation = m_owner.prepareBackingChanges(
-            &backingChanges, publication.retirementEffects());
+            std::move(backingChanges), publication.retirementEffects());
         if (!backingReservation.isValid())
             return {};
 
@@ -763,7 +763,6 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         preparedCommit.data->transaction = transaction;
         preparedCommit.data->metadata = std::move(publication);
         preparedCommit.data->epoch = std::move(rootCandidate);
-        preparedCommit.data->backingChanges = std::move(backingChanges);
         preparedCommit.data->backingReservation = std::move(backingReservation);
         preparedCommit.data->descriptorChanges = std::move(descriptorChanges);
         preparedCommit.data->completion = commitCompletion;
@@ -979,7 +978,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                 return {};
         }
         auto backingReservation = m_owner.prepareBackingChanges(
-            &backingChanges, publication.retirementEffects());
+            std::move(backingChanges), publication.retirementEffects());
         if (!backingReservation.isValid())
             return {};
 
@@ -988,7 +987,6 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         preparedCommit.data->owner = this;
         preparedCommit.data->metadata = std::move(publication);
         preparedCommit.data->restoreEpoch = std::move(rootCandidate);
-        preparedCommit.data->backingChanges = std::move(backingChanges);
         preparedCommit.data->backingReservation = std::move(backingReservation);
         preparedCommit.data->descriptorChanges = std::move(restoredDefaultVersions);
         preparedCommit.data->completion = completion;

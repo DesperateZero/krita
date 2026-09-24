@@ -44,7 +44,9 @@ public:
      * LOCKING: the lock on the tile data should be taken
      *          by the caller before making a call.
      */
-    void swapInTileData(KisTileData *td);
+    // Returns false without consuming the swap chunk when mapping,
+    // allocation, or decompression fails.
+    bool swapInTileData(KisTileData *td);
 
     /**
      * Forget all the information linked with the tile data.

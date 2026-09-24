@@ -25,13 +25,24 @@
 class KisTileDataStoreIterator;
 class KisTileDataStoreReverseIterator;
 class KisTileDataStoreClockIterator;
+struct KisTileDataResidencyState;
+
+class KRITAIMAGE_EXPORT KisTileDataResidencyTransition
+{
+public:
+    virtual ~KisTileDataResidencyTransition() = default;
+    virtual void commit(quint64 revision) noexcept = 0;
+};
 
 class KRITAIMAGE_EXPORT KisTileDataResidencyObserver
 {
 public:
     virtual ~KisTileDataResidencyObserver() = default;
-    virtual void residencyChanged(KisTileData *tileData, bool resident,
-                                  quint64 revision) = 0;
+    virtual QSharedPointer<KisTileDataResidencyTransition>
+        prepareResidencyChange(KisTileData *tileData,
+                               const KisTileDataResidencyState &source,
+                               bool targetResident,
+                               QString *error) = 0;
 };
 
 struct KRITAIMAGE_EXPORT KisTileDataResidencyState
@@ -129,6 +140,8 @@ public:
      * It may fail in case the tile is being accessed
      * at the same moment of time.
      */
+    // The caller retains td for this call. Observer admission is prepared
+    // before the iterator/swap locks and committed only after both are free.
     bool trySwapTileData(KisTileData *td);
 
 
@@ -157,7 +170,9 @@ public:
      *                 td->m_swapLock is locked
      *                 m_listRWLock is unlocked
      */
-    void ensureTileDataLoaded(KisTileData *td);
+    // On success returns with td->m_swapLock held for read. On admission
+    // failure returns false with no storage lock held and leaves SSD valid.
+    bool ensureTileDataLoaded(KisTileData *td);
 
     void registerTileData(KisTileData *td);
     void unregisterTileData(KisTileData *td);
@@ -175,16 +190,26 @@ private:
     struct ResidencyObservers {
         bool resident = false;
         quint64 revision = 0;
+        quint64 observersRevision = 0;
         QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
     };
-    struct ResidencyNotification {
-        quint64 revision = 0;
+    struct PreparedResidencyChange {
+        bool valid = false;
+        bool sourceResident = false;
+        quint64 sourceRevision = 0;
+        quint64 observersRevision = 0;
         QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+        QVector<QSharedPointer<KisTileDataResidencyTransition>> transitions;
     };
 
-    // Called while the tile swap lock protects the physical state change.
-    ResidencyNotification recordResidencyChangeLocked(KisTileData *td,
-                                                       bool resident);
+    PreparedResidencyChange prepareResidencyChange(KisTileData *td,
+                                                   bool targetResident);
+    // Called with the tile swap lock held for write.
+    bool validateResidencyChangeLocked(
+        KisTileData *td, const PreparedResidencyChange &prepared);
+    quint64 recordResidencyChangeLocked(KisTileData *td, bool resident);
+    static void commitResidencyChange(
+        PreparedResidencyChange &prepared, quint64 revision) noexcept;
 
     KisTileData *allocTileData(qint32 pixelSize, const quint8 *defPixel);
 

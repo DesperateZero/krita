@@ -7,6 +7,8 @@
 #include <QMutex>
 #include <QSemaphore>
 
+#include <utility>
+
 #include "tiles3/swap/kis_tile_data_swapper.h"
 #include "tiles3/swap/kis_tile_data_swapper_p.h"
 #include "tiles3/kis_tile_data.h"
@@ -136,10 +138,10 @@ void KisTileDataSwapper::doJob()
 class SoftSwapStrategy
 {
 public:
-    typedef KisTileDataStoreIterator iterator;
+    typedef KisTileDataStoreClockIterator iterator;
 
     static inline iterator* beginIteration(KisTileDataStore *store) {
-        return store->beginIteration();
+        return store->beginClockIteration();
     }
 
     static inline void endIteration(KisTileDataStore *store, iterator *iter) {
@@ -185,41 +187,44 @@ template<class strategy>
 qint64 KisTileDataSwapper::pass(qint64 needToFreeMetric)
 {
     qint64 freedMetric = 0;
-    QList<KisTileData*> additionalCandidates;
+    const qint64 initialResidentTiles = m_d->store->numTilesInMemory();
+    constexpr qsizetype maximumCandidateBatch = 64;
 
-    typename strategy::iterator *iter =
-        strategy::beginIteration(m_d->store);
+    const auto scan = [&](bool includeNewlyAged) {
+        qint64 scanned = 0;
+        while (freedMetric < needToFreeMetric
+               && scanned < initialResidentTiles) {
+            QList<KisTileData *> candidates;
+            candidates.reserve(maximumCandidateBatch);
+            typename strategy::iterator *iter =
+                strategy::beginIteration(m_d->store);
+            while (iter->hasNext() && scanned < initialResidentTiles
+                   && candidates.size() < maximumCandidateBatch) {
+                KisTileData *item = iter->next();
+                ++scanned;
+                if (!strategy::isInteresting(item))
+                    continue;
+                if (!strategy::swapOutFirst(item) && !includeNewlyAged) {
+                    item->markOld();
+                    continue;
+                }
+                if (item->ref())
+                    candidates.append(item);
+            }
+            strategy::endIteration(m_d->store, iter);
 
-    KisTileData *item = 0;
-
-    while (iter->hasNext()) {
-        item = iter->next();
-
-        if (freedMetric >= needToFreeMetric) break;
-
-        if (!strategy::isInteresting(item)) continue;
-
-        if (strategy::swapOutFirst(item)) {
-            if (iter->trySwapOut(item)) {
-                freedMetric += item->pixelSize();
+            for (KisTileData *candidate : std::as_const(candidates)) {
+                if (freedMetric < needToFreeMetric
+                    && m_d->store->trySwapTileData(candidate)) {
+                    freedMetric += candidate->pixelSize();
+                }
+                candidate->deref();
             }
         }
-        else {
-            item->markOld();
-            additionalCandidates.append(item);
-        }
-
-    }
-
-    Q_FOREACH (item, additionalCandidates) {
-        if (freedMetric >= needToFreeMetric) break;
-
-        if (iter->trySwapOut(item)) {
-            freedMetric += item->pixelSize();
-        }
-    }
-
-    strategy::endIteration(m_d->store, iter);
+    };
+    scan(false);
+    if (freedMetric < needToFreeMetric)
+        scan(true);
 
     return freedMetric;
 }

@@ -204,7 +204,8 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *preclon
         DEBUG_COUNT_PRECLONE_HIT(rhs);
     } else {
         if (precloneHit) *precloneHit = false;
-        rhs->blockSwapping();
+        if (!rhs->blockSwapping())
+            return nullptr;
         td = new KisTileData(*rhs);
         rhs->unblockSwapping();
         DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
@@ -275,13 +276,18 @@ bool KisTileDataStore::registerResidencyObserver(
         ResidencyObservers record;
         record.resident = resident;
         record.revision = 1;
+        record.observersRevision = 1;
         found = m_residencyObservers.insert(td, std::move(record));
     } else {
         Q_ASSERT(found->revision != 0);
         Q_ASSERT(found->resident == resident);
     }
-    if (!found->observers.contains(observer))
+    if (!found->observers.contains(observer)) {
         found->observers.append(observer);
+        ++found->observersRevision;
+        if (!found->observersRevision)
+            ++found->observersRevision;
+    }
     if (initialState)
         *initialState = {found->resident, found->revision};
     return true;
@@ -294,36 +300,113 @@ void KisTileDataStore::unregisterResidencyObserver(
     auto existing = m_residencyObservers.find(td);
     if (existing == m_residencyObservers.end())
         return;
-    existing->observers.removeAll(observer);
+    if (existing->observers.removeAll(observer)) {
+        ++existing->observersRevision;
+        if (!existing->observersRevision)
+            ++existing->observersRevision;
+    }
     if (existing->observers.isEmpty())
         m_residencyObservers.erase(existing);
 }
 
-KisTileDataStore::ResidencyNotification
-KisTileDataStore::recordResidencyChangeLocked(KisTileData *td, bool resident)
+KisTileDataStore::PreparedResidencyChange
+KisTileDataStore::prepareResidencyChange(KisTileData *td, bool targetResident)
+{
+    PreparedResidencyChange result;
+    if (!td)
+        return result;
+    {
+        QReadLocker swapLocker(&td->m_swapLock);
+        result.sourceResident = td->data() != nullptr;
+        if (result.sourceResident == targetResident)
+            return result;
+        QMutexLocker observerLocker(&m_residencyObserverLock);
+        const auto found = m_residencyObservers.constFind(td);
+        if (found == m_residencyObservers.cend()) {
+            result.valid = true;
+            return result;
+        }
+        if (found->resident != result.sourceResident || !found->revision
+            || !found->observersRevision) {
+            return {};
+        }
+        result.sourceRevision = found->revision;
+        result.observersRevision = found->observersRevision;
+        result.observers = found->observers;
+    }
+
+    const KisTileDataResidencyState source{
+        result.sourceResident, result.sourceRevision};
+    result.transitions.reserve(result.observers.size());
+    for (const auto &observer : std::as_const(result.observers)) {
+        QString error;
+        auto transition = observer->prepareResidencyChange(
+            td, source, targetResident, &error);
+        if (!transition) {
+            result.transitions.clear();
+            result.valid = false;
+            return result;
+        }
+        result.transitions.append(std::move(transition));
+    }
+    result.valid = true;
+    return result;
+}
+
+bool KisTileDataStore::validateResidencyChangeLocked(
+    KisTileData *td, const PreparedResidencyChange &prepared)
+{
+    if (!prepared.valid || (td->data() != nullptr) != prepared.sourceResident)
+        return false;
+    QMutexLocker locker(&m_residencyObserverLock);
+    const auto found = m_residencyObservers.constFind(td);
+    if (!prepared.observersRevision)
+        return found == m_residencyObservers.cend();
+    return found != m_residencyObservers.cend()
+        && found->resident == prepared.sourceResident
+        && found->revision == prepared.sourceRevision
+        && found->observersRevision == prepared.observersRevision;
+}
+
+quint64 KisTileDataStore::recordResidencyChangeLocked(KisTileData *td,
+                                                      bool resident)
 {
     QMutexLocker locker(&m_residencyObserverLock);
     const auto found = m_residencyObservers.find(td);
     if (found == m_residencyObservers.end())
-        return {};
+        return 0;
     Q_ASSERT(found->revision != 0);
     Q_ASSERT(found->resident != resident);
     ++found->revision;
     if (!found->revision)
         ++found->revision;
     found->resident = resident;
-    return {found->revision, found->observers};
+    return found->revision;
 }
 
-void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
+void KisTileDataStore::commitResidencyChange(
+    PreparedResidencyChange &prepared, quint64 revision) noexcept
+{
+    for (const auto &transition : std::as_const(prepared.transitions))
+        transition->commit(revision);
+    prepared.transitions.clear();
+}
+
+bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
 {
 //    dbgKrita << "#### SWAP MISS! ####" << td << ppVar(td->mementoed()) << ppVar(td->age()) << ppVar(td->numUsers());
     checkFreeMemory();
 
-    td->m_swapLock.lockForRead();
-
-    while (!td->data()) {
+    constexpr int maximumAttempts = 4;
+    for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
+        td->m_swapLock.lockForRead();
+        if (td->data())
+            return true;
         td->m_swapLock.unlock();
+
+        PreparedResidencyChange prepared = prepareResidencyChange(td, true);
+        if (!prepared.valid)
+            return false;
 
         /**
          * The order of this heavy locking is very important.
@@ -345,64 +428,85 @@ void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
          */
 
         bool loaded = false;
-        ResidencyNotification notification;
+        bool stale = false;
+        quint64 revision = 0;
         if (!td->data()) {
             td->m_swapLock.lockForWrite();
-
-            m_swappedStore.swapInTileData(td);
-            registerTileDataImp(td);
-            loaded = true;
-            notification = recordResidencyChangeLocked(td, true);
-
+            if (!validateResidencyChangeLocked(td, prepared)) {
+                stale = true;
+            } else {
+                loaded = m_swappedStore.swapInTileData(td);
+                if (loaded) {
+                    registerTileDataImp(td);
+                    revision = recordResidencyChangeLocked(td, true);
+                }
+            }
             td->m_swapLock.unlock();
         }
 
         m_iteratorLock.unlock();
 
-        if (loaded) {
-            for (const auto &observer : std::as_const(notification.observers))
-                observer->residencyChanged(td, true, notification.revision);
-        }
+        if (loaded)
+            commitResidencyChange(prepared, revision);
+        else
+            prepared.transitions.clear();
+
+        if (stale)
+            continue;
 
         /**
          * <-- In theory, livelock is possible here...
          */
 
         td->m_swapLock.lockForRead();
+        if (td->data())
+            return true;
+        td->m_swapLock.unlock();
     }
+    return false;
 }
 
 bool KisTileDataStore::trySwapTileData(KisTileData *td)
 {
-    /**
-     * This function is called with m_listLock acquired
-     */
+    constexpr int maximumAttempts = 4;
+    for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
+        PreparedResidencyChange prepared = prepareResidencyChange(td, false);
+        if (!prepared.valid)
+            return false;
 
-    bool result = false;
-    ResidencyNotification notification;
-    if (!td->m_swapLock.tryLockForWrite()) return result;
-
-    if (td->data()) {
-        if (m_swappedStore.trySwapOutTileData(td)) {
+        bool result = false;
+        bool stale = false;
+        quint64 revision = 0;
+        m_iteratorLock.lockForWrite();
+        if (!td->m_swapLock.tryLockForWrite()) {
+            m_iteratorLock.unlock();
+            return false;
+        }
+        if (!validateResidencyChangeLocked(td, prepared)) {
+            stale = true;
+        } else if (td->data() && m_swappedStore.trySwapOutTileData(td)) {
             unregisterTileDataImp(td);
             result = true;
-            notification = recordResidencyChangeLocked(td, false);
+            revision = recordResidencyChangeLocked(td, false);
         }
-    }
-    td->m_swapLock.unlock();
+        td->m_swapLock.unlock();
+        m_iteratorLock.unlock();
 
-    if (result) {
-        for (const auto &observer : std::as_const(notification.observers))
-            observer->residencyChanged(td, false, notification.revision);
+        if (result) {
+            commitResidencyChange(prepared, revision);
+            return true;
+        }
+        prepared.transitions.clear();
+        if (!stale)
+            return false;
     }
-
-    return result;
+    return false;
 }
 
 KisTileDataStoreIterator* KisTileDataStore::beginIteration()
 {
     m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreIterator(m_tileDataMap, this);
+    return new KisTileDataStoreIterator(m_tileDataMap);
 }
 void KisTileDataStore::endIteration(KisTileDataStoreIterator* iterator)
 {
@@ -413,7 +517,7 @@ void KisTileDataStore::endIteration(KisTileDataStoreIterator* iterator)
 KisTileDataStoreReverseIterator* KisTileDataStore::beginReverseIteration()
 {
     m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreReverseIterator(m_tileDataMap, this);
+    return new KisTileDataStoreReverseIterator(m_tileDataMap);
 }
 void KisTileDataStore::endIteration(KisTileDataStoreReverseIterator* iterator)
 {
@@ -425,7 +529,7 @@ void KisTileDataStore::endIteration(KisTileDataStoreReverseIterator* iterator)
 KisTileDataStoreClockIterator* KisTileDataStore::beginClockIteration()
 {
     m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreClockIterator(m_tileDataMap, m_clockIndex.loadAcquire(), this);
+    return new KisTileDataStoreClockIterator(m_tileDataMap, m_clockIndex.loadAcquire());
 }
 
 void KisTileDataStore::endIteration(KisTileDataStoreClockIterator* iterator)
@@ -453,14 +557,18 @@ void KisTileDataStore::debugPrintList()
 void KisTileDataStore::debugSwapAll()
 {
     KisTileDataStoreIterator* iter = beginIteration();
-    KisTileData *item = 0;
+    QVector<KisTileData *> items;
 
     while (iter->hasNext()) {
-        item = iter->next();
-        iter->trySwapOut(item);
+        KisTileData *item = iter->next();
+        if (item->ref())
+            items.append(item);
     }
-
     endIteration(iter);
+    for (KisTileData *item : std::as_const(items)) {
+        trySwapTileData(item);
+        item->deref();
+    }
 }
 
 void KisTileDataStore::debugClear()

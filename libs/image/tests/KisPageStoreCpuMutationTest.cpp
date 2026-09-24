@@ -52,6 +52,8 @@ public:
     std::function<void()> beforeAdopt;
     std::function<void()> beforeRelease;
     std::function<void()> afterDomainSnapshot;
+    std::function<void()> afterBackingFootprint;
+    bool forwardDomainAdmission = true;
     bool rejectAdopt = false;
     std::function<void()> beforeValidate;
     KisReplicaHandle lastTarget;
@@ -126,7 +128,11 @@ public:
     KisReplicaMemoryUsage memoryUsage() const override { return p->memoryUsage(); }
     KisReplicaBackingFootprint backingFootprint(
         const KisReplicaHandle &r) const override
-    { return p->backingFootprint(r); }
+    {
+        auto result = p->backingFootprint(r);
+        if (afterBackingFootprint) afterBackingFootprint();
+        return result;
+    }
     QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override
     {
         auto result = p->backingDomainChanges();
@@ -135,6 +141,15 @@ public:
     }
     void acknowledgeBackingDomainChange(quint64 slot, quint64 revision) override
     { p->acknowledgeBackingDomainChange(slot, revision); }
+    bool registerBackingDomainAdmission(
+        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        QString *error) override
+    {
+        if (forwardDomainAdmission)
+            return p->registerBackingDomainAdmission(admission, error);
+        KisPageStoreDetail::setError(error, {});
+        return bool(admission);
+    }
 };
 
 struct Fixture
@@ -1912,11 +1927,7 @@ void KisPageStoreCpuMutationTest::guardReleaseParksPendingBacking()
     QVERIFY(tile->ref());
     const auto releaseTile = qScopeGuard([&] { tile->deref(); });
     const auto swap = [&] {
-        auto *store = KisTileDataStore::instance();
-        auto *it = store->beginIteration();
-        const bool result = it->trySwapOut(tile);
-        store->endIteration(it);
-        return result;
+        return KisTileDataStore::instance()->trySwapTileData(tile);
     };
     memset(guard.data(), 0x71, size_t(guard.byteSize()));
     QVERIFY(!swap());
@@ -2643,8 +2654,8 @@ void KisPageStoreCpuMutationTest::completePayload()
     auto *tile = f.provider->p->tileDataForCpuWriteGuard(guard); QVERIFY(tile); QVERIFY(tile->ref());
     const auto releaseTile = qScopeGuard([&] { tile->deref(); });
     guard = {};
-    auto *tileStore = KisTileDataStore::instance(); auto *iterator = tileStore->beginIteration();
-    const bool swapped = iterator->trySwapOut(tile); tileStore->endIteration(iterator); QVERIFY(swapped);
+    auto *tileStore = KisTileDataStore::instance();
+    const bool swapped = tileStore->trySwapTileData(tile); QVERIFY(swapped);
     guard = segment.beginWrite(key()); QVERIFY(guard.isValid()); QCOMPARE(guard.version(),version);
     QCOMPARE(QByteArray(static_cast<const char *>(guard.data()), int(guard.byteSize())),expected); guard = {};
     QVERIFY(segment.removePage(key()));
@@ -2867,8 +2878,7 @@ void KisPageStoreCpuMutationTest::cursorReadRetainsViewNotPins()
     const auto releaseTile = qScopeGuard([&] { tile->deref(); });
     f.store->release(std::move(lease));
     const auto swap = [&] {
-        auto *tiles = KisTileDataStore::instance(); auto *it = tiles->beginIteration();
-        const bool swapped = it->trySwapOut(tile); tiles->endIteration(it); return swapped;
+        return KisTileDataStore::instance()->trySwapTileData(tile);
     };
     KisPageStoreCpuAccessSession cursor(KisCpuAccessLifetime::CursorPage);
     QVERIFY(cursor.beginRead(f.store.get(), {1}, {}, KisPagePriority::Normal));
@@ -3605,21 +3615,20 @@ void KisPageStoreCpuMutationTest::immutableAliasSource()
     QCOMPARE(foreign->memoryUsage().committedBytes, quint64(0));
     read = {}; view = {};
     auto *tileStore = KisTileDataStore::instance();
-    auto *it = tileStore->beginIteration(); const bool swapped = it->trySwapOut(tile); tileStore->endIteration(it);
+    const bool swapped = tileStore->trySwapTileData(tile);
     QVERIFY(swapped); QVERIFY(!tile->data()); // COW user reference is not a RAM pin
     const auto domainChanges = f.provider->p->backingDomainChanges();
     QCOMPARE(domainChanges.size(), 1);
     QCOMPARE(domainChanges.front().physicalSlot, firstFootprint.physicalSlot);
     QCOMPARE(domainChanges.front().domain, KisPageAccessDomain::Ssd);
     QCOMPARE(domainChanges.front().bytes, descriptor.minimumByteSize());
-    // backingUsage() is a pure ledger observation. A provider-local swap does
-    // not smuggle an O(N) domain rescan into this accessor; the next owner
-    // admission synchronizes the changed physical domain.
+    // backingUsage() is a pure ledger observation. The swap token has already
+    // installed the physical move, so this accessor performs no domain rescan.
     const auto coldUsage = f.store->backingUsage();
     QCOMPARE(coldUsage.buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
-             2 * descriptor.minimumByteSize());
+             descriptor.minimumByteSize());
     QCOMPARE(coldUsage.buckets[size_t(KisBackingBudgetClass::Current)].live.ssd,
-             quint64(0));
+             descriptor.minimumByteSize());
     const auto tx = f.store->beginCurrentTransaction(); auto segment = f.store->beginMutation(tx);
     const auto requests = f.store->sessionStats(); const auto work = f.provider->p->payloadWork();
     QVERIFY(segment.aliasPage(key(2), source));
@@ -3635,9 +3644,9 @@ void KisPageStoreCpuMutationTest::immutableAliasSource()
     QCOMPARE(f.pixel({}, 3), QByteArray(bpp, char(0x31)));
     const auto residentUsage = f.store->backingUsage();
     QCOMPARE(residentUsage.buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
-             descriptor.minimumByteSize());
+             2 * descriptor.minimumByteSize());
     QCOMPARE(residentUsage.buckets[size_t(KisBackingBudgetClass::Current)].live.ssd,
-             descriptor.minimumByteSize());
+             quint64(0));
     const auto residentChanges = f.provider->p->backingDomainChanges();
     QCOMPARE(residentChanges.size(), 1);
     QCOMPARE(residentChanges.front().domain, KisPageAccessDomain::CpuRam);
@@ -3779,7 +3788,7 @@ void KisPageStoreCpuMutationTest::aliasMutation()
     QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x41));
     auto original = old.readResidentPage(key()); QVERIFY(original.isValid());
     QCOMPARE(static_cast<const quint8 *>(original.data())[0], quint8(0x41));
-    tile->blockSwapping(); QCOMPARE(tile->data()[0], quint8(0x61)); tile->unblockSwapping();
+    QVERIFY(tile->blockSwapping()); QCOMPARE(tile->data()[0], quint8(0x61)); tile->unblockSwapping();
     original = {}; before = {}; during = {}; old = {}; source.clear();
     QVERIFY(f.store->closeSession());
 }
@@ -4187,10 +4196,64 @@ void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
              qPrintable(f.error));
 
     auto *tileStore = KisTileDataStore::instance();
-    auto *it = tileStore->beginIteration();
-    const bool swapped = it->trySwapOut(tile);
-    tileStore->endIteration(it);
-    QVERIFY(swapped);
+    QVector<KisBackingClassChange> preparedClassChange{
+        {handle, KisBackingBudgetClass::Current,
+         KisBackingBudgetClass::RetainedHistory}};
+    auto classReservation = ledger.prepareBackingChanges(
+        std::move(preparedClassChange), {}, &f.error);
+    QVERIFY2(classReservation.isValid(), qPrintable(f.error));
+    QVERIFY(!tileStore->trySwapTileData(tile));
+    QVERIFY(tile->isResident());
+    QVERIFY(f.provider->backingDomainChanges().isEmpty());
+    classReservation.release();
+
+    KisBackingBudgetController racingBudget;
+    KisPageOwnerLedger racingLedger;
+    QVERIFY(racingLedger.configure(f.completions, &f.error));
+    racingLedger.attachBackingBudget(racingBudget);
+    QVERIFY(racingLedger.registerProvider(f.provider, &f.error));
+    auto racingReservation = racingBudget.reserve(delta, &f.error);
+    QVERIFY2(racingReservation.isValid(), qPrintable(f.error));
+    QSemaphore footprintReady;
+    QSemaphore resumeRegistration;
+    std::atomic<bool> pauseFootprintOnce{true};
+    f.provider->afterBackingFootprint = [&] {
+        if (pauseFootprintOnce.exchange(false)) {
+            footprintReady.release();
+            resumeRegistration.acquire();
+        }
+    };
+    bool racingRegistrationSucceeded = true;
+    QString racingRegistrationError;
+    std::thread racingRegistration([&] {
+        racingRegistrationSucceeded = racingLedger.registerBacking(
+            handle, racingReservation, KisBackingBudgetClass::Current,
+            &racingRegistrationError);
+    });
+    const auto joinRacingRegistration = qScopeGuard([&] {
+        resumeRegistration.release();
+        if (racingRegistration.joinable()) racingRegistration.join();
+        f.provider->afterBackingFootprint = {};
+    });
+    QVERIFY(footprintReady.tryAcquire(1, 5000));
+    QVERIFY(tileStore->trySwapTileData(tile));
+    resumeRegistration.release();
+    racingRegistration.join();
+    f.provider->afterBackingFootprint = {};
+    QVERIFY(!racingRegistrationSucceeded);
+    QVERIFY(racingRegistrationError.contains(QStringLiteral("reserved")));
+    racingReservation.release();
+
+    KisBackingBudgetDelta racingSsdDelta;
+    racingSsdDelta.buckets[size_t(KisBackingBudgetClass::Current)].ssd =
+        handle.layout.byteSize;
+    auto racingSsdReservation = racingBudget.reserve(
+        racingSsdDelta, &f.error);
+    QVERIFY2(racingSsdReservation.isValid(), qPrintable(f.error));
+    QVERIFY2(racingLedger.registerBacking(
+                 handle, racingSsdReservation, KisBackingBudgetClass::Current,
+                 &f.error),
+             qPrintable(f.error));
     const auto coldChanges = f.provider->backingDomainChanges();
     QCOMPARE(coldChanges.size(), 1);
     QCOMPARE(kisCompareBackingRevision(coldChanges.front().revision,
@@ -4218,7 +4281,7 @@ void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
     });
     QVERIFY(snapshotReady.tryAcquire(1, 5000));
 
-    tile->blockSwapping();
+    QVERIFY(tile->blockSwapping());
     QVERIFY(tile->data());
     tile->unblockSwapping();
     const auto residentChanges = f.provider->backingDomainChanges();
@@ -4250,6 +4313,32 @@ void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
     QCOMPARE(usage.cpuRam, handle.layout.byteSize);
     QCOMPARE(usage.ssd, quint64(0));
 
+    // The journal is verification only. A mutable owner that was not
+    // registered with the provider cannot approve an already completed move.
+    KisBackingBudgetController unadmittedBudget;
+    KisPageOwnerLedger unadmittedLedger;
+    QVERIFY(unadmittedLedger.configure(f.completions, &f.error));
+    unadmittedLedger.attachBackingBudget(unadmittedBudget);
+    f.provider->forwardDomainAdmission = false;
+    QVERIFY(unadmittedLedger.registerProvider(f.provider, &f.error));
+    f.provider->forwardDomainAdmission = true;
+    auto unadmittedReservation = unadmittedBudget.reserve(delta, &f.error);
+    QVERIFY2(unadmittedReservation.isValid(), qPrintable(f.error));
+    QVERIFY2(unadmittedLedger.registerBacking(
+                 handle, unadmittedReservation,
+                 KisBackingBudgetClass::Current, &f.error),
+             qPrintable(f.error));
+    QVERIFY(tileStore->trySwapTileData(tile));
+    QVERIFY(!unadmittedLedger.synchronizeBackingDomains(&f.error));
+    QVERIFY(f.error.contains(QStringLiteral("unadmitted")));
+    unadmittedLedger.releaseRetiredBacking(handle);
+    QVERIFY2(racingLedger.synchronizeBackingDomains(&f.error),
+             qPrintable(f.error));
+    QVERIFY(tile->blockSwapping());
+    tile->unblockSwapping();
+    QVERIFY2(ledger.synchronizeBackingDomains(&f.error), qPrintable(f.error));
+
+    racingLedger.releaseRetiredBacking(handle);
     ledger.releaseRetiredBacking(handle);
     tile->deref();
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
@@ -4396,9 +4485,48 @@ void KisPageStoreCpuMutationTest::finiteBackingLimitMatrix()
         QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
     }
 
-    // SSD: a tiles3 residency notification is rejected by zero durable
-    // capacity on the next owner admission. A later swap-in supersedes that
-    // event, after which mutation/abort/close drain normally.
+    // A domain move reserves its destination domain but has zero logical
+    // growth. An exactly full Current bucket must therefore still swap out.
+    {
+        Fixture f;
+        KisPageBackingLimits limits;
+        limits.logicalCurrentBytes = pageBytes;
+        limits.residentCurrentBytes.cpuRam = pageBytes;
+        limits.residentCurrentBytes.ssd = pageBytes;
+        limits.durableStoreCapacity = pageBytes;
+        QVERIFY(f.store->configureBackingLimits(limits));
+        QVERIFY(f.init());
+        const auto tx = f.store->beginCurrentTransaction();
+        auto mutation = f.store->beginMutation(tx, &f.error);
+        auto guard = mutation.beginWrite(
+            key(), KisPageWriteMode::DiscardContents, &f.error);
+        QVERIFY2(guard.isValid(), qPrintable(f.error));
+        std::memset(guard.data(), 0x31, size_t(guard.byteSize()));
+        guard = {};
+        QVERIFY2(mutation.seal(&f.error), qPrintable(f.error));
+        QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+        QVERIFY(f.store->waitForRetirementIdle());
+
+        auto view = f.store->captureReadView();
+        auto read = view.readResidentPage(key());
+        QVERIFY(read.isValid());
+        auto *tile = f.provider->p->tileDataForCpuReadGuard(read);
+        QVERIFY(tile && tile->ref());
+        read = {};
+        view = {};
+        QVERIFY(KisTileDataStore::instance()->trySwapTileData(tile));
+        QVERIFY(!tile->isResident());
+        const auto usage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::Current)].live;
+        QCOMPARE(usage.cpuRam, quint64(0));
+        QCOMPARE(usage.ssd, pageBytes);
+        tile->deref();
+        QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    }
+
+    // SSD: target space is admitted before tiles3 changes residency. A zero
+    // durable limit keeps the RAM source valid and does not poison unrelated
+    // owner admission with a post-facto journal entry.
     {
         Fixture f;
         KisPageBackingLimits limits;
@@ -4415,20 +4543,16 @@ void KisPageStoreCpuMutationTest::finiteBackingLimitMatrix()
         read = {};
         view = {};
         auto *tileStore = KisTileDataStore::instance();
-        auto *it = tileStore->beginIteration();
-        const bool swapped = it->trySwapOut(tile);
-        tileStore->endIteration(it);
-        QVERIFY(swapped);
-        const auto blockedTx = f.store->beginCurrentTransaction();
-        auto blocked = f.store->beginMutation(blockedTx);
-        QVERIFY(!blocked.beginWrite(key()).isValid());
-        QVERIFY(blocked.cancel());
-        QVERIFY(f.store->abort(blockedTx));
+        const bool swapped = tileStore->trySwapTileData(tile);
+        QVERIFY(!swapped);
+        QVERIFY(tile->isResident());
         QVERIFY(f.store->backingUsage().backpressureCount > 0);
+        QVERIFY(f.provider->backingDomainChanges().isEmpty());
+        const auto domainUsage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::Current)].live;
+        QCOMPARE(domainUsage.cpuRam, 2 * pageBytes);
+        QCOMPARE(domainUsage.ssd, quint64(0));
 
-        tile->blockSwapping();
-        QVERIFY(tile->data());
-        tile->unblockSwapping();
         const auto retryTx = f.store->beginCurrentTransaction();
         auto retry = f.store->beginMutation(retryTx);
         auto guard = retry.beginWrite(key(), KisPageWriteMode::DiscardContents);
@@ -4437,6 +4561,52 @@ void KisPageStoreCpuMutationTest::finiteBackingLimitMatrix()
         QVERIFY(retry.cancel());
         QVERIFY(f.store->abort(retryTx));
         QVERIFY2(f.store->closeSession(), "finite SSD recovery did not drain");
+    }
+
+    // RAM: after a current page moves to SSD, another current page may use the
+    // only resident slot. Faulting the first page back then fails before the
+    // swap chunk is consumed, so the valid SSD source remains intact.
+    {
+        Fixture f;
+        KisPageBackingLimits limits;
+        limits.residentCurrentBytes.cpuRam = pageBytes;
+        limits.durableStoreCapacity = pageBytes;
+        QVERIFY(f.store->configureBackingLimits(limits));
+        QVERIFY(f.init());
+        const auto writePage = [&](const KisPageKey &page, quint8 value) {
+            const auto tx = f.store->beginCurrentTransaction();
+            auto mutation = f.store->beginMutation(tx, &f.error);
+            auto guard = mutation.beginWrite(
+                page, KisPageWriteMode::DiscardContents, &f.error);
+            if (!guard.isValid()) return false;
+            std::memset(guard.data(), value, size_t(guard.byteSize()));
+            guard = {};
+            return mutation.seal(&f.error)
+                && f.store->commit(tx, f.store->preparedPages(tx)).isValid()
+                && f.store->waitForRetirementIdle();
+        };
+        QVERIFY2(writePage(key(), 0x31), qPrintable(f.error));
+        auto view = f.store->captureReadView();
+        auto read = view.readResidentPage(key());
+        QVERIFY(read.isValid());
+        auto *tile = f.provider->p->tileDataForCpuReadGuard(read);
+        QVERIFY(tile && tile->ref());
+        const auto release = qScopeGuard([&] { tile->deref(); });
+        read = {};
+        view = {};
+        QVERIFY(KisTileDataStore::instance()->trySwapTileData(tile));
+        QVERIFY(!tile->isResident());
+        QVERIFY2(writePage(key(1), 0x51), qPrintable(f.error));
+
+        QVERIFY(!tile->blockSwapping());
+        QVERIFY(!tile->isResident());
+        const auto usage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::Current)].live;
+        QCOMPARE(usage.cpuRam, pageBytes);
+        QCOMPARE(usage.ssd, pageBytes);
+        QVERIFY(f.store->backingUsage().backpressureCount > 0);
+        QVERIFY(f.provider->backingDomainChanges().isEmpty());
+        QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
     }
 }
 

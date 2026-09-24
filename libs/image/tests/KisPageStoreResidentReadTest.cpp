@@ -735,10 +735,7 @@ void KisPageStoreResidentReadTest::swapMissDoesNotMaterialize()
     auto guard = view.tryReadResidentPage(key(0)); QVERIFY(guard.isValid());
     auto *tiles = KisTileDataStore::instance();
     const auto swap = [&] {
-        auto *it = tiles->beginIteration();
-        const bool result = it->trySwapOut(tile);
-        tiles->endIteration(it);
-        return result;
+        return tiles->trySwapTileData(tile);
     };
     QVERIFY(!swap()); // physical pin, even though generic read map is empty
     guard = {};

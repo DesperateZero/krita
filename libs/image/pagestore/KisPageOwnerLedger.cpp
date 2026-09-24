@@ -8,14 +8,18 @@
 #include "KisPageWriteCoordinator_p.h"
 
 #include <QHash>
+#include <QEnableSharedFromThis>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPair>
+#include <QScopeGuard>
 #include <QSet>
+#include <QWaitCondition>
 
 #include <algorithm>
 #include <atomic>
 #include <limits>
+#include <unordered_map>
 
 namespace {
 
@@ -95,6 +99,8 @@ struct PhysicalBackingRecord
     KisReplicaHandle representative;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 domainRevision = 0;
+    quint64 domainClaim = 0;
+    quint64 classClaim = 0;
     std::array<quint32, static_cast<size_t>(KisBackingBudgetClass::Count)> references{};
     KisBackingBudgetClass chargedClass = KisBackingBudgetClass::Count;
 
@@ -152,9 +158,10 @@ bool addPhysicalChargeChange(KisBackingBudgetDelta *delta,
         && addBackingDeltaChecked(delta, after, record.domain, bytes);
 }
 
-struct PreparedRetirementSlot
+struct PreparedBackingChangeSlot
 {
     QVector<KisBackingClassChange> changes;
+    QVector<PhysicalBackingKey> physicals;
     KisBackingBudgetReservation reservation;
     quint32 generation = 0;
 };
@@ -163,7 +170,7 @@ bool buildPhysicalBackingDelta(
     const QVector<KisBackingClassChange> &changes,
     const QHash<BackingKey, BackingRecord> &backings,
     const QHash<PhysicalBackingKey, PhysicalBackingRecord> &physicalBackings,
-    const QSet<BackingKey> &preparedRetirements,
+    const QSet<BackingKey> &preparedChanges,
     KisBackingBudgetDelta *signedDelta,
     QString *error)
 {
@@ -174,7 +181,7 @@ bool buildPhysicalBackingDelta(
         const BackingKey key = change.replica.allocationIdentity();
         const auto found = backings.constFind(key);
         if (!change.replica.isValid() || found == backings.constEnd()
-            || preparedRetirements.contains(key)
+            || preparedChanges.contains(key)
             || found->budgetClass != change.before
             || !(found->replica == change.replica)
             || change.before == change.after
@@ -193,6 +200,11 @@ bool buildPhysicalBackingDelta(
             const auto source = physicalBackings.constFind(found->physical);
             if (source == physicalBackings.constEnd()) {
                 KisPageStoreDetail::setError(error, QStringLiteral("physical backing owner is missing"));
+                return false;
+            }
+            if (source->domainClaim || source->classClaim) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("physical backing transition is active"));
                 return false;
             }
             physical = projected.insert(found->physical, *source);
@@ -234,14 +246,80 @@ public:
         return found->completion;
     }
 
-    PreparedRetirementSlot *preparedRetirement(quint64 cookie)
+    PreparedBackingChangeSlot *preparedChange(quint64 cookie)
     {
         const quint32 slotIndex = quint32(cookie);
-        if (slotIndex >= preparedRetirements.size())
+        if (slotIndex >= preparedChanges.size())
             return nullptr;
-        auto &slot = preparedRetirements.at(slotIndex);
+        auto &slot = preparedChanges.at(slotIndex);
         return slot.reservation.isValid() && slot.generation == quint32(cookie >> 32)
             ? &slot : nullptr;
+    }
+
+    quint64 storePreparedChange(
+        QVector<KisBackingClassChange> changes,
+        KisBackingBudgetReservation reservation)
+    {
+        quint32 slotIndex = 0;
+        if (freePreparedChanges.empty()) {
+            slotIndex = quint32(preparedChanges.size());
+            if (freePreparedChanges.capacity() < preparedChanges.size() + 1) {
+                freePreparedChanges.reserve(
+                    std::max(preparedChanges.size() + 1,
+                             freePreparedChanges.capacity()
+                                 ? freePreparedChanges.capacity() * 2 : size_t(1)));
+            }
+            preparedChanges.emplace_back();
+        } else {
+            slotIndex = freePreparedChanges.back();
+            freePreparedChanges.pop_back();
+        }
+        PreparedBackingChangeSlot &slot = preparedChanges.at(slotIndex);
+        ++slot.generation;
+        if (!slot.generation)
+            ++slot.generation;
+        const quint64 cookie = (quint64(slot.generation) << 32) | slotIndex;
+        slot.changes = std::move(changes);
+        slot.reservation = std::move(reservation);
+
+        QSet<PhysicalBackingKey> claimedPhysicals;
+        claimedPhysicals.reserve(slot.changes.size());
+        slot.physicals.reserve(slot.changes.size());
+        for (const KisBackingClassChange &change : std::as_const(slot.changes)) {
+            const BackingKey key = change.replica.allocationIdentity();
+            const auto backing = backings.constFind(key);
+            Q_ASSERT(backing != backings.constEnd());
+            preparedBackingChanges.insert(key);
+            if (backing == backings.constEnd()
+                || claimedPhysicals.contains(backing->physical)) {
+                continue;
+            }
+            auto physical = physicalBackings.find(backing->physical);
+            Q_ASSERT(physical != physicalBackings.end()
+                     && !physical->domainClaim && !physical->classClaim);
+            if (physical != physicalBackings.end()) {
+                physical->classClaim = cookie;
+                claimedPhysicals.insert(backing->physical);
+                slot.physicals.append(backing->physical);
+            }
+        }
+        return cookie;
+    }
+
+    void releasePreparedClaims(PreparedBackingChangeSlot &slot,
+                               quint64 cookie) noexcept
+    {
+        for (const KisBackingClassChange &change : std::as_const(slot.changes))
+            preparedBackingChanges.remove(change.replica.allocationIdentity());
+        for (const PhysicalBackingKey &key : std::as_const(slot.physicals)) {
+            auto physical = physicalBackings.find(key);
+            if (physical != physicalBackings.end()
+                && physical->classClaim == cookie) {
+                physical->classClaim = 0;
+            }
+        }
+        slot.physicals.clear();
+        physicalClaimsChanged.wakeAll();
     }
 
     void applyBackingChange(const KisBackingClassChange &change,
@@ -270,24 +348,289 @@ public:
     QSharedPointer<KisCompletionRegistry> completions;
     quint64 nextValidationStamp = 1;
     QHash<ProviderKey, QSharedPointer<KisPageReplicaProvider>> providers;
+    QSet<ProviderKey> pendingProviderRegistrations;
     QHash<quint64, ProviderOperationRecord> operations;
     QHash<quint64, KisPreparedPageProof> sealedProofs;
     KisBackingBudgetController *backingBudget = nullptr;
     QHash<BackingKey, BackingRecord> backings;
     QHash<PhysicalBackingKey, PhysicalBackingRecord> physicalBackings;
+    QWaitCondition physicalClaimsChanged;
     // Lookup only for physically shared backing; singleton uses representative.
     QHash<PhysicalBackingKey, QSet<BackingKey>> sharedPhysicalMembers;
-    QSet<BackingKey> preparedRetirementBackings;
-    std::vector<PreparedRetirementSlot> preparedRetirements;
-    std::vector<quint32> freePreparedRetirements;
+    QSet<BackingKey> preparedBackingChanges;
+    std::vector<PreparedBackingChangeSlot> preparedChanges;
+    std::vector<quint32> freePreparedChanges;
+    QSharedPointer<KisPageOwnerDomainAdmission> domainAdmission;
 };
+
+class KisPageOwnerDomainAdmission final
+    : public KisReplicaBackingDomainAdmission
+    , public QEnableSharedFromThis<KisPageOwnerDomainAdmission>
+{
+public:
+    explicit KisPageOwnerDomainAdmission(KisPageOwnerLedger *owner)
+        : m_owner(owner) {}
+
+    class Reservation final : public KisReplicaBackingDomainReservation
+    {
+    public:
+        Reservation(QSharedPointer<KisPageOwnerDomainAdmission> owner,
+                    quint64 cookie)
+            : m_owner(std::move(owner)), m_cookie(cookie) {}
+        ~Reservation() override
+        {
+            if (m_owner)
+                m_owner->cancel(m_cookie);
+        }
+        void commit(quint64 targetRevision) noexcept override
+        {
+            if (!m_owner)
+                return;
+            m_owner->commit(m_cookie, targetRevision);
+            m_owner.reset();
+            m_cookie = 0;
+        }
+
+    private:
+        QSharedPointer<KisPageOwnerDomainAdmission> m_owner;
+        quint64 m_cookie = 0;
+    };
+
+    QSharedPointer<KisReplicaBackingDomainReservation> prepare(
+        const KisReplicaPhysicalSlotIdentity &physical,
+        quint64 bytes,
+        KisPageAccessDomain sourceDomain,
+        quint64 sourceRevision,
+        KisPageAccessDomain targetDomain,
+        QString *error) override
+    {
+        QMutexLocker authorityLocker(&m_mutex);
+        if (!m_owner || !physical.provider.isValid()
+            || !physical.providerEpoch.isValid() || !physical.slot
+            || !bytes || !sourceRevision
+            || sourceDomain == KisPageAccessDomain::Unknown
+            || targetDomain == KisPageAccessDomain::Unknown
+            || sourceDomain == targetDomain
+            || bytes > quint64(std::numeric_limits<qint64>::max())) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("backing-domain transition request is invalid"));
+            return {};
+        }
+        if (m_pendingRegistrations.contains(physical)) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("backing-domain registration is active"));
+            return {};
+        }
+        auto *owner = m_owner->d.data();
+        QMutexLocker ownerLocker(&owner->mutex);
+        auto record = owner->physicalBackings.find(physical);
+        if (record == owner->physicalBackings.end()) {
+            KisPageStoreDetail::setError(error, {});
+            return QSharedPointer<Reservation>::create(sharedFromThis(), 0);
+        }
+        if (!owner->backingBudget || record->byteSize() != bytes
+            || record->domain != sourceDomain
+            || record->domainRevision != sourceRevision
+            || record->domainClaim || record->classClaim) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("backing-domain transition source is stale or busy"));
+            return {};
+        }
+
+        KisBackingBudgetDelta signedDelta;
+        if (!addBackingDeltaChecked(&signedDelta, record->chargedClass,
+                                    sourceDomain, -qint64(bytes))
+            || !addBackingDeltaChecked(&signedDelta, record->chargedClass,
+                                       targetDomain, qint64(bytes))) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("backing-domain transition delta overflows"));
+            return {};
+        }
+        auto reservation = owner->backingBudget->reserveChange(
+            signedDelta, error);
+        if (!reservation.isValid())
+            return {};
+        ++m_nextCookie;
+        if (!m_nextCookie)
+            ++m_nextCookie;
+        const quint64 cookie = m_nextCookie;
+        record->domainClaim = cookie;
+        Claim claim;
+        claim.physical = physical;
+        claim.sourceDomain = sourceDomain;
+        claim.sourceRevision = sourceRevision;
+        claim.targetDomain = targetDomain;
+        claim.bytes = bytes;
+        claim.signedDelta = signedDelta;
+        claim.reservation = std::move(reservation);
+        m_claims.emplace(cookie, std::move(claim));
+        KisPageStoreDetail::setError(error, {});
+        return QSharedPointer<Reservation>::create(sharedFromThis(), cookie);
+    }
+
+    void detach() noexcept
+    {
+        QMutexLocker authorityLocker(&m_mutex);
+        if (!m_owner)
+            return;
+        auto *owner = m_owner->d.data();
+        QMutexLocker ownerLocker(&owner->mutex);
+        for (const auto &[cookie, claim] : m_claims) {
+            auto record = owner->physicalBackings.find(claim.physical);
+            if (record != owner->physicalBackings.end()
+                && record->domainClaim == cookie) {
+                record->domainClaim = 0;
+            }
+        }
+        m_claims.clear();
+        m_pendingRegistrations.clear();
+        owner->physicalClaimsChanged.wakeAll();
+        m_owner = nullptr;
+    }
+
+    bool beginRegistration(const PhysicalBackingKey &physical)
+    {
+        QMutexLocker locker(&m_mutex);
+        if (!m_owner || m_pendingRegistrations.contains(physical))
+            return false;
+        m_pendingRegistrations.insert(physical);
+        return true;
+    }
+
+    void endRegistration(const PhysicalBackingKey &physical) noexcept
+    {
+        QMutexLocker locker(&m_mutex);
+        m_pendingRegistrations.remove(physical);
+    }
+
+private:
+    struct Claim {
+        PhysicalBackingKey physical;
+        KisPageAccessDomain sourceDomain = KisPageAccessDomain::Unknown;
+        quint64 sourceRevision = 0;
+        KisPageAccessDomain targetDomain = KisPageAccessDomain::Unknown;
+        quint64 bytes = 0;
+        KisBackingBudgetDelta signedDelta;
+        KisBackingBudgetReservation reservation;
+    };
+
+    void cancel(quint64 cookie) noexcept
+    {
+        if (!cookie)
+            return;
+        QMutexLocker authorityLocker(&m_mutex);
+        auto claim = m_claims.find(cookie);
+        if (claim == m_claims.end())
+            return;
+        if (m_owner) {
+            auto *owner = m_owner->d.data();
+            QMutexLocker ownerLocker(&owner->mutex);
+            auto record = owner->physicalBackings.find(claim->second.physical);
+            if (record != owner->physicalBackings.end()
+                && record->domainClaim == cookie) {
+                record->domainClaim = 0;
+            }
+            m_claims.erase(claim);
+            owner->physicalClaimsChanged.wakeAll();
+        } else {
+            m_claims.erase(claim);
+        }
+    }
+
+    void commit(quint64 cookie, quint64 targetRevision) noexcept
+    {
+        if (!cookie)
+            return;
+        QMutexLocker authorityLocker(&m_mutex);
+        auto claim = m_claims.find(cookie);
+        if (claim == m_claims.end() || !m_owner)
+            return;
+        auto *owner = m_owner->d.data();
+        QMutexLocker ownerLocker(&owner->mutex);
+        auto record = owner->physicalBackings.find(claim->second.physical);
+        const auto revisionOrder = record != owner->physicalBackings.end()
+            ? kisCompareBackingRevision(targetRevision, record->domainRevision)
+            : KisBackingRevisionOrder::Ambiguous;
+        Q_ASSERT(record != owner->physicalBackings.end()
+                 && record->domainClaim == cookie
+                 && record->domain == claim->second.sourceDomain
+                 && record->domainRevision == claim->second.sourceRevision
+                 && revisionOrder == KisBackingRevisionOrder::Newer);
+        if (record != owner->physicalBackings.end()
+            && record->domainClaim == cookie
+            && record->domain == claim->second.sourceDomain
+            && record->domainRevision == claim->second.sourceRevision
+            && revisionOrder == KisBackingRevisionOrder::Newer) {
+            owner->backingBudget->commitReservation(
+                std::move(claim->second.reservation), claim->second.signedDelta);
+            record->domain = claim->second.targetDomain;
+            record->domainRevision = targetRevision;
+            record->domainClaim = 0;
+        }
+        m_claims.erase(claim);
+        owner->physicalClaimsChanged.wakeAll();
+    }
+
+    QMutex m_mutex;
+    KisPageOwnerLedger *m_owner = nullptr;
+    quint64 m_nextCookie = 0;
+    std::unordered_map<quint64, Claim> m_claims;
+    QSet<PhysicalBackingKey> m_pendingRegistrations;
+};
+
+KisBackingClassChangeReservation::KisBackingClassChangeReservation(
+    KisPageOwnerLedger *owner, quint64 cookie)
+    : m_owner(owner), m_cookie(cookie)
+{
+}
+
+KisBackingClassChangeReservation::~KisBackingClassChangeReservation()
+{
+    release();
+}
+
+KisBackingClassChangeReservation::KisBackingClassChangeReservation(
+    KisBackingClassChangeReservation &&other) noexcept
+    : m_owner(std::exchange(other.m_owner, nullptr))
+    , m_cookie(std::exchange(other.m_cookie, 0))
+{
+}
+
+KisBackingClassChangeReservation &
+KisBackingClassChangeReservation::operator=(
+    KisBackingClassChangeReservation &&other) noexcept
+{
+    if (this != &other) {
+        release();
+        m_owner = std::exchange(other.m_owner, nullptr);
+        m_cookie = std::exchange(other.m_cookie, 0);
+    }
+    return *this;
+}
+
+bool KisBackingClassChangeReservation::isValid() const
+{
+    return m_owner && m_cookie;
+}
+
+void KisBackingClassChangeReservation::release() noexcept
+{
+    if (m_owner)
+        m_owner->cancelPreparedBackingChanges(m_cookie);
+    m_owner = nullptr;
+    m_cookie = 0;
+}
 
 KisPageOwnerLedger::KisPageOwnerLedger()
     : d(new Private)
 {
+    d->domainAdmission = QSharedPointer<KisPageOwnerDomainAdmission>::create(this);
 }
 
-KisPageOwnerLedger::~KisPageOwnerLedger() = default;
+KisPageOwnerLedger::~KisPageOwnerLedger()
+{
+    d->domainAdmission->detach();
+}
 
 bool KisPageOwnerLedger::configure(
     const QSharedPointer<KisCompletionRegistry> &completions,
@@ -338,9 +681,26 @@ bool KisPageOwnerLedger::registerBacking(const KisReplicaHandle &replica,
         KisPageStoreDetail::setError(error, QStringLiteral("replica exceeds its backing reservation"));
         return false;
     }
-    const KisReplicaBackingFootprint footprint = observeBackingFootprint(replica);
+    KisReplicaBackingFootprint footprint = observeBackingFootprint(replica);
     if (!footprint.isValid() || footprint.bytes != replica.layout.byteSize) {
         KisPageStoreDetail::setError(error, QStringLiteral("provider physical backing footprint is invalid"));
+        return false;
+    }
+    const PhysicalBackingKey registrationPhysical =
+        physicalBackingKey(replica, footprint);
+    if (!d->domainAdmission->beginRegistration(registrationPhysical)) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("physical backing registration is busy"));
+        return false;
+    }
+    const auto finishRegistration = qScopeGuard([&] {
+        d->domainAdmission->endRegistration(registrationPhysical);
+    });
+    footprint = observeBackingFootprint(replica);
+    if (!footprint.isValid() || footprint.bytes != replica.layout.byteSize
+        || !(physicalBackingKey(replica, footprint) == registrationPhysical)) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("provider physical backing changed during registration"));
         return false;
     }
 
@@ -371,6 +731,11 @@ bool KisPageOwnerLedger::registerBacking(const KisReplicaHandle &replica,
         record.chargedClass = budgetClass;
         physical = d->physicalBackings.insert(physicalKey, record);
     } else {
+        if (physical->domainClaim || physical->classClaim) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("shared physical backing transition is active"));
+            return false;
+        }
         if (physical->domain != footprint.domain
             || physical->domainRevision != footprint.revision
             || physical->byteSize() != footprint.bytes) {
@@ -473,7 +838,7 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
     auto found = d->backings.find(key);
     if (found == d->backings.end() || !(found->replica == replica) || !d->backingBudget
         || (reservation && reservation->owner != d->backingBudget)
-        || d->preparedRetirementBackings.contains(key)) {
+        || d->preparedBackingChanges.contains(key)) {
         KisPageStoreDetail::setError(error, reservation
             ? QStringLiteral("replica backing is not available for reserved reclassification")
             : QStringLiteral("replica backing is not owned by this store"));
@@ -487,6 +852,11 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
     auto physical = d->physicalBackings.find(found->physical);
     if (physical == d->physicalBackings.end()) {
         KisPageStoreDetail::setError(error, QStringLiteral("replica physical backing is missing"));
+        return false;
+    }
+    if (physical->domainClaim || physical->classClaim) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("replica physical backing transition is active"));
         return false;
     }
     PhysicalBackingRecord next = *physical;
@@ -504,7 +874,7 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
     const KisBackingBudgetDelta needed = positiveBackingDelta(installed);
     KisBackingBudgetReservation automaticReservation;
     if (!reservation) {
-        automaticReservation = d->backingBudget->reserve(needed, error);
+        automaticReservation = d->backingBudget->reserveChange(installed, error);
         if (!automaticReservation.isValid()) return false;
         reservation = &automaticReservation;
     } else if (!d->backingBudget->reservationCovers(reservation->cookie, needed)) {
@@ -581,10 +951,7 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
         KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
         return false;
     }
-    KisBackingBudgetDelta signedDelta;
-    QHash<PhysicalBackingKey, PhysicalBackingRecord> updates;
     QVector<Probe> acknowledged;
-    bool hasDomainChanges = false;
     for (const Probe &probe : std::as_const(probes)) {
         if (!probe.change.isValid()) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider backing-domain change is invalid"));
@@ -597,15 +964,12 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
             // not consume an observation before this owner has the backing.
             continue;
         }
-        const auto projected = updates.constFind(key);
-        PhysicalBackingRecord next = projected == updates.cend()
-            ? *physical : *projected;
-        if (probe.change.bytes != next.byteSize()) {
+        if (probe.change.bytes != physical->byteSize()) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider physical backing observation is invalid"));
             return false;
         }
         const auto order = kisCompareBackingRevision(
-            probe.change.revision, next.domainRevision);
+            probe.change.revision, physical->domainRevision);
         if (order == KisBackingRevisionOrder::Ambiguous) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider backing-domain revision is ambiguous"));
             return false;
@@ -615,40 +979,19 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
             continue;
         }
         if (order == KisBackingRevisionOrder::Same) {
-            if (probe.change.domain != next.domain) {
+            if (probe.change.domain != physical->domain) {
                 KisPageStoreDetail::setError(error, QStringLiteral("provider reused a backing-domain revision"));
                 return false;
             }
             acknowledged.append(probe);
             continue;
         }
-        if (probe.change.domain != next.domain) {
-            const qint64 bytes = qint64(next.byteSize());
-            if (!addBackingDeltaChecked(&signedDelta, next.chargedClass,
-                                        next.domain, -bytes)
-                || !addBackingDeltaChecked(&signedDelta, next.chargedClass,
-                                           probe.change.domain, bytes)) {
-                KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain delta overflows"));
-                return false;
-            }
-            next.domain = probe.change.domain;
-            hasDomainChanges = true;
-        }
-        next.domainRevision = probe.change.revision;
-        updates.insert(key, next);
-        acknowledged.append(probe);
-    }
-    if (hasDomainChanges) {
-        auto reservation = d->backingBudget->reserve(positiveBackingDelta(signedDelta), error);
-        if (!reservation.isValid())
-            return false;
-        reservation.commit(signedDelta);
-    }
-    for (auto update = updates.cbegin(); update != updates.cend(); ++update) {
-        auto physical = d->physicalBackings.find(update.key());
-        Q_ASSERT(physical != d->physicalBackings.end());
-        if (physical != d->physicalBackings.end())
-            *physical = update.value();
+        // Mutable providers must install domain/revision through the
+        // pre-admission token before publishing this journal observation.
+        // A newer observation here proves that an owner was skipped.
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("provider published an unadmitted backing-domain change"));
+        return false;
     }
     locker.unlock();
     for (const Probe &probe : std::as_const(acknowledged)) {
@@ -659,15 +1002,11 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
     return true;
 }
 
-KisBackingBudgetReservation KisPageOwnerLedger::prepareBackingChanges(
-    QVector<KisBackingClassChange> *changes,
+KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
+    QVector<KisBackingClassChange> changes,
     const QVector<KisPageTransitionEffect> &retirementEffects,
     QString *error)
 {
-    if (!changes) {
-        KisPageStoreDetail::setError(error, QStringLiteral("publication backing change output is missing"));
-        return {};
-    }
     if (!synchronizeBackingDomains(error)) return {};
     QMutexLocker locker(&d->mutex);
     if (!d->backingBudget) {
@@ -676,8 +1015,8 @@ KisBackingBudgetReservation KisPageOwnerLedger::prepareBackingChanges(
     }
 
     QHash<BackingKey, KisBackingBudgetClass> targetClasses;
-    targetClasses.reserve(changes->size());
-    for (const auto &change : std::as_const(*changes))
+    targetClasses.reserve(changes.size());
+    for (const auto &change : std::as_const(changes))
         targetClasses.insert(change.replica.allocationIdentity(), change.after);
     for (const KisPageTransitionEffect &effect : retirementEffects) {
         if (!effect.replica.isValid()) {
@@ -697,18 +1036,24 @@ KisBackingBudgetReservation KisPageOwnerLedger::prepareBackingChanges(
             continue;
         }
         if (found->budgetClass != KisBackingBudgetClass::RetirementDebt) {
-            changes->append({effect.replica, found->budgetClass,
-                             KisBackingBudgetClass::RetirementDebt});
+            changes.append({effect.replica, found->budgetClass,
+                            KisBackingBudgetClass::RetirementDebt});
             targetClasses.insert(key, KisBackingBudgetClass::RetirementDebt);
         }
     }
 
     KisBackingBudgetDelta signedDelta;
-    if (!buildPhysicalBackingDelta(*changes, d->backings, d->physicalBackings,
-                                   d->preparedRetirementBackings,
+    if (!buildPhysicalBackingDelta(changes, d->backings, d->physicalBackings,
+                                   d->preparedBackingChanges,
                                    &signedDelta, error))
         return {};
-    return d->backingBudget->reserve(positiveBackingDelta(signedDelta), error);
+    auto reservation = d->backingBudget->reserveChange(signedDelta, error);
+    if (!reservation.isValid())
+        return {};
+    const quint64 cookie = d->storePreparedChange(
+        std::move(changes), std::move(reservation));
+    KisPageStoreDetail::setError(error, {});
+    return {this, cookie};
 }
 
 bool KisPageOwnerLedger::prepareRetirementDebt(
@@ -721,134 +1066,84 @@ bool KisPageOwnerLedger::prepareRetirementDebt(
         return false;
     }
     *cookie = 0;
-    if (!synchronizeBackingDomains(error)) return false;
-    QMutexLocker locker(&d->mutex);
-    if (!d->backingBudget) {
-        KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
-        return false;
-    }
-
-    QVector<KisBackingClassChange> changes;
-    changes.reserve(effects.size());
-    QSet<BackingKey> seen;
-    seen.reserve(effects.size());
-    for (const KisPageTransitionEffect &effect : effects) {
-        if (!effect.replica.isValid()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("retirement effect is invalid"));
-            return false;
-        }
-        const BackingKey key = effect.replica.allocationIdentity();
-        const auto found = d->backings.constFind(key);
-        if (found == d->backings.constEnd())
-            continue;
-        if (d->preparedRetirementBackings.contains(key)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("replica already has a prepared retirement"));
-            return false;
-        }
-        if (seen.contains(key)) {
-            continue;
-        }
-        if (!(found->replica == effect.replica)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("retirement backing no longer matches its owner record"));
-            return false;
-        }
-        if (found->budgetClass == KisBackingBudgetClass::RetirementDebt)
-            continue;
-        changes.append({effect.replica, found->budgetClass,
-                        KisBackingBudgetClass::RetirementDebt});
-        seen.insert(key);
-    }
-
-    KisBackingBudgetDelta signedDelta;
-    if (!buildPhysicalBackingDelta(changes, d->backings, d->physicalBackings,
-                                   d->preparedRetirementBackings,
-                                   &signedDelta, error))
-        return false;
-    auto reservation = d->backingBudget->reserve(positiveBackingDelta(signedDelta), error);
+    auto reservation = prepareBackingChanges({}, effects, error);
     if (!reservation.isValid())
         return false;
-
-    quint32 slotIndex = 0;
-    if (d->freePreparedRetirements.empty()) {
-        slotIndex = quint32(d->preparedRetirements.size());
-        if (d->freePreparedRetirements.capacity() < d->preparedRetirements.size() + 1) {
-            d->freePreparedRetirements.reserve(
-                std::max(d->preparedRetirements.size() + 1,
-                         d->freePreparedRetirements.capacity()
-                             ? d->freePreparedRetirements.capacity() * 2 : size_t(1)));
-        }
-        d->preparedRetirements.emplace_back();
-    } else {
-        slotIndex = d->freePreparedRetirements.back();
-        d->freePreparedRetirements.pop_back();
-    }
-    PreparedRetirementSlot &slot = d->preparedRetirements.at(slotIndex);
-    ++slot.generation;
-    if (!slot.generation)
-        ++slot.generation;
-    slot.changes = std::move(changes);
-    slot.reservation = std::move(reservation);
-    for (const KisBackingClassChange &change : std::as_const(slot.changes))
-        d->preparedRetirementBackings.insert(change.replica.allocationIdentity());
-    *cookie = (quint64(slot.generation) << 32) | slotIndex;
+    *cookie = std::exchange(reservation.m_cookie, 0);
+    reservation.m_owner = nullptr;
     KisPageStoreDetail::setError(error, {});
     return true;
 }
 
 void KisPageOwnerLedger::commitRetirementDebt(quint64 cookie) noexcept
 {
+    commitPreparedBackingChanges(cookie);
+}
+
+void KisPageOwnerLedger::cancelRetirementDebt(quint64 cookie) noexcept
+{
+    cancelPreparedBackingChanges(cookie);
+}
+
+void KisPageOwnerLedger::commitPreparedBackingChanges(quint64 cookie) noexcept
+{
     QMutexLocker locker(&d->mutex);
     const quint32 slotIndex = quint32(cookie);
-    PreparedRetirementSlot *slot = d->preparedRetirement(cookie);
+    PreparedBackingChangeSlot *slot = d->preparedChange(cookie);
     if (!slot) return;
 
     KisBackingBudgetDelta signedDelta;
     for (const KisBackingClassChange &change : std::as_const(slot->changes)) {
         const BackingKey key = change.replica.allocationIdentity();
-        Q_ASSERT(d->preparedRetirementBackings.contains(key));
+        Q_ASSERT(d->preparedBackingChanges.contains(key));
         d->applyBackingChange(change, &signedDelta);
-        d->preparedRetirementBackings.remove(key);
     }
     slot->reservation.commit(signedDelta);
+    d->releasePreparedClaims(*slot, cookie);
     slot->changes.clear();
-    d->freePreparedRetirements.push_back(slotIndex);
+    d->freePreparedChanges.push_back(slotIndex);
 }
 
-void KisPageOwnerLedger::cancelRetirementDebt(quint64 cookie) noexcept
+void KisPageOwnerLedger::cancelPreparedBackingChanges(quint64 cookie) noexcept
 {
     QMutexLocker locker(&d->mutex);
     const quint32 slotIndex = quint32(cookie);
-    PreparedRetirementSlot *slot = d->preparedRetirement(cookie);
+    PreparedBackingChangeSlot *slot = d->preparedChange(cookie);
     if (!slot) return;
-    for (const KisBackingClassChange &change : std::as_const(slot->changes))
-        d->preparedRetirementBackings.remove(change.replica.allocationIdentity());
     slot->reservation.release();
+    d->releasePreparedClaims(*slot, cookie);
     slot->changes.clear();
-    d->freePreparedRetirements.push_back(slotIndex);
+    d->freePreparedChanges.push_back(slotIndex);
 }
 
 void KisPageOwnerLedger::commitBackingChanges(
-    KisBackingBudgetReservation &&reservation,
-    const QVector<KisBackingClassChange> &changes) noexcept
+    KisBackingClassChangeReservation &&reservation) noexcept
 {
-    QMutexLocker locker(&d->mutex);
-    Q_ASSERT(reservation.isValid());
-    KisBackingBudgetDelta signedDelta;
-    for (const KisBackingClassChange &change : changes) {
-        const BackingKey key = change.replica.allocationIdentity();
-        Q_ASSERT(!d->preparedRetirementBackings.contains(key));
-        d->applyBackingChange(change, &signedDelta);
-    }
-    reservation.commit(signedDelta);
+    Q_ASSERT(reservation.m_owner == this && reservation.m_cookie);
+    if (reservation.m_owner != this || !reservation.m_cookie)
+        return;
+    const quint64 cookie = std::exchange(reservation.m_cookie, 0);
+    reservation.m_owner = nullptr;
+    commitPreparedBackingChanges(cookie);
 }
 
 void KisPageOwnerLedger::releaseRetiredBacking(const KisReplicaHandle &replica) noexcept
 {
     QMutexLocker locker(&d->mutex);
     const BackingKey key = replica.allocationIdentity();
-    Q_ASSERT(!d->preparedRetirementBackings.contains(key));
+    Q_ASSERT(!d->preparedBackingChanges.contains(key));
     auto found = d->backings.find(key);
     if (found == d->backings.end() || !(found->replica == replica)) return;
+    while (true) {
+        const auto physical = d->physicalBackings.constFind(found->physical);
+        if (physical == d->physicalBackings.cend()
+            || (!physical->domainClaim && !physical->classClaim))
+            break;
+        d->physicalClaimsChanged.wait(&d->mutex);
+        found = d->backings.find(key);
+        if (found == d->backings.end() || !(found->replica == replica))
+            return;
+    }
     const BackingRecord record = *found;
     d->backings.erase(found);
     auto physical = d->physicalBackings.find(record.physical);
@@ -902,24 +1197,54 @@ bool KisPageOwnerLedger::registerProvider(
     }
     const KisReplicaProviderId id = provider->providerId();
     const KisReplicaProviderEpoch epoch = provider->providerEpoch();
-    QMutexLocker locker(&d->mutex);
-    if (!d->completions) {
-        KisPageStoreDetail::setError(error, QStringLiteral("owner ledger is not configured"));
-        return false;
-    }
     const ProviderKey key = providerKey(id, epoch);
-    if (d->providers.contains(key)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("replica provider identity is already registered"));
-        return false;
-    }
-    // One active epoch per stable provider ID. Re-registration after restart
-    // requires a new document/session ledger so stale handles fail closed.
-    for (auto registered = d->providers.cbegin(); registered != d->providers.cend(); ++registered) {
-        if (registered.key().first == id.value) {
-            KisPageStoreDetail::setError(error, QStringLiteral("replica provider ID already has an active epoch"));
+    const auto validateRegistration = [&]() {
+        if (!d->completions) {
+            KisPageStoreDetail::setError(error, QStringLiteral("owner ledger is not configured"));
             return false;
         }
+        if (d->providers.contains(key)
+            || d->pendingProviderRegistrations.contains(key)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("replica provider identity is already registered"));
+            return false;
+        }
+        // One active epoch per stable provider ID. Re-registration after
+        // restart requires a new ledger so stale handles fail closed.
+        for (auto registered = d->providers.cbegin();
+             registered != d->providers.cend(); ++registered) {
+            if (registered.key().first == id.value) {
+                KisPageStoreDetail::setError(error, QStringLiteral("replica provider ID already has an active epoch"));
+                return false;
+            }
+        }
+        for (const ProviderKey &pending :
+             std::as_const(d->pendingProviderRegistrations)) {
+            if (pending.first == id.value) {
+                KisPageStoreDetail::setError(
+                    error,
+                    QStringLiteral("replica provider ID registration is already active"));
+                return false;
+            }
+        }
+        return true;
+    };
+    {
+        QMutexLocker locker(&d->mutex);
+        if (!validateRegistration())
+            return false;
+        d->pendingProviderRegistrations.insert(key);
     }
+    // Provider code remains outside the owner gate. Mutable-domain providers
+    // retain only a weak reference to this ledger admission authority.
+    if (!provider->registerBackingDomainAdmission(d->domainAdmission, error)) {
+        QMutexLocker locker(&d->mutex);
+        d->pendingProviderRegistrations.remove(key);
+        return false;
+    }
+    QMutexLocker locker(&d->mutex);
+    const bool removed = d->pendingProviderRegistrations.remove(key);
+    Q_ASSERT(removed);
+    Q_UNUSED(removed);
     d->providers.insert(key, provider);
     KisPageStoreDetail::setError(error, {});
     return true;

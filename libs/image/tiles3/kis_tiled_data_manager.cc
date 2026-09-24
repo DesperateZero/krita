@@ -87,9 +87,11 @@ KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
 
     m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
     QString pageStoreError;
-    KIS_SAFE_ASSERT_RECOVER_NOOP(
-        m_pageStoreBackend->configure(pixelSize, defaultPixel,
-                                      &pageStoreError));
+    if (!m_pageStoreBackend->configure(pixelSize, defaultPixel,
+                                       &pageStoreError)) {
+        delete m_pageStoreBackend;
+        m_pageStoreBackend = nullptr;
+    }
     m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
 }
 
@@ -122,9 +124,11 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
             *dm.m_pageStoreBackend, &pageStoreError)) {
         delete m_pageStoreBackend;
         m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
-        KIS_SAFE_ASSERT_RECOVER_NOOP(
-            m_pageStoreBackend->configure(m_pixelSize, m_defaultPixel,
-                                          &pageStoreError));
+        if (!m_pageStoreBackend->configure(m_pixelSize, m_defaultPixel,
+                                           &pageStoreError)) {
+            delete m_pageStoreBackend;
+            m_pageStoreBackend = nullptr;
+        }
     }
     m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
     recalculateExtent();
@@ -508,7 +512,10 @@ void KisTiledDataManager::purge(const QRect& area)
     {
         const qint32 tileDataSize = KisTileData::HEIGHT * KisTileData::WIDTH * pixelSize();
         KisTileData *tileData = m_hashTable->refAndFetchDefaultTileData();
-        tileData->blockSwapping();
+        if (!tileData->blockSwapping()) {
+            tileData->deref();
+            return;
+        }
         const quint8 *defaultData = tileData->data();
 
         KisTileHashTableConstIterator iter(m_hashTable);

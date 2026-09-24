@@ -76,13 +76,16 @@ inline KisTileData* KisTileData::clone() {
     return m_store->duplicateTileData(this);
 }
 
-inline void KisTileData::blockSwapping() {
+inline bool KisTileData::blockSwapping() {
     m_swapLock.lockForRead();
     if(!m_data) {
         m_swapLock.unlock();
-        m_store->ensureTileDataLoaded(this);
+        if (!m_store->ensureTileDataLoaded(this)) {
+            return false;
+        }
     }
     resetAge();
+    return true;
 }
 
 inline void KisTileData::unblockSwapping() {

@@ -144,7 +144,7 @@ public:
     /**
      * Control the access of swapper to the tile data
      */
-    inline void blockSwapping();
+    inline bool blockSwapping();
     // Resident-only pin. Never performs swap-in or waits for the swap writer.
     inline bool tryBlockSwapping(bool *busy = nullptr);
     // Wait for the local swap barrier, but never initiate a swap-in.

@@ -53,6 +53,15 @@ QVector<KisReplicaBackingDomainChange> KisPageReplicaProvider::backingDomainChan
 void KisPageReplicaProvider::acknowledgeBackingDomainChange(quint64, quint64)
 {
 }
+bool KisPageReplicaProvider::registerBackingDomainAdmission(
+    const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+    QString *error)
+{
+    const bool valid = bool(admission);
+    KisPageStoreDetail::setError(
+        error, valid ? QString{} : QStringLiteral("backing-domain admission is invalid"));
+    return valid;
+}
 bool KisPageReplicaProvider::copySynchronousSourceToCpu(
     const QSharedPointer<const KisPageReplicaSource> &, const KisPageAllocationDescriptor &,
     void *, quint32, quint64)

@@ -21,8 +21,8 @@ private:
 private Q_SLOTS:
     void testRoundTrip();
     void testRandomAccess();
+    void testCapacityFailurePreservesResidentTile();
 
 };
 
 #endif /* KIS_SWAPPED_DATA_STORE_TEST_H */
-

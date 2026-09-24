@@ -4484,13 +4484,14 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
         {current, KisBackingBudgetClass::Current, KisBackingBudgetClass::RetainedHistory},
         {pending, KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::Current}};
     QVector<KisBackingClassChange> duplicate{publication[0], publication[1], publication[0]};
-    QVERIFY(!owner.prepareBackingChanges(&duplicate, {}, &error).isValid());
+    QVERIFY(!owner.prepareBackingChanges(duplicate, {}, &error).isValid());
     QVERIFY(error.contains(QStringLiteral("more than once")));
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, 4096u);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetainedHistory)].reserved.cpuRam, 0u);
-    auto publicationReservation = owner.prepareBackingChanges(&publication, {}, &error);
+    auto publicationReservation = owner.prepareBackingChanges(
+        std::move(publication), {}, &error);
     QVERIFY2(publicationReservation.isValid(), qPrintable(error));
-    owner.commitBackingChanges(std::move(publicationReservation), publication);
+    owner.commitBackingChanges(std::move(publicationReservation));
     const auto installed = budget.usage();
     QCOMPARE(installed.buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, 4096u);
     QCOMPARE(installed.buckets[size_t(KisBackingBudgetClass::RetainedHistory)].live.cpuRam, 4096u);
@@ -4501,9 +4502,12 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
         retireCurrent[0], retireCurrent[0]};
     QVector<KisBackingClassChange> mergedRetirement;
     auto mergedReservation = owner.prepareBackingChanges(
-        &mergedRetirement, duplicatedRetirement, &error);
+        std::move(mergedRetirement), duplicatedRetirement, &error);
     QVERIFY2(mergedReservation.isValid(), qPrintable(error));
-    QCOMPARE(mergedRetirement.size(), 1);
+    QCOMPARE(budget.usage()
+                 .buckets[size_t(KisBackingBudgetClass::RetirementDebt)]
+                 .reserved.cpuRam,
+             4096u);
     mergedReservation.release();
     quint64 debtCookie = 0;
     QVERIFY2(owner.prepareRetirementDebt(duplicatedRetirement, &debtCookie, &error),
@@ -7753,6 +7757,13 @@ void KisPageStoreReferenceTest::randomAccessorMatchesTiles3AcrossNegativePageBou
     // scope, not the retired standalone accessor-based prototypes.
     auto scope = manager->capturePageStoreReadScope(false);
     QVERIFY(scope && scope->isValid());
+    {
+        KisPageStoreReadCursor cursor(scope);
+        const auto pair = cursor.read(-1, -1, &error);
+        QVERIFY2(pair.isValid(), qPrintable(error));
+        const auto defaultPair = cursor.read(0, -1, &error);
+        QVERIFY2(defaultPair.isValid(), qPrintable(error));
+    }
     KisHLineIterator2 hline(manager.data(), 4, -8, 2, 5, -7, false, nullptr, scope);
     QCOMPARE(hline.nConseqPixels(), qint32(1));
     QCOMPARE(hline.rawDataConst()[0], quint8(0x11));

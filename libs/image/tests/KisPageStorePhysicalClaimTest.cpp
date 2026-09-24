@@ -62,11 +62,7 @@ struct Fixture
     }
     bool swap()
     {
-        auto *store = KisTileDataStore::instance();
-        auto *it = store->beginIteration();
-        const bool result = it->trySwapOut(tile);
-        store->endIteration(it);
-        return result;
+        return KisTileDataStore::instance()->trySwapTileData(tile);
     }
 };
 
@@ -212,7 +208,7 @@ void KisPageStorePhysicalClaimTest::sourceConsumersRespectWriter()
                                                 KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
     QVERIFY(target.isValid());
     if (preclone) {
-        f.tile->blockSwapping();
+        QVERIFY(f.tile->blockSwapping());
         f.tile->m_clonesStack.push(new KisTileData(*f.tile, false));
         f.tile->unblockSwapping();
     }
