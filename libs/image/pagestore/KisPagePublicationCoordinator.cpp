@@ -129,6 +129,165 @@ public:
     KisImageEpochCommitResult result;
 };
 
+class KisPagePublicationCoordinator::KisPreparedOverlayUpdate::Data
+{
+public:
+    struct Change {
+        OverlayChange replacement;
+        KisPreparedPageProof superseded;
+        bool removalWasInBase = false;
+    };
+
+    KisPagePublicationCoordinator *owner = nullptr;
+    KisPageTransaction transaction;
+    QVector<Change> changes;
+    QVector<KisPageTransition> detachments;
+    KisPageMetadataCoordinator::PreparedPublication metadata;
+    bool prepared = false;
+    bool installed = false;
+};
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
+    KisPreparedOverlayUpdate() = default;
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
+    ~KisPreparedOverlayUpdate()
+{
+    cancel();
+}
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
+    KisPreparedOverlayUpdate(KisPreparedOverlayUpdate &&) noexcept = default;
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate &
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate::operator=(
+    KisPreparedOverlayUpdate &&other) noexcept
+{
+    if (this != &other) {
+        cancel();
+        data = std::move(other.data);
+    }
+    return *this;
+}
+
+bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::isValid() const
+{
+    return data && data->owner && data->transaction.isValid()
+        && !data->changes.isEmpty() && !data->installed;
+}
+
+qsizetype KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
+    metadataChangeCount() const
+{
+    return isValid() ? data->detachments.size() : 0;
+}
+
+bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
+    QString *error)
+{
+    if (!isValid() || data->prepared) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("overlay update cannot be prepared"));
+        return false;
+    }
+    if (!data->detachments.isEmpty()) {
+        data->metadata = data->owner->m_metadata.prepareMutation(
+            data->transaction, data->detachments, error);
+        if (!data->metadata.isValid())
+            return false;
+    }
+    data->prepared = true;
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
+bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
+    tryInstallLocked(
+        QVector<KisPageTransitionEffect> *retirementEffects,
+        KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
+        QString *error)
+{
+    if (!isValid() || !data->prepared || !retirementEffects
+        || !metadataCleanup) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("overlay update cannot be installed"));
+        return false;
+    }
+    KisPagePublicationCoordinator &owner = *data->owner;
+    const auto transaction = owner.m_preparedTransactions.constFind(
+        data->transaction.id.value);
+    for (const Data::Change &change : std::as_const(data->changes)) {
+        const KisPreparedPageProof current =
+            transaction == owner.m_preparedTransactions.cend()
+            ? KisPreparedPageProof{}
+            : transaction->proofs.value(change.replacement.key);
+        if (!(current == change.superseded)
+            || (current.isValid()
+                && !owner.m_owner.ownsPreparedPageProof(current))
+            || (change.replacement.proof.isValid()
+                && !owner.m_owner.ownsPreparedPageProof(
+                    change.replacement.proof))) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("overlay update source changed"));
+            return false;
+        }
+    }
+
+    if (!data->detachments.isEmpty()
+        && !owner.m_metadata.installMutation(
+            std::move(data->metadata), data->transaction, error,
+            metadataCleanup)) {
+        return false;
+    }
+
+    QVector<KisPageKey> historical;
+    historical.reserve(data->detachments.size());
+    for (const Data::Change &change : std::as_const(data->changes)) {
+        if (!change.superseded.isValid())
+            continue;
+        const bool revoked = owner.revokePreparedProofLocked(
+            change.superseded);
+        Q_ASSERT(revoked);
+        if (!revoked) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("overlay proof revocation invariant failed"));
+            return false;
+        }
+        historical.append(change.superseded.authority.version.key);
+    }
+    for (const Data::Change &change : std::as_const(data->changes)) {
+        if (change.replacement.removal) {
+            owner.setRemovalLocked(data->transaction.id,
+                                   change.replacement.key,
+                                   change.removalWasInBase);
+        } else {
+            owner.installPreparedProofLocked(change.replacement.proof);
+        }
+    }
+    if (!historical.isEmpty()) {
+        *retirementEffects += owner.m_history.collectUnreachableLocked(
+            historical);
+    }
+    data->installed = true;
+    data->owner = nullptr;
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
+void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::cancel() noexcept
+{
+    if (!data || data->installed || !data->owner) {
+        data.reset();
+        return;
+    }
+    for (const Data::Change &change : std::as_const(data->changes)) {
+        if (change.replacement.proof.isValid())
+            data->owner->m_owner.revokePreparedPage(
+                change.replacement.proof);
+    }
+    data.reset();
+}
+
 KisPagePublicationCoordinator::KisPreparedMutationCommit::KisPreparedMutationCommit() = default;
 
 KisPagePublicationCoordinator::KisPreparedMutationCommit::~KisPreparedMutationCommit()
@@ -1092,6 +1251,70 @@ bool KisPagePublicationCoordinator::stagesRemovalLocked(
 {
     const auto found = m_preparedTransactions.constFind(transaction.value);
     return found != m_preparedTransactions.constEnd() && found->removals.contains(key);
+}
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate
+KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
+    const KisPageTransaction &transaction,
+    QVector<OverlayChange> changes,
+    QString *error)
+{
+    if (!hasActiveTransactionLocked(transaction) || changes.isEmpty()) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("overlay update input is invalid"));
+        return {};
+    }
+
+    auto candidate = std::make_unique<KisPreparedOverlayUpdate::Data>();
+    candidate->owner = this;
+    candidate->transaction = transaction;
+    candidate->changes.reserve(changes.size());
+    candidate->detachments.reserve(changes.size());
+    QSet<KisPageKey> keys;
+    keys.reserve(changes.size());
+    const auto prior = m_preparedTransactions.constFind(transaction.id.value);
+    const auto base = m_epochs.root(transaction.baseEpoch);
+    for (OverlayChange &change : changes) {
+        const bool hasProof = change.proof.isValid();
+        if (!change.key.isValid() || change.removal == hasProof
+            || keys.contains(change.key)
+            || (hasProof
+                && (!(change.proof.transaction == transaction.id)
+                    || !(change.proof.authority.version.key == change.key)
+                    || !m_owner.ownsPreparedPageProof(change.proof)))) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("overlay update change is invalid"));
+            return {};
+        }
+        keys.insert(change.key);
+        const KisPreparedPageProof superseded =
+            prior == m_preparedTransactions.cend()
+            ? KisPreparedPageProof{} : prior->proofs.value(change.key);
+        if (superseded.isValid()) {
+            if (!m_owner.ownsPreparedPageProof(superseded)
+                || (hasProof
+                    && superseded.authority.version.generation.value
+                        >= change.proof.authority.version.generation.value)) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("overlay update does not replace its current proof"));
+                return {};
+            }
+            KisPageTransition detach;
+            detach.kind = KisPageTransitionKind::DetachPreparedVersion;
+            detach.version = superseded.authority.version;
+            detach.transaction = transaction.id;
+            candidate->detachments.append(detach);
+        }
+        const bool removalWasInBase =
+            change.removal && base.containsPage(change.key);
+        candidate->changes.append(
+            {std::move(change), superseded, removalWasInBase});
+    }
+
+    KisPreparedOverlayUpdate result;
+    result.data = std::move(candidate);
+    KisPageStoreDetail::setError(error, {});
+    return result;
 }
 
 bool KisPagePublicationCoordinator::revokePreparedProofLocked(

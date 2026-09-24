@@ -137,6 +137,7 @@ public:
     // counts while retirement workers can bind/release operations.
     qsizetype publicationBlockingOperationCount() const;
     qsizetype sealedProofCount() const;
+    bool ownsPreparedPageProof(const KisPreparedPageProof &proof) const;
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger

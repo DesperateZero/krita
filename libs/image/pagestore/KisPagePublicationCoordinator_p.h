@@ -40,6 +40,37 @@ struct KisPagePublicationCoordinatorSnapshot {
 class KisPagePublicationCoordinator final
 {
 public:
+    struct OverlayChange {
+        KisPageKey key;
+        KisPreparedPageProof proof;
+        bool removal = false;
+    };
+
+    class KisPreparedOverlayUpdate final
+    {
+    public:
+        KisPreparedOverlayUpdate();
+        ~KisPreparedOverlayUpdate();
+        KisPreparedOverlayUpdate(KisPreparedOverlayUpdate &&) noexcept;
+        KisPreparedOverlayUpdate &operator=(KisPreparedOverlayUpdate &&) noexcept;
+        KisPreparedOverlayUpdate(const KisPreparedOverlayUpdate &) = delete;
+        KisPreparedOverlayUpdate &operator=(const KisPreparedOverlayUpdate &) = delete;
+
+        bool isValid() const;
+        qsizetype metadataChangeCount() const;
+        bool prepare(QString *error);
+        bool tryInstallLocked(
+            QVector<KisPageTransitionEffect> *retirementEffects,
+            KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
+            QString *error);
+
+    private:
+        class Data;
+        std::unique_ptr<Data> data;
+        void cancel() noexcept;
+        friend class KisPagePublicationCoordinator;
+    };
+
     using TransactionHasMutationActivity = bool (*)(void *context, KisPageTransactionId transaction);
     using PageWriteClaimed = bool (*)(void *context, const KisPageKey &key);
     using MutationPreparation = void (*)(void *context, KisPageTransactionId transaction);
@@ -111,6 +142,10 @@ public:
     const QHash<KisPageKey, KisPreparedPageProof> *findProofsLocked(KisPageTransactionId transaction) const;
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;
     bool stagesRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
+    KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
+        const KisPageTransaction &transaction,
+        QVector<OverlayChange> changes,
+        QString *error);
     bool revokePreparedProofLocked(const KisPreparedPageProof &proof);
     void installPreparedProofLocked(const KisPreparedPageProof &proof);
 

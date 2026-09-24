@@ -1732,37 +1732,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
             if (source && !hadPage)
                 ++sealedPageCount;
         }
-    // Detach old proofs only after all new pixel proofs exist. The prepared
-    // metadata capability checks every exact detachment before installing any;
-    // outstanding captured views/read pins become ordinary retained history.
-    QVector<KisPreparedPageProof> superseded;
-    QVector<KisPageTransition> transitions;
-    if (const auto *priorProofs = owner->publicationCoordinator.findProofsLocked(d->transaction.id);
-        success && priorProofs) {
-        const auto prepareDetach = [&](const KisPageKey &key) {
-            const auto old = priorProofs->value(key);
-            if (!old.isValid())
-                return;
-            superseded.append(old);
-            KisPageTransition detach;
-            detach.kind = KisPageTransitionKind::DetachPreparedVersion;
-            detach.version = old.authority.version;
-            detach.transaction = d->transaction.id;
-            transitions.append(detach);
-        };
-        // Final removals and surviving pixel targets are disjoint. Do not
-        // build another K-key hash, especially for ordinary first-write seals
-        // with no previously sealed overlay proof to detach.
-        for (qsizetype i = 0; i < d->writes.size(); ++i) {
-            const auto index = KisMutationWriteSet::EntryIndex(i);
-            const auto *entry = d->writes.at(index);
-            if (entry->isRemoval() || d->pageAtEntry(index))
-                prepareDetach(entry->key());
-        }
-    }
-    // Do not retain an iterator/reference into preparedProofs across unlock:
-    // a disjoint segment in this transaction may seal concurrently. Capture
-    // only this segment's superseded keys, then merge into the latest overlay.
     ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealProofPrepare, quint64(sealedPageCount));
@@ -1791,23 +1760,69 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         for (qsizetype i = 0; i < d->writes.size(); ++i)
             if (auto *page = d->pageAtEntry(KisMutationWriteSet::EntryIndex(i)))
                 page->writable.reset();
-    phase.next(Phase::MutationSealMetadataPrepare, success ? quint64(transitions.size()) : 0);
-    KisPageMetadataCoordinator::PreparedPublication candidate;
-    KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
-    const bool preparesMetadata = success && !transitions.isEmpty();
-    if (preparesMetadata) {
-        candidate = owner->metadata.prepareMutation(d->transaction, transitions, &failure);
-        success = candidate.isValid();
+
+    phase.next(Phase::MutationSealOwnerWait, pageWork);
+    lock.relock();
+    phase.next(Phase::MutationSealInputs, pageWork);
+    success = success && d->claimsHeldLocked();
+    QVector<KisPagePublicationCoordinator::OverlayChange> overlayChanges;
+    overlayChanges.reserve(d->writes.size());
+    quint64 sealedCpuWrites = 0;
+    quint64 sealedRemovals = 0;
+    quint64 sealedSources = 0;
+    if (success) {
+        for (qsizetype i = 0; i < d->writes.size(); ++i) {
+            const auto index = KisMutationWriteSet::EntryIndex(i);
+            auto *entry = d->writes.at(index);
+            auto *page = d->pageAtEntry(index);
+            if (entry->isRemoval()) {
+                overlayChanges.append(
+                    {entry->key(), {}, true});
+                ++sealedRemovals;
+            } else if (page) {
+                overlayChanges.append(
+                    {entry->key(), page->proof, false});
+                sealedCpuWrites += entry->isCpuWrite();
+            }
+            sealedSources += bool(entry->initializationSource());
+        }
     }
+    auto overlay = success && !overlayChanges.isEmpty()
+        ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
+              d->transaction, std::move(overlayChanges), &failure)
+        : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
+    const bool hasOverlay = success && d->writes.size() != 0;
+    success = success && (!hasOverlay || overlay.isValid());
+    if (success && hasOverlay) {
+        // The aggregate now owns every new sealed proof. A failed prepare or
+        // install revokes them together while the former overlay stays live.
+        for (qsizetype i = 0; i < d->writes.size(); ++i) {
+            if (auto *page = d->pageAtEntry(
+                    KisMutationWriteSet::EntryIndex(i))) {
+                page->proof = {};
+            }
+        }
+    }
+    const qsizetype metadataChangeCount = overlay.metadataChangeCount();
+    lock.unlock();
+    phase.next(Phase::MutationSealMetadataPrepare,
+               quint64(metadataChangeCount));
+    if (success && hasOverlay)
+        success = overlay.prepare(&failure);
+    KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
     phase.next(Phase::MutationSealInstall, pageWork);
     success = success && d->claimsHeldLocked();
-    if (success && preparesMetadata)
-        success = owner->metadata.installMutation(std::move(candidate), d->transaction, &failure, &metadataCleanup);
+    if (success && hasOverlay) {
+        success = overlay.tryInstallLocked(
+            &retirements, &metadataCleanup, &failure);
+    }
     --owner->activeProviderCalls;
-    owner->mutationStats.sealMetadataPreparations += quint64(preparesMetadata);
-    owner->mutationStats.sealMetadataRejections += quint64(preparesMetadata && !success);
+    owner->mutationStats.sealMetadataPreparations +=
+        quint64(metadataChangeCount != 0);
+    owner->mutationStats.sealMetadataRejections +=
+        quint64(metadataChangeCount != 0 && !success);
     if (!success) {
         // No proof/overlay has been exposed; rollback only this segment's
         // versions, preserving previously prepared history and its proofs.
@@ -1821,40 +1836,11 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation seal failed: ") + failure);
         return false;
     }
-    QVector<KisPageKey> historical;
-    historical.reserve(superseded.size());
-    for (const auto &old : std::as_const(superseded)) {
-        const bool revoked = owner->publicationCoordinator.revokePreparedProofLocked(old);
-        Q_ASSERT(revoked);
-        Q_UNUSED(revoked);
-        historical.append(old.authority.version.key);
-    }
-    const auto base = owner->epochs.root(d->transaction.baseEpoch);
-    quint64 sealedCpuWrites = 0;
-    quint64 sealedRemovals = 0;
-    quint64 sealedSources = 0;
-    for (qsizetype i = 0; i < d->writes.size(); ++i) {
-        const auto *entry = d->writes.at(KisMutationWriteSet::EntryIndex(i));
-        const auto *page = d->pageAtEntry(KisMutationWriteSet::EntryIndex(i));
-        if (entry->isRemoval()) {
-            owner->publicationCoordinator.setRemovalLocked(
-                d->transaction.id, entry->key(), base.containsPage(entry->key()));
-            ++sealedRemovals;
-        }
-        if (page) {
-            owner->publicationCoordinator.installPreparedProofLocked(page->proof);
-            sealedCpuWrites += entry->isCpuWrite();
-        }
-        sealedSources += bool(entry->initializationSource());
-    }
     owner->mutationStats.pagesSealed += sealedCpuWrites;
     owner->synchronousHostWrites += sealedSources;
     owner->mutationStats.removalsSealed += sealedRemovals;
     KisPageMutationSession::Private::ColdPageSet sealedPages;
     std::swap(d->coldPages, sealedPages);
-    if (!historical.isEmpty()) {
-        retirements += owner->historyCollector.collectUnreachableLocked(historical);
-    }
     // The complete overlay is installed. Destruction and physical retirement
     // may call providers or queue large releases; keep the claims but not the
     // owner gate while doing that work.
@@ -1864,9 +1850,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     disposeDeferredMetadataCleanup(std::move(metadataCleanup), owner->metadataCleanupStatistics);
     sealedPages = {};
     d->clearSources();
-    superseded.clear();
-    transitions.clear();
-    historical.clear();
     owner->retirementQueue.retireEffects(retirements, owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
@@ -3388,10 +3371,6 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
 
     const auto &request = active->request;
     bool success = d->completions->verifyTerminal(completion).succeeded();
-    const auto *prior = d->publicationCoordinator.findProofsLocked(request.transaction);
-    const KisPreparedPageProof superseded = prior ? prior->value(request.version.key) : KisPreparedPageProof{};
-    success = success && (!superseded.isValid()
-        || superseded.authority.version.generation.value < request.version.generation.value);
     KisPreparedPageProof proof;
     if (success) {
         KisPageAllocationDescriptor descriptor;
@@ -3405,32 +3384,43 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
                                          descriptor, completion, &proof);
         lock.relock();
     }
-    // Validation can fail outside owner; leave the old overlay untouched until
-    // its replacement has a complete proof. Detached versions use the same
-    // historical reader/last-use lifecycle as native mutation seals.
-    if (success && superseded.isValid()) {
-        KisPageTransition detach;
-        detach.kind = KisPageTransitionKind::DetachPreparedVersion;
-        detach.version = superseded.authority.version;
-        detach.transaction = request.transaction;
-        success = d->metadata.applyOwner(detach.version.key, detach).accepted;
+    KisPagePublicationCoordinator::KisPreparedOverlayUpdate overlay;
+    if (success) {
+        const auto transaction = d->epochs.transaction(request.transaction);
+        if (transaction.isActive()) {
+            QVector<KisPagePublicationCoordinator::OverlayChange> changes;
+            changes.append(
+                {request.version.key, proof, false});
+            overlay = d->publicationCoordinator.prepareOverlayUpdateLocked(
+                transaction.transaction, std::move(changes), nullptr);
+        }
+        success = overlay.isValid();
+        if (success)
+            proof = {};
     }
     QVector<KisPageTransitionEffect> retirements;
+    KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
+    if (success) {
+        lock.unlock();
+        success = overlay.prepare(nullptr);
+        lock.relock();
+    }
+    if (success) {
+        success = overlay.tryInstallLocked(
+            &retirements, &metadataCleanup, nullptr);
+    }
+    const auto disposeCleanup = qScopeGuard([&] {
+        lock.unlock();
+        disposeDeferredMetadataCleanup(
+            std::move(metadataCleanup), d->metadataCleanupStatistics);
+        lock.relock();
+    });
     if (!success) {
         if (proof.isValid()) d->owner.revokePreparedPage(proof);
         const auto cancelled = d->cancelWriteLocked(request);
         if (!cancelled.accepted)
             return {}; // consumed lease remains abort-retryable in activeWrites
         retirements = cancelled.effects;
-    } else {
-        if (superseded.isValid()) {
-            const bool revoked = d->publicationCoordinator.revokePreparedProofLocked(superseded);
-            Q_ASSERT(revoked);
-            Q_UNUSED(revoked);
-        }
-        d->publicationCoordinator.installPreparedProofLocked(proof);
-        if (superseded.isValid())
-            retirements = d->historyCollector.collectUnreachableLocked({superseded.authority.version.key});
     }
     d->activeWrites.remove(lease.m_leaseId.value);
     d->retireEffectsLocked(retirements, lock);

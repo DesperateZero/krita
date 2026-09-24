@@ -1426,6 +1426,16 @@ qsizetype KisPageOwnerLedger::sealedProofCount() const
     return d->sealedProofs.size();
 }
 
+bool KisPageOwnerLedger::ownsPreparedPageProof(
+    const KisPreparedPageProof &proof) const
+{
+    if (!proof.isValid())
+        return false;
+    QMutexLocker locker(&d->mutex);
+    const auto found = d->sealedProofs.constFind(proof.providerValidationStamp);
+    return found != d->sealedProofs.cend() && found.value() == proof;
+}
+
 bool KisPageOwnerLedger::sealPreparedPage(
     const KisPageMetadataCoordinator &metadata,
     const KisPageVersion &version,
