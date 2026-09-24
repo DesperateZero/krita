@@ -1831,6 +1831,71 @@ void KisTiledDataManagerTest::testPageStoreCopyLiveWriteCompatibility()
     if (history) { source.commit(); source.purgeHistory(memento); }
 }
 
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopyFailure_data()
+{
+    QTest::addColumn<bool>("rough");
+    QTest::addColumn<int>("failurePoint");
+    for (bool rough : {false, true}) {
+        for (KisSwapInFailurePoint point : {KisSwapInFailurePoint::Mapping,
+                                            KisSwapInFailurePoint::Allocation,
+                                            KisSwapInFailurePoint::Decompression}) {
+            QTest::newRow(qPrintable(QStringLiteral("rough%1-failure%2").arg(rough).arg(int(point))))
+                << rough << int(point);
+        }
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopyFailure()
+{
+    QFETCH(bool, rough);
+    QFETCH(int, failurePoint);
+    const quint8 blank = 0;
+    const quint8 firstSource = 0x61;
+    const quint8 secondSource = 0x62;
+    const quint8 initialTarget = 0x31;
+    KisTiledDataManager source(1, &blank);
+    KisTiledDataManager target(1, &blank);
+
+    // Exercise the production compatibility path with a legacy source. Keep
+    // its two physical backings distinct so only the second page is swapped.
+    source.m_mementoManager->setPageStoreBridge(nullptr);
+    delete source.m_pageStoreBackend;
+    source.m_pageStoreBackend = nullptr;
+    source.clear(0, 0, 64, 64, &firstSource);
+    source.clear(64, 0, 64, 64, &secondSource);
+    target.clear(0, 0, 128, 64, &initialTarget);
+
+    bool exists = false;
+    const auto secondTile = source.getReadOnlyTileLazy(1, 0, exists);
+    QVERIFY(exists);
+    KisTileData *secondData = secondTile->tileData();
+    QVERIFY(secondData->ref());
+    const auto release = qScopeGuard([&] {
+        secondData->deref();
+    });
+    auto *tileStore = KisTileDataStore::instance();
+    QVERIFY(tileStore->trySwapTileData(secondData));
+    QVERIFY(!secondData->isResident());
+
+    const auto committed = target.m_pageStoreBackend->store()->sessionStats().committedTransactions;
+    tileStore->testingFailNextSwapIn(KisSwapInFailurePoint(failurePoint));
+    const QRect area = rough ? QRect(0, 0, 128, 64) : QRect(1, 0, 126, 64);
+    if (rough)
+        target.bitBltRough(&source, area);
+    else
+        target.bitBlt(&source, area);
+
+    QCOMPARE(target.m_pageStoreBackend->store()->sessionStats().committedTransactions, committed);
+    QVERIFY(!secondData->isResident());
+    const auto firstCached = target.m_hashTable->getExistingTile(0, 0);
+    QVERIFY(firstCached);
+    QVERIFY(firstCached->tileData()->data());
+    QCOMPARE(firstCached->tileData()->data()[rough ? 0 : 1], initialTarget);
+    QByteArray actual(128 * 64, Qt::Uninitialized);
+    target.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 128, 64);
+    QCOMPARE(actual, QByteArray(actual.size(), char(initialTarget)));
+}
+
 void KisTiledDataManagerTest::testPageStoreDefaultLifecycleDoesNotMaterialize()
 {
     QFETCH(int, pixelSize);

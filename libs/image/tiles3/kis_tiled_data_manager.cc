@@ -7,6 +7,7 @@
  */
 
 #include <QRect>
+#include <QScopeGuard>
 #include <QVector>
 
 #include <utility>
@@ -859,6 +860,12 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
         return;
     }
     ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
+    bool published = false;
+    const auto restoreCompatibilityState = qScopeGuard([&] {
+        if (published) return;
+        pageStoreBatch.finish(false);
+        refreshPageStoreIndex(rect);
+    });
 
     const qint32 pixelSize = this->pixelSize();
     const bool defaultPixelsCoincide =
@@ -959,7 +966,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
             }
         }
     }
-    KIS_SAFE_ASSERT_RECOVER_NOOP(pageStoreBatch.finish());
+    published = pageStoreBatch.finish();
 }
 
 template<bool useOldSrcData>
@@ -977,6 +984,12 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
         return;
     }
     ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
+    bool published = false;
+    const auto restoreCompatibilityState = qScopeGuard([&] {
+        if (published) return;
+        pageStoreBatch.finish(false);
+        refreshPageStoreIndex(rect);
+    });
 
     const qint32 pixelSize = this->pixelSize();
     const bool defaultPixelsCoincide =
@@ -1053,7 +1066,7 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
             srcTile->unlockForRead();
         }
     }
-    KIS_SAFE_ASSERT_RECOVER_NOOP(pageStoreBatch.finish());
+    published = pageStoreBatch.finish();
 }
 
 void KisTiledDataManager::bitBlt(KisTiledDataManager *srcDM, const QRect &rect)

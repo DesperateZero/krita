@@ -84,6 +84,8 @@ private Q_SLOTS:
     void testPageStoreCopyFixedView();
     void testPageStoreCopyLiveWriteCompatibility_data();
     void testPageStoreCopyLiveWriteCompatibility();
+    void testPageStoreCompatibilityCopyFailure_data();
+    void testPageStoreCompatibilityCopyFailure();
     void testPageStoreDefaultLifecycleDoesNotMaterialize_data();
     void testPageStoreDefaultLifecycleDoesNotMaterialize();
     void testPageStoreHistoryClearStagesAbsence_data();
