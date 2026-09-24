@@ -41,7 +41,7 @@ KisReplicaBackingFootprint KisPageReplicaProvider::backingFootprint(
 {
     return replica.isValid()
         ? KisReplicaBackingFootprint{replica.allocation.slot, replica.domain,
-                                     replica.layout.byteSize}
+                                     replica.layout.byteSize, 1}
         : KisReplicaBackingFootprint{};
 }
 

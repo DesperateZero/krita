@@ -94,6 +94,7 @@ struct PhysicalBackingRecord
 {
     KisReplicaHandle representative;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
+    quint64 domainRevision = 0;
     std::array<quint32, static_cast<size_t>(KisBackingBudgetClass::Count)> references{};
     KisBackingBudgetClass chargedClass = KisBackingBudgetClass::Count;
 
@@ -365,11 +366,14 @@ bool KisPageOwnerLedger::registerBacking(const KisReplicaHandle &replica,
         PhysicalBackingRecord record;
         record.representative = replica;
         record.domain = footprint.domain;
+        record.domainRevision = footprint.revision;
         record.references[static_cast<size_t>(budgetClass)] = 1;
         record.chargedClass = budgetClass;
         physical = d->physicalBackings.insert(physicalKey, record);
     } else {
-        if (physical->domain != footprint.domain || physical->byteSize() != footprint.bytes) {
+        if (physical->domain != footprint.domain
+            || physical->domainRevision != footprint.revision
+            || physical->byteSize() != footprint.bytes) {
             KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing footprint changed"));
             return false;
         }
@@ -578,49 +582,78 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
         return false;
     }
     KisBackingBudgetDelta signedDelta;
-    bool hasChanges = false;
+    QHash<PhysicalBackingKey, PhysicalBackingRecord> updates;
+    QVector<Probe> acknowledged;
+    bool hasDomainChanges = false;
     for (const Probe &probe : std::as_const(probes)) {
         if (!probe.change.isValid()) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider backing-domain change is invalid"));
             return false;
         }
-        const auto physical = d->physicalBackings.constFind(probe.key());
+        const PhysicalBackingKey key = probe.key();
+        const auto physical = d->physicalBackings.constFind(key);
         if (physical == d->physicalBackings.constEnd()) {
+            // Allocation and ledger registration are separate operations. Do
+            // not consume an observation before this owner has the backing.
             continue;
         }
-        if (probe.change.bytes != physical->byteSize()) {
+        const auto projected = updates.constFind(key);
+        PhysicalBackingRecord next = projected == updates.cend()
+            ? *physical : *projected;
+        if (probe.change.bytes != next.byteSize()) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider physical backing observation is invalid"));
             return false;
         }
-        if (probe.change.domain == physical->domain)
-            continue;
-        const qint64 bytes = qint64(physical->byteSize());
-        if (!addBackingDeltaChecked(&signedDelta, physical->chargedClass,
-                                    physical->domain, -bytes)
-            || !addBackingDeltaChecked(&signedDelta, physical->chargedClass,
-                                       probe.change.domain, bytes)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain delta overflows"));
+        const auto order = kisCompareBackingRevision(
+            probe.change.revision, next.domainRevision);
+        if (order == KisBackingRevisionOrder::Ambiguous) {
+            KisPageStoreDetail::setError(error, QStringLiteral("provider backing-domain revision is ambiguous"));
             return false;
         }
-        hasChanges = true;
+        if (order == KisBackingRevisionOrder::Older) {
+            acknowledged.append(probe);
+            continue;
+        }
+        if (order == KisBackingRevisionOrder::Same) {
+            if (probe.change.domain != next.domain) {
+                KisPageStoreDetail::setError(error, QStringLiteral("provider reused a backing-domain revision"));
+                return false;
+            }
+            acknowledged.append(probe);
+            continue;
+        }
+        if (probe.change.domain != next.domain) {
+            const qint64 bytes = qint64(next.byteSize());
+            if (!addBackingDeltaChecked(&signedDelta, next.chargedClass,
+                                        next.domain, -bytes)
+                || !addBackingDeltaChecked(&signedDelta, next.chargedClass,
+                                           probe.change.domain, bytes)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain delta overflows"));
+                return false;
+            }
+            next.domain = probe.change.domain;
+            hasDomainChanges = true;
+        }
+        next.domainRevision = probe.change.revision;
+        updates.insert(key, next);
+        acknowledged.append(probe);
     }
-    if (hasChanges) {
+    if (hasDomainChanges) {
         auto reservation = d->backingBudget->reserve(positiveBackingDelta(signedDelta), error);
         if (!reservation.isValid())
             return false;
         reservation.commit(signedDelta);
-        for (const Probe &probe : std::as_const(probes)) {
-            auto physical = d->physicalBackings.find(probe.key());
-            if (physical != d->physicalBackings.end()
-                && probe.change.isValid()) {
-                physical->domain = probe.change.domain;
-            }
-        }
+    }
+    for (auto update = updates.cbegin(); update != updates.cend(); ++update) {
+        auto physical = d->physicalBackings.find(update.key());
+        Q_ASSERT(physical != d->physicalBackings.end());
+        if (physical != d->physicalBackings.end())
+            *physical = update.value();
     }
     locker.unlock();
-    for (const Probe &probe : std::as_const(probes)) {
+    for (const Probe &probe : std::as_const(acknowledged)) {
         probe.provider->acknowledgeBackingDomainChange(
-            probe.change.physicalSlot, probe.change.sequence);
+            probe.change.physicalSlot, probe.change.revision);
     }
     KisPageStoreDetail::setError(error, {});
     return true;

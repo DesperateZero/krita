@@ -14,6 +14,7 @@
 #include "KisCpuResidentBinding_p.h"
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageMetadataCoordinator.h"
+#include "KisPageOwnerLedger.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "KisPageWriteCoordinator_p.h"
@@ -50,6 +51,7 @@ public:
     std::function<void()> beforeRequestReplica;
     std::function<void()> beforeAdopt;
     std::function<void()> beforeRelease;
+    std::function<void()> afterDomainSnapshot;
     bool rejectAdopt = false;
     std::function<void()> beforeValidate;
     KisReplicaHandle lastTarget;
@@ -126,9 +128,13 @@ public:
         const KisReplicaHandle &r) const override
     { return p->backingFootprint(r); }
     QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override
-    { return p->backingDomainChanges(); }
-    void acknowledgeBackingDomainChange(quint64 slot, quint64 sequence) override
-    { p->acknowledgeBackingDomainChange(slot, sequence); }
+    {
+        auto result = p->backingDomainChanges();
+        if (afterDomainSnapshot) afterDomainSnapshot();
+        return result;
+    }
+    void acknowledgeBackingDomainChange(quint64 slot, quint64 revision) override
+    { p->acknowledgeBackingDomainChange(slot, revision); }
 };
 
 struct Fixture
@@ -220,6 +226,8 @@ private Q_SLOTS:
         QTest::newRow("sealed-proofs") << 2;
     }
     void partialCancellationRetiresBeforeRetry();
+    void backingDomainRejectsStaleSnapshot();
+    void metadataArenaBudgetTracksAllocator();
     void finiteBackingLimitMatrix();
     void retiredEpochAdmissionAndPhysicalReaders_data()
     {
@@ -4144,6 +4152,172 @@ void KisPageStoreCpuMutationTest::partialCancellationRetiresBeforeRetry()
     QVERIFY(f.store->abort(tx));
     QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x31)));
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+}
+
+void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
+{
+    Fixture f;
+    QVERIFY2(f.init(), qPrintable(f.error));
+    QVERIFY2(f.fill(0x31), qPrintable(f.error));
+    const KisReplicaHandle handle = f.provider->lastTarget;
+    QVERIFY(handle.isValid());
+
+    auto view = f.store->captureReadView();
+    auto read = view.readResidentPage(handle.version.key);
+    QVERIFY(read.isValid());
+    auto *tile = f.provider->p->tileDataForCpuReadGuard(read);
+    QVERIFY(tile && tile->ref());
+    read = {};
+    view = {};
+
+    KisBackingBudgetController budget;
+    KisPageOwnerLedger ledger;
+    QVERIFY(ledger.configure(f.completions, &f.error));
+    ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider, &f.error));
+    const auto initialFootprint = f.provider->backingFootprint(handle);
+    QVERIFY(initialFootprint.isValid());
+    KisBackingBudgetDelta delta;
+    delta.buckets[size_t(KisBackingBudgetClass::Current)].cpuRam =
+        handle.layout.byteSize;
+    auto reservation = budget.reserve(delta, &f.error);
+    QVERIFY2(reservation.isValid(), qPrintable(f.error));
+    QVERIFY2(ledger.registerBacking(handle, reservation,
+                                    KisBackingBudgetClass::Current, &f.error),
+             qPrintable(f.error));
+
+    auto *tileStore = KisTileDataStore::instance();
+    auto *it = tileStore->beginIteration();
+    const bool swapped = it->trySwapOut(tile);
+    tileStore->endIteration(it);
+    QVERIFY(swapped);
+    const auto coldChanges = f.provider->backingDomainChanges();
+    QCOMPARE(coldChanges.size(), 1);
+    QCOMPARE(kisCompareBackingRevision(coldChanges.front().revision,
+                                       initialFootprint.revision),
+             KisBackingRevisionOrder::Newer);
+
+    QSemaphore snapshotReady;
+    QSemaphore resumeOldSnapshot;
+    std::atomic<bool> pauseOnce{true};
+    f.provider->afterDomainSnapshot = [&] {
+        if (pauseOnce.exchange(false)) {
+            snapshotReady.release();
+            resumeOldSnapshot.acquire();
+        }
+    };
+    bool oldSyncSucceeded = false;
+    QString oldSyncError;
+    std::thread oldSync([&] {
+        oldSyncSucceeded = ledger.synchronizeBackingDomains(&oldSyncError);
+    });
+    const auto joinOldSync = qScopeGuard([&] {
+        resumeOldSnapshot.release();
+        if (oldSync.joinable()) oldSync.join();
+        f.provider->afterDomainSnapshot = {};
+    });
+    QVERIFY(snapshotReady.tryAcquire(1, 5000));
+
+    tile->blockSwapping();
+    QVERIFY(tile->data());
+    tile->unblockSwapping();
+    const auto residentChanges = f.provider->backingDomainChanges();
+    QCOMPARE(residentChanges.size(), 1);
+    QCOMPARE(residentChanges.front().domain, KisPageAccessDomain::CpuRam);
+    QCOMPARE(kisCompareBackingRevision(residentChanges.front().revision,
+                                       coldChanges.front().revision),
+             KisBackingRevisionOrder::Newer);
+    QVERIFY2(ledger.synchronizeBackingDomains(&f.error), qPrintable(f.error));
+
+    resumeOldSnapshot.release();
+    oldSync.join();
+    QVERIFY2(oldSyncSucceeded, qPrintable(oldSyncError));
+    f.provider->afterDomainSnapshot = {};
+
+    const auto actual = f.provider->backingFootprint(handle);
+    QVERIFY(actual.isValid());
+    QCOMPARE(actual.domain, KisPageAccessDomain::CpuRam);
+    QCOMPARE(actual.revision, residentChanges.front().revision);
+    auto usage = budget.usage()
+        .buckets[size_t(KisBackingBudgetClass::Current)].live;
+    QCOMPARE(usage.cpuRam, handle.layout.byteSize);
+    QCOMPARE(usage.ssd, quint64(0));
+    QVERIFY(f.provider->backingDomainChanges().isEmpty());
+
+    QVERIFY2(ledger.synchronizeBackingDomains(&f.error), qPrintable(f.error));
+    usage = budget.usage()
+        .buckets[size_t(KisBackingBudgetClass::Current)].live;
+    QCOMPARE(usage.cpuRam, handle.layout.byteSize);
+    QCOMPARE(usage.ssd, quint64(0));
+
+    ledger.releaseRetiredBacking(handle);
+    tile->deref();
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+}
+
+void KisPageStoreCpuMutationTest::metadataArenaBudgetTracksAllocator()
+{
+    // Even an empty Store owns finite shard/arena directories. A zero limit
+    // must reject configuration before any metadata allocation escapes.
+    {
+        Fixture f;
+        KisPageBackingLimits limits;
+        limits.metadataArenaBytes = 0;
+        QVERIFY(f.store->configureBackingLimits(limits, &f.error));
+        QVERIFY(!f.init());
+        QVERIFY(f.error.contains(QStringLiteral("budget")));
+        const auto usage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        QCOMPARE(usage.live.cpuRam, quint64(0));
+        QCOMPARE(usage.reserved.cpuRam, quint64(0));
+    }
+
+    quint64 directoryBytes = 0;
+    {
+        Fixture probe;
+        QVERIFY2(probe.init(), qPrintable(probe.error));
+        directoryBytes = probe.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        QVERIFY(directoryBytes > 0);
+        QVERIFY2(probe.store->closeSession(&probe.error), qPrintable(probe.error));
+    }
+
+    // Directory-only capacity configures cleanly, then rejects the first
+    // arena block before installing a page and releases the failed prepare.
+    {
+        Fixture f;
+        KisPageBackingLimits limits;
+        limits.metadataArenaBytes = directoryBytes;
+        QVERIFY(f.store->configureBackingLimits(limits, &f.error));
+        QVERIFY2(f.init(), qPrintable(f.error));
+        const auto tx = f.store->beginCurrentTransaction();
+        auto mutation = f.begin(tx);
+        auto guard = mutation.beginWrite(
+            key(), KisPageWriteMode::DiscardContents, &f.error);
+        QVERIFY(!guard.isValid());
+        QVERIFY(f.error.contains(QStringLiteral("budget")));
+        QVERIFY(mutation.cancel());
+        QVERIFY(f.store->abort(tx));
+        const auto usage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        QCOMPARE(usage.live.cpuRam, directoryBytes);
+        QCOMPARE(usage.reserved.cpuRam, quint64(0));
+        QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    }
+
+    // A successful write converts real block reservations into live usage.
+    {
+        Fixture f;
+        QVERIFY2(f.init(), qPrintable(f.error));
+        const quint64 before = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        QVERIFY2(f.fill(0x31), qPrintable(f.error));
+        const auto usage = f.store->backingUsage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        QVERIFY(usage.live.cpuRam > before);
+        QCOMPARE(usage.reserved.cpuRam, quint64(0));
+        QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    }
 }
 
 void KisPageStoreCpuMutationTest::finiteBackingLimitMatrix()

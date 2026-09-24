@@ -30,7 +30,16 @@ class KRITAIMAGE_EXPORT KisTileDataResidencyObserver
 {
 public:
     virtual ~KisTileDataResidencyObserver() = default;
-    virtual void residencyChanged(KisTileData *tileData, bool resident) = 0;
+    virtual void residencyChanged(KisTileData *tileData, bool resident,
+                                  quint64 revision) = 0;
+};
+
+struct KRITAIMAGE_EXPORT KisTileDataResidencyState
+{
+    bool resident = false;
+    quint64 revision = 0;
+
+    bool isValid() const { return revision != 0; }
 };
 
 /**
@@ -157,11 +166,26 @@ public:
     // payloads. Swap work reports the exact changed tile after releasing its
     // storage lock; ordinary tiles pay no per-object state cost.
     bool registerResidencyObserver(
-        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer);
+        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer,
+        KisTileDataResidencyState *initialState = nullptr);
     void unregisterResidencyObserver(
         KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer);
 
 private:
+    struct ResidencyObservers {
+        bool resident = false;
+        quint64 revision = 0;
+        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+    };
+    struct ResidencyNotification {
+        quint64 revision = 0;
+        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+    };
+
+    // Called while the tile swap lock protects the physical state change.
+    ResidencyNotification recordResidencyChangeLocked(KisTileData *td,
+                                                       bool resident);
+
     KisTileData *allocTileData(qint32 pixelSize, const quint8 *defPixel);
 
     inline void registerTileDataImp(KisTileData *td);
@@ -199,7 +223,7 @@ private:
     ConcurrentMap<int, KisTileData*> m_tileDataMap;
     QReadWriteLock m_iteratorLock;
     QMutex m_residencyObserverLock;
-    QHash<KisTileData *, QVector<QSharedPointer<KisTileDataResidencyObserver>>> m_residencyObservers;
+    QHash<KisTileData *, ResidencyObservers> m_residencyObservers;
 };
 
 template<typename T>

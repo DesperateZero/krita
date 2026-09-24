@@ -8,6 +8,7 @@
 #include "KisCpuResidentBinding_p.h"
 #include "KisPageMetadataCoordinator_p.h"
 #include "KisPageStoreReclamation_p.h"
+#include "KisPageWriteCoordinator_p.h"
 
 #include <QAtomicInteger>
 #include <QElapsedTimer>
@@ -50,6 +51,106 @@ using VersionArena = KisShardSlotArena<KisVersionRecord, 16 * 1024>;
 using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>;
 using OverflowArena = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>;
 
+class MetadataBudgetAuthority final
+{
+public:
+    explicit MetadataBudgetAuthority(KisBackingBudgetController *budget)
+        : m_budget(budget) {}
+
+    void attach(KisBackingBudgetController *budget)
+    {
+        QMutexLocker locker(&m_mutex);
+        Q_ASSERT(budget);
+        m_budget = budget;
+    }
+
+    void detach() noexcept
+    {
+        QMutexLocker locker(&m_mutex);
+        m_budget = nullptr;
+    }
+
+    KisBackingBudgetReservation reserve(const KisBackingBudgetDelta &delta,
+                                        QString *error)
+    {
+        QMutexLocker locker(&m_mutex);
+        if (!m_budget) {
+            KisPageStoreDetail::setError(
+                error, QStringLiteral("metadata backing budget is unavailable"));
+            return {};
+        }
+        return m_budget->reserve(delta, error);
+    }
+
+    void commitReservation(KisBackingBudgetReservation &&reservation,
+                           const KisBackingBudgetDelta &installed) noexcept
+    {
+        QMutexLocker locker(&m_mutex);
+        Q_ASSERT(m_budget);
+        if (m_budget)
+            m_budget->commitReservation(std::move(reservation), installed);
+    }
+
+    void releaseLive(quint64 bytes) noexcept
+    {
+        QMutexLocker locker(&m_mutex);
+        if (m_budget) {
+            m_budget->releaseLive(KisBackingBudgetClass::MetadataArena,
+                                  KisPageAccessDomain::CpuRam, bytes);
+        }
+    }
+
+private:
+    QMutex m_mutex;
+    KisBackingBudgetController *m_budget = nullptr;
+};
+
+struct MetadataBudgetRelease {
+    std::shared_ptr<MetadataBudgetAuthority> authority;
+    quint64 bytes = 0;
+
+    MetadataBudgetRelease() = default;
+    MetadataBudgetRelease(std::shared_ptr<MetadataBudgetAuthority> authority,
+                          quint64 bytes)
+        : authority(std::move(authority)), bytes(bytes) {}
+    MetadataBudgetRelease(MetadataBudgetRelease &&other) noexcept
+        : authority(std::move(other.authority))
+        , bytes(std::exchange(other.bytes, 0)) {}
+    MetadataBudgetRelease &operator=(MetadataBudgetRelease &&other) noexcept
+    {
+        if (this != &other) {
+            release();
+            authority = std::move(other.authority);
+            bytes = std::exchange(other.bytes, 0);
+        }
+        return *this;
+    }
+    MetadataBudgetRelease(const MetadataBudgetRelease &) = delete;
+    MetadataBudgetRelease &operator=(const MetadataBudgetRelease &) = delete;
+    ~MetadataBudgetRelease() { release(); }
+
+    void add(quint64 addition)
+    {
+        Q_ASSERT(addition <= std::numeric_limits<quint64>::max() - bytes);
+        bytes += addition;
+    }
+
+    MetadataBudgetRelease take(quint64 amount)
+    {
+        Q_ASSERT(amount <= bytes);
+        bytes -= amount;
+        return {authority, amount};
+    }
+
+    void release() noexcept
+    {
+        if (authority && bytes)
+            authority->releaseLive(bytes);
+        authority.reset();
+        bytes = 0;
+    }
+};
+
 struct MetadataArenas {
     // These are hard ceilings, not reservations. Directory storage is the
     // only eagerly reserved metadata; all block payloads remain lazy.
@@ -61,18 +162,61 @@ struct MetadataArenas {
     ReplicaArena replicas{ReplicaBudget};
     OverflowArena overflow{OverflowBudget};
 
+    static constexpr quint64 maximumDirectoryBytes()
+    {
+        return VersionArena::directoryBytesForLimit(VersionBudget)
+            + ReplicaArena::directoryBytesForLimit(ReplicaBudget)
+            + OverflowArena::directoryBytesForLimit(OverflowBudget);
+    }
+
+    quint64 allocatedDirectoryBytes() const
+    {
+        return versions.allocatedDirectoryBytes()
+            + replicas.allocatedDirectoryBytes()
+            + overflow.allocatedDirectoryBytes();
+    }
+
     struct ReleasedBlocks {
+        // Members are destroyed in reverse order: payloads first, accounting
+        // second, so usage never understates memory that is still allocated.
+        MetadataBudgetRelease budgetRelease;
         VersionArena::ReleasedBlocks versions;
         ReplicaArena::ReleasedBlocks replicas;
         OverflowArena::ReleasedBlocks overflow;
+
+        ReleasedBlocks() = default;
+        ReleasedBlocks(ReleasedBlocks &&) noexcept = default;
+        ReleasedBlocks &operator=(ReleasedBlocks &&other) noexcept
+        {
+            if (this == &other)
+                return *this;
+            versions = {};
+            replicas = {};
+            overflow = {};
+            budgetRelease.release();
+            versions = std::move(other.versions);
+            replicas = std::move(other.replicas);
+            overflow = std::move(other.overflow);
+            budgetRelease = std::move(other.budgetRelease);
+            return *this;
+        }
+        ReleasedBlocks(const ReleasedBlocks &) = delete;
+        ReleasedBlocks &operator=(const ReleasedBlocks &) = delete;
     };
 
-    ReleasedBlocks takeEmptyBlocks(quint64 minimumBlocksToKeep = 1)
+    ReleasedBlocks takeEmptyBlocks(MetadataBudgetRelease *budgetCharge,
+                                   quint64 minimumBlocksToKeep = 1)
     {
         ReleasedBlocks result;
         result.versions = versions.takeEmptyBlocks(minimumBlocksToKeep);
         result.replicas = replicas.takeEmptyBlocks(minimumBlocksToKeep);
         result.overflow = overflow.takeEmptyBlocks(minimumBlocksToKeep);
+        const quint64 bytes = result.versions.byteSize()
+            + result.replicas.byteSize() + result.overflow.byteSize();
+        if (bytes) {
+            Q_ASSERT(budgetCharge);
+            result.budgetRelease = budgetCharge->take(bytes);
+        }
         return result;
     }
 };
@@ -182,6 +326,9 @@ bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataAren
  * couples the resulting capacity to explicit slot/index reservations.
  */
 struct MetadataArenaGrowth {
+    // Candidate payloads are destroyed before the reservation that accounts
+    // for them when preparation exits early.
+    KisBackingBudgetReservation budgetReservation;
     std::vector<VersionArena::PreparedBlock> versions;
     std::vector<ReplicaArena::PreparedBlock> replicas;
     std::vector<OverflowArena::PreparedBlock> overflow;
@@ -210,8 +357,27 @@ struct MetadataArenaGrowth {
         return true;
     }
 
-    bool prepare(const MetadataArenaGrowthPlan &plan)
+    static quint64 blockBytes(const MetadataArenaGrowthPlan &plan)
     {
+        return plan.versionBlocks * VersionArena::blockByteSize()
+            + plan.replicaBlocks * ReplicaArena::blockByteSize()
+            + plan.overflowBlocks * OverflowArena::blockByteSize();
+    }
+
+    bool prepare(const MetadataArenaGrowthPlan &plan,
+                 const std::shared_ptr<MetadataBudgetAuthority> &authority,
+                 QString *error)
+    {
+        if (!authority || budgetReservation.isValid()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("metadata backing budget is unavailable"));
+            return false;
+        }
+        KisBackingBudgetDelta delta;
+        delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+            qint64(blockBytes(plan));
+        budgetReservation = authority->reserve(delta, error);
+        if (!budgetReservation.isValid())
+            return false;
         return prepareBlocks<VersionArena>(&versions, plan.versionBlocks)
             && prepareBlocks<ReplicaArena>(&replicas, plan.replicaBlocks)
             && prepareBlocks<OverflowArena>(&overflow, plan.overflowBlocks);
@@ -244,15 +410,47 @@ struct MetadataArenaGrowth {
         return arena->availableSlots() >= slots ? AttachResult::Ready : AttachResult::NeedsMore;
     }
 
-    AttachResult attach(MetadataArenas *arenas, const MetadataArenaDemand &demand)
+    AttachResult attach(MetadataArenas *arenas,
+                        MetadataBudgetRelease *budgetCharge,
+                        const MetadataArenaDemand &demand)
     {
+        const quint64 versionBytesBefore =
+            arenas->versions.statistics().allocatedBytes;
+        const quint64 replicaBytesBefore =
+            arenas->replicas.statistics().allocatedBytes;
+        const quint64 overflowBytesBefore =
+            arenas->overflow.statistics().allocatedBytes;
         const auto versionResult = attachBlocks(&arenas->versions, demand.versions, &versions, &attachedBlocks);
-        if (versionResult != AttachResult::Ready)
-            return versionResult;
-        const auto replicaResult = attachBlocks(&arenas->replicas, demand.replicas, &replicas, &attachedBlocks);
-        if (replicaResult != AttachResult::Ready)
-            return replicaResult;
-        return attachBlocks(&arenas->overflow, demand.overflow, &overflow, &attachedBlocks);
+        auto result = versionResult;
+        if (result == AttachResult::Ready) {
+            result = attachBlocks(&arenas->replicas, demand.replicas,
+                                  &replicas, &attachedBlocks);
+        }
+        if (result == AttachResult::Ready) {
+            result = attachBlocks(&arenas->overflow, demand.overflow,
+                                  &overflow, &attachedBlocks);
+        }
+        // Destroy unattached candidates before releasing their reservation.
+        versions.clear();
+        replicas.clear();
+        overflow.clear();
+        if (budgetReservation.isValid()) {
+            KisBackingBudgetDelta installed;
+            const quint64 attachedBytes =
+                arenas->versions.statistics().allocatedBytes - versionBytesBefore
+                + arenas->replicas.statistics().allocatedBytes - replicaBytesBefore
+                + arenas->overflow.statistics().allocatedBytes - overflowBytesBefore;
+            installed.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+                qint64(attachedBytes);
+            Q_ASSERT(budgetCharge && budgetCharge->authority);
+            budgetCharge->authority->commitReservation(
+                std::move(budgetReservation), installed);
+            if (attachedBytes) {
+                Q_ASSERT(budgetCharge);
+                budgetCharge->add(attachedBytes);
+            }
+        }
+        return result;
     }
 };
 
@@ -1233,7 +1431,16 @@ struct ShardRecordStore {
 };
 
 struct MetadataShard : KisPageMetadataShardMetrics {
+    explicit MetadataShard(std::shared_ptr<MetadataBudgetAuthority> authority,
+                           quint64 directoryBytes)
+        : budgetAuthority(std::move(authority))
+        , budgetCharge(budgetAuthority, directoryBytes) {}
+
     mutable QMutex mutex;
+    std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
+    // Declared before arenas so arena payloads are destroyed before their
+    // remaining live charge is released.
+    MetadataBudgetRelease budgetCharge;
     MetadataArenas arenas;
     ShardRecordStore records{&arenas};
     QHash<KisPageKey, MetadataPage> pages;
@@ -1395,7 +1602,8 @@ MetadataGrowthResult growMetadataArenasOutsideLock(MetadataShard *shard,
                                                    const MetadataArenaDemand &demand,
                                                    MetadataArenaGrowth *growth,
                                                    Locker *locker,
-                                                   Revalidate revalidate)
+                                                   Revalidate revalidate,
+                                                   QString *error)
 {
     Q_ASSERT(shard);
     Q_ASSERT(growth);
@@ -1410,7 +1618,7 @@ MetadataGrowthResult growMetadataArenasOutsideLock(MetadataShard *shard,
         const quint64 preparedBefore = growth->preparedBlockCount();
         const quint64 attachedBefore = growth->attachedBlocks;
         locker->unlock();
-        const bool prepared = growth->prepare(plan);
+        const bool prepared = growth->prepare(plan, shard->budgetAuthority, error);
         locker->relock();
         ++shard->metadataArenaGrowthBatches;
         shard->metadataArenaBlockCandidatesPrepared += growth->preparedBlockCount() - preparedBefore;
@@ -1422,7 +1630,8 @@ MetadataGrowthResult growMetadataArenasOutsideLock(MetadataShard *shard,
             ++shard->metadataArenaGrowthConflicts;
             return MetadataGrowthResult::Stale;
         }
-        const auto attached = growth->attach(&shard->arenas, demand);
+        const auto attached = growth->attach(&shard->arenas,
+                                             &shard->budgetCharge, demand);
         shard->metadataArenaBlocksAttached += growth->attachedBlocks - attachedBefore;
         if (attached == MetadataArenaGrowth::AttachResult::Rejected) {
             ++shard->metadataArenaGrowthFailures;
@@ -1468,6 +1677,18 @@ bool cpuReadableReplica(const KisReplicaStateSnapshot &state)
 class KisPageMetadataCoordinator::Private
 {
 public:
+    Private()
+        : budgetAuthority(
+            std::make_shared<MetadataBudgetAuthority>(&standaloneBudget)) {}
+
+    ~Private()
+    {
+        operational.store(false, std::memory_order_release);
+        shards.clear();
+        directoryCharge.release();
+        budgetAuthority->detach();
+    }
+
     MetadataShard *shardFor(const KisPageKey &key) const
     {
         // configure() publishes an immutable shard directory once. Readers
@@ -1488,6 +1709,11 @@ public:
 
     mutable QMutex configurationMutex;
     std::atomic<bool> operational{false};
+    KisBackingBudgetController standaloneBudget;
+    std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
+    // Declared before shards so the directory allocation is destroyed before
+    // its final live charge is released.
+    MetadataBudgetRelease directoryCharge;
     std::vector<std::shared_ptr<MetadataShard>> shards;
     QAtomicInteger<quint64> acceptedTransitions{0};
     QAtomicInteger<quint64> rejectedTransitions{0};
@@ -1582,7 +1808,8 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::cancel() noexcept
             continue;
         QMutexLocker locker(&growth.shardOwner->mutex);
         growth.reservations.cancel(&growth.shardOwner->records);
-        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks();
+        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks(
+            &growth.shardOwner->budgetCharge);
     }
 }
 
@@ -1884,7 +2111,8 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
             KisPageStoreDetail::setError(error, QStringLiteral("metadata arena budget is exhausted"));
             return result;
         }
-        const bool prepared = growth.blocks.prepare(plan);
+        const bool prepared = growth.blocks.prepare(
+            plan, growth.shardOwner->budgetAuthority, error);
         {
             QMutexLocker locker(&growth.shardOwner->mutex);
             ++growth.shardOwner->metadataArenaGrowthBatches;
@@ -1916,7 +2144,9 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         }
 
         const quint64 attachedBefore = growth.blocks.attachedBlocks;
-        const auto attachResult = growth.blocks.attach(&growth.shardOwner->arenas, growth.totalDemand);
+        const auto attachResult = growth.blocks.attach(
+            &growth.shardOwner->arenas, &growth.shardOwner->budgetCharge,
+            growth.totalDemand);
         growth.shardOwner->metadataArenaBlocksAttached += growth.blocks.attachedBlocks - attachedBefore;
         if (attachResult != MetadataArenaGrowth::AttachResult::Ready
             || !growth.shardOwner->records.reserve(growth.totalDemand,
@@ -2096,7 +2326,8 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
     for (auto &growth : data->arenaGrowth) {
         QMutexLocker locker(&growth.shardOwner->mutex);
         growth.reservations.cancel(&growth.shardOwner->records);
-        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks();
+        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks(
+            &growth.shardOwner->budgetCharge);
     }
     data->owner.reset();
     (mutation ? d->installedMutationPages : d->installedPublicationPages)
@@ -2113,6 +2344,15 @@ KisPageMetadataCoordinator::KisPageMetadataCoordinator()
 }
 
 KisPageMetadataCoordinator::~KisPageMetadataCoordinator() = default;
+
+void KisPageMetadataCoordinator::attachBackingBudget(
+    KisBackingBudgetController &budget)
+{
+    QMutexLocker locker(&d->configurationMutex);
+    Q_ASSERT(!d->operational.load(std::memory_order_relaxed));
+    Q_ASSERT(d->shards.empty());
+    d->budgetAuthority->attach(&budget);
+}
 
 void KisPageMetadataCoordinator::attachRetirementDebtOwner(
     void *context,
@@ -2214,10 +2454,50 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         KisPageStoreDetail::setError(error, QStringLiteral("metadata coordinator is already configured"));
         return false;
     }
-    d->shards.reserve(size_t(shardCount));
-    for (qsizetype i = 0; i < shardCount; ++i) {
-        d->shards.push_back(std::make_shared<MetadataShard>());
+    const quint64 count = quint64(shardCount);
+    const quint64 perShardMaximum = MetadataArenas::maximumDirectoryBytes();
+    const quint64 shardPointers = count * quint64(sizeof(std::shared_ptr<MetadataShard>));
+    if (perShardMaximum > (quint64(std::numeric_limits<qint64>::max()) - shardPointers) / count) {
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata directory budget overflows"));
+        return false;
     }
+    KisBackingBudgetDelta directoryReservation;
+    directoryReservation.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+        qint64(perShardMaximum * count + shardPointers);
+    auto budget = d->budgetAuthority->reserve(directoryReservation, error);
+    if (!budget.isValid())
+        return false;
+
+    try {
+        d->shards.reserve(size_t(shardCount));
+        for (qsizetype i = 0; i < shardCount; ++i) {
+            d->shards.push_back(std::make_shared<MetadataShard>(
+                d->budgetAuthority, quint64(0)));
+        }
+    } catch (const std::bad_alloc &) {
+        d->shards.clear();
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata shard directory allocation failed"));
+        return false;
+    }
+    quint64 actualBytes = quint64(d->shards.capacity())
+        * quint64(sizeof(std::shared_ptr<MetadataShard>));
+    for (const auto &shard : d->shards)
+        actualBytes += shard->arenas.allocatedDirectoryBytes();
+    if (actualBytes > quint64(directoryReservation
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam)) {
+        d->shards.clear();
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata directory allocation exceeded its reservation"));
+        return false;
+    }
+    KisBackingBudgetDelta installed;
+    installed.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+        qint64(actualBytes);
+    d->budgetAuthority->commitReservation(std::move(budget), installed);
+    const quint64 pointerBytes = quint64(d->shards.capacity())
+        * quint64(sizeof(std::shared_ptr<MetadataShard>));
+    d->directoryCharge = MetadataBudgetRelease(d->budgetAuthority, pointerBytes);
+    for (const auto &shard : d->shards)
+        shard->budgetCharge.add(shard->arenas.allocatedDirectoryBytes());
     d->operational.store(true, std::memory_order_release);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -2263,7 +2543,7 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
     }
     const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &locker, [&] {
         return !shard->pages.contains(initial.key);
-    });
+    }, error);
     if (storage != MetadataGrowthResult::Ready) {
         KisPageStoreDetail::setError(error,
                  storage == MetadataGrowthResult::Stale
@@ -2649,7 +2929,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             page = shard->pages.find(key);
             return page != shard->pages.end() && shard->canMutate(key, page.value())
                 && page->revision == expectedRevision;
-        });
+        }, nullptr);
         if (storage == MetadataGrowthResult::Stale) {
             // Local owner transitions are composable against the newest page
             // revision. Arena growth is an implementation detail, so do not leak
@@ -2692,7 +2972,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         }
         d->acceptedTransitions.fetchAndAddRelaxed(quint64(transitions.size()));
         result.accepted = true;
-        auto releasedBlocks = shard->arenas.takeEmptyBlocks();
+        auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (retirementDebtPrepared) {
             d->commitRetirementDebt(d->retirementDebtContext,

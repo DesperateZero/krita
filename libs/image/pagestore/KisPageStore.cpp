@@ -284,6 +284,7 @@ public:
                           &Private::releaseRetirementLifetime)
     {
         owner.attachBackingBudget(backingBudget);
+        metadata.attachBackingBudget(backingBudget);
         metadata.attachRetirementDebtOwner(&owner,
                                            &Private::prepareRetirementDebt,
                                            &Private::commitRetirementDebt,
@@ -668,10 +669,11 @@ public:
     // not an operation sequence number and never mutates the registry.
     KisCompletionTicket readyHostCompletion;
     KisPageOwnerLedger owner;
+    // Outlives metadata/owner so their final arena/backing charges can settle.
+    KisBackingBudgetController backingBudget;
     KisPageMetadataCoordinator metadata;
     KisImageEpochReferenceModel epochs;
     KisPageWriteAdmission writeAdmission;
-    KisBackingBudgetController backingBudget;
     KisPageWriteCoordinator writeCoordinator;
     KisPageDefaultStorage defaultStorage;
     KisPageRetirementQueue retirementQueue;

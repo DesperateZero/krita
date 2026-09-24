@@ -260,14 +260,30 @@ void KisTileDataStore::freeTileData(KisTileData *td)
 }
 
 bool KisTileDataStore::registerResidencyObserver(
-    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer)
+    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer,
+    KisTileDataResidencyState *initialState)
 {
     if (!td || !observer)
         return false;
-    QMutexLocker locker(&m_residencyObserverLock);
-    auto &observers = m_residencyObservers[td];
-    if (!observers.contains(observer))
-        observers.append(observer);
+    // Match the transition lock order: swap state first, sparse observer
+    // record second. This makes the initial domain/revision one observation.
+    QReadLocker swapLocker(&td->m_swapLock);
+    QMutexLocker observerLocker(&m_residencyObserverLock);
+    const bool resident = td->data() != nullptr;
+    auto found = m_residencyObservers.find(td);
+    if (found == m_residencyObservers.end()) {
+        ResidencyObservers record;
+        record.resident = resident;
+        record.revision = 1;
+        found = m_residencyObservers.insert(td, std::move(record));
+    } else {
+        Q_ASSERT(found->revision != 0);
+        Q_ASSERT(found->resident == resident);
+    }
+    if (!found->observers.contains(observer))
+        found->observers.append(observer);
+    if (initialState)
+        *initialState = {found->resident, found->revision};
     return true;
 }
 
@@ -278,9 +294,25 @@ void KisTileDataStore::unregisterResidencyObserver(
     auto existing = m_residencyObservers.find(td);
     if (existing == m_residencyObservers.end())
         return;
-    existing->removeAll(observer);
-    if (existing->isEmpty())
+    existing->observers.removeAll(observer);
+    if (existing->observers.isEmpty())
         m_residencyObservers.erase(existing);
+}
+
+KisTileDataStore::ResidencyNotification
+KisTileDataStore::recordResidencyChangeLocked(KisTileData *td, bool resident)
+{
+    QMutexLocker locker(&m_residencyObserverLock);
+    const auto found = m_residencyObservers.find(td);
+    if (found == m_residencyObservers.end())
+        return {};
+    Q_ASSERT(found->revision != 0);
+    Q_ASSERT(found->resident != resident);
+    ++found->revision;
+    if (!found->revision)
+        ++found->revision;
+    found->resident = resident;
+    return {found->revision, found->observers};
 }
 
 void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
@@ -313,12 +345,14 @@ void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
          */
 
         bool loaded = false;
+        ResidencyNotification notification;
         if (!td->data()) {
             td->m_swapLock.lockForWrite();
 
             m_swappedStore.swapInTileData(td);
             registerTileDataImp(td);
             loaded = true;
+            notification = recordResidencyChangeLocked(td, true);
 
             td->m_swapLock.unlock();
         }
@@ -326,13 +360,8 @@ void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
         m_iteratorLock.unlock();
 
         if (loaded) {
-            QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
-            {
-                QMutexLocker locker(&m_residencyObserverLock);
-                observers = m_residencyObservers.value(td);
-            }
-            for (const auto &observer : std::as_const(observers))
-                observer->residencyChanged(td, true);
+            for (const auto &observer : std::as_const(notification.observers))
+                observer->residencyChanged(td, true, notification.revision);
         }
 
         /**
@@ -350,24 +379,21 @@ bool KisTileDataStore::trySwapTileData(KisTileData *td)
      */
 
     bool result = false;
+    ResidencyNotification notification;
     if (!td->m_swapLock.tryLockForWrite()) return result;
 
     if (td->data()) {
         if (m_swappedStore.trySwapOutTileData(td)) {
             unregisterTileDataImp(td);
             result = true;
+            notification = recordResidencyChangeLocked(td, false);
         }
     }
     td->m_swapLock.unlock();
 
     if (result) {
-        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
-        {
-            QMutexLocker locker(&m_residencyObserverLock);
-            observers = m_residencyObservers.value(td);
-        }
-        for (const auto &observer : std::as_const(observers))
-            observer->residencyChanged(td, false);
+        for (const auto &observer : std::as_const(notification.observers))
+            observer->residencyChanged(td, false, notification.revision);
     }
 
     return result;

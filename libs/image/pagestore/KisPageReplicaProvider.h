@@ -276,27 +276,53 @@ struct KRITAIMAGE_EXPORT KisReplicaBackingFootprint
     quint64 physicalSlot = 0;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 bytes = 0;
+    quint64 revision = 1;
 
     bool isValid() const
     {
         return physicalSlot != 0 && domain != KisPageAccessDomain::Unknown
-            && bytes != 0;
+            && bytes != 0 && revision != 0;
     }
 };
 
-/** Provider-coalesced physical-domain change. Sequence is provider-local and
- * acknowledges only this exact observation; a newer change for the same
- * physical slot remains pending. */
+enum class KisBackingRevisionOrder : quint8 {
+    Older,
+    Same,
+    Newer,
+    Ambiguous
+};
+
+/** RFC-1982 style comparison permits the storage revision to skip zero on
+ * wrap. More than half the 64-bit sequence space cannot remain unobserved. */
+inline KisBackingRevisionOrder kisCompareBackingRevision(quint64 candidate,
+                                                         quint64 installed)
+{
+    if (!candidate || !installed || candidate == installed)
+        return candidate == installed && candidate
+            ? KisBackingRevisionOrder::Same
+            : KisBackingRevisionOrder::Ambiguous;
+    constexpr quint64 halfRange = quint64(1) << 63;
+    const quint64 distance = candidate - installed;
+    if (distance == halfRange)
+        return KisBackingRevisionOrder::Ambiguous;
+    return distance < halfRange ? KisBackingRevisionOrder::Newer
+                                : KisBackingRevisionOrder::Older;
+}
+
+/** Provider-coalesced physical-domain change. Revision is minted at the
+ * physical storage transition, not when an observer callback arrives. An
+ * acknowledgement applies only to this exact revision; a newer change for
+ * the same physical slot remains pending. */
 struct KRITAIMAGE_EXPORT KisReplicaBackingDomainChange
 {
-    quint64 sequence = 0;
+    quint64 revision = 0;
     quint64 physicalSlot = 0;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 bytes = 0;
 
     bool isValid() const
     {
-        return sequence != 0 && physicalSlot != 0
+        return revision != 0 && physicalSlot != 0
             && domain != KisPageAccessDomain::Unknown && bytes != 0;
     }
 };
@@ -356,7 +382,7 @@ public:
     // acknowledges its exact sequence after budget installation.
     virtual QVector<KisReplicaBackingDomainChange> backingDomainChanges() const;
     virtual void acknowledgeBackingDomainChange(quint64 physicalSlot,
-                                                quint64 sequence);
+                                                quint64 revision);
 
     /**
      * Optional fused allocation + preserve initialization. The owner protects

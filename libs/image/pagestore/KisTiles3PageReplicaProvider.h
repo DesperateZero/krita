@@ -101,7 +101,7 @@ public:
         const KisReplicaHandle &replica) const override;
     QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override;
     void acknowledgeBackingDomainChange(quint64 physicalSlot,
-                                        quint64 sequence) override;
+                                        quint64 revision) override;
     KisReplicaOperation prepareSynchronousWriteCopy(
         KisPageOperationId operation,
         const KisReplicaHandle &source,

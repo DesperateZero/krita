@@ -1343,7 +1343,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 "R2/M2 arena block preparation escaped the single growth carrier"
             )
         growth_unlock = metadata_text.find("locker->unlock()")
-        growth_prepare = metadata_text.find("growth->prepare(plan)")
+        growth_prepare = metadata_text.find("growth->prepare(plan")
         growth_relock = metadata_text.find("locker->relock()")
         if not (growth_unlock >= 0 and
                 growth_unlock < growth_prepare < growth_relock):

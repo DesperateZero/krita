@@ -254,6 +254,14 @@ KisBackingBudgetReservation KisBackingBudgetController::reserve(const KisBacking
     return {this, cookie};
 }
 
+void KisBackingBudgetController::commitReservation(
+    KisBackingBudgetReservation &&reservation,
+    const KisBackingBudgetDelta &installed) noexcept
+{
+    if (reservation.owner == this)
+        reservation.commit(installed);
+}
+
 KisPageBackingUsage KisBackingBudgetController::usage() const
 {
     QMutexLocker lock(&m_mutex);

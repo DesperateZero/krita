@@ -246,6 +246,18 @@ public:
         return quint64(BlockBytes);
     }
 
+    static constexpr quint64 directoryBytesForLimit(quint64 maximumBytes)
+    {
+        return maximumBytes == std::numeric_limits<quint64>::max()
+            ? 0
+            : (maximumBytes / quint64(BlockBytes)) * quint64(sizeof(DirectoryEntry));
+    }
+
+    quint64 allocatedDirectoryBytes() const
+    {
+        return quint64(m_directory.capacity()) * quint64(sizeof(DirectoryEntry));
+    }
+
     bool canAttachBlocks(quint64 count) const
     {
         if (m_closed || count == 0)

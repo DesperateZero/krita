@@ -178,6 +178,8 @@ public:
     explicit KisBackingBudgetController(const KisPageBackingLimits &limits = {});
 
     KisBackingBudgetReservation reserve(const KisBackingBudgetDelta &, QString *error);
+    void commitReservation(KisBackingBudgetReservation &&reservation,
+                           const KisBackingBudgetDelta &installed) noexcept;
     KisPageBackingUsage usage() const;
     quint32 maxTransientVersionsPerPage() const;
     bool configureLimits(const KisPageBackingLimits &, QString *error);

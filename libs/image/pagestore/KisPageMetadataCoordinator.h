@@ -19,6 +19,7 @@
 class KisCpuReadBindingLink;
 class KisPageHistoryCollector;
 class KisPageOwnerLedger;
+class KisBackingBudgetController;
 class KisPageReplicaProvider;
 class KisPagePublicationCoordinator;
 class KisPageReadCoordinator;
@@ -202,6 +203,7 @@ private:
                                            quint64 *,
                                            QString *);
     using FinalizeRetirementDebt = void (*)(void *, quint64) noexcept;
+    void attachBackingBudget(KisBackingBudgetController &budget);
     void attachRetirementDebtOwner(void *context,
                                    PrepareRetirementDebt prepare,
                                    FinalizeRetirementDebt commit,

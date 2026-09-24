@@ -120,19 +120,42 @@ public:
     class ResidencyObserver final : public KisTileDataResidencyObserver
     {
     public:
-        void residencyChanged(KisTileData *tileData, bool resident) override
+        void residencyChanged(KisTileData *tileData, bool resident,
+                              quint64 revision) override
         {
             QMutexLocker locker(&m_mutex);
-            const auto tracked = m_payloads.constFind(tileData);
-            if (tracked == m_payloads.cend())
+            auto tracked = m_payloads.find(tileData);
+            if (tracked == m_payloads.end() || !revision)
                 return;
-            ++m_sequence;
-            if (!m_sequence)
-                ++m_sequence;
-            m_changes.insert(tracked->slot,
-                {m_sequence, tracked->slot,
-                 resident ? KisPageAccessDomain::CpuRam : KisPageAccessDomain::Ssd,
-                 tracked->bytes});
+            const KisPageAccessDomain domain = resident
+                ? KisPageAccessDomain::CpuRam : KisPageAccessDomain::Ssd;
+            const auto order = tracked->revision
+                ? kisCompareBackingRevision(revision, tracked->revision)
+                : KisBackingRevisionOrder::Newer;
+            if (order == KisBackingRevisionOrder::Older)
+                return;
+            if (order == KisBackingRevisionOrder::Same) {
+                Q_ASSERT(tracked->domain == domain);
+                return;
+            }
+            if (order == KisBackingRevisionOrder::Ambiguous)
+                return;
+            tracked->revision = revision;
+            tracked->domain = domain;
+
+            const KisReplicaBackingDomainChange change{
+                revision, tracked->slot, domain, tracked->bytes};
+            auto pending = m_changes.find(tracked->slot);
+            if (pending == m_changes.end()) {
+                m_changes.insert(tracked->slot, change);
+                return;
+            }
+            const auto pendingOrder = kisCompareBackingRevision(
+                revision, pending->revision);
+            if (pendingOrder == KisBackingRevisionOrder::Newer)
+                *pending = change;
+            else if (pendingOrder == KisBackingRevisionOrder::Same)
+                Q_ASSERT(pending->domain == domain && pending->bytes == tracked->bytes);
         }
 
         bool track(KisTileData *tileData, quint64 slot, quint64 bytes)
@@ -141,6 +164,51 @@ public:
             if (!tileData || !slot || !bytes || m_payloads.contains(tileData))
                 return false;
             m_payloads.insert(tileData, {slot, bytes});
+            return true;
+        }
+
+        bool initialize(KisTileData *tileData,
+                        const KisTileDataResidencyState &state)
+        {
+            if (!state.isValid())
+                return false;
+            QMutexLocker locker(&m_mutex);
+            auto tracked = m_payloads.find(tileData);
+            if (tracked == m_payloads.end())
+                return false;
+            const KisPageAccessDomain domain = state.resident
+                ? KisPageAccessDomain::CpuRam : KisPageAccessDomain::Ssd;
+            if (!tracked->revision) {
+                tracked->revision = state.revision;
+                tracked->domain = domain;
+                return true;
+            }
+            const auto order = kisCompareBackingRevision(state.revision,
+                                                         tracked->revision);
+            if (order == KisBackingRevisionOrder::Newer) {
+                tracked->revision = state.revision;
+                tracked->domain = domain;
+                return true;
+            }
+            if (order == KisBackingRevisionOrder::Same)
+                return tracked->domain == domain;
+            // A callback may have delivered a newer state between observer
+            // registration and this initial snapshot installation.
+            return order == KisBackingRevisionOrder::Older;
+        }
+
+        bool observation(KisTileData *tileData,
+                         KisPageAccessDomain *domain,
+                         quint64 *revision) const
+        {
+            QMutexLocker locker(&m_mutex);
+            const auto tracked = m_payloads.constFind(tileData);
+            if (tracked == m_payloads.cend() || !tracked->revision
+                || tracked->domain == KisPageAccessDomain::Unknown) {
+                return false;
+            }
+            if (domain) *domain = tracked->domain;
+            if (revision) *revision = tracked->revision;
             return true;
         }
 
@@ -161,11 +229,11 @@ public:
             return result;
         }
 
-        void acknowledge(quint64 slot, quint64 sequence)
+        void acknowledge(quint64 slot, quint64 revision)
         {
             QMutexLocker locker(&m_mutex);
             const auto change = m_changes.find(slot);
-            if (change != m_changes.end() && change->sequence == sequence)
+            if (change != m_changes.end() && change->revision == revision)
                 m_changes.erase(change);
         }
 
@@ -173,9 +241,10 @@ public:
         struct Payload {
             quint64 slot = 0;
             quint64 bytes = 0;
+            quint64 revision = 0;
+            KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
         };
         mutable QMutex m_mutex;
-        quint64 m_sequence = 0;
         QHash<KisTileData *, Payload> m_payloads;
         QHash<quint64, KisReplicaBackingDomainChange> m_changes;
     };
@@ -230,8 +299,13 @@ public:
         }
         const quint64 identity = nextPhysicalSlot++;
         physicalPayloads.insert(tileData, {identity, 1});
+        KisTileDataResidencyState initialState;
         if (!residencyObserver->track(tileData, identity, bytes)
-            || !KisTileDataStore::instance()->registerResidencyObserver(tileData, residencyObserver)) {
+            || !KisTileDataStore::instance()->registerResidencyObserver(
+                tileData, residencyObserver, &initialState)
+            || !residencyObserver->initialize(tileData, initialState)) {
+            KisTileDataStore::instance()->unregisterResidencyObserver(
+                tileData, residencyObserver);
             residencyObserver->untrack(tileData, identity);
             physicalPayloads.remove(tileData);
             return {};
@@ -726,10 +800,13 @@ KisReplicaBackingFootprint KisTiles3PageReplicaProvider::backingFootprint(
         return {};
     }
     KisTileData *tileData = it->tileData();
-    return {it->physicalBacking,
-            tileData && tileData->isResident() ? KisPageAccessDomain::CpuRam
-                                               : KisPageAccessDomain::Ssd,
-            it->handle.layout.byteSize};
+    KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
+    quint64 revision = 0;
+    if (!tileData || !d->residencyObserver->observation(
+            tileData, &domain, &revision)) {
+        return {};
+    }
+    return {it->physicalBacking, domain, it->handle.layout.byteSize, revision};
 }
 
 QVector<KisReplicaBackingDomainChange>
@@ -739,9 +816,9 @@ KisTiles3PageReplicaProvider::backingDomainChanges() const
 }
 
 void KisTiles3PageReplicaProvider::acknowledgeBackingDomainChange(
-    quint64 physicalSlot, quint64 sequence)
+    quint64 physicalSlot, quint64 revision)
 {
-    d->residencyObserver->acknowledge(physicalSlot, sequence);
+    d->residencyObserver->acknowledge(physicalSlot, revision);
 }
 
 QSharedPointer<KisCpuResidentBinding> KisTiles3PageReplicaProvider::cpuResidentBinding(
