@@ -13,7 +13,6 @@
 struct RegisteredBackendService
 {
     KisBackendValidationReport report;
-    bool current = true;
     QString revocationReason;
 };
 
@@ -31,11 +30,6 @@ KisBackendServiceRegistry::KisBackendServiceRegistry()
 
 KisBackendServiceRegistry::~KisBackendServiceRegistry() = default;
 
-bool KisBackendServiceRegistry::isOperational() const
-{
-    return true;
-}
-
 KisBackendReadyToken KisBackendServiceRegistry::acceptValidatedService(
     const KisBackendValidationReport &report)
 {
@@ -46,7 +40,7 @@ KisBackendReadyToken KisBackendServiceRegistry::acceptValidatedService(
     QMutexLocker locker(&d->mutex);
     auto existing = d->services.find(report.serviceId);
     if (existing != d->services.end()) {
-        if (existing->current &&
+        if (existing->revocationReason.isEmpty() &&
             existing->report.deviceGeneration == report.deviceGeneration &&
             existing->report.allocatorGeneration == report.allocatorGeneration &&
             existing->report.coordinatorGeneration == report.coordinatorGeneration &&
@@ -60,7 +54,7 @@ KisBackendReadyToken KisBackendServiceRegistry::acceptValidatedService(
                                         report.deviceGeneration,
                                         report.shaderAbi);
         }
-        if (existing->current ||
+        if (existing->revocationReason.isEmpty() ||
             report.deviceGeneration <= existing->report.deviceGeneration) {
             return {};
         }
@@ -90,7 +84,7 @@ bool KisBackendServiceRegistry::isCurrent(const KisBackendReadyToken &token) con
     QMutexLocker locker(&d->mutex);
     const auto it = d->services.constFind(token.serviceId());
     return it != d->services.constEnd() &&
-           it->current &&
+           it->revocationReason.isEmpty() &&
            it->report.deviceGeneration == token.deviceGeneration() &&
            it->report.shaderAbi == token.shaderAbi();
 }
@@ -106,12 +100,11 @@ bool KisBackendServiceRegistry::revokeService(quint64 serviceId,
     QMutexLocker locker(&d->mutex);
     auto it = d->services.find(serviceId);
     if (it == d->services.end() ||
-        !it->current ||
+        !it->revocationReason.isEmpty() ||
         it->report.deviceGeneration != deviceGeneration) {
         return false;
     }
 
-    it->current = false;
     it->revocationReason = reason;
     return true;
 }

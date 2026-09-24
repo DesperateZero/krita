@@ -34,12 +34,23 @@ KisChunkAllocator::~KisChunkAllocator()
 
 KisChunk KisChunkAllocator::getChunk(quint64 size)
 {
+    KisChunk chunk;
+    if (tryGetChunk(size, &chunk)) return chunk;
+    qFatal("KisChunkAllocator: out of swap space");
+    return {};
+}
+
+bool KisChunkAllocator::tryGetChunk(quint64 size, KisChunk *chunk)
+{
+    if (!chunk || size == 0 || size > m_storeMaxSize) return false;
     KisChunkDataListIterator startPosition = m_iterator;
     START_COUNTING();
 
     forever {
-        if(tryInsertChunk(m_list, m_iterator, size))
-            return WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+        if(tryInsertChunk(m_list, m_iterator, size)) {
+            *chunk = WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+            return true;
+        }
 
         if(m_iterator == m_list.end())
             break;
@@ -52,8 +63,10 @@ KisChunk KisChunkAllocator::getChunk(quint64 size)
     m_iterator = m_list.begin();
 
     forever {
-        if(tryInsertChunk(m_list, m_iterator, size))
-            return WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+        if(tryInsertChunk(m_list, m_iterator, size)) {
+            *chunk = WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+            return true;
+        }
 
         if(m_iterator == m_list.end() || m_iterator == startPosition)
             break;
@@ -65,15 +78,14 @@ KisChunk KisChunkAllocator::getChunk(quint64 size)
     REGISTER_FAIL();
     m_iterator = m_list.end();
 
-    while ((m_storeSize += m_storeSlabSize) <= m_storeMaxSize) {
-        if(tryInsertChunk(m_list, m_iterator, size))
-            return WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+    while (m_storeSlabSize <= m_storeMaxSize - m_storeSize) {
+        m_storeSize += m_storeSlabSize;
+        if(tryInsertChunk(m_list, m_iterator, size)) {
+            *chunk = WRAP_PREVIOUS_CHUNK_DATA(m_iterator);
+            return true;
+        }
     }
-
-    qFatal("KisChunkAllocator: out of swap space");
-
-    // just let gcc be happy! :)
-    return KisChunk(m_list.end());
+    return false;
 }
 
 bool KisChunkAllocator::tryInsertChunk(KisChunkDataList &list,

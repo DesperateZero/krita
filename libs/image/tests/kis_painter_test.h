@@ -51,7 +51,15 @@ private Q_SLOTS:
 
 
     void testOptimizedCopying();
+    void testPageStoreBitBltReadBoundary_data();
+    void testPageStoreBitBltReadBoundary();
+    void testPageStoreBitBltLiveSource_data();
+    void testPageStoreBitBltLiveSource();
+    void testPageStoreBitBltSelfCopy_data();
+    void testPageStoreBitBltSelfCopy();
+    void testPageStoreBitBltWriteOperation_data();
+    void testPageStoreBitBltWriteOperation();
+    void testPageStorePixelOperationCoordinates();
 };
 
 #endif
-

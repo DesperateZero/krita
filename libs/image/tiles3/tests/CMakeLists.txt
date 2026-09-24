@@ -1,5 +1,6 @@
 kis_add_tests(
     kis_tiled_data_manager_test.cpp
+    kis_tiles3_cpu_baseline_test.cpp
     kis_low_memory_tests.cpp
     kis_lockless_stack_test.cpp
     kis_chunk_allocator_test.cpp
@@ -10,5 +11,7 @@ kis_add_tests(
     kis_tile_data_pooler_test.cpp
     LINK_LIBRARIES kritaimage kritatestsdk
     )
+
+target_link_libraries(kis_tiled_data_manager_test kritapagestoretestsupport)
 
 set_tests_properties(libs-image-tiles3-kis_low_memory_tests PROPERTIES TIMEOUT 180)

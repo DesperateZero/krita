@@ -40,6 +40,9 @@ public:
     }
 
     bool tileExists(qint32 col, qint32 row);
+    // The chained table compares full coordinates, unlike the packed-key
+    // concurrent table. Keep range capability separate from PageStore IDs.
+    static bool supportsCoordinates(qint32, qint32) { return true; }
 
     /**
      * Returns a tile in position (col,row). If no tile exists,
@@ -158,7 +161,6 @@ public:
                 } else {
                     //EOList reached
                     m_index = -1;
-                    // m_tile.clear(); // already null
                 }
             }
         }

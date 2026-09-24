@@ -11,6 +11,7 @@
 #include <QObject>
 #include <QRect>
 #include <QVector>
+#include <functional>
 
 #include "kis_debug.h"
 
@@ -36,6 +37,7 @@ class KoColorProfile;
 
 class KisRegion;
 class KisDataManager;
+class KisPixelWriteCursor;
 class KisPaintDeviceWriter;
 class KisKeyframe;
 class KisRasterKeyframeChannel;
@@ -840,6 +842,17 @@ public:
 
     KisRandomAccessorSP createRandomAccessorNG();
     KisRandomConstAccessorSP createRandomConstAccessorNG() const;
+
+    /** Synchronous, explicit pixel-operation boundary. Pointers/accessor are
+     * borrowed only within callback (and the current cursor page). Native
+     * targets share one unpublished mutation and cancel on false/failure.
+     * Pre-existing legacy target borrowers select compatibility BEFORE work;
+     * that route retains its old unlock/partial-failure semantics. Never replay
+     * after native failure. Callback must stay in rect and not reenter target
+     * writes; capture source/mask readers before calling this operation.
+     */
+    bool applyPixelOperation(const QRect &rect,
+                             const std::function<bool(KisPixelWriteCursor *)> &operation);
 
     /**
      * Create an iterator that will "artificially" extend the paint device with the

@@ -32,17 +32,37 @@ set(kritaimage_LIB_SRCS
    gpustroke/KisStrokeCoordinator.cpp
    pagestore/KisBackendServiceRegistry.cpp
    pagestore/KisCompletionRegistry.cpp
+   pagestore/KisCpuPageReplicaProvider.cpp
+   pagestore/KisTiles3PageReplicaProvider.cpp
    pagestore/KisDocumentGpuSession.cpp
    pagestore/KisDerivedSurfaceCache.cpp
    pagestore/KisEvaluationGraphTypes.cpp
    pagestore/KisEvaluationGraphLowerer.cpp
    pagestore/KisEvaluationPlanner.cpp
+   pagestore/KisImageEpochReferenceModel.cpp
+   pagestore/KisPageDefaultStorage.cpp
+   pagestore/KisPageHistoryCollector.cpp
+   pagestore/KisPageRetirementQueue.cpp
+   pagestore/KisPageMetadataCoordinator.cpp
+   pagestore/KisPageMetadataArena_p.h
+   pagestore/KisPageMetadataReservation_p.h
+   pagestore/KisPageMetadataCoordinator_p.h
+   pagestore/KisPageOwnerLedger.cpp
+   pagestore/KisPagePublicationCoordinator.cpp
+   pagestore/KisPageReadCoordinator.cpp
    pagestore/KisPageReplicaProvider.cpp
+   pagestore/KisCpuResidentBinding.cpp
    pagestore/KisPageStateMachine.cpp
+   pagestore/KisPageWriteCoordinator.cpp
    pagestore/KisPageStore.cpp
+   pagestore/KisPageStoreReclamation.cpp
+   pagestore/KisPageStoreDiagnostics.cpp
+   pagestore/KisPageStoreIteratorReadScope.cpp
+   pagestore/KisPageStoreMementoManager.cpp
    pagestore/KisResidencyController.cpp
    pagestore/KisSurfaceRegistry.cpp
    pagestore/KisSurfaceCodecRegistry.cpp
+   pagestore/KisTiledDataManagerPageStoreBackend.cpp
    pagestore/KisUnifiedSsdPageStore.cpp
    tiles3/kis_tile.cc
    tiles3/kis_tile_data.cc

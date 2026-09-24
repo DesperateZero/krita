@@ -125,6 +125,7 @@ public:
     }
 
     KisChunk getChunk(quint64 size);
+    bool tryGetChunk(quint64 size, KisChunk *chunk);
     void freeChunk(KisChunk chunk);
 
     void debugChunks();
@@ -148,4 +149,3 @@ private:
 };
 
 #endif /* __KIS_CHUNK_ALLOCATOR_H */
-

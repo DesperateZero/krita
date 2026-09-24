@@ -15,12 +15,8 @@ bool KisVulkanCompositeExecutor::configure(
     quint64 deviceGeneration,
     const QSharedPointer<KisVulkanPipelineRepository> &pipelines)
 {
-    if (m_deviceGeneration != 0 || deviceGeneration == 0 || !pipelines) {
-        return false;
-    }
-    m_deviceGeneration = deviceGeneration;
-    m_pipelines = pipelines;
-    return true;
+    return kisConfigureVulkanPipelineExecutor(deviceGeneration, pipelines,
+                                              m_deviceGeneration, m_pipelines);
 }
 
 QString KisVulkanCompositeExecutor::validate(

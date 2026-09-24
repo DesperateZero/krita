@@ -87,11 +87,7 @@ bool KisVulkanSubmissionCoordinator::configure(
         return false;
     }
 
-    KisCompletionSourceDescriptor source;
-    source.name = QStringLiteral("Vulkan device generation %1 timeline")
-                      .arg(config.deviceGeneration);
-    source.gpuTimeline = true;
-    const quint64 sourceId = completionRegistry->registerSource(source);
+    const quint64 sourceId = completionRegistry->registerSource(KisCompletionDomain::GpuTimeline);
     if (sourceId == 0) {
         if (error) *error = QStringLiteral("Could not register Vulkan timeline completion source");
         return false;
@@ -141,8 +137,8 @@ QString KisVulkanSubmissionCoordinator::validate(
         return QStringLiteral("Selected device has no present queue family");
     }
     for (const KisCompletionTicket &dependency : request.dependencies) {
-        if (!d->completions->isKnownSource(dependency.source())) {
-            return QStringLiteral("Submission dependency comes from an unknown completion source");
+        if (d->completions->status(dependency) == KisCompletionStatus::Unknown) {
+            return QStringLiteral("Submission dependency is unknown to the completion registry");
         }
     }
     return {};

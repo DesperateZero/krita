@@ -21,6 +21,7 @@ public:
     {
         Q_ASSERT(m_splitRect.isSplit());
 
+        const auto readScope = dataManager->capturePageStoreReadScope(writable);
         m_iterators.resize(4);
         for (int i = 0; i < 4; i++) {
             QRect rc = m_splitRect[i];
@@ -30,7 +31,7 @@ public:
                                                        rc,
                                                        offsetX, offsetY,
                                                        writable,
-                                                       listener);
+                                                       listener, readScope);
         }
         m_strategy.completeInitialization(&m_iterators, &m_splitRect);
         m_iterationAreaSize =

@@ -145,6 +145,11 @@ public:
      * Control the access of swapper to the tile data
      */
     inline void blockSwapping();
+    // Resident-only pin. Never performs swap-in or waits for the swap writer.
+    inline bool tryBlockSwapping(bool *busy = nullptr);
+    // Wait for the local swap barrier, but never initiate a swap-in.
+    inline bool blockSwappingIfResident();
+    inline bool isResident() const;
     inline void unblockSwapping();
 
     /**
@@ -209,6 +214,9 @@ public:
     static void releaseInternalPools();
 
 private:
+    // Store-only complete-row constructor. Input is validated before allocation;
+    // all pixels are initialized before registration with pooler/swapper.
+    KisTileData(qint32 pixelSize, const quint8 *source, qsizetype sourceStride, KisTileDataStore *store);
     void fillWithPixel(const quint8 *defPixel);
 
     static quint8* allocateData(const qint32 pixelSize);
@@ -216,6 +224,7 @@ private:
 private:
     friend class KisTileDataPooler;
     friend class KisTileDataPoolerTest;
+    friend class KisPageStorePhysicalClaimTest;
     /**
      * A list of pre-duplicated tiledatas.
      * To make a COW faster, KisTileDataPooler thread duplicates
@@ -278,7 +287,7 @@ private:
      * tryLockForWrite() - used by swapper to check no-one reads
      *                     this tile data
      */
-    QReadWriteLock m_swapLock;
+    mutable QReadWriteLock m_swapLock;
 
 private:
     friend class KisLowMemoryTests;
@@ -295,14 +304,11 @@ private:
      */
     mutable QAtomicInt m_usersCount;
 
-    /**
-     * Shared pointer counter
-     */
+    /** Shared pointer counter. */
     mutable QAtomicInt m_refCount;
 
 
     qint32 m_pixelSize;
-    //qint32 m_timeStamp;
 
     KisTileDataStore *m_store;
     static SimpleCache m_cache;

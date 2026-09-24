@@ -11,7 +11,10 @@
 #include "kis_tile_data_store.h"
 #include "kis_tile.h"
 #include "kis_memento_manager.h"
+#include "KisTilePageStoreBridge.h"
 #include "kis_debug.h"
+
+#include <algorithm>
 
 
 void KisTile::init(qint32 col, qint32 row,
@@ -20,6 +23,11 @@ void KisTile::init(qint32 col, qint32 row,
     m_col = col;
     m_row = row;
     m_lockCounter = 0;
+    m_pageStoreOldDataView.storeRelaxed(0);
+    m_pageStoreNativeReadReady.storeRelaxed(0);
+    m_pageStoreWriteLockCount = 0;
+    m_pageStoreWriteIntentOwnsNativePin = false;
+    m_pageStoreBridge.storeRelaxed(nullptr);
 
     m_extent = QRect(m_col * KisTileData::WIDTH, m_row * KisTileData::HEIGHT,
                      KisTileData::WIDTH, KisTileData::HEIGHT);
@@ -31,6 +39,98 @@ void KisTile::init(qint32 col, qint32 row,
         mm->registerTileChange(this);
     }
     m_mementoManager.storeRelease(mm);
+}
+
+void KisTile::setPageStoreBridge(KisTilePageStoreBridge *bridge, bool oldData)
+{
+    if (m_pageStoreBridge.loadAcquire() == bridge &&
+        bool(m_pageStoreOldDataView.loadAcquire()) == oldData) {
+        return;
+    }
+    QMutexLocker locker(&m_swapBarrierLock);
+    if (m_lockCounter != 0) {
+        Q_ASSERT(m_pageStoreBridge.loadRelaxed() == bridge &&
+                 bool(m_pageStoreOldDataView.loadRelaxed()) == oldData);
+        return;
+    }
+    if (m_pageStoreBridge.loadRelaxed() != bridge ||
+        bool(m_pageStoreOldDataView.loadRelaxed()) != oldData) {
+        m_pageStoreNativeReadReady.storeRelaxed(0);
+        m_pageStoreOldDataView.storeRelaxed(oldData ? 1 : 0);
+        m_pageStoreBridge.storeRelease(bridge);
+    }
+}
+
+void KisTile::setPageStoreNativeReadReady()
+{
+    if (m_pageStoreNativeReadReady.loadAcquire()) return;
+    QMutexLocker locker(&m_swapBarrierLock);
+    Q_ASSERT(m_lockCounter == 0);
+    m_pageStoreNativeReadReady.storeRelease(1);
+}
+
+void KisTile::installPageStoreReadCache(KisTileData *replacement)
+{
+    Q_ASSERT(replacement);
+    QMutexLocker locker(&m_swapBarrierLock);
+    if (m_lockCounter != 0) {
+        m_pageStoreNativeReadReady.storeRelease(0);
+        return;
+    }
+    replacePageStoreReadCacheLocked(replacement);
+    m_pageStoreNativeReadReady.storeRelease(1);
+}
+
+KisTilePageStoreBridge *KisTile::resolvePageStoreBridge(KisMementoManager *manager) const
+{
+    KisTilePageStoreBridge *bridge = m_pageStoreBridge.loadAcquire();
+    return bridge ? bridge : (manager ? manager->pageStoreBridge() : nullptr);
+}
+
+void KisTile::replacePageStoreReadCacheLocked(KisTileData *replacement) const
+{
+    if (replacement == m_tileData) return;
+    replacement->acquire();
+    KisTileData *previous = m_tileData;
+    const_cast<KisTile *>(this)->m_tileData = replacement;
+    previous->release();
+}
+
+bool KisTile::releasePageStoreLeasesLocked() const
+{
+    if (m_pageStoreLeases.empty()) return false;
+    Q_ASSERT(m_lockCounter > 0);
+    --m_lockCounter;
+    if (m_lockCounter != 0) return true;
+    for (const auto &lease : m_pageStoreLeases)
+        KIS_SAFE_ASSERT_RECOVER_NOOP(lease->finish());
+    m_pageStoreLeases.clear();
+    for (KisTileData *tileData : m_oldTileData) {
+        tileData->unblockSwapping();
+        tileData->release();
+    }
+    m_oldTileData.clear();
+    return true;
+}
+
+bool KisTile::refreshPageStoreData()
+{
+    if (m_pageStoreNativeReadReady.loadAcquire()) return true;
+    KisMementoManager *manager = m_mementoManager.loadAcquire();
+    QMutexLocker locker(&m_swapBarrierLock);
+    KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
+    if (!bridge || m_lockCounter != 0) return true;
+    if (m_pageStoreNativeReadReady.loadRelaxed()) return true;
+    std::unique_ptr<KisTilePageStoreLease> lease =
+        bridge->acquireTile(
+            m_col, m_row, false,
+            bool(m_pageStoreOldDataView.loadRelaxed()));
+    if (!lease || !lease->tileData()) return false;
+    KisTileData *replacement = lease->tileData();
+    replacePageStoreReadCacheLocked(replacement);
+    const bool finished = lease->finish();
+    if (finished) m_pageStoreNativeReadReady.storeRelease(1);
+    return finished;
 }
 
 KisTile::KisTile(qint32 col, qint32 row,
@@ -211,6 +311,33 @@ void KisTile::lockForRead() const
     m_sanityLockedForRead.ref();
 #endif
 
+    KisMementoManager *manager = m_mementoManager.loadAcquire();
+    {
+        QMutexLocker locker(&m_swapBarrierLock);
+        KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
+        if (bridge) {
+            if (m_lockCounter != 0) {
+                ++m_lockCounter;
+                return;
+            }
+            if (m_pageStoreNativeReadReady.loadRelaxed()) {
+                ++m_lockCounter;
+                m_tileData->blockSwapping();
+                Q_ASSERT(m_tileData->data());
+                return;
+            }
+            std::unique_ptr<KisTilePageStoreLease> lease =
+                bridge->acquireTile(m_col, m_row, false,
+                                    bool(m_pageStoreOldDataView.loadRelaxed()));
+            KIS_SAFE_ASSERT_RECOVER_RETURN(lease && lease->tileData());
+            replacePageStoreReadCacheLocked(lease->tileData());
+            m_pageStoreNativeReadReady.storeRelease(1);
+            ++m_lockCounter;
+            m_pageStoreLeases.push_back(std::move(lease));
+            return;
+        }
+    }
+
     DEBUG_LOG_ACTION("lock [R]");
     blockSwapping();
 }
@@ -218,11 +345,86 @@ void KisTile::lockForRead() const
 
 #define lazyCopying() (m_tileData->m_usersCount>1)
 
+bool KisTile::ensurePageStoreWriteAccess() const
+{
+    QMutexLocker locker(&m_swapBarrierLock);
+    if (m_pageStoreWriteLockCount <= 0 || pageStoreWriteLease()) {
+        return true;
+    }
+
+    KisMementoManager *manager = m_mementoManager.loadAcquire();
+    KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
+    if (!bridge || m_pageStoreOldDataView.loadRelaxed()) return false;
+
+    std::unique_ptr<KisTilePageStoreLease> lease =
+        bridge->acquireTile(m_col, m_row, true, false);
+    if (!lease || !lease->tileData() || !lease->writable()) return false;
+
+    const bool hadPageStoreLease = !m_pageStoreLeases.empty();
+    KisTileData *replacement = lease->tileData();
+    KisTileData *previous = m_tileData;
+    if (replacement != previous) {
+        replacement->acquire();
+        const_cast<KisTile *>(this)->m_tileData = replacement;
+    }
+
+    // A write intent entered through the native resident path owns the one
+    // tile-local swap pin.  The resolved provider lease now owns the pin for
+    // the writable generation, so hand over without keeping both backings
+    // pinned for the remainder of the mutation.
+    if (m_pageStoreWriteIntentOwnsNativePin) {
+        previous->unblockSwapping();
+        if (replacement != previous) previous->release();
+        m_pageStoreWriteIntentOwnsNativePin = false;
+    } else if (replacement != previous) {
+        // This is the uncommon read-then-write nesting case.  A generic read
+        // lease already owns its pin.  A native outer read, however, needs us
+        // to retain and later release the previous backing explicitly.
+        if (hadPageStoreLease) {
+            previous->release();
+        } else {
+            m_oldTileData.push(previous);
+        }
+    }
+
+    m_pageStoreNativeReadReady.storeRelease(1);
+    m_pageStoreLeases.push_back(std::move(lease));
+    return true;
+}
+
+quint8 *KisTile::tryWriteData() const
+{
+    if (!ensurePageStoreWriteAccess()) return nullptr;
+    return data();
+}
+
+bool KisTile::hasPageStoreWriteIntent() const
+{
+    QMutexLocker locker(&m_swapBarrierLock);
+    return m_pageStoreWriteLockCount > 0;
+}
+
 void KisTile::lockForWrite()
 {
 #ifdef DEAD_TILES_SANITY_CHECK
     m_sanityLockedForWrite.ref();
 #endif
+
+    KisMementoManager *manager = m_mementoManager.loadAcquire();
+    {
+        QMutexLocker locker(&m_swapBarrierLock);
+        KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
+        if (bridge) {
+            if (m_lockCounter == 0) {
+                m_tileData->blockSwapping();
+                m_pageStoreWriteIntentOwnsNativePin = true;
+            }
+            ++m_lockCounter;
+            ++m_pageStoreWriteLockCount;
+            DEBUG_LOG_ACTION("lock [W/PageStore intent]");
+            return;
+        }
+    }
 
     blockSwapping();
 
@@ -263,6 +465,26 @@ void KisTile::lockForWrite()
 
 void KisTile::unlockForWrite()
 {
+    {
+        QMutexLocker locker(&m_swapBarrierLock);
+        if (m_pageStoreWriteLockCount > 0) {
+            --m_pageStoreWriteLockCount;
+        }
+        if (releasePageStoreLeasesLocked()) {
+            DEBUG_LOG_ACTION("unlock [W/PageStore]");
+            return;
+        }
+        if (m_pageStoreWriteIntentOwnsNativePin) {
+            Q_ASSERT(m_lockCounter > 0);
+            --m_lockCounter;
+            if (m_lockCounter == 0) {
+                m_tileData->unblockSwapping();
+                m_pageStoreWriteIntentOwnsNativePin = false;
+            }
+            DEBUG_LOG_ACTION("unlock [W/PageStore intent]");
+            return;
+        }
+    }
     unblockSwapping();
     DEBUG_LOG_ACTION("unlock [W]");
 
@@ -274,6 +496,13 @@ void KisTile::unlockForWrite()
 
 void KisTile::unlockForRead() const
 {
+    {
+        QMutexLocker locker(&m_swapBarrierLock);
+        if (releasePageStoreLeasesLocked()) {
+            DEBUG_LOG_ACTION("unlock [R/PageStore]");
+            return;
+        }
+    }
     unblockSwapping();
     DEBUG_LOG_ACTION("unlock [R]");
 
@@ -282,7 +511,6 @@ void KisTile::unlockForRead() const
     KIS_ASSERT(m_sanityLockedForRead.loadAcquire() >= 0);
 #endif
 }
-
 
 #include <stdio.h>
 void KisTile::debugPrintInfo()

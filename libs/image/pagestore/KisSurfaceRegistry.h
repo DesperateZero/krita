@@ -15,17 +15,9 @@
 
 #include "KisPageStoreTypes.h"
 
-enum class KisSurfaceRole : quint8 {
-    Canonical,
-    DerivedProjection,
-    DerivedDisplay,
-    DerivedEvaluation
-};
-
 struct KRITAIMAGE_EXPORT KisSurfaceDescriptor
 {
     QString debugName;
-    KisSurfaceRole role = KisSurfaceRole::Canonical;
     KisSurfaceFormat format;
     QSize pixelExtent;
     QSize logicalPageExtent;
@@ -50,12 +42,10 @@ public:
     KisSurfaceRegistry();
     ~KisSurfaceRegistry();
 
-    bool isOperational() const;
     KisSurfaceId registerSurface(const KisSurfaceDescriptor &descriptor);
     bool unregisterSurface(KisSurfaceId surface);
     std::optional<KisSurfaceDescriptor> descriptor(KisSurfaceId surface) const;
     bool contains(KisSurfaceId surface) const;
-    int surfaceCount() const;
 
 private:
     class Private;

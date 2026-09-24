@@ -15,6 +15,10 @@ QString KisEvaluationGraphSnapshot::validationError() const
     if (!epoch.isValid() || documentId == 0 || graphRevision == 0) {
         return QStringLiteral("Evaluation graph identity or revision is missing");
     }
+    if (!surfaceSnapshot.isValid() ||
+        surfaceSnapshot.snapshot.graphRevision != graphRevision) {
+        return QStringLiteral("Evaluation graph is not bound to an exact PageStore epoch root");
+    }
     if (!context.isValid()) {
         return QStringLiteral("Evaluation graph context is invalid");
     }

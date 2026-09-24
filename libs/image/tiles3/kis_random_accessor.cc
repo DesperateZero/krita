@@ -13,34 +13,40 @@
 const quint32 KisRandomAccessor2::CACHESIZE = 4; // Define the number of tiles we keep in cache
 
 KisRandomAccessor2::KisRandomAccessor2(KisTiledDataManager *ktm, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *completeListener) :
-        m_ktm(ktm),
-        m_tilesCache(new KisTileInfo*[CACHESIZE]),
+        KisBaseIterator(ktm, writable, completeListener),
+        m_tilesCache(nullptr),
         m_tilesCacheSize(0),
-        m_pixelSize(m_ktm->pixelSize()),
         m_data(0),
         m_oldData(0),
-        m_writable(writable),
         m_lastX(0),
         m_lastY(0),
         m_offsetX(offsetX),
-        m_offsetY(offsetY),
-        m_completeListener(completeListener)
+        m_offsetY(offsetY)
 {
     Q_ASSERT(ktm != 0);
+    if (!m_readCursor) m_tilesCache = new KisTileInfo*[CACHESIZE];
+    registerWriteBoundary(this, [](const void *context) {
+        return static_cast<const KisRandomAccessor2 *>(context)->m_tilesCacheSize != 0;
+    });
 }
 
 KisRandomAccessor2::~KisRandomAccessor2()
+{
+    unregisterWriteBoundary();
+    releaseWriteCache();
+    delete [] m_tilesCache;
+}
+
+void KisRandomAccessor2::releaseWriteCache()
 {
     for (uint i = 0; i < m_tilesCacheSize; i++) {
         unlockTile(m_tilesCache[i]->tile);
         unlockOldTile(m_tilesCache[i]->oldtile);
         delete m_tilesCache[i];
     }
-    delete [] m_tilesCache;
-
-    if (m_writable && m_completeListener) {
-        m_completeListener->notifyWritableIteratorCompleted();
-    }
+    m_tilesCacheSize = 0;
+    m_data = nullptr; m_oldData = nullptr;
+    m_readScope.clear();
 }
 
 void KisRandomAccessor2::moveTo(qint32 x, qint32 y)
@@ -50,6 +56,18 @@ void KisRandomAccessor2::moveTo(qint32 x, qint32 y)
 
     x -= m_offsetX;
     y -= m_offsetY;
+
+    if (m_readCursor) {
+        const qint32 col = xToCol(x), row = yToRow(y);
+        const auto pair = m_readCursor->read(col, row);
+        m_data = nullptr; m_oldData = nullptr;
+        KIS_SAFE_ASSERT_RECOVER_RETURN(pair.isValid());
+        const qsizetype localX = qint64(x) - qint64(col) * KisTileData::WIDTH;
+        const qsizetype localY = qint64(y) - qint64(row) * KisTileData::HEIGHT;
+        m_data = const_cast<quint8 *>(pair.current + localY * pair.currentStride + localX * m_pixelSize);
+        m_oldData = pair.before + localY * pair.beforeStride + localX * m_pixelSize;
+        return;
+    }
 
     // Look in the cache if the tile if the data is available
     for (uint i = 0; i < m_tilesCacheSize; i++) {
@@ -89,14 +107,14 @@ void KisRandomAccessor2::moveTo(qint32 x, qint32 y)
 
 quint8* KisRandomAccessor2::rawData()
 {
-    return m_data;
+    return m_writable ? m_data : nullptr;
 }
 
 
 const quint8* KisRandomAccessor2::oldRawData() const
 {
 #ifdef DEBUG
-    if (!m_ktm->hasCurrentMemento()) warnTiles << "Accessing oldRawData() when no transaction is in progress.";
+    if (!m_dataManager->hasCurrentMemento()) warnTiles << "Accessing oldRawData() when no transaction is in progress.";
 #endif
     return m_oldData;
 }
@@ -109,14 +127,8 @@ const quint8* KisRandomAccessor2::rawDataConst() const
 KisRandomAccessor2::KisTileInfo* KisRandomAccessor2::fetchTileData(qint32 col, qint32 row)
 {
     KisTileInfo* kti = new KisTileInfo;
-
-    m_ktm->getTilesPair(col, row, m_writable, &kti->tile, &kti->oldtile);
-
-    lockTile(kti->tile);
-    kti->data = kti->tile->data();
-
-    lockOldTile(kti->oldtile);
-    kti->oldData = kti->oldtile->data();
+    if (m_writable && !m_readScope) m_readScope = m_dataManager->capturePageStoreReadScope(true);
+    fetchTileDataForCache(*kti, col, row);
 
     kti->area_x1 = col * KisTileData::HEIGHT;
     kti->area_y1 = row * KisTileData::WIDTH;
@@ -128,17 +140,17 @@ KisRandomAccessor2::KisTileInfo* KisRandomAccessor2::fetchTileData(qint32 col, q
 
 qint32 KisRandomAccessor2::numContiguousColumns(qint32 x) const
 {
-    return m_ktm->numContiguousColumns(x - m_offsetX, 0, 0);
+    return m_dataManager->numContiguousColumns(x - m_offsetX, 0, 0);
 }
 
 qint32 KisRandomAccessor2::numContiguousRows(qint32 y) const
 {
-    return m_ktm->numContiguousRows(y - m_offsetY, 0, 0);
+    return m_dataManager->numContiguousRows(y - m_offsetY, 0, 0);
 }
 
 qint32 KisRandomAccessor2::rowStride(qint32 x, qint32 y) const
 {
-    return m_ktm->rowStride(x - m_offsetX, y - m_offsetY);
+    return m_dataManager->rowStride(x - m_offsetX, y - m_offsetY);
 }
 
 qint32 KisRandomAccessor2::x() const

@@ -64,7 +64,6 @@ public:
     KisBackendServiceRegistry();
     ~KisBackendServiceRegistry();
 
-    bool isOperational() const;
     KisBackendReadyToken acceptValidatedService(const KisBackendValidationReport &report);
     bool isCurrent(const KisBackendReadyToken &token) const;
     bool revokeService(quint64 serviceId,

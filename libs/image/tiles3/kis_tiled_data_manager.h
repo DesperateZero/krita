@@ -8,7 +8,10 @@
 #define KIS_TILEDDATAMANAGER_H_
 
 #include <QtGlobal>
+#include <QByteArray>
+#include <QMutex>
 #include <QVector>
+#include <QSharedPointer>
 #include <KisRegion.h>
 
 #include <kis_shared.h>
@@ -27,6 +30,7 @@
 #include "kis_memento_manager.h"
 #include "kis_memento.h"
 #include "KisTiledExtentManager.h"
+#include "pagestore/KisPageStoreWriteOperation_p.h"
 
 class KisTiledDataManager;
 typedef KisSharedPtr<KisTiledDataManager> KisTiledDataManagerSP;
@@ -35,6 +39,10 @@ class KisTiledIterator;
 class KisTiledRandomAccessor;
 class KisPaintDeviceWriter;
 class QIODevice;
+class KisTiledDataManagerPageStoreBackend;
+class KisCapturedReadView;
+class KisPageStoreIteratorReadScope;
+struct KisLogicalPageId;
 
 /**
  * KisTiledDataManager implements the interface that KisDataManager defines
@@ -66,6 +74,18 @@ public:
     KisTiledDataManager(const KisTiledDataManager &dm);
     KisTiledDataManager & operator=(const KisTiledDataManager &dm);
 
+    // Internal iterator seam. Null means legacy-only manager; a non-null
+    // invalid scope fails closed. A marked live-writer scope is an explicit
+    // compatibility path, NOT immutable visibility. Wrapped peers share the
+    // immutable selection; a supplied selection must match owner and mode.
+    QSharedPointer<const KisPageStoreIteratorReadScope> capturePageStoreReadScope(
+        bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
+    Qt::HANDLE registerPageStoreWriteBoundary(const void *key, KisPageStoreWriteBoundary hasLiveAccess);
+    void unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key);
+    KisPageStoreWriteOperationResult writePageStoreOperation(
+        const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
+        QString *error = nullptr);
+
 
 protected:
     // Allow the baseclass of iterators access to the interior
@@ -75,6 +95,7 @@ protected:
     friend class KisTiledRandomAccessor;
     friend class KisRandomAccessor2;
     friend class KisStressJob;
+    friend class KisTiledDataManagerTest;
 
 public:
     void setDefaultPixel(const quint8 *defPixel);
@@ -93,91 +114,30 @@ public:
      */
     inline void getTilesPair(qint32 col, qint32 row, bool writable, KisTileSP *tile, KisTileSP *oldTile) {
         *tile = getTile(col, row, writable);
-
-        bool unused;
-        *oldTile = m_mementoManager->getCommittedTile(col, row, unused);
-
-        if (!*oldTile) {
-            *oldTile = *tile;
-        }
+        *oldTile = getOldTile(col, row);
     }
 
-    inline KisTileSP getTile(qint32 col, qint32 row, bool writable) {
-        if (writable) {
-            bool newTile;
-            KisTileSP tile = m_hashTable->getTileLazy(col, row, newTile);
-            if (newTile) {
-                m_extentManager.notifyTileAdded(col, row);
-            }
-            return tile;
+    KisTileSP getTile(qint32 col, qint32 row, bool writable);
 
-        } else {
-            bool unused;
-            return m_hashTable->getReadOnlyTileLazy(col, row, unused);
-        }
-    }
+    KisTileSP getReadOnlyTileLazy(qint32 col, qint32 row, bool &existingTile);
 
-    inline KisTileSP getReadOnlyTileLazy(qint32 col, qint32 row, bool &existingTile) {
-        return m_hashTable->getReadOnlyTileLazy(col, row, existingTile);
-    }
-
-    inline KisTileSP getOldTile(qint32 col, qint32 row, bool &existingTile) {
-        KisTileSP tile = m_mementoManager->getCommittedTile(col, row, existingTile);
-        return tile ? tile : getReadOnlyTileLazy(col, row, existingTile);
-    }
+    KisTileSP getOldTile(qint32 col, qint32 row, bool &existingTile);
 
     inline KisTileSP getOldTile(qint32 col, qint32 row) {
         bool unused;
         return getOldTile(col, row, unused);
     }
 
-    KisMementoSP getMemento() {
-        QWriteLocker locker(&m_lock);
-        KisMementoSP memento = m_mementoManager->getMemento();
-        memento->saveOldDefaultPixel(m_defaultPixel, m_pixelSize);
-        return memento;
-    }
+    KisMementoSP getMemento();
 
     /**
      * Finishes having already started transaction
      */
-    void commit() {
-        QWriteLocker locker(&m_lock);
+    void commit();
 
-        KisMementoSP memento = m_mementoManager->currentMemento();
-        if(memento) {
-            memento->saveNewDefaultPixel(m_defaultPixel, m_pixelSize);
-        }
-
-        m_mementoManager->commit();
-    }
-
-    void rollback(KisMementoSP memento) {
-        commit();
-
-        QWriteLocker locker(&m_lock);
-        m_mementoManager->rollback(m_hashTable, memento);
-        const quint8 *defaultPixel = memento->oldDefaultPixel();
-        if(memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
-            setDefaultPixelImpl(defaultPixel);
-        }
-        recalculateExtent();
-    }
-    void rollforward(KisMementoSP memento) {
-        commit();
-
-        QWriteLocker locker(&m_lock);
-        m_mementoManager->rollforward(m_hashTable, memento);
-        const quint8 *defaultPixel = memento->newDefaultPixel();
-        if(memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
-            setDefaultPixelImpl(defaultPixel);
-        }
-        recalculateExtent();
-    }
-    bool hasCurrentMemento() const {
-        return m_mementoManager->hasCurrentMemento();
-        //return true;
-    }
+    void rollback(KisMementoSP memento);
+    void rollforward(KisMementoSP memento);
+    bool hasCurrentMemento() const;
 
     /**
      * Removes all the history that precedes the revision
@@ -185,10 +145,7 @@ public:
      * purgeHistory(someMemento) you won't be able to do
      * rollback(someMemento) anymore.
      */
-    void purgeHistory(KisMementoSP oldestMemento) {
-        QWriteLocker locker(&m_lock);
-        m_mementoManager->purgeHistory(oldestMemento);
-    }
+    void purgeHistory(KisMementoSP oldestMemento);
 
     static void releaseInternalPools();
 
@@ -334,6 +291,14 @@ public:
 private:
     KisTileHashTable *m_hashTable;
     KisMementoManager *m_mementoManager;
+    KisTiledDataManagerPageStoreBackend *m_pageStoreBackend;
+    // One immutable, manager-owned uniform backing lets repeated whole-tile
+    // fills recognize a physical no-op without walking PageStore or advancing
+    // the logical generation. Writers still COW because this reference keeps
+    // the backing shared.
+    KisTileData *m_uniformClearTileData = nullptr;
+    QByteArray m_uniformClearPixel;
+    QMutex m_uniformClearMutex;
     quint8* m_defaultPixel;
     qint32 m_pixelSize;
     KisTiledExtentManager m_extentManager;
@@ -356,6 +321,12 @@ private:
 
 private:
     void setDefaultPixelImpl(const quint8 *defPixel);
+    void rebuildPageStoreIndex();
+    void attachPageStoreTile(KisTileSP &tile, bool oldData, bool nativeReady);
+    void refreshPageStoreIndex(const QRect &rect);
+    void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
+    bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
+    bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
 
     bool writeTilesHeader(KisPaintDeviceWriter &store, quint32 numTiles);
     bool processTilesHeader(QIODevice *stream, quint32 &numTiles);
@@ -389,7 +360,7 @@ private:
                        qint32 dataRowStride = -1) const;
 
     template <bool allChannelsPresent>
-    void writePlanarBytesBody(QVector<quint8*> planes,
+    bool writePlanarBytesBody(QVector<quint8*> planes,
                               QVector<qint32> channelsizes,
                               qint32 x, qint32 y, qint32 w, qint32 h);
     QVector<quint8*> readPlanarBytesBody(QVector<qint32> channelsizes,
@@ -407,4 +378,3 @@ public:
 //#include "kis_datamanager.h"
 
 #endif // KIS_TILEDDATAMANAGER_H_
-

@@ -89,6 +89,37 @@ inline void KisTileData::unblockSwapping() {
     m_swapLock.unlock();
 }
 
+inline bool KisTileData::tryBlockSwapping(bool *busy) {
+    if (busy) *busy = false;
+    if (!m_swapLock.tryLockForRead()) {
+        if (busy) *busy = true;
+        return false;
+    }
+    if (!m_data) {
+        m_swapLock.unlock();
+        return false;
+    }
+    resetAge();
+    return true;
+}
+
+inline bool KisTileData::blockSwappingIfResident() {
+    m_swapLock.lockForRead();
+    if (!m_data) {
+        m_swapLock.unlock();
+        return false;
+    }
+    resetAge();
+    return true;
+}
+
+inline bool KisTileData::isResident() const {
+    m_swapLock.lockForRead();
+    const bool result = m_data != nullptr;
+    m_swapLock.unlock();
+    return result;
+}
+
 inline KisChunk KisTileData::swapChunk() const {
     return m_swapChunk;
 }
@@ -122,4 +153,3 @@ inline qint32 KisTileData::numUsers() const {
 }
 
 #endif /* KIS_TILE_DATA_H_ */
-

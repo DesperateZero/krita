@@ -887,7 +887,6 @@ void KisPaintDevice::Private::uploadFrameData(DataSP srcData, DataSP dstData)
 {
     if (srcData->colorSpace() != dstData->colorSpace() &&
         *srcData->colorSpace() != *dstData->colorSpace()) {
-
         KUndo2Command tempCommand;
 
         srcData = toQShared(new Data(q, srcData.data(), true));
@@ -1869,6 +1868,17 @@ KisRandomAccessorSP KisPaintDevice::createRandomAccessorNG()
 KisRandomConstAccessorSP KisPaintDevice::createRandomConstAccessorNG() const
 {
     return m_d->currentStrategy()->createRandomConstAccessorNG();
+}
+
+bool KisPaintDevice::applyPixelOperation(
+    const QRect &rect, const std::function<bool(KisPixelWriteCursor *)> &operation)
+{
+    if (rect.isEmpty()) return true;
+    if (!operation) return false;
+    m_d->cache()->invalidate();
+    const bool result = m_d->currentStrategy()->applyPixelOperation(rect, operation);
+    m_d->cache()->invalidate();
+    return result;
 }
 
 KisRandomSubAccessorSP KisPaintDevice::createRandomSubAccessor() const

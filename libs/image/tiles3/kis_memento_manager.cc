@@ -78,7 +78,8 @@ KisMementoManager::KisMementoManager(const KisMementoManager& rhs)
         m_cancelledRevisions(rhs.m_cancelledRevisions),
         m_headsHashTable(rhs.m_headsHashTable, 0),
         m_currentMemento(rhs.m_currentMemento),
-        m_registrationBlocked(rhs.m_registrationBlocked)
+        m_registrationBlocked(rhs.m_registrationBlocked),
+        m_pageStoreBridge(nullptr)
 {
     Q_ASSERT_X(!m_registrationBlocked,
                "KisMementoManager", "(impossible happened) "
@@ -112,7 +113,7 @@ KisMementoManager::~KisMementoManager()
 
 void KisMementoManager::registerTileChange(KisTile *tile)
 {
-    if (registrationBlocked()) return;
+    if (registrationBlocked() || m_pageStoreBridge) return;
 
     DEBUG_LOG_TILE_ACTION("reg. [C]", tile, tile->col(), tile->row());
 
@@ -135,7 +136,7 @@ void KisMementoManager::registerTileChange(KisTile *tile)
 
 void KisMementoManager::registerTileDeleted(KisTile *tile)
 {
-    if (registrationBlocked()) return;
+    if (registrationBlocked() || m_pageStoreBridge) return;
 
     DEBUG_LOG_TILE_ACTION("reg. [D]", tile, tile->col(), tile->row());
 
@@ -195,7 +196,6 @@ void KisMementoManager::commit()
         m_headsHashTable.deleteTile(mi->col(), mi->row());
 
         iter.moveCurrentToHashTable(&m_headsHashTable);
-        //iter.next(); // previous line does this for us
     }
 
     KisHistoryItem hItem;
@@ -232,16 +232,6 @@ KisMementoSP KisMementoManager::getMemento()
      * We do not allow nested transactions
      */
     KIS_SAFE_ASSERT_RECOVER_NOOP(!namedTransactionInProgress());
-
-    /**
-     * The following assert is useful for testing if some code creates a
-     * transaction on a device with "inconsistent history". We cannot keep
-     * this sanity check enabled all the time, because in some places
-     * (e.g. projection in KisAsyncMerger) such usecase is considered legit.
-     * But in places with "consistent history", e.g. in layer's paint
-     * device, such usage will cause undo corruption.
-     */
-    // KIS_SAFE_ASSERT_RECOVER_NOOP(m_index.isEmpty());
 
     // Clear redo() information
     m_cancelledRevisions.clear();
@@ -402,6 +392,16 @@ void KisMementoManager::setDefaultTileData(KisTileData *defaultTileData)
 {
     m_headsHashTable.setDefaultTileData(defaultTileData);
     m_index.setDefaultTileData(defaultTileData);
+}
+
+void KisMementoManager::setPageStoreBridge(KisTilePageStoreBridge *bridge)
+{
+    m_pageStoreBridge = bridge;
+}
+
+KisTilePageStoreBridge *KisMementoManager::pageStoreBridge() const
+{
+    return m_pageStoreBridge;
 }
 
 void KisMementoManager::debugPrintInfo()

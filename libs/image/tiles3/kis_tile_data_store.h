@@ -10,7 +10,11 @@
 
 #include "kritaimage_export.h"
 
+#include <QHash>
+#include <QMutex>
 #include <QReadWriteLock>
+#include <QSharedPointer>
+#include <QVector>
 #include "kis_tile_data_interface.h"
 
 #include "kis_tile_data_pooler.h"
@@ -21,6 +25,13 @@
 class KisTileDataStoreIterator;
 class KisTileDataStoreReverseIterator;
 class KisTileDataStoreClockIterator;
+
+class KRITAIMAGE_EXPORT KisTileDataResidencyObserver
+{
+public:
+    virtual ~KisTileDataResidencyObserver() = default;
+    virtual void residencyChanged(KisTileData *tileData, bool resident) = 0;
+};
 
 /**
  * Stores tileData objects. When needed compresses them and swaps.
@@ -90,6 +101,10 @@ public:
     {
         return allocTileData(pixelSize, defPixel);
     }
+    // Synchronous borrowed complete rows. Never registers uninitialized pixels;
+    // returns independent storage, with the normal allocator/swap lifecycle.
+    KisTileData *createTileDataFromRows(qint32 pixelSize, const quint8 *source,
+                                      qsizetype sourceStride, qsizetype sourceBytes);
 
     // Called by The Memento Manager after every commit
     inline void kickPooler()
@@ -114,6 +129,12 @@ public:
      */
 
     KisTileData *duplicateTileData(KisTileData *rhs);
+    // Reports whether this call consumed a background clone; logical payload
+    // bytes must not be mistaken for a foreground memcpy or hardware traffic.
+    KisTileData *duplicateTileData(KisTileData *rhs, bool *precloneHit);
+    // Internal native-provider path. The caller already holds an exact
+    // source pixel pin for this entire call; do not acquire a nested pin.
+    KisTileData *duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit);
 
     void freeTileData(KisTileData *td);
 
@@ -131,6 +152,14 @@ public:
 
     void registerTileData(KisTileData *td);
     void unregisterTileData(KisTileData *td);
+
+    // Sparse observers are installed only for PageStore-owned physical
+    // payloads. Swap work reports the exact changed tile after releasing its
+    // storage lock; ordinary tiles pay no per-object state cost.
+    bool registerResidencyObserver(
+        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer);
+    void unregisterResidencyObserver(
+        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer);
 
 private:
     KisTileData *allocTileData(qint32 pixelSize, const quint8 *defPixel);
@@ -169,6 +198,8 @@ private:
     QAtomicInt m_clockIndex;
     ConcurrentMap<int, KisTileData*> m_tileDataMap;
     QReadWriteLock m_iteratorLock;
+    QMutex m_residencyObserverLock;
+    QHash<KisTileData *, QVector<QSharedPointer<KisTileDataResidencyObserver>>> m_residencyObservers;
 };
 
 template<typename T>
@@ -179,4 +210,3 @@ inline T MiB_TO_METRIC(T value)
 }
 
 #endif /* KIS_TILE_DATA_STORE_H_ */
-

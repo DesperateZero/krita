@@ -9,18 +9,6 @@
 #include <QMutex>
 #include <QMutexLocker>
 
-namespace {
-
-KisReplicaOperation failedReplicaOperation(const QString &reason)
-{
-    KisReplicaOperation operation;
-    operation.status = KisPageRequestStatus::Failed;
-    operation.error = reason;
-    return operation;
-}
-
-}
-
 class KisVulkanPageReplicaProvider::Private
 {
 public:
@@ -54,7 +42,9 @@ bool KisVulkanPageReplicaProvider::configure(
         if (error) *error = QStringLiteral("Replica provider configuration is incomplete");
         return false;
     }
-    if (!memoryLedger->isConfigured() || !bindingTable->isOperational()) {
+    if (!memoryLedger->isConfigured() ||
+        !bindingTable->matchesProvider(config.providerId,
+                                       config.providerGeneration)) {
         if (error) *error = QStringLiteral("Replica provider dependencies are not configured");
         return false;
     }
@@ -65,18 +55,6 @@ bool KisVulkanPageReplicaProvider::configure(
     return true;
 }
 
-bool KisVulkanPageReplicaProvider::isConfigured() const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->config.isValid();
-}
-
-quint64 KisVulkanPageReplicaProvider::providerGeneration() const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->config.providerGeneration;
-}
-
 QString KisVulkanPageReplicaProvider::name() const
 {
     QMutexLocker locker(&d->mutex);
@@ -85,14 +63,32 @@ QString KisVulkanPageReplicaProvider::name() const
         : QStringLiteral("Krita Vulkan page replica provider (unconfigured)");
 }
 
+KisReplicaProviderId KisVulkanPageReplicaProvider::providerId() const
+{
+    QMutexLocker locker(&d->mutex);
+    return KisReplicaProviderId{d->config.providerId};
+}
+
+KisReplicaProviderEpoch KisVulkanPageReplicaProvider::providerEpoch() const
+{
+    QMutexLocker locker(&d->mutex);
+    return KisReplicaProviderEpoch{d->config.providerGeneration};
+}
+
 KisReplicaCapabilities KisVulkanPageReplicaProvider::capabilities() const
 {
     QMutexLocker locker(&d->mutex);
-    return d->config.capabilities;
+    KisReplicaCapabilities result = d->config.capabilities;
+    // Submission completion is asynchronous even if a caller accidentally
+    // sets the generic capability bit in its configuration.
+    result.synchronousOperations = false;
+    return result;
 }
 
 KisReplicaOperation KisVulkanPageReplicaProvider::requestReplica(
+    KisPageOperationId operation,
     const KisPageVersion &version,
+    const KisPageAllocationDescriptor &descriptor,
     KisPageAccessDomain domain,
     KisPageAccessMode mode,
     KisPagePriority priority)
@@ -101,68 +97,127 @@ KisReplicaOperation KisVulkanPageReplicaProvider::requestReplica(
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid()) {
-        return failedReplicaOperation(QStringLiteral("Vulkan replica provider is not configured"));
+        return KisReplicaOperation::failed(operation,
+                                      QStringLiteral("Vulkan replica provider is not configured"));
     }
-    if (!version.isValid() || !d->config.capabilities.domains.contains(domain)) {
-        return failedReplicaOperation(QStringLiteral("Replica request version or access domain is unsupported"));
+    if (!operation.isValid() || !version.isValid() || !descriptor.isValid() ||
+        !d->config.capabilities.domains.contains(domain)) {
+        return KisReplicaOperation::failed(
+            operation,
+            QStringLiteral("Replica request version or access domain is unsupported"));
     }
-    return failedReplicaOperation(
+    return KisReplicaOperation::failed(operation,
         QStringLiteral("Native Vulkan page allocation/materialization is not implemented before BR3"));
 }
 
 KisReplicaOperation KisVulkanPageReplicaProvider::prepareWrite(
-    const KisPageKey &key,
-    KisPageGeneration generation,
+    KisPageOperationId operation,
+    const KisPageVersion &version,
+    const KisPageAllocationDescriptor &descriptor,
     KisPageAccessDomain domain,
+    KisPageWriteMode mode,
     KisPagePriority priority)
 {
+    Q_UNUSED(mode);
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid()) {
-        return failedReplicaOperation(QStringLiteral("Vulkan replica provider is not configured"));
+        return KisReplicaOperation::failed(operation,
+                                      QStringLiteral("Vulkan replica provider is not configured"));
     }
-    if (!key.isValid() || !generation.isValid() ||
+    if (!operation.isValid() || !version.isValid() || !descriptor.isValid() ||
         !d->config.capabilities.domains.contains(domain)) {
-        return failedReplicaOperation(QStringLiteral("Write reservation identity or domain is invalid"));
+        return KisReplicaOperation::failed(
+            operation,
+            QStringLiteral("Write reservation identity or domain is invalid"));
     }
-    return failedReplicaOperation(
+    return KisReplicaOperation::failed(operation,
         QStringLiteral("Native Vulkan write allocation is not implemented before BR3"));
 }
 
 KisReplicaOperation KisVulkanPageReplicaProvider::transfer(
-    const KisReplicaHandle &source,
-    const KisReplicaHandle &target,
+    const KisReplicaTransferRequest &request,
     KisPagePriority priority)
 {
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid()) {
-        return failedReplicaOperation(QStringLiteral("Vulkan replica provider is not configured"));
+        return KisReplicaOperation::failed(request.operation,
+                                      QStringLiteral("Vulkan replica provider is not configured"));
     }
-    if (!source.isValid() || !target.isValid() || !(source.version == target.version)) {
-        return failedReplicaOperation(QStringLiteral("Replica transfer endpoints do not describe one page generation"));
+    if (!request.isSameProviderTransfer() ||
+        request.target.provider.value != d->config.providerId ||
+        request.target.providerEpoch.value != d->config.providerGeneration ||
+        !d->config.capabilities.domains.contains(request.target.domain)) {
+        return KisReplicaOperation::failed(
+            request.operation,
+            QStringLiteral("Replica transfer target or endpoints do not match this provider"));
     }
-    return failedReplicaOperation(
+    return KisReplicaOperation::failed(request.operation,
         QStringLiteral("Native Vulkan replica transfer is not implemented before BR3"));
+}
+
+KisReplicaAccess KisVulkanPageReplicaProvider::resolveAccess(
+    KisPageLeaseId lease,
+    KisPageOperationId operation,
+    const KisReplicaHandle &replica,
+    KisPageAccessRequirement requirement,
+    KisPageAccessMode mode)
+{
+    Q_UNUSED(lease);
+    Q_UNUSED(operation);
+    Q_UNUSED(replica);
+    Q_UNUSED(requirement);
+    Q_UNUSED(mode);
+    // BR3 resolves an operation-scoped binding only after PageStore has
+    // validated the exact replica and acquired the corresponding lease.
+    return {};
+}
+
+void KisVulkanPageReplicaProvider::releaseAccess(
+    KisReplicaAccess access,
+    const KisCompletionTicket &lastUse)
+{
+    Q_UNUSED(access);
+    Q_UNUSED(lastUse);
+    // BR3 forwards GPU last use to the shared retirement path.
 }
 
 bool KisVulkanPageReplicaProvider::validate(
     const KisReplicaHandle &replica,
-    KisPageGeneration expectedGeneration) const
+    const KisPageAllocationDescriptor &descriptor) const
 {
     QMutexLocker locker(&d->mutex);
-    return d->config.isValid() && replica.isValid() && expectedGeneration.isValid() &&
-           replica.provider == d->config.providerId &&
-           replica.version.generation == expectedGeneration &&
+    return d->config.isValid() && replica.isValid() && descriptor.isValid() &&
+           replica.provider.value == d->config.providerId &&
+           replica.providerEpoch.value == d->config.providerGeneration &&
+           replica.layout.matches(descriptor) &&
            d->config.capabilities.domains.contains(replica.domain);
 }
 
-void KisVulkanPageReplicaProvider::retire(const KisReplicaHandle &replica,
-                                          const KisCompletionTicket &lastUse)
+KisReplicaOperation KisVulkanPageReplicaProvider::retire(
+    KisPageOperationId operation,
+    const KisReplicaHandle &replica,
+    const KisCompletionTicket &lastUse)
 {
-    Q_UNUSED(replica);
     Q_UNUSED(lastUse);
-    // BR3 connects replica allocations to the shared resource-retirement queue.
+    QMutexLocker locker(&d->mutex);
+    if (!d->config.isValid()) {
+        return KisReplicaOperation::failed(operation,
+                                      QStringLiteral("Vulkan replica provider is not configured"));
+    }
+    if (!operation.isValid() || !replica.isValid() ||
+        replica.provider.value != d->config.providerId ||
+        replica.providerEpoch.value != d->config.providerGeneration ||
+        !d->config.capabilities.domains.contains(replica.domain)) {
+        return KisReplicaOperation::failed(operation,
+                                      QStringLiteral("Replica retirement identity is invalid"));
+    }
+    // BR3 connects replica allocations to the shared resource-retirement queue
+    // and returns a completion under the caller-supplied operation identity.
+    return KisReplicaOperation::failed(
+        operation,
+        QStringLiteral("Native Vulkan replica retirement is not implemented before BR3"));
 }
 
 KisReplicaMemoryUsage KisVulkanPageReplicaProvider::memoryUsage() const

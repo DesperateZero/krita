@@ -1,0 +1,559 @@
+{
+  "coverage": [
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "Source-bound callers and RAII ownership identify every legacy tile lease. The compatibility behavior and cancellation tests cover successful, rejected, cancelled, and terminal release paths without retaining a second hot-path census.",
+      "id": "legacy-tile-leases",
+      "manifest-entries": [
+        "BR1-PS-TILE-STATE-001",
+        "BR1-PS-TILE-LEASE-003"
+      ],
+      "metrics-source": "source-bound reverse callgraph and Store capability snapshots",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+      ],
+      "status": "static-only"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "All four data-manager refresh call sites are source-bound and fail closed through their existing safe assertion. Behavior tests retain native refresh, rejection, and resident-read routing coverage; Store request totals remain the canonical fallback observer.",
+      "id": "tile-refresh-and-manager-routing",
+      "manifest-entries": [
+        "BR1-PS-TILE-BRIDGE-002",
+        "BR1-PS-DM-ROUTING-004"
+      ],
+      "metrics-source": "source-bound reverse callgraph and KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard"
+      ],
+      "status": "static-only"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreSessionStats.writePageClaimConflicts"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.activeControlWritePages",
+          "KisPageStoreSessionStats.activeCpuWritePages"
+        ],
+        "operation": [
+          "KisPageStoreSessionStats.writePageClaimChecks"
+        ],
+        "page": [
+          "KisPageMutationStatistics.generationsReserved"
+        ],
+        "peak": [
+          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+        ],
+        "terminal": [
+          "KisPageMutationStatistics.pagesSealed",
+          "KisPageMutationStatistics.pagesCancelled"
+        ]
+      },
+      "evidence": "Legacy and operation-wide backend reservations enter the canonical KisPageWriteAdmission owner. Store and mutation snapshots expose claim probes/conflicts, live claims, generations, pins, and terminal seal/cancel without a backend shadow census.",
+      "id": "backend-writer-admission",
+      "manifest-entries": [
+        "BR1-PS-BACKEND-ADMISSION-005"
+      ],
+      "metrics-source": "KisPageStoreSessionStats and KisPageMutationStatistics",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [
+          "KisPageStoreSessionStats.activeTransactions",
+          "KisPageStoreSessionStats.preparedPageProofs"
+        ],
+        "operation": [
+          "KisPageStoreSessionStats.committedTransactions"
+        ],
+        "page": [],
+        "peak": [],
+        "terminal": [
+          "KisPageStoreSessionStats.committedTransactions"
+        ]
+      },
+      "evidence": "Anonymous compatibility clients share a real PageStore transaction and RAII lease registry. Canonical Store snapshots expose transaction/proof lifetime and commits; cancellation and failure remain covered by behavior tests rather than a second backend transaction ledger.",
+      "id": "anonymous-compatibility-transactions",
+      "manifest-entries": [
+        "BR1-PS-BACKEND-ANON-006"
+      ],
+      "metrics-source": "KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "Iterator boundary registration, probing, and teardown share one backend registry mutex. Source-bound callers and fixed-view/live-write race tests cover the balanced lifetime without per-probe counter writes.",
+      "id": "iterator-compatibility-boundaries",
+      "manifest-entries": [
+        "BR1-PS-BACKEND-ITERATOR-007",
+        "BR1-PS-ITERATOR-BASE-012",
+        "BR1-PS-ACCESSOR-RANDOM-013"
+      ],
+      "metrics-source": "source-bound reverse callgraph and iterator behavior tests",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreIteratorFixedView"
+      ],
+      "status": "static-only"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreSessionStats.writePageClaimConflicts"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.activeControlWritePages",
+          "KisPageStoreSessionStats.activeCpuWritePages"
+        ],
+        "operation": [
+          "KisPageMutationStatistics.operationSessionsCreated",
+          "KisPageStoreSessionStats.writePageClaimChecks"
+        ],
+        "page": [
+          "KisPageMutationStatistics.generationsReserved",
+          "KisPageMutationStatistics.pagesSealed",
+          "KisPageMutationStatistics.pagesCancelled"
+        ],
+        "peak": [
+          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+        ],
+        "terminal": [
+          "KisPageMutationStatistics.pagesSealed",
+          "KisPageMutationStatistics.pagesCancelled"
+        ]
+      },
+      "evidence": "Native, generic, managed-range and legacy-adapter claims share KisPageWriteAdmission. Convergence batch 6 makes entry state enforce guard exclusion and retain alias input directly; the separate source set/index, parked pointer, guard/native flags and persistent transition are removed. Source-only entries allocate no cold slot; terminal source release stays outside the owner lock. Backend writable-page maps remain deleted; backing accounting includes retirement Debt and unique tiles3 payloads.",
+      "id": "store-write-sets-and-writer-maps",
+      "manifest-entries": [
+        "BR1-PS-SESSION-WRITESET-008",
+        "BR1-PS-STORE-WRITER-MAPS-009"
+      ],
+      "metrics-source": "KisPageMutationStatistics and KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisPageStoreReferenceTest::mutationWriteSetUsesInlineAndSparseIndexStorage",
+        "KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically",
+        "KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded",
+        "KisPageStoreCpuMutationTest::indexedWriteClaimsIgnoreUnrelatedRequests",
+        "KisPageStoreCpuMutationTest::cancelAndClaims"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageMetadataFootprint.Arena.rejectedBlockAttaches",
+          "KisPageMetadataFootprint.Arena.quarantinedSlots",
+          "KisPageMetadataFootprint.Arena.quarantinedBlocks"
+        ],
+        "live": [
+          "KisPageMetadataFootprint.Arena.allocatedBytes",
+          "KisPageMetadataFootprint.Arena.usedSlots",
+          "KisPageMetadataFootprint.Arena.freeSlots"
+        ],
+        "operation": [
+          "KisPageMetadataFootprint.Arena.releasedBytes",
+          "KisPageMetadataMetrics.metadataArenaGrowthBatches",
+          "KisPageMetadataMetrics.metadataArenaBlockCandidatesPrepared",
+          "KisPageMetadataMetrics.metadataArenaBlocksAttached",
+          "KisPageMetadataMetrics.metadataArenaGrowthConflicts",
+          "KisPageMetadataMetrics.metadataArenaGrowthFailures"
+        ],
+        "page": [
+          "KisPageMetadataFootprint.versionArena",
+          "KisPageMetadataFootprint.replicaArena",
+          "KisPageMetadataFootprint.overflowArena"
+        ],
+        "peak": [
+          "KisPageMetadataFootprint.Arena.highWaterSlots"
+        ],
+        "terminal": [
+          "KisShardSlotArena::close",
+          "KisShardSlotArena::drain"
+        ]
+      },
+      "evidence": "Each metadata shard owns lazy version, replica and overflow arenas. Authoritative records use typed generation-checked slots; demand is measured under the shard mutex, block candidates are allocated after unlock, page revision is revalidated before attach, and empty blocks detach through an intrusive batch for lock-external destruction.",
+      "id": "metadata-slot-arenas",
+      "manifest-entries": [
+        "BR1-PS-METADATA-ARENA-021"
+      ],
+      "metrics-source": "KisPageMetadataFootprint::Arena",
+      "representative-tests": [
+        "KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline",
+        "KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease",
+        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithinBudget"
+      ],
+      "status": "instrumented"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageMetadataMetrics.fullSnapshotExports",
+          "KisPageMetadataMetrics.rejectedTransitions",
+          "KisPageMetadataMetrics.rejectedPublicationInstalls",
+          "KisPageMetadataFootprint.Index.rejectedReservations"
+        ],
+        "live": [
+          "KisPageMetadataFootprint.versions",
+          "KisPageMetadataFootprint.replicas",
+          "KisPageMetadataFootprint.readLeases",
+          "KisPageMetadataFootprint.pendingLastUses",
+          "KisPageMetadataFootprint.Index.entries",
+          "KisPageMetadataFootprint.Index.outstandingReservations"
+        ],
+        "operation": [
+          "KisPageMetadataMetrics.localTransitionSequences",
+          "KisPageMetadataMetrics.fullSnapshotExports",
+          "KisPageMetadataFootprint.Index.reservationBatches"
+        ],
+        "page": [
+          "KisPageMetadataMetrics.localVersionInputs",
+          "KisPageMetadataMetrics.localVersionInstalls",
+          "KisPageMetadataMetrics.localVersionRemovals",
+          "KisPageMetadataFootprint.pageActivities",
+          "KisPageMetadataFootprint.metadataPageBytes",
+          "KisPageMetadataFootprint.metadataPageActivityBytes",
+          "KisPageMetadataFootprint.exactVersionIndex",
+          "KisPageMetadataFootprint.physicalSlotIndex"
+        ],
+        "peak": [
+          "KisPageMetadataMetrics.maximumHistorySliceVersionInputs",
+          "KisPageMetadataFootprint.Index.highWaterEntries",
+          "KisPageMetadataFootprint.Index.capacity"
+        ],
+        "terminal": [
+          "KisPageMetadataMetrics.installedPublicationPages",
+          "KisPageMetadataMetrics.installedMutationPages",
+          "KisShardSlotIndex::eraseExact",
+          "KisShardSlotIndex::cancelReservation"
+        ]
+      },
+      "evidence": "KisPageMetadataCoordinator stores a 96-byte compact page directory, sparse slot-referenced activity records, compact version/replica records and overflow nodes as authority. It owns one exact-version and one physical-slot index per shard, projects touched records through the reference state machine, and reconstructs full snapshots only at diagnostic or boundary APIs. Index insertion requires an explicit capacity token and page ordering is intrusive.",
+      "id": "metadata-compact-records",
+      "manifest-entries": [
+        "BR1-PS-METADATA-RECORDS-020"
+      ],
+      "metrics-source": "KisPageMetadataMetrics and KisPageMetadataFootprint",
+      "representative-tests": [
+        "KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip",
+        "KisPageStoreReferenceTest::metadataShardSlotIndexReservations",
+        "KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership",
+        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::indexedMutationTransitions",
+        "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [
+          "KisPageStoreSessionStats.pendingRequests",
+          "KisPageStoreSessionStats.activeReadLeases",
+          "KisPageStoreSessionStats.pendingLastUses"
+        ],
+        "operation": [
+          "KisPageStoreSessionStats.readRequestsCreated",
+          "KisPageStoreReadScopeStatistics.capturedReadViewsCreated"
+        ],
+        "page": [],
+        "peak": [],
+        "terminal": [
+          "KisPageStoreReadScopeStatistics.capturedReadViewReleases"
+        ]
+      },
+      "evidence": "KisPageReadCoordinator is the sole owner of generic read requests, active read leases, pending last-use records and captured-view release accounting. Both generic and native superseded overlays use historical collection; cancellation and failed read resolution also trigger it. No Store callback owns a separate superseded-prepared cleanup protocol.",
+      "id": "read-coordinator",
+      "manifest-entries": [
+        "BR1-PS-STORE-READ-018"
+      ],
+      "metrics-source": "KisPageStoreSessionStats and KisPageStoreReadScopeStatistics",
+      "representative-tests": [
+        "KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFacade",
+        "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges",
+        "KisPageStoreCpuMutationTest::supersededOverlayUsesHistoricalLifetime",
+        "KisPageStoreResidentReadTest::concurrentCommitAndRead"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStorePublicationStatistics.rootRebases",
+          "KisPageStorePublicationStatistics.metadataRepreparations",
+          "KisPageStorePublicationStatistics.restoreMetadataRepreparations"
+        ],
+        "live": [
+          "KisPageStorePublicationStatistics.activeCommitPreparations",
+          "KisPageStoreSessionStats.preparedPageProofs",
+          "KisPageStoreSessionStats.preparedSurfaceChanges",
+          "KisPageStoreSessionStats.stagedPageRemovals"
+        ],
+        "operation": [
+          "KisPageStorePublicationStatistics.commitCandidates",
+          "KisPageStorePublicationStatistics.preparedMutationCommits",
+          "KisPageStorePublicationStatistics.restoreCandidates"
+        ],
+        "page": [
+          "KisPageStorePublicationStatistics.descriptorInstallations"
+        ],
+        "peak": [
+          "KisPageStorePublicationStatistics.metadataCleanupPeakPendingCandidates",
+          "KisPageStorePublicationStatistics.metadataCleanupPeakPendingUnits"
+        ],
+        "terminal": [
+          "KisPageStorePublicationStatistics.installedMutationCommits",
+          "KisPageStorePublicationStatistics.cancelledMutationCommits",
+          "KisPageStoreSessionStats.committedTransactions"
+        ]
+      },
+      "evidence": "KisPagePublicationCoordinator owns one per-transaction staged publication state and a move-only KisPreparedMutationCommit aggregating metadata/epoch/capacity and contiguous proof/descriptor/completion inputs. Publication statistics expose prepare/install/cancel, retry, live preparation, descriptor and cleanup outcomes.",
+      "id": "publication-coordinator",
+      "manifest-entries": [
+        "BR1-PS-STORE-PUBLICATION-019"
+      ],
+      "metrics-source": "KisPageStorePublicationStatistics and KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication",
+        "KisPageStoreCpuMutationTest::restoreProtectsSourceAndRevalidatesLease",
+        "KisPageStoreCpuMutationTest::capturedOverlayDefaultIdentitySurvivesAbortAndRestore"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreSessionStats.defaultPreparationWaits",
+          "KisPageStoreSessionStats.defaultReadCacheOversizeBypasses"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.cachedDefaultReadBuffers",
+          "KisPageStoreSessionStats.liveDefaultReadBytes",
+          "KisPageStoreSessionStats.activeDefaultPreparations"
+        ],
+        "operation": [
+          "KisPageStoreSessionStats.defaultMaterializationRequests"
+        ],
+        "page": [
+          "KisPageStoreSessionStats.defaultReadBuffersCreated"
+        ],
+        "peak": [
+          "KisPageStoreSessionStats.peakDefaultPreparations"
+        ],
+        "terminal": [
+          "KisPageStoreSessionStats.defaultReadInitializedBytes",
+          "KisPageStoreSessionStats.defaultReadCacheEvictions"
+        ]
+      },
+      "evidence": "KisPageDefaultStorage owns the bounded 64-entry/8 MiB immutable-read cache and the 64-entry materialization admission set. Session snapshots expose cache bytes, eviction/oversize terminals, active/peak preparations and admission waits; active preparations participate in close eligibility.",
+      "id": "default-storage",
+      "manifest-entries": [
+        "BR1-PS-STORE-DEFAULT-010"
+      ],
+      "metrics-source": "KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisPageStoreResidentReadTest::defaultMaterializationAdmissionIsBounded",
+        "KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded",
+        "KisTiledDataManagerTest::testPageStoreDefaultLifecycleDoesNotMaterialize",
+        "KisPageStoreCpuMutationTest::virtualDefaultOnlyAllocatesTarget"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreReadScopeStatistics.foregroundHistoricalGcPagesVisited"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.pendingHistoricalPages",
+          "KisPageStoreSessionStats.deferredHistoricalPages",
+          "KisPageStoreSessionStats.activeHistoryScans"
+        ],
+        "operation": [
+          "KisPageStoreReadScopeStatistics.historyReachabilityRefreshes"
+        ],
+        "page": [
+          "KisPageStoreReadScopeStatistics.historicalGcPagesVisited",
+          "KisPageStoreReadScopeStatistics.historicalGcVersionsVisited",
+          "KisPageStoreReadScopeStatistics.historyReachabilityRootsVisited"
+        ],
+        "peak": [
+          "KisPageStoreReadScopeStatistics.maximumHistoryPagesPerPass",
+          "KisPageStoreReadScopeStatistics.maximumHistoryVersionsPerPass"
+        ],
+        "terminal": [
+          "KisPageStoreReadScopeStatistics.capturedReadViewReleases"
+        ]
+      },
+      "evidence": "History scanning publishes operation/page/live/peak/fallback diagnostics without delegating root reachability or candidate selection to the physical retirement service.",
+      "id": "history-collection",
+      "manifest-entries": [
+        "BR1-PS-STORE-HISTORY-011"
+      ],
+      "metrics-source": "KisPageStoreReadScopeStatistics and KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget",
+        "KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreSessionStats.retirementRetryRequeues"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.pendingRetiredReplicas",
+          "KisPageStoreSessionStats.activeRetirementReplicas",
+          "KisPageStoreSessionStats.pendingRetiredBytes"
+        ],
+        "operation": [
+          "KisPageStoreSessionStats.backgroundRetirementPasses",
+          "KisPageStoreSessionStats.retirementIdleWaits"
+        ],
+        "page": [],
+        "peak": [
+          "KisPageStoreSessionStats.maximumReplicasPerRetirementPass",
+          "KisPageStoreSessionStats.peakRetiredReplicas",
+          "KisPageStoreSessionStats.peakRetiredBytes"
+        ],
+        "terminal": [
+          "KisPageStoreSessionStats.retirementCloseDrainedReplicas"
+        ]
+      },
+      "evidence": "KisPageRetirementQueue is the sole owner of detached physical debt. Session snapshots expose live/active debt, the 32-replica worker budget, peaks, retry requeues, idle waits and close-drain terminals; provider work remains outside both owner and queue locks.",
+      "id": "retirement-queue",
+      "manifest-entries": [
+        "BR1-PS-STORE-RETIREMENT-017"
+      ],
+      "metrics-source": "KisPageStoreSessionStats",
+      "representative-tests": [
+        "KisPageStoreCpuMutationTest::rejectedRetirementsPreserveDebtAndBudget",
+        "KisPageStoreCpuMutationTest::firstRetirementRunsOffThreadAndCloseDrains",
+        "KisPageStoreCpuMutationTest::blockedRetirementDoesNotBlockPublication",
+        "KisPageStoreCpuMutationTest::closeRetriesDetachedReplicas",
+        "KisPageStoreCpuMutationTest::closePollsDetachedRetirement"
+      ],
+      "status": "instrumented"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageStoreDiagnosticMetric intervals for legacy pixel-operation phases"
+        ],
+        "live": [],
+        "operation": [
+          "KisPageStoreDiagnosticPhase.PainterBitBltPrepare",
+          "KisPageStoreDiagnosticPhase.PainterBitBltFinish"
+        ],
+        "page": [
+          "KisPageStoreDiagnosticMetric.workItems"
+        ],
+        "peak": [],
+        "terminal": [
+          "KisPageStoreDiagnosticPhase.PainterBitBltFinish"
+        ]
+      },
+      "evidence": "The operation recorder reports painter prepare/source/composite/finish intervals and work items without adding a hot-path global counter.",
+      "id": "painter-operation-adapter",
+      "manifest-entries": [
+        "BR1-PS-PAINTER-OP-014"
+      ],
+      "metrics-source": "KisPageStoreDiagnosticRecorder",
+      "representative-tests": [
+        "KisPainterTest::testPageStoreBitBltWriteOperation"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [
+          "KisPageMutationStatistics.pagesCancelled"
+        ],
+        "live": [
+          "KisPageStoreSessionStats.activeCpuWritePages"
+        ],
+        "operation": [
+          "KisPageMutationStatistics.writablePinsAcquired"
+        ],
+        "page": [
+          "KisPageMutationStatistics.generationsReserved"
+        ],
+        "peak": [
+          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+        ],
+        "terminal": [
+          "KisPageMutationStatistics.writablePinsReleased"
+        ]
+      },
+      "evidence": "The retired count-authorized tryAcquireExclusiveWrite API is gone. Fresh native writes use one move-only KisCpuWriteBindingReservation; the graph records its production and test callers, while physical allocation ownership remains split until provider handoff.",
+      "id": "physical-exclusive-gate",
+      "manifest-entries": [
+        "BR1-PS-PHYSICAL-GATE-015"
+      ],
+      "metrics-source": "KisPageMutationStatistics, KisPageStoreSessionStats and reverse-callgraph.json physical-exclusive-gate",
+      "representative-tests": [
+        "KisPageStorePhysicalClaimTest::parkedWriterReservation",
+        "KisPageStorePhysicalClaimTest::parkedWriterConcurrentConsumers",
+        "KisPageStorePhysicalClaimTest::sourceConsumersRespectWriter"
+      ],
+      "status": "existing"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "The BR3 Vulkan provider remains fail-closed and has no production runtime path in BR1.",
+      "id": "vulkan-provider",
+      "manifest-entries": [
+        "BR1-PS-VULKAN-PROVIDER-016"
+      ],
+      "metrics-source": "none until BR3",
+      "representative-tests": [
+        "KisVulkanFoundationContractsTest::pageProviderFailsClosedBeforeBr3"
+      ],
+      "status": "deferred"
+    }
+  ],
+  "milestone": "BR1-R3-M5B",
+  "schema": 1
+}

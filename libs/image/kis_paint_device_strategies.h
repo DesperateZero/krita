@@ -11,6 +11,65 @@
 #include "kis_wrapped_hline_iterator.h"
 #include "kis_wrapped_vline_iterator.h"
 #include "kis_wrapped_random_accessor.h"
+#include <limits>
+
+// Coordinate decoration only. Native pixel ownership stays in the operation
+// cursor; this adapter never acquires a compatibility tile or retains a pointer.
+class KisOperationMappedAccessor final : public KisPixelWriteCursor
+{
+public:
+    KisOperationMappedAccessor(KisPixelWriteCursor *cursor, QPoint offset,
+                               QRect wrap, WrapAroundAxis axis)
+        : m_cursor(cursor), m_offset(offset), m_wrap(wrap), m_axis(axis) {}
+    qint64 mapX(qint32 x) const {
+        qint64 value = x;
+        if (!m_wrap.isEmpty() && m_axis != WRAPAROUND_VERTICAL) {
+            value = (value - m_wrap.x()) % m_wrap.width(); if (value < 0) value += m_wrap.width();
+        }
+        return value - m_offset.x();
+    }
+    qint64 mapY(qint32 y) const {
+        qint64 value = y;
+        if (!m_wrap.isEmpty() && m_axis != WRAPAROUND_HORIZONTAL) {
+            value = (value - m_wrap.y()) % m_wrap.height(); if (value < 0) value += m_wrap.height();
+        }
+        return value - m_offset.y();
+    }
+    static bool fits(qint64 value) {
+        return value >= std::numeric_limits<qint32>::min() && value <= std::numeric_limits<qint32>::max();
+    }
+    bool isValid() const { return !m_failed; }
+    void moveTo(qint32 x, qint32 y) override {
+        m_position = {x,y};
+        const auto localX = mapX(x), localY = mapY(y);
+        if (m_failed || !fits(localX) || !fits(localY)) { m_failed = true; return; }
+        m_cursor->moveTo(qint32(localX), qint32(localY));
+    }
+    quint8 *rawData() override { return m_failed ? nullptr : m_cursor->rawData(); }
+    qint32 numContiguousColumns(qint32 x) const override {
+        if (!fits(mapX(x))) return 0;
+        const auto n = m_cursor->numContiguousColumns(qint32(mapX(x)));
+        return m_wrap.isEmpty() || m_axis == WRAPAROUND_VERTICAL ? n :
+            qint32(qMin<qint64>(n, qint64(m_wrap.right()) + 1 - (mapX(x) + m_offset.x())));
+    }
+    qint32 numContiguousRows(qint32 y) const override {
+        if (!fits(mapY(y))) return 0;
+        const auto n = m_cursor->numContiguousRows(qint32(mapY(y)));
+        return m_wrap.isEmpty() || m_axis == WRAPAROUND_HORIZONTAL ? n :
+            qint32(qMin<qint64>(n, qint64(m_wrap.bottom()) + 1 - (mapY(y) + m_offset.y())));
+    }
+    qint32 rowStride(qint32 x, qint32 y) const override {
+        return fits(mapX(x)) && fits(mapY(y)) ? m_cursor->rowStride(qint32(mapX(x)), qint32(mapY(y))) : 0;
+    }
+    qint32 x() const override { return m_position.x(); }
+    qint32 y() const override { return m_position.y(); }
+private:
+    KisPixelWriteCursor *m_cursor;
+    QPoint m_offset, m_position;
+    QRect m_wrap;
+    WrapAroundAxis m_axis;
+    bool m_failed = false;
+};
 
 
 class KisPaintDevice::Private::KisPaintDeviceStrategy
@@ -103,6 +162,10 @@ public:
         return new KisRandomAccessor2(m_d->dataManager().data(), m_d->x(), m_d->y(), false, m_d->cacheInvalidator());
     }
 
+    virtual bool applyPixelOperation(const QRect &rect, const KisPageStorePixelOperation &operation) {
+        return applyPixelOperationImpl({rect}, operation, {});
+    }
+
     virtual void fastBitBlt(KisPaintDeviceSP src, const QRect &rect) {
         Q_ASSERT(m_device->fastBitBltPossible(src));
         fastBitBltImpl(src->dataManager(), rect);
@@ -148,6 +211,46 @@ public:
         m_d->cache()->invalidate();
     }
 protected:
+    bool applyPixelOperationImpl(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
+                                 const QRect &wrap) {
+        const QPoint offset(m_d->x(), m_d->y());
+        QVector<QRect> localRects;
+        for (const auto &rect : rects) if (!rect.isEmpty()) {
+            const qint64 x = qint64(rect.x()) - offset.x(), y = qint64(rect.y()) - offset.y();
+            if (!KisOperationMappedAccessor::fits(x) || !KisOperationMappedAccessor::fits(y) ||
+                !KisOperationMappedAccessor::fits(x + rect.width() - 1) ||
+                !KisOperationMappedAccessor::fits(y + rect.height() - 1)) return false;
+            localRects.append(QRect(qint32(x), qint32(y), rect.width(), rect.height()));
+        }
+        // Retain the selected animation/LOD manager for the synchronous
+        // callback and cache update. Device metadata must not be mutated here.
+        auto manager = m_d->dataManager();
+        QString error;
+        const auto result = manager->writePageStoreOperation(localRects, [&](KisPixelWriteCursor *cursor) {
+            KisOperationMappedAccessor mapped(cursor, offset, wrap, m_device->defaultBounds()->wrapAroundModeAxis());
+            const bool accepted = operation(&mapped);
+            return accepted && mapped.isValid();
+        }, &error);
+        using Result = KisPageStoreWriteOperationResult;
+        if (result == Result::Succeeded) return true;
+        if (result == Result::Failed) { qWarning() << "PageStore pixel operation failed:" << error; return false; }
+        // Borrowed/unsupported is decided before callback execution. Keep the
+        // legacy visibility contract; never execute this branch after failure.
+        auto cursor = createRandomAccessorNG();
+        class LegacyDestination final : public KisPixelWriteCursor {
+        public:
+            explicit LegacyDestination(KisRandomAccessorNG *cursor) : cursor(cursor) {}
+            void moveTo(qint32 x, qint32 y) override { cursor->moveTo(x,y); }
+            quint8 *rawData() override { return cursor->rawData(); }
+            qint32 numContiguousColumns(qint32 x) const override { return cursor->numContiguousColumns(x); }
+            qint32 numContiguousRows(qint32 y) const override { return cursor->numContiguousRows(y); }
+            qint32 rowStride(qint32 x, qint32 y) const override { return cursor->rowStride(x,y); }
+            qint32 x() const override { return cursor->x(); }
+            qint32 y() const override { return cursor->y(); }
+            KisRandomAccessorNG *cursor;
+        } destination(cursor.data());
+        return operation(&destination);
+    }
     virtual void readBytesImpl(quint8 *data, const QRect &rect, int dataRowStride) const {
         m_d->dataManager()->readBytes(data,
                                       rect.x() - m_d->x(),
@@ -338,6 +441,11 @@ public:
         return new KisWrappedRandomAccessor(
             m_d->dataManager().data(), m_d->x(), m_d->y(), false, m_d->cacheInvalidator(), m_wrapRect,
             m_device->defaultBounds()->wrapAroundModeAxis());
+    }
+
+    bool applyPixelOperation(const QRect &rect, const KisPageStorePixelOperation &operation) override {
+        const KisWrappedRect parts(rect, m_wrapRect, m_device->defaultBounds()->wrapAroundModeAxis());
+        return applyPixelOperationImpl(parts, operation, m_wrapRect);
     }
 
     void fastBitBltImpl(KisDataManagerSP srcDataManager, const QRect &rect) override {

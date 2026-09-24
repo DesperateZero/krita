@@ -11,6 +11,16 @@ else()
     set (HAVE_FAILING_CMAKE FALSE)
 endif()
 
+# Standalone PageStore reference helpers are not part of kritaimage.
+add_library(kritapagestoretestsupport STATIC
+    pagestore/KisPageStoreCpuAccessSession.cpp
+    pagestore/KisPageStoreRandomAccessor.cpp
+    pagestore/KisPageStoreCpuSurfaceOps.cpp
+    pagestore/KisPageStoreCheckpoint.cpp)
+target_link_libraries(kritapagestoretestsupport PUBLIC kritaimage)
+target_include_directories(kritapagestoretestsupport PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/pagestore)
+
 set(KisRandomGenerator2DDemoSources KisRandomGenerator2DDemo.cpp kimageframe.cpp)
 ki18n_wrap_ui(KisRandomGenerator2DDemoSources KisRandomGenerator2DDemo.ui)
 add_executable(KisRandomGenerator2DDemo ${KisRandomGenerator2DDemoSources})
@@ -135,6 +145,36 @@ kis_add_tests(
 
 kis_add_test(
     KisPageStoreFoundationTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk
+    )
+
+kis_add_test(
+    KisCompletionRegistryTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk
+    )
+
+kis_add_test(
+    KisPageStoreReferenceTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk kritapagestoretestsupport
+    )
+
+kis_add_test(
+    KisPageStoreReadBaselineTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk kritapagestoretestsupport
+    )
+
+kis_add_test(
+    KisPageStoreResidentReadTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk kritapagestoretestsupport
+    )
+
+kis_add_test(
+    KisPageStoreCpuMutationTest.cpp
+    LINK_LIBRARIES kritaimage kritatestsdk kritapagestoretestsupport
+    )
+
+kis_add_test(
+    KisPageStorePhysicalClaimTest.cpp
     LINK_LIBRARIES kritaimage kritatestsdk
     )
 

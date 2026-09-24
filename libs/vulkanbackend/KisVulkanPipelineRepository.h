@@ -9,6 +9,7 @@
 
 #include <QByteArray>
 #include <QScopedPointer>
+#include <QSharedPointer>
 #include <QString>
 #include <QStringList>
 
@@ -76,5 +77,17 @@ private:
     class Private;
     QScopedPointer<Private> d;
 };
+
+inline bool kisConfigureVulkanPipelineExecutor(
+    quint64 deviceGeneration,
+    const QSharedPointer<KisVulkanPipelineRepository> &pipelines,
+    quint64 &configuredGeneration,
+    QSharedPointer<KisVulkanPipelineRepository> &configuredPipelines)
+{
+    if (configuredGeneration != 0 || deviceGeneration == 0 || !pipelines) return false;
+    configuredGeneration = deviceGeneration;
+    configuredPipelines = pipelines;
+    return true;
+}
 
 #endif // KIS_VULKAN_PIPELINE_REPOSITORY_H

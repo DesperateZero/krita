@@ -150,6 +150,16 @@ vulkan-architecture:
   script:
     - bash build-tools/ci-scripts/check-vulkan-architecture.sh
 
+pagestore-architecture:
+  stage: build
+  image: invent-registry.kde.org/sysadmin/ci-images/suse-qt69:latest
+  tags:
+    - Linux
+  extends:
+    - .ci-always-job-mixin
+  script:
+    - python3 build-tools/ci-scripts/check-pagestore-architecture.py
+
 
 include:
   - local: /build-tools/ci-scripts/linux.yml

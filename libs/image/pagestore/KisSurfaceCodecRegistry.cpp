@@ -26,11 +26,6 @@ KisSurfaceCodecRegistry::KisSurfaceCodecRegistry()
 
 KisSurfaceCodecRegistry::~KisSurfaceCodecRegistry() = default;
 
-bool KisSurfaceCodecRegistry::isOperational() const
-{
-    return true;
-}
-
 bool KisSurfaceCodecRegistry::registerCodec(const QSharedPointer<KisSurfaceCodec> &codec)
 {
     if (!codec || codec->id().isEmpty() || codec->version() == 0) {
@@ -62,10 +57,4 @@ QSharedPointer<const KisSurfaceCodec> KisSurfaceCodecRegistry::codecFor(
         match = codec;
     }
     return match;
-}
-
-int KisSurfaceCodecRegistry::codecCount() const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->codecs.size();
 }

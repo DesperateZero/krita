@@ -257,7 +257,7 @@ int main(int argc, char *argv[]) \
     QStandardPaths::setTestModeEnabled(true); \
     KisSynchronizedConnectionBase::setAutoModeForUnittestsEnabled(true); \
     qputenv("EXTRA_RESOURCE_DIRS", QByteArray(KRITA_RESOURCE_DIRS_FOR_TESTS)); \
-    qputenv("KRITA_PLUGIN_PATH", QByteArray(KRITA_PLUGINS_DIR_FOR_TESTS)); \
+    configureKritaTestPluginPath(); \
     QApplication app(argc, argv); \
     app.setAttribute(Qt::AA_Use96Dpi, true); \
     QTEST_DISABLE_KEYPAD_NAVIGATION \
@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) \
     QLocale::setDefault(QLocale(QLocale::English, QLocale::UnitedStates)); \
     qputenv("QT_LOGGING_RULES", ""); \
     qputenv("EXTRA_RESOURCE_DIRS", QByteArray(KRITA_RESOURCE_DIRS_FOR_TESTS)); \
-    qputenv("KRITA_PLUGIN_PATH", QByteArray(KRITA_PLUGINS_DIR_FOR_TESTS)); \
+    configureKritaTestPluginPath(); \
     KisSynchronizedConnectionBase::setAutoModeForUnittestsEnabled(true); \
     QStandardPaths::setTestModeEnabled(true); \
     QApplication app(argc, argv); \

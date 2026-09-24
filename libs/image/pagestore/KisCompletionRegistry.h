@@ -8,8 +8,6 @@
 #define KIS_COMPLETION_REGISTRY_H
 
 #include <QScopedPointer>
-#include <QString>
-
 #include "KisPageStoreTypes.h"
 
 enum class KisCompletionStatus : quint8 {
@@ -20,23 +18,52 @@ enum class KisCompletionStatus : quint8 {
     Cancelled
 };
 
-struct KRITAIMAGE_EXPORT KisCompletionSourceDescriptor
+/** Cold diagnostic snapshot under the registry lock, not a hot-path counter. */
+struct KRITAIMAGE_EXPORT KisCompletionSourceStatistics
 {
-    QString name;
-    bool gpuTimeline = false;
-    bool cpuJob = false;
-    bool ioOperation = false;
+    bool knownSource = false;
+    quint64 allocatedTickets = 0;
+    quint64 pendingTickets = 0;
+    quint64 terminalTickets = 0;
+    // Actual lookup records, not bytes or the number of logical tickets.
+    quint64 storageRecords = 0;
+};
+
+/** Terminal completion evidence minted only by KisCompletionRegistry. */
+class KRITAIMAGE_EXPORT KisVerifiedCompletion
+{
+public:
+    KisVerifiedCompletion() = default;
 
     bool isValid() const
     {
-        const int kindCount = int(gpuTimeline) + int(cpuJob) + int(ioOperation);
-        return !name.isEmpty() && kindCount == 1;
+        return m_ticket.isValid() &&
+               (m_status == KisCompletionStatus::Succeeded ||
+                m_status == KisCompletionStatus::Failed ||
+                m_status == KisCompletionStatus::Cancelled);
     }
+    KisCompletionTicket ticket() const { return m_ticket; }
+    KisCompletionStatus status() const { return m_status; }
+    bool succeeded() const { return m_status == KisCompletionStatus::Succeeded; }
+
+private:
+    KisVerifiedCompletion(const KisCompletionTicket &ticket,
+                          KisCompletionStatus status)
+        : m_ticket(ticket)
+        , m_status(status)
+    {
+    }
+
+    KisCompletionTicket m_ticket;
+    KisCompletionStatus m_status = KisCompletionStatus::Unknown;
+
+    friend class KisCompletionRegistry;
 };
 
 /**
- * Bridge for GPU timeline, CPU job and I/O completions. Ticket values are
- * meaningful only when registered here and can never expose native fences.
+ * Bridge for GPU timeline, CPU job, I/O and host-logical completions. Ticket
+ * values are qualified by this registry instance and can never expose native
+ * fences or alias an equally numbered ticket from another session registry.
  */
 class KRITAIMAGE_EXPORT KisCompletionRegistry
 {
@@ -45,13 +72,13 @@ public:
     ~KisCompletionRegistry();
 
     bool isOperational() const;
-    quint64 registerSource(const KisCompletionSourceDescriptor &descriptor);
+    quint64 registerSource(KisCompletionDomain domain);
     KisCompletionTicket allocatePending(quint64 source);
     bool complete(const KisCompletionTicket &ticket, KisCompletionStatus status);
     KisCompletionStatus status(const KisCompletionTicket &ticket) const;
+    KisVerifiedCompletion verifyTerminal(const KisCompletionTicket &ticket) const;
 
-    bool isKnownSource(quint64 source) const;
-    quint64 latestAllocatedValue(quint64 source) const;
+    KisCompletionSourceStatistics sourceStatistics(quint64 source) const;
 
 private:
     class Private;

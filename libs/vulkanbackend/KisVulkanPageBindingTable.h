@@ -30,6 +30,7 @@ struct KisVulkanPageBinding
 struct KisVulkanPageBindingSnapshot
 {
     quint64 providerId = 0;
+    quint64 providerEpoch = 0;
     quint64 operationId = 0;
     quint64 tableGeneration = 0;
     QVector<KisVulkanPageBinding> bindings;
@@ -49,8 +50,9 @@ public:
     KisVulkanPageBindingTable();
     ~KisVulkanPageBindingTable();
 
-    bool configure(quint64 providerId);
+    bool configure(quint64 providerId, quint64 providerEpoch);
     bool isOperational() const;
+    bool matchesProvider(quint64 providerId, quint64 providerEpoch) const;
     bool publishCompleted(const KisVulkanPageBindingSnapshot &snapshot,
                           const KisCompletionTicket &completedTicket,
                           QString *error = nullptr);

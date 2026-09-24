@@ -9,6 +9,8 @@
 #include "config-memory-leak-tracker.h"
 
 #include <QGlobalStatic>
+#include <limits>
+#include <utility>
 
 #include "kis_tile_data_store.h"
 #include "kis_tile_data.h"
@@ -171,14 +173,37 @@ KisTileData *KisTileDataStore::allocTileData(qint32 pixelSize, const quint8 *def
     return td;
 }
 
+KisTileData *KisTileDataStore::createTileDataFromRows(
+    qint32 pixelSize, const quint8 *source, qsizetype sourceStride, qsizetype sourceBytes)
+{
+    if (!source || pixelSize <= 0 ||
+        pixelSize > std::numeric_limits<qint32>::max() / (KisTileData::WIDTH * KisTileData::HEIGHT)) return nullptr;
+    const qsizetype rowBytes = qsizetype(KisTileData::WIDTH) * pixelSize;
+    if (sourceStride < rowBytes || sourceStride >
+        (std::numeric_limits<qsizetype>::max() - rowBytes) / (KisTileData::HEIGHT - 1) ||
+        sourceBytes < (KisTileData::HEIGHT - 1) * sourceStride + rowBytes) return nullptr;
+    const qsizetype required = (KisTileData::HEIGHT - 1) * sourceStride + rowBytes;
+    if (quintptr(source) > std::numeric_limits<quintptr>::max() - quintptr(required - 1)) return nullptr;
+    KisTileData *td = new KisTileData(pixelSize, source, sourceStride, this);
+    registerTileData(td);
+    return td;
+}
+
 KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs)
+{
+    return duplicateTileData(rhs, nullptr);
+}
+
+KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *precloneHit)
 {
     KisTileData *td = 0;
 
     if (rhs->m_clonesStack.pop(td)) {
+        if (precloneHit) *precloneHit = true;
         DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
         DEBUG_COUNT_PRECLONE_HIT(rhs);
     } else {
+        if (precloneHit) *precloneHit = false;
         rhs->blockSwapping();
         td = new KisTileData(*rhs);
         rhs->unblockSwapping();
@@ -186,6 +211,24 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs)
         DEBUG_COUNT_PRECLONE_MISS(rhs);
     }
 
+    registerTileData(td);
+    return td;
+}
+
+KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit)
+{
+    Q_ASSERT(rhs && rhs->data());
+    KisTileData *td = nullptr;
+    if (rhs->m_clonesStack.pop(td)) {
+        if (precloneHit) *precloneHit = true;
+        DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
+        DEBUG_COUNT_PRECLONE_HIT(rhs);
+    } else {
+        if (precloneHit) *precloneHit = false;
+        td = new KisTileData(*rhs);
+        DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
+        DEBUG_COUNT_PRECLONE_MISS(rhs);
+    }
     registerTileData(td);
     return td;
 }
@@ -208,7 +251,36 @@ void KisTileDataStore::freeTileData(KisTileData *td)
     td->m_swapLock.unlock();
     m_iteratorLock.unlock();
 
+    {
+        QMutexLocker locker(&m_residencyObserverLock);
+        m_residencyObservers.remove(td);
+    }
+
     delete td;
+}
+
+bool KisTileDataStore::registerResidencyObserver(
+    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer)
+{
+    if (!td || !observer)
+        return false;
+    QMutexLocker locker(&m_residencyObserverLock);
+    auto &observers = m_residencyObservers[td];
+    if (!observers.contains(observer))
+        observers.append(observer);
+    return true;
+}
+
+void KisTileDataStore::unregisterResidencyObserver(
+    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer)
+{
+    QMutexLocker locker(&m_residencyObserverLock);
+    auto existing = m_residencyObservers.find(td);
+    if (existing == m_residencyObservers.end())
+        return;
+    existing->removeAll(observer);
+    if (existing->isEmpty())
+        m_residencyObservers.erase(existing);
 }
 
 void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
@@ -240,16 +312,28 @@ void KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
          * m_listLock.
          */
 
+        bool loaded = false;
         if (!td->data()) {
             td->m_swapLock.lockForWrite();
 
             m_swappedStore.swapInTileData(td);
             registerTileDataImp(td);
+            loaded = true;
 
             td->m_swapLock.unlock();
         }
 
         m_iteratorLock.unlock();
+
+        if (loaded) {
+            QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+            {
+                QMutexLocker locker(&m_residencyObserverLock);
+                observers = m_residencyObservers.value(td);
+            }
+            for (const auto &observer : std::as_const(observers))
+                observer->residencyChanged(td, true);
+        }
 
         /**
          * <-- In theory, livelock is possible here...
@@ -275,6 +359,16 @@ bool KisTileDataStore::trySwapTileData(KisTileData *td)
         }
     }
     td->m_swapLock.unlock();
+
+    if (result) {
+        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+        {
+            QMutexLocker locker(&m_residencyObserverLock);
+            observers = m_residencyObservers.value(td);
+        }
+        for (const auto &observer : std::as_const(observers))
+            observer->residencyChanged(td, false);
+    }
 
     return result;
 }
@@ -341,10 +435,6 @@ void KisTileDataStore::debugSwapAll()
     }
 
     endIteration(iter);
-
-//    dbgKrita << "Number of tiles:" << numTiles();
-//    dbgKrita << "Tiles in memory:" << numTilesInMemory();
-//    m_swappedStore.debugStatistics();
 }
 
 void KisTileDataStore::debugClear()

@@ -38,14 +38,15 @@ public:
                                          const QRect &rc,
                                          qint32 offsetX, qint32 offsetY,
                                          bool writable,
-                                         KisIteratorCompleteListener *completeListener) {
+                                         KisIteratorCompleteListener *completeListener,
+                                         const QSharedPointer<const KisPageStoreIteratorReadScope> &scope) {
 
         return new KisVLineIterator2(dataManager,
                                      rc.x(), rc.y(),
                                      rc.height(),
                                      offsetX, offsetY,
                                      writable,
-                                     completeListener);
+                                     completeListener, scope);
     }
 
     inline void completeInitialization(QVector<IteratorTypeSP> *iterators,

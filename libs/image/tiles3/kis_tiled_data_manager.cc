@@ -9,6 +9,8 @@
 #include <QRect>
 #include <QVector>
 
+#include <utility>
+
 #include "kis_tile.h"
 #include "kis_tiled_data_manager.h"
 #include "kis_tile_data_wrapper.h"
@@ -20,6 +22,47 @@
 #include "kis_paint_device_writer.h"
 
 #include "kis_global.h"
+#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
+#include "pagestore/KisPageStoreDiagnostics_p.h"
+#include "pagestore/KisPageStoreIteratorReadScope_p.h"
+
+namespace {
+
+class ScopedPageStoreWriteBatch
+{
+public:
+    explicit ScopedPageStoreWriteBatch(
+        KisTiledDataManagerPageStoreBackend *backend)
+        : m_backend(backend && backend->isOperational() ? backend : nullptr)
+    {
+        if (!m_backend) return;
+        m_batch = m_backend->beginMutationBatch(&m_error);
+        KIS_SAFE_ASSERT_RECOVER_NOOP(m_batch);
+    }
+    bool isValid() const { return !m_backend || bool(m_batch); }
+    bool finish(bool succeeded = true)
+    {
+        return !m_backend ? succeeded : m_batch && (succeeded
+            ? m_batch->finish(&m_error) : m_batch->cancel());
+    }
+
+    bool replaceFullTile(qint32 column,
+                         qint32 row,
+                         KisTileData *tileData,
+                         bool sparseDefault)
+    {
+        return !m_backend ||
+            (m_batch && m_batch->replaceFullTile(
+                column, row, tileData, sparseDefault, &m_error));
+    }
+
+private:
+    KisTiledDataManagerPageStoreBackend *m_backend = nullptr;
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> m_batch;
+    QString m_error;
+};
+
+}
 
 
 /* The data area is divided into tiles each say 64x64 pixels (defined at compile time)
@@ -33,6 +76,7 @@
 KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
                                          const quint8 *defaultPixel)
 {
+    m_pageStoreBackend = nullptr;
     /* See comment in destructor for details */
     m_mementoManager = new KisMementoManager();
     m_hashTable = new KisTileHashTable(m_mementoManager);
@@ -40,6 +84,13 @@ KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
     m_pixelSize = pixelSize;
     m_defaultPixel = new quint8[m_pixelSize];
     setDefaultPixel(defaultPixel);
+
+    m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
+    QString pageStoreError;
+    KIS_SAFE_ASSERT_RECOVER_NOOP(
+        m_pageStoreBackend->configure(pixelSize, defaultPixel,
+                                      &pageStoreError));
+    m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
 }
 
 KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
@@ -61,8 +112,21 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
     /**
      * We won't call setDefaultTileData here, as defaultTileDatas
      * has already been made shared in m_hashTable(dm->m_hashTable)
-     */
+    */
     memcpy(m_defaultPixel, dm.m_defaultPixel, m_pixelSize);
+    m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
+    QString pageStoreError;
+    if (!dm.m_pageStoreBackend ||
+        !dm.m_pageStoreBackend->isOperational() ||
+        !m_pageStoreBackend->configureClone(
+            *dm.m_pageStoreBackend, &pageStoreError)) {
+        delete m_pageStoreBackend;
+        m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
+        KIS_SAFE_ASSERT_RECOVER_NOOP(
+            m_pageStoreBackend->configure(m_pixelSize, m_defaultPixel,
+                                          &pageStoreError));
+    }
+    m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
     recalculateExtent();
 }
 
@@ -76,15 +140,168 @@ KisTiledDataManager::~KisTiledDataManager()
      * Manager should be alive during  that destruction. We could  use shared
      * pointers instead, but they create too much overhead.
      */
+    m_mementoManager->setPageStoreBridge(nullptr);
     delete m_hashTable;
+    delete m_pageStoreBackend;
     delete m_mementoManager;
 
+    if (m_uniformClearTileData) {
+        m_uniformClearTileData->release();
+        m_uniformClearTileData = nullptr;
+    }
+
     delete[] m_defaultPixel;
+}
+
+KisTileSP KisTiledDataManager::getTile(qint32 col, qint32 row, bool writable)
+{
+    bool newTile = false;
+    KisTileSP tile = writable
+        ? m_hashTable->getTileLazy(col, row, newTile)
+        : m_hashTable->getReadOnlyTileLazy(col, row, newTile);
+    if (writable && newTile) {
+        m_extentManager.notifyTileAdded(col, row);
+    }
+    // A sparse miss already has immutable default backing; a writable miss
+    // remains an intent until pixels are exposed and needs no replica refresh.
+    attachPageStoreTile(tile, false, (!writable && !newTile) || (writable && newTile));
+    return tile;
+}
+
+KisTileSP KisTiledDataManager::getReadOnlyTileLazy(
+    qint32 col, qint32 row, bool &existingTile)
+{
+    KisTileSP tile = m_hashTable->getReadOnlyTileLazy(col, row, existingTile);
+    attachPageStoreTile(tile, false, !existingTile);
+    return tile;
+}
+
+KisTileSP KisTiledDataManager::getOldTile(
+    qint32 col, qint32 row, bool &existingTile)
+{
+    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational() ||
+        !m_pageStoreBackend->hasCurrentHistory()) {
+        KisTileSP tile = m_mementoManager->getCommittedTile(
+            col, row, existingTile);
+        return tile ? tile : getReadOnlyTileLazy(col, row, existingTile);
+    }
+    KisTileSP current =
+        m_hashTable->getReadOnlyTileLazy(col, row, existingTile);
+    existingTile = m_pageStoreBackend->pageAllocated(col, row, true);
+    KisTileSP oldTile = new KisTile(*current, col, row, nullptr);
+    attachPageStoreTile(oldTile, true, false);
+    return oldTile;
+}
+
+void KisTiledDataManager::attachPageStoreTile(
+    KisTileSP &tile, bool oldData, bool nativeReady)
+{
+    if (!tile || !m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return;
+    tile->setPageStoreBridge(m_pageStoreBackend, oldData);
+    if (nativeReady) tile->setPageStoreNativeReadReady();
+    else KIS_SAFE_ASSERT_RECOVER_NOOP(tile->refreshPageStoreData());
+}
+
+KisMementoSP KisTiledDataManager::getMemento()
+{
+    QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        return m_pageStoreBackend->beginHistory(m_defaultPixel, m_pixelSize);
+    }
+    KisMementoSP memento = m_mementoManager->getMemento();
+    memento->saveOldDefaultPixel(m_defaultPixel, m_pixelSize);
+    return memento;
+}
+
+void KisTiledDataManager::commit()
+{
+    QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        QString error;
+        KIS_SAFE_ASSERT_RECOVER(
+            m_pageStoreBackend->commitHistory(
+                m_defaultPixel, m_pixelSize, &error)) {
+            qWarning() << "PageStore history commit failed:" << error;
+        }
+        return;
+    }
+    KisMementoSP memento = m_mementoManager->currentMemento();
+    if (memento) memento->saveNewDefaultPixel(m_defaultPixel, m_pixelSize);
+    m_mementoManager->commit();
+}
+
+void KisTiledDataManager::rollback(KisMementoSP memento)
+{
+    commit();
+    QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        if (m_pageStoreBackend->rollback(memento)) {
+            if (memento->oldDefaultPixel() &&
+                std::memcmp(m_defaultPixel, memento->oldDefaultPixel(),
+                            m_pixelSize)) {
+                setDefaultPixelImpl(memento->oldDefaultPixel());
+            }
+            rebuildPageStoreIndex();
+        }
+        return;
+    }
+    m_mementoManager->rollback(m_hashTable, memento);
+    const quint8 *defaultPixel = memento->oldDefaultPixel();
+    if (std::memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
+        setDefaultPixelImpl(defaultPixel);
+    }
+    recalculateExtent();
+}
+
+void KisTiledDataManager::rollforward(KisMementoSP memento)
+{
+    commit();
+    QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        if (m_pageStoreBackend->rollforward(memento)) {
+            if (memento->newDefaultPixel() &&
+                std::memcmp(m_defaultPixel, memento->newDefaultPixel(),
+                            m_pixelSize)) {
+                setDefaultPixelImpl(memento->newDefaultPixel());
+            }
+            rebuildPageStoreIndex();
+        }
+        return;
+    }
+    m_mementoManager->rollforward(m_hashTable, memento);
+    const quint8 *defaultPixel = memento->newDefaultPixel();
+    if (std::memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
+        setDefaultPixelImpl(defaultPixel);
+    }
+    recalculateExtent();
+}
+
+bool KisTiledDataManager::hasCurrentMemento() const
+{
+    return m_pageStoreBackend && m_pageStoreBackend->isOperational()
+        ? m_pageStoreBackend->hasCurrentHistory()
+        : m_mementoManager->hasCurrentMemento();
+}
+
+void KisTiledDataManager::purgeHistory(KisMementoSP oldestMemento)
+{
+    QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        m_pageStoreBackend->purgeHistory(
+            oldestMemento, m_defaultPixel, m_pixelSize);
+    } else {
+        m_mementoManager->purgeHistory(oldestMemento);
+    }
 }
 
 void KisTiledDataManager::setDefaultPixel(const quint8 *defaultPixel)
 {
     QWriteLocker locker(&m_lock);
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        const QByteArray pixel(reinterpret_cast<const char *>(defaultPixel),
+                               m_pixelSize);
+        if (!m_pageStoreBackend->setDefaultPixel(pixel)) return;
+    }
     setDefaultPixelImpl(defaultPixel);
 }
 
@@ -135,16 +352,27 @@ bool KisTiledDataManager::read(QIODevice *stream)
     clear();
 
     QWriteLocker locker(&m_lock);
-    KisMementoSP nothing = m_mementoManager->getMemento();
+    const bool pageStoreHistory =
+        m_pageStoreBackend && m_pageStoreBackend->isOperational();
+    KisMementoSP nothing = pageStoreHistory
+        ? m_pageStoreBackend->beginHistory(m_defaultPixel, m_pixelSize)
+        : m_mementoManager->getMemento();
+    if (!nothing) return false;
 
     if (!stream) {
-        m_mementoManager->commit();
+        if (pageStoreHistory) m_pageStoreBackend->abortHistory();
+        else m_mementoManager->commit();
         return false;
     }
 
     const qint32 maxLineLength = 79; // Legacy magic
     QByteArray line = stream->readLine(maxLineLength);
     line = line.trimmed();
+    if (line.isEmpty()) {
+        if (pageStoreHistory) m_pageStoreBackend->abortHistory();
+        else m_mementoManager->commit();
+        return false;
+    }
 
     quint32 numTiles;
     qint32 tilesVersion = LEGACY_VERSION;
@@ -157,8 +385,11 @@ bool KisTiledDataManager::read(QIODevice *stream)
 
         tilesVersion = lineItems.takeFirst().toInt();
 
-        if(!processTilesHeader(stream, numTiles))
+        if(!processTilesHeader(stream, numTiles)) {
+            if (pageStoreHistory) m_pageStoreBackend->abortHistory();
+            else m_mementoManager->commit();
             return false;
+        }
     }
     else {
         numTiles = line.toUInt();
@@ -174,7 +405,18 @@ bool KisTiledDataManager::read(QIODevice *stream)
         }
     }
 
-    m_mementoManager->commit();
+    if (pageStoreHistory) {
+        if (!readSuccess ||
+            !m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize)) {
+            if (m_pageStoreBackend->hasCurrentHistory()) {
+                m_pageStoreBackend->abortHistory();
+            }
+            rebuildPageStoreIndex();
+            return false;
+        }
+    } else {
+        m_mementoManager->commit();
+    }
     return readSuccess;
 }
 
@@ -286,6 +528,14 @@ void KisTiledDataManager::purge(const QRect& area)
         tileData->unblockSwapping();
         tileData->deref();
     }
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        QVector<KisLogicalPageId> pages;
+        pages.reserve(tilesToDelete.size());
+        for (const KisTileSP &tile : std::as_const(tilesToDelete)) {
+            pages.append({tile->col(), tile->row()});
+        }
+        if (!m_pageStoreBackend->removePages(pages)) return;
+    }
     Q_FOREACH (KisTileSP tile, tilesToDelete) {
         if (m_hashTable->deleteTile(tile)) {
             m_extentManager.notifyTileRemoved(tile->col(), tile->row());
@@ -328,7 +578,20 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
     if (pixelBytesAreDefault) {
         clearRect &= m_extentManager.extent();
+        if (clearRect.isEmpty()) return;
     }
+
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        if (!KisTileHashTable::supportsCoordinates(xToCol(clearRect.left()), yToRow(clearRect.top())) ||
+            !KisTileHashTable::supportsCoordinates(xToCol(clearRect.right()), yToRow(clearRect.bottom()))) return;
+        QVector<KisLogicalPageId> changed;
+        if (m_pageStoreBackend->fillRect(clearRect,
+                QByteArray(reinterpret_cast<const char *>(clearPixel), pixelSize), nullptr, &changed))
+            refreshPageStorePages(changed);
+        return;
+    }
+
+    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
 
     qint32 firstColumn = xToCol(clearRect.left());
     qint32 lastColumn = xToCol(clearRect.right());
@@ -344,12 +607,32 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
     clearPixelData = duplicatePixel(maxRunLength, clearPixel);
 
     KisTileData *td = 0;
+    bool reusesUniformClearBacking = false;
     if (!pixelBytesAreDefault &&
         clearRect.width() >= KisTileData::WIDTH &&
         clearRect.height() >= KisTileData::HEIGHT) {
-
-        td = KisTileDataStore::instance()->createDefaultTileData(pixelSize, clearPixel);
-        td->acquire();
+        const QByteArray clearPixelBytes(
+            reinterpret_cast<const char *>(clearPixel), pixelSize);
+        {
+            QMutexLocker uniformLocker(&m_uniformClearMutex);
+            reusesUniformClearBacking = m_uniformClearTileData &&
+                m_uniformClearPixel == clearPixelBytes;
+            if (reusesUniformClearBacking) {
+                td = m_uniformClearTileData;
+            } else {
+                td = KisTileDataStore::instance()->createDefaultTileData(
+                    pixelSize, clearPixel);
+                if (m_uniformClearTileData) {
+                    m_uniformClearTileData->release();
+                }
+                m_uniformClearTileData = td;
+                m_uniformClearTileData->acquire();
+                m_uniformClearPixel = clearPixelBytes;
+            }
+            // Hold the selected backing independently of the cache. Another
+            // clear may replace the cache entry as soon as this lock drops.
+            td->acquire();
+        }
     }
 
     for (qint32 row = firstRow; row <= lastRow; ++row) {
@@ -361,6 +644,23 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
             if (clearTileRect == tileRect) {
                  // Clear whole tile
+                 if (reusesUniformClearBacking) {
+                     bool existingTile = false;
+                     KisTileSP current = m_hashTable->getReadOnlyTileLazy(
+                         column, row, existingTile);
+                     if (existingTile) {
+                         current->lockForRead();
+                         const bool alreadyCleared = current->tileData() == td;
+                         current->unlockForRead();
+                         if (alreadyCleared) continue;
+                     }
+                 }
+                 if (!pageStoreBatch.replaceFullTile(
+                         column, row, td, pixelBytesAreDefault)) {
+                     if (td) td->release();
+                     delete[] clearPixelData;
+                     return;
+                 }
                  const bool wasDeleted =
                      m_hashTable->deleteTile(column, row);
 
@@ -371,6 +671,9 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
                  if (!pixelBytesAreDefault) {
                      KisTileSP clearedTile = KisTileSP(new KisTile(column, row, td, m_mementoManager));
+                     clearedTile->setPageStoreBridge(
+                         m_pageStoreBackend, false);
+                     clearedTile->setPageStoreNativeReadReady();
                      m_hashTable->addTile(clearedTile);
                      m_extentManager.notifyTileAdded(column, row);
                  }
@@ -403,6 +706,7 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
     if (td) td->release();
     delete[] clearPixelData;
+    KIS_SAFE_ASSERT_RECOVER_NOOP(pageStoreBatch.finish());
 }
 
 void KisTiledDataManager::clear(QRect clearRect, quint8 clearValue)
@@ -424,15 +728,117 @@ void KisTiledDataManager::clear(qint32 x, qint32 y, qint32 w, qint32 h, quint8 c
 
 void KisTiledDataManager::clear()
 {
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        if (!m_pageStoreBackend->clearAll()) return;
+    }
     m_hashTable->clear();
     m_extentManager.clear();
 }
 
+void KisTiledDataManager::rebuildPageStoreIndex()
+{
+    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return;
+    const QVector<KisLogicalPageId> pages =
+        m_pageStoreBackend->allocatedPages();
+    m_hashTable->clear();
+    m_extentManager.clear();
+    for (const KisLogicalPageId &page : pages) {
+        bool newTile = false;
+        KisTileSP tile = m_hashTable->getTileLazy(
+            page.column, page.row, newTile);
+        tile->setPageStoreBridge(m_pageStoreBackend, false);
+        if (newTile) m_extentManager.notifyTileAdded(page.column, page.row);
+    }
+}
+
+void KisTiledDataManager::refreshPageStorePages(const QVector<KisLogicalPageId> &pages)
+{
+    if (pages.isEmpty()) return;
+    KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
+        KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(pages.size()));
+    auto view = m_pageStoreBackend->captureReadView();
+    KIS_SAFE_ASSERT_RECOVER_RETURN(view.isValid());
+    for (const auto &page : pages)
+        KIS_SAFE_ASSERT_RECOVER_RETURN(refreshPageStorePage(view, page));
+}
+
+bool KisTiledDataManager::refreshPageStorePage(
+    const KisCapturedReadView &view, const KisLogicalPageId &page)
+{
+    const KisPageKey key{m_pageStoreBackend->surface(), page};
+    KisPageVersion version;
+    if (!view.resolvePageVersion(key, &version)) return false;
+    if (version.isDefaultPixel()) {
+        if (m_hashTable->deleteTile(page.column, page.row))
+            m_extentManager.notifyTileRemoved(page.column, page.row);
+        return true;
+    }
+    KisPageStoreReadPage read(m_pageStoreBackend->store(), view, key);
+    auto *data = m_pageStoreBackend->tileDataForReadPage(read);
+    if (!data) return false;
+    bool created = false;
+    auto tile = m_hashTable->getTileLazy(page.column, page.row, created);
+    tile->setPageStoreBridge(m_pageStoreBackend, false);
+    tile->installPageStoreReadCache(data);
+    if (created) m_extentManager.notifyTileAdded(page.column, page.row);
+    return true;
+}
+
+void KisTiledDataManager::refreshPageStoreIndex(const QRect &rect)
+{
+    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational() ||
+        rect.isEmpty()) {
+        return;
+    }
+    const qint32 firstColumn = xToCol(rect.left());
+    const qint32 lastColumn = xToCol(rect.right());
+    const qint32 firstRow = yToRow(rect.top());
+    const qint32 lastRow = yToRow(rect.bottom());
+    auto view = m_pageStoreBackend->captureReadView();
+    KIS_SAFE_ASSERT_RECOVER_RETURN(view.isValid());
+    for (qint64 row = firstRow; row <= lastRow; ++row) {
+        for (qint64 column = firstColumn; column <= lastColumn; ++column) {
+            const KisLogicalPageId page{qint32(column), qint32(row)};
+            KIS_SAFE_ASSERT_RECOVER_RETURN(refreshPageStorePage(view, page));
+        }
+    }
+}
+
+
+bool KisTiledDataManager::copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const
+{
+    // The caller rejects unsupported coordinates before mutation. Do not let
+    // compatibility classification traverse a range the index cannot hold.
+    if (!KisTileHashTable::supportsCoordinates(xToCol(rect.left()), yToRow(rect.top())) ||
+        !KisTileHashTable::supportsCoordinates(xToCol(rect.right()), yToRow(rect.bottom()))) return false;
+    if (oldData && m_pageStoreBackend->hasCurrentHistory()) return false;
+    // No global counter/lock added to tile lock/unlock. Probe only this copy's
+    // source range, without creating wrappers, exposing bytes or publishing.
+    // Already borrowed legacy writers cannot be revoked or silently read as
+    // their sealed before-image. Those operations keep the compatibility path.
+    for (qint64 row = yToRow(rect.top()); row <= yToRow(rect.bottom()); ++row)
+        for (qint64 column = xToCol(rect.left()); column <= xToCol(rect.right()); ++column) {
+            auto tile = m_hashTable->getExistingTile(qint32(column), qint32(row));
+            if (tile && tile->hasPageStoreWriteIntent()) return true;
+        }
+    return false;
+}
 
 template<bool useOldSrcData>
 void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &rect)
 {
     if (rect.isEmpty()) return;
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational() &&
+        srcDM->m_pageStoreBackend && srcDM->m_pageStoreBackend->isOperational() &&
+        !srcDM->copyNeedsLiveLegacySource(rect, useOldSrcData)) {
+        if (!KisTileHashTable::supportsCoordinates(xToCol(rect.left()), yToRow(rect.top())) ||
+            !KisTileHashTable::supportsCoordinates(xToCol(rect.right()), yToRow(rect.bottom()))) return;
+        QVector<KisLogicalPageId> changed;
+        if (m_pageStoreBackend->copyFrom(*srcDM->m_pageStoreBackend, rect, useOldSrcData, false, nullptr, &changed))
+            refreshPageStorePages(changed);
+        return;
+    }
+    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
 
     const qint32 pixelSize = this->pixelSize();
     const bool defaultPixelsCoincide =
@@ -462,14 +868,39 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
 
             if (cloneTileRect == tileRect) {
                  // Clone whole tile
+                 srcTile->lockForRead();
+                 KisTileData *td = srcTile->tileData();
+                 const bool sparseDefault =
+                     !srcTileExists && defaultPixelsCoincide;
+                 bool dstTileExists = false;
+                 KisTileSP dstTile = getReadOnlyTileLazy(
+                     column, row, dstTileExists);
+                 bool unchanged = sparseDefault && !dstTileExists;
+                 if (!sparseDefault && dstTileExists) {
+                     dstTile->lockForRead();
+                     KisTileData *dstData = dstTile->tileData();
+                     unchanged = dstData == td ||
+                         memcmp(dstData->data(), td->data(),
+                                size_t(rowStride) * KisTileData::HEIGHT) == 0;
+                     dstTile->unlockForRead();
+                 }
+                 if (unchanged) {
+                     srcTile->unlockForRead();
+                     continue;
+                 }
+                 const bool pageStoreReplaced =
+                     pageStoreBatch.replaceFullTile(
+                         column, row, td, sparseDefault);
+                 if (!pageStoreReplaced) {
+                     srcTile->unlockForRead();
+                     return;
+                 }
                  const bool wasDeleted =
                      m_hashTable->deleteTile(column, row);
 
                  if (srcTileExists || !defaultPixelsCoincide) {
-                     srcTile->lockForRead();
-                     KisTileData *td = srcTile->tileData();
                      KisTileSP clonedTile = KisTileSP(new KisTile(column, row, td, m_mementoManager));
-                     srcTile->unlockForRead();
+                     clonedTile->setPageStoreBridge(m_pageStoreBackend, false);
 
                      m_hashTable->addTile(clonedTile);
 
@@ -479,6 +910,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                  } else if (wasDeleted) {
                      m_extentManager.notifyTileRemoved(column, row);
                  }
+                 srcTile->unlockForRead();
 
             } else {
                 const qint32 lineSize = cloneTileRect.width() * pixelSize;
@@ -504,12 +936,24 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
             }
         }
     }
+    KIS_SAFE_ASSERT_RECOVER_NOOP(pageStoreBatch.finish());
 }
 
 template<bool useOldSrcData>
 void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRect &rect)
 {
     if (rect.isEmpty()) return;
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational() &&
+        srcDM->m_pageStoreBackend && srcDM->m_pageStoreBackend->isOperational() &&
+        !srcDM->copyNeedsLiveLegacySource(rect, useOldSrcData)) {
+        if (!KisTileHashTable::supportsCoordinates(xToCol(rect.left()), yToRow(rect.top())) ||
+            !KisTileHashTable::supportsCoordinates(xToCol(rect.right()), yToRow(rect.bottom()))) return;
+        QVector<KisLogicalPageId> changed;
+        if (m_pageStoreBackend->copyFrom(*srcDM->m_pageStoreBackend, rect, useOldSrcData, true, nullptr, &changed))
+            refreshPageStorePages(changed);
+        return;
+    }
+    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
 
     const qint32 pixelSize = this->pixelSize();
     const bool defaultPixelsCoincide =
@@ -536,14 +980,41 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
                 srcDM->getOldTile(column, row, srcTileExists) :
                 srcDM->getReadOnlyTileLazy(column, row, srcTileExists);
 
+            srcTile->lockForRead();
+            KisTileData *td = srcTile->tileData();
+            const bool sparseDefault =
+                !srcTileExists && defaultPixelsCoincide;
+            bool dstTileExists = false;
+            KisTileSP dstTile = getReadOnlyTileLazy(
+                column, row, dstTileExists);
+            bool unchanged = sparseDefault && !dstTileExists;
+            if (!sparseDefault && dstTileExists) {
+                dstTile->lockForRead();
+                KisTileData *dstData = dstTile->tileData();
+                unchanged = dstData == td ||
+                    memcmp(dstData->data(), td->data(),
+                           size_t(KisTileData::WIDTH) *
+                               KisTileData::HEIGHT * pixelSize) == 0;
+                dstTile->unlockForRead();
+            }
+            if (unchanged) {
+                srcTile->unlockForRead();
+                continue;
+            }
+            const bool pageStoreReplaced =
+                pageStoreBatch.replaceFullTile(
+                    column, row, td, sparseDefault);
+            if (!pageStoreReplaced) {
+                srcTile->unlockForRead();
+                return;
+            }
+
             const bool wasDeleted =
                 m_hashTable->deleteTile(column, row);
 
             if (srcTileExists || !defaultPixelsCoincide) {
-                srcTile->lockForRead();
-                KisTileData *td = srcTile->tileData();
                 KisTileSP clonedTile = KisTileSP(new KisTile(column, row, td, m_mementoManager));
-                srcTile->unlockForRead();
+                clonedTile->setPageStoreBridge(m_pageStoreBackend, false);
 
                 m_hashTable->addTile(clonedTile);
 
@@ -553,8 +1024,10 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
             } else if (wasDeleted) {
                 m_extentManager.notifyTileRemoved(column, row);
             }
+            srcTile->unlockForRead();
         }
     }
+    KIS_SAFE_ASSERT_RECOVER_NOOP(pageStoreBatch.finish());
 }
 
 void KisTiledDataManager::bitBlt(KisTiledDataManager *srcDM, const QRect &rect)
@@ -590,6 +1063,13 @@ void KisTiledDataManager::setExtent(QRect newRect)
     // Do nothing if the desired size is bigger than we currently are:
     // that is handled by the autoextending automatically
     if (newRect.contains(oldRect)) return;
+
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        if (m_pageStoreBackend->trimToRect(newRect)) {
+            rebuildPageStoreIndex();
+        }
+        return;
+    }
 
     KisTileSP tile;
     QRect tileRect;
@@ -686,9 +1166,65 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
                                      qint32 width, qint32 height,
                                      qint32 dataRowStride)
 {
+    using Phase = KisPageStoreDiagnosticPhase;
+    KisPageStoreDiagnosticTimer diagnostic(m_pageStoreBackend ? m_pageStoreBackend->store() : nullptr,
+                                           Phase::WriteBytesOwnerWait, 1);
     QWriteLocker locker(&m_lock);
-    // Actual bytes reading/writing is done in private header
-    writeBytesBody(data, x, y, width, height, dataRowStride);
+    diagnostic.next(Phase::WriteBytesBatchBegin, 1);
+    if (!data || width <= 0 || height <= 0) return;
+    // Validate before QRect construction, index traversal or any pixel work.
+    // Keep the legacy void API, but never replay a failed native operation.
+    const qint64 tightRow = qint64(width) * pixelSize();
+    const qint64 sourceStride = dataRowStride > 0 ? dataRowStride : tightRow;
+    const bool validLayout = qint64(x) + width - 1 <= std::numeric_limits<qint32>::max() &&
+        qint64(y) + height - 1 <= std::numeric_limits<qint32>::max() && sourceStride >= tightRow &&
+        quint64(sourceStride) <= quint64(std::numeric_limits<qsizetype>::max()) / quint64(height);
+    KIS_SAFE_ASSERT_RECOVER_RETURN(validLayout);
+    const QRect rect(x, y, width, height);
+    KIS_SAFE_ASSERT_RECOVER_RETURN(
+        KisTileHashTable::supportsCoordinates(xToCol(rect.left()), yToRow(rect.top())) &&
+        KisTileHashTable::supportsCoordinates(xToCol(rect.right()), yToRow(rect.bottom())));
+    if (m_pageStoreBackend) {
+        QVector<KisLogicalPageId> changed;
+        QString error;
+        const bool legacyIntent = copyNeedsLiveLegacySource(rect, false);
+        // Match the operation-private painter route: range reservation and
+        // canonical claims protect execution, not the derived tiles3 index.
+        // Never wait for a native target or execute pixels while excluding
+        // readers of the still-visible before-image with the DataManager lock.
+        locker.unlock();
+        diagnostic.next(Phase::WriteBytesBody, 1);
+        const auto result = m_pageStoreBackend->writeBytes(data, x, y, width, height, dataRowStride,
+            legacyIntent, &changed, &error);
+        if (result == KisPageStoreWriteOperationResult::Succeeded) {
+            diagnostic.next(Phase::WriteBytesBatchFinish, 1);
+            locker.relock();
+            refreshPageStorePages(changed);
+            return;
+        }
+        if (result == KisPageStoreWriteOperationResult::Failed) {
+            qWarning() << "PageStore packed write failed:" << error;
+            KIS_SAFE_ASSERT_RECOVER_RETURN(false);
+        }
+        // Borrowed/Unavailable are decided before work. Existing live legacy
+        // pointers retain their original visibility and release boundary.
+        locker.relock();
+    }
+    {
+        ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
+        KIS_SAFE_ASSERT_RECOVER_RETURN(pageStoreBatch.isValid());
+        diagnostic.next(Phase::WriteBytesBody, 1);
+        // Actual bytes reading/writing is done in private header. Child
+        // PageStore acquire/resolve/publish timers are inclusive in Body.
+        writeBytesBody(data, x, y, width, height, dataRowStride);
+        diagnostic.next(Phase::WriteBytesBatchFinish, 1);
+        if (!pageStoreBatch.finish()) {
+            // Unpublished COW was cancelled; do not leave compatibility tiles
+            // marked ready with bytes that canonical PageStore never exposed.
+            refreshPageStoreIndex(QRect(x, y, width, height));
+            KIS_SAFE_ASSERT_RECOVER_NOOP(false);
+        }
+    }
 }
 
 void KisTiledDataManager::readBytes(quint8 *data,
@@ -697,8 +1233,70 @@ void KisTiledDataManager::readBytes(quint8 *data,
                                     qint32 dataRowStride) const
 {
     QReadLocker locker(&m_lock);
+    if (m_pageStoreBackend) {
+        QString error;
+        if (m_pageStoreBackend->hasCurrentThreadIteratorWrites()) {
+            readBytesBody(data, x, y, width, height, dataRowStride);
+            return;
+        }
+        const bool read = m_pageStoreBackend->readBytes(data, x, y, width, height, dataRowStride, &error);
+        if (!read) qWarning() << "PageStore packed read failed:" << error;
+        KIS_SAFE_ASSERT_RECOVER_NOOP(read);
+        return;
+    }
     // Actual bytes reading/writing is done in private header
     readBytesBody(data, x, y, width, height, dataRowStride);
+}
+
+QSharedPointer<const KisPageStoreIteratorReadScope>
+KisTiledDataManager::capturePageStoreReadScope(
+    bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing) const
+{
+    return m_pageStoreBackend ? m_pageStoreBackend->captureIteratorReadScope(writable, nullptr, std::move(existing))
+                              : QSharedPointer<const KisPageStoreIteratorReadScope>{};
+}
+
+Qt::HANDLE KisTiledDataManager::registerPageStoreWriteBoundary(
+    const void *key, KisPageStoreWriteBoundary boundary)
+{
+    return m_pageStoreBackend ? m_pageStoreBackend->registerIteratorWriteBoundary(key, boundary) : nullptr;
+}
+void KisTiledDataManager::unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key)
+{
+    if (m_pageStoreBackend && thread) m_pageStoreBackend->unregisterIteratorWriteBoundary(thread, key);
+}
+
+KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
+    const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation, QString *error)
+{
+    using Result = KisPageStoreWriteOperationResult;
+    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return Result::Unavailable;
+    QSet<KisLogicalPageId> targets;
+    bool legacyIntent = false;
+    {
+        QReadLocker lock(&m_lock);
+        for (const auto &rect : targetRects) {
+            if (rect.isEmpty()) continue;
+            if (!KisTileHashTable::supportsCoordinates(xToCol(rect.left()), yToRow(rect.top())) ||
+                !KisTileHashTable::supportsCoordinates(xToCol(rect.right()), yToRow(rect.bottom()))) {
+                if (error) *error = QStringLiteral("pixel operation exceeds compatibility index coordinates");
+                return Result::Failed;
+            }
+            for (qint64 row = yToRow(rect.top()); row <= yToRow(rect.bottom()); ++row)
+                for (qint64 col = xToCol(rect.left()); col <= xToCol(rect.right()); ++col) {
+                    auto tile = m_hashTable->getExistingTile(qint32(col), qint32(row));
+                    legacyIntent |= tile && tile->hasPageStoreWriteIntent();
+                    targets.insert({qint32(col), qint32(row)});
+                }
+        }
+    }
+    QVector<KisLogicalPageId> changed;
+    const auto result = m_pageStoreBackend->writeOperation(targets.values(), legacyIntent, operation, &changed, error);
+    if (result == Result::Succeeded) {
+        QWriteLocker lock(&m_lock);
+        refreshPageStorePages(changed);
+    }
+    return result;
 }
 
 QVector<quint8*>
@@ -717,7 +1315,32 @@ void KisTiledDataManager::writePlanarBytes(QVector<quint8*> planes,
                                            qint32 x, qint32 y,
                                            qint32 width, qint32 height)
 {
+    // Empty/missing input is a known no-op, not a request for writable pixels.
+    if (width <= 0 || height <= 0) return;
+    KIS_SAFE_ASSERT_RECOVER_RETURN(!planes.isEmpty() && planes.size() == channelSizes.size());
+    qint64 channelBytes = 0;
+    bool anyChannelPresent = false;
+    for (int i = 0; i < channelSizes.size(); ++i) {
+        const int size = channelSizes[i];
+        KIS_SAFE_ASSERT_RECOVER_RETURN(size >= 0);
+        channelBytes += size;
+        KIS_SAFE_ASSERT_RECOVER_RETURN(quint64(width) * quint64(height) <=
+            quint64(std::numeric_limits<qsizetype>::max()) / qMax(1, size));
+        anyChannelPresent |= size > 0 && planes[i];
+    }
+    KIS_SAFE_ASSERT_RECOVER_RETURN(channelBytes <= pixelSize());
+    KIS_SAFE_ASSERT_RECOVER_RETURN(qint64(x) + width - 1 <= std::numeric_limits<qint32>::max() &&
+                                   qint64(y) + height - 1 <= std::numeric_limits<qint32>::max());
+    if (!anyChannelPresent) return;
+    if (!KisTileHashTable::supportsCoordinates(xToCol(x), yToRow(y)) ||
+        !KisTileHashTable::supportsCoordinates(xToCol(qint32(qint64(x) + width - 1)),
+                                               yToRow(qint32(qint64(y) + height - 1)))) {
+        qWarning() << "Planar write exceeds the compatibility tile index coordinate range";
+        return;
+    }
     QWriteLocker locker(&m_lock);
+    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
+    KIS_SAFE_ASSERT_RECOVER_RETURN(pageStoreBatch.isValid());
     // Actual bytes reading/writing is done in private header
 
     bool allChannelsPresent = true;
@@ -729,10 +1352,12 @@ void KisTiledDataManager::writePlanarBytes(QVector<quint8*> planes,
         }
     }
 
-    if (allChannelsPresent) {
-        writePlanarBytesBody<true>(planes, channelSizes, x, y, width, height);
-    } else {
-        writePlanarBytesBody<false>(planes, channelSizes, x, y, width, height);
+    const bool written = allChannelsPresent
+        ? writePlanarBytesBody<true>(planes, channelSizes, x, y, width, height)
+        : writePlanarBytesBody<false>(planes, channelSizes, x, y, width, height);
+    if (!pageStoreBatch.finish(written)) {
+        refreshPageStoreIndex(QRect(x, y, width, height));
+        qWarning() << "PageStore planar write failed";
     }
 }
 
@@ -746,7 +1371,7 @@ qint32 KisTiledDataManager::numContiguousColumns(qint32 x, qint32 minY, qint32 m
     if (x >= 0) {
         numColumns = KisTileData::WIDTH - (x % KisTileData::WIDTH);
     } else {
-        numColumns = ((-x - 1) % KisTileData::WIDTH) + 1;
+        numColumns = ((-qint64(x) - 1) % KisTileData::WIDTH) + 1;
     }
 
     return numColumns;
@@ -762,7 +1387,7 @@ qint32 KisTiledDataManager::numContiguousRows(qint32 y, qint32 minX, qint32 maxX
     if (y >= 0) {
         numRows = KisTileData::HEIGHT - (y % KisTileData::HEIGHT);
     } else {
-        numRows = ((-y - 1) % KisTileData::HEIGHT) + 1;
+        numRows = ((-qint64(y) - 1) % KisTileData::HEIGHT) + 1;
     }
 
     return numRows;

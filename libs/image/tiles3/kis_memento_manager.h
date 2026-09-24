@@ -17,6 +17,7 @@ typedef QList<KisMementoItemSP> KisMementoItemList;
 typedef QListIterator<KisMementoItemSP> KisMementoItemListIterator;
 
 class KisMemento;
+class KisTilePageStoreBridge;
 struct KisHistoryItem {
     KisMemento* memento;
     KisMementoItemList itemList;
@@ -102,6 +103,8 @@ public:
     KisMementoSP currentMemento();
 
     void setDefaultTileData(KisTileData *defaultTileData);
+    void setPageStoreBridge(KisTilePageStoreBridge *bridge);
+    KisTilePageStoreBridge *pageStoreBridge() const;
 
     void debugPrintInfo();
 
@@ -159,6 +162,7 @@ protected:
      * \see rollforward()
      */
     bool m_registrationBlocked;
+    KisTilePageStoreBridge *m_pageStoreBridge = nullptr;
 };
 
 #endif /* KIS_MEMENTO_MANAGER_ */

@@ -224,6 +224,7 @@ struct KRITAIMAGE_EXPORT KisEvaluationContext
 struct KRITAIMAGE_EXPORT KisEvaluationGraphSnapshot
 {
     KisEvaluationEpochId epoch;
+    KisRetainedImageEpochSnapshot surfaceSnapshot;
     quint64 documentId = 0;
     quint64 graphRevision = 0;
     KisEvaluationContext context;

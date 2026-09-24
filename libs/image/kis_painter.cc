@@ -44,7 +44,7 @@
 #include <brushengine/kis_paint_information.h>
 #include "kis_paintop_registry.h"
 #include "kis_perspective_math.h"
-#include "tiles3/kis_random_accessor.h"
+#include "KisPixelWriteCursor.h"
 #include <kis_distance_information.h>
 #include <KoColorSpaceMaths.h>
 #include "kis_lod_transform.h"
@@ -704,117 +704,123 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
 
     // Read below
     KisRandomConstAccessorSP srcIt = srcDev->createRandomConstAccessorNG();
-    KisRandomAccessorSP dstIt = d->device->createRandomAccessorNG();
+    const bool painted = d->device->applyPixelOperation(QRect(dstX, dstY, srcWidth, srcHeight),
+        [&](KisPixelWriteCursor *dstIt) {
 
-    /* Here be a huge block of verbose code that does roughly the same than
-    the other bit blit operations. This one is longer than the rest in an effort to
-    optimize speed and memory use */
-    if (d->selection) {
-        KisPaintDeviceSP selectionProjection(d->selection->projection());
-        KisRandomConstAccessorSP maskIt = selectionProjection->createRandomConstAccessorNG();
+        /* Here be a huge block of verbose code that does roughly the same than
+        the other bit blit operations. This one is longer than the rest in an effort to
+        optimize speed and memory use */
+        if (d->selection) {
+            KisPaintDeviceSP selectionProjection(d->selection->projection());
+            KisRandomConstAccessorSP maskIt = selectionProjection->createRandomConstAccessorNG();
 
-        while (rowsRemaining > 0) {
+            while (rowsRemaining > 0) {
 
-            qint32 dstX_ = dstX;
-            qint32 srcX_ = srcX;
-            qint32 columnsRemaining = srcWidth;
-            qint32 numContiguousDstRows = dstIt->numContiguousRows(dstY_);
-            qint32 numContiguousSrcRows = srcIt->numContiguousRows(srcY_);
-            qint32 numContiguousSelRows = maskIt->numContiguousRows(dstY_);
+                qint32 dstX_ = dstX;
+                qint32 srcX_ = srcX;
+                qint32 columnsRemaining = srcWidth;
+                qint32 numContiguousDstRows = dstIt->numContiguousRows(dstY_);
+                qint32 numContiguousSrcRows = srcIt->numContiguousRows(srcY_);
+                qint32 numContiguousSelRows = maskIt->numContiguousRows(dstY_);
 
-            qint32 rows = qMin(numContiguousDstRows, numContiguousSrcRows);
-            rows = qMin(rows, numContiguousSelRows);
-            rows = qMin(rows, rowsRemaining);
+                qint32 rows = qMin(numContiguousDstRows, numContiguousSrcRows);
+                rows = qMin(rows, numContiguousSelRows);
+                rows = qMin(rows, rowsRemaining);
 
-            while (columnsRemaining > 0) {
+                while (columnsRemaining > 0) {
 
-                qint32 numContiguousDstColumns = dstIt->numContiguousColumns(dstX_);
-                qint32 numContiguousSrcColumns = srcIt->numContiguousColumns(srcX_);
-                qint32 numContiguousSelColumns = maskIt->numContiguousColumns(dstX_);
+                    qint32 numContiguousDstColumns = dstIt->numContiguousColumns(dstX_);
+                    qint32 numContiguousSrcColumns = srcIt->numContiguousColumns(srcX_);
+                    qint32 numContiguousSelColumns = maskIt->numContiguousColumns(dstX_);
 
-                qint32 columns = qMin(numContiguousDstColumns, numContiguousSrcColumns);
-                columns = qMin(columns, numContiguousSelColumns);
-                columns = qMin(columns, columnsRemaining);
+                    qint32 columns = qMin(numContiguousDstColumns, numContiguousSrcColumns);
+                    columns = qMin(columns, numContiguousSelColumns);
+                    columns = qMin(columns, columnsRemaining);
 
-                qint32 srcRowStride = srcIt->rowStride(srcX_, srcY_);
-                srcIt->moveTo(srcX_, srcY_);
+                    qint32 srcRowStride = srcIt->rowStride(srcX_, srcY_);
+                    srcIt->moveTo(srcX_, srcY_);
 
-                qint32 dstRowStride = dstIt->rowStride(dstX_, dstY_);
-                dstIt->moveTo(dstX_, dstY_);
+                    qint32 dstRowStride = dstIt->rowStride(dstX_, dstY_);
+                    dstIt->moveTo(dstX_, dstY_);
 
-                qint32 maskRowStride = maskIt->rowStride(dstX_, dstY_);
-                maskIt->moveTo(dstX_, dstY_);
+                    qint32 maskRowStride = maskIt->rowStride(dstX_, dstY_);
+                    maskIt->moveTo(dstX_, dstY_);
 
-                d->paramInfo.dstRowStart   = dstIt->rawData();
-                d->paramInfo.dstRowStride  = dstRowStride;
-                // if we don't use the oldRawData, we need to access the rawData of the source device.
-                d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : static_cast<KisRandomAccessor2*>(srcIt.data())->rawData();
-                d->paramInfo.srcRowStride  = srcRowStride;
-                d->paramInfo.maskRowStart  = static_cast<KisRandomAccessor2*>(maskIt.data())->rawData();
-                d->paramInfo.maskRowStride = maskRowStride;
-                d->paramInfo.rows          = rows;
-                d->paramInfo.cols          = columns;
-                d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
+                    d->paramInfo.dstRowStart   = dstIt->rawData();
+                    d->paramInfo.dstRowStride  = dstRowStride;
+                    // Read the captured current/before view through the const
+                    // contract. Never downcast a reader into a mutable accessor.
+                    d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
+                    d->paramInfo.srcRowStride  = srcRowStride;
+                    d->paramInfo.maskRowStart  = maskIt->rawDataConst();
+                    d->paramInfo.maskRowStride = maskRowStride;
+                    d->paramInfo.rows          = rows;
+                    d->paramInfo.cols          = columns;
+                    if (!d->paramInfo.dstRowStart || !d->paramInfo.srcRowStart || !d->paramInfo.maskRowStart) return false;
+                    d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
 
-                srcX_ += columns;
-                dstX_ += columns;
-                columnsRemaining -= columns;
+                    srcX_ += columns;
+                    dstX_ += columns;
+                    columnsRemaining -= columns;
+                }
+
+                srcY_ += rows;
+                dstY_ += rows;
+                rowsRemaining -= rows;
             }
-
-            srcY_ += rows;
-            dstY_ += rows;
-            rowsRemaining -= rows;
         }
-    }
-    else {
+        else {
 
-        while (rowsRemaining > 0) {
+            while (rowsRemaining > 0) {
 
-            qint32 dstX_ = dstX;
-            qint32 srcX_ = srcX;
-            qint32 columnsRemaining = srcWidth;
-            qint32 numContiguousDstRows = dstIt->numContiguousRows(dstY_);
-            qint32 numContiguousSrcRows = srcIt->numContiguousRows(srcY_);
+                qint32 dstX_ = dstX;
+                qint32 srcX_ = srcX;
+                qint32 columnsRemaining = srcWidth;
+                qint32 numContiguousDstRows = dstIt->numContiguousRows(dstY_);
+                qint32 numContiguousSrcRows = srcIt->numContiguousRows(srcY_);
 
-            qint32 rows = qMin(numContiguousDstRows, numContiguousSrcRows);
-            rows = qMin(rows, rowsRemaining);
+                qint32 rows = qMin(numContiguousDstRows, numContiguousSrcRows);
+                rows = qMin(rows, rowsRemaining);
 
-            while (columnsRemaining > 0) {
+                while (columnsRemaining > 0) {
 
-                qint32 numContiguousDstColumns = dstIt->numContiguousColumns(dstX_);
-                qint32 numContiguousSrcColumns = srcIt->numContiguousColumns(srcX_);
+                    qint32 numContiguousDstColumns = dstIt->numContiguousColumns(dstX_);
+                    qint32 numContiguousSrcColumns = srcIt->numContiguousColumns(srcX_);
 
-                qint32 columns = qMin(numContiguousDstColumns, numContiguousSrcColumns);
-                columns = qMin(columns, columnsRemaining);
+                    qint32 columns = qMin(numContiguousDstColumns, numContiguousSrcColumns);
+                    columns = qMin(columns, columnsRemaining);
 
-                qint32 srcRowStride = srcIt->rowStride(srcX_, srcY_);
-                srcIt->moveTo(srcX_, srcY_);
+                    qint32 srcRowStride = srcIt->rowStride(srcX_, srcY_);
+                    srcIt->moveTo(srcX_, srcY_);
 
-                qint32 dstRowStride = dstIt->rowStride(dstX_, dstY_);
-                dstIt->moveTo(dstX_, dstY_);
+                    qint32 dstRowStride = dstIt->rowStride(dstX_, dstY_);
+                    dstIt->moveTo(dstX_, dstY_);
 
-                d->paramInfo.dstRowStart   = dstIt->rawData();
-                d->paramInfo.dstRowStride  = dstRowStride;
-                // if we don't use the oldRawData, we need to access the rawData of the source device.
-                d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : static_cast<KisRandomAccessor2*>(srcIt.data())->rawData();
-                d->paramInfo.srcRowStride  = srcRowStride;
-                d->paramInfo.maskRowStart  = 0;
-                d->paramInfo.maskRowStride = 0;
-                d->paramInfo.rows          = rows;
-                d->paramInfo.cols          = columns;
-                d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
+                    d->paramInfo.dstRowStart   = dstIt->rawData();
+                    d->paramInfo.dstRowStride  = dstRowStride;
+                    d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
+                    d->paramInfo.srcRowStride  = srcRowStride;
+                    d->paramInfo.maskRowStart  = 0;
+                    d->paramInfo.maskRowStride = 0;
+                    d->paramInfo.rows          = rows;
+                    d->paramInfo.cols          = columns;
+                    if (!d->paramInfo.dstRowStart || !d->paramInfo.srcRowStart) return false;
+                    d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
 
-                srcX_ += columns;
-                dstX_ += columns;
-                columnsRemaining -= columns;
+                    srcX_ += columns;
+                    dstX_ += columns;
+                    columnsRemaining -= columns;
+                }
+
+                srcY_ += rows;
+                dstY_ += rows;
+                rowsRemaining -= rows;
             }
-
-            srcY_ += rows;
-            dstY_ += rows;
-            rowsRemaining -= rows;
         }
-    }
 
+        return true;
+    });
+    if (!painted) return;
     addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
 
 }

@@ -1,0 +1,651 @@
+{
+  "baseline_commit": "f5fbbde618df6fb4e1068ace7381c339a70dd4c0",
+  "containment_status": "r0-complete-no-d0",
+  "metadata_status": "r2-m4-allocation-free-publication",
+  "restructuring_status": "r1-complete",
+  "write_status": "r3-m5b-complete",
+  "reviewed_ratchet_ceiling": {
+    "libs/image/tiles3/kis_tile.h": {
+      "identifier_occurrences": 6,
+      "direct_includes": 1,
+      "reason": "The zero-allocation tile compatibility boundary now stores and releases source-bound move-only leases in one inline capability vector; it does not own PageStore state."
+    },
+    "libs/image/tiles3/kis_tiled_data_manager.cc": {
+      "identifier_occurrences": 21,
+      "direct_includes": 3,
+      "reason": "The compatibility adapter names the canonical fixed read-view and operation boundary types directly so refresh and packed writes cannot recreate private transaction authority."
+    },
+    "libs/image/tiles3/kis_tiled_data_manager.h": {
+      "identifier_occurrences": 10,
+      "direct_includes": 1,
+      "reason": "Private adapter declarations expose only canonical fixed-view and operation value types; no PageStore ownership or duplicate lifecycle state was added."
+    }
+  },
+  "entries": [
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTile",
+      "facts-owned": [
+        "old-view",
+        "read-pin",
+        "page-writer"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility",
+        "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent"
+      ],
+      "id": "BR1-PS-TILE-STATE-001",
+      "path": "libs/image/tiles3/kis_tile.h",
+      "remove-after": "R4/M8 canonical cursor and guard coverage",
+      "replacement-type": "KisPageReadCoordinator and KisPageWriteCoordinator adapters",
+      "runtime-counter": "static-only: source-bound lease callers plus Store capability snapshots and terminal behavior tests",
+      "static-callers": [
+        "KisTile::lockForRead",
+        "KisTile::lockForWrite",
+        "KisTile::unlockForRead",
+        "KisTile::unlockForWrite"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "m_pageStoreOldDataView",
+        "m_pageStoreNativeReadReady",
+        "m_pageStoreWriteLockCount",
+        "m_pageStoreWriteIntentOwnsNativePin",
+        "m_pageStoreBridge",
+        "m_pageStoreLeases"
+      ],
+      "target-owner": "KisPageReadCoordinator and KisPageWriteAdmission"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTile",
+      "facts-owned": [
+        "binding-cache-validity",
+        "page-writer"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior"
+      ],
+      "id": "BR1-PS-TILE-BRIDGE-002",
+      "path": "libs/image/tiles3/kis_tile.cc",
+      "remove-after": "R4/M8 tile bridge quarantine",
+      "replacement-type": "operation-scoped read/write guard",
+      "runtime-counter": "static-only: four source-bound refresh callers plus Store request/materialization snapshots",
+      "static-callers": [
+        "KisTiledDataManager::getTile",
+        "KisTiledDataManager::refreshPageStorePages"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "refreshPageStoreData",
+        "ensurePageStoreWriteAccess",
+        "setPageStoreBridge"
+      ],
+      "target-owner": "KisTiledDataManagerPageStoreBackend narrow adapter"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTilePageStoreBridge",
+      "facts-owned": [
+        "read-pin",
+        "writable-pin",
+        "legacy-unlock"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+      ],
+      "id": "BR1-PS-TILE-LEASE-003",
+      "path": "libs/image/tiles3/KisTilePageStoreBridge.h",
+      "remove-after": "R4/M8 all legacy tile callers migrated",
+      "replacement-type": "KisCpuReadGuard or KisCpuWriteGuard",
+      "runtime-counter": "static-only: lease RAII terminals plus Store active read/write capability snapshots",
+      "static-callers": [
+        "KisTile::ensurePageStoreWriteAccess",
+        "KisTile::lockForRead"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "KisTilePageStoreLease",
+        "KisTilePageStoreBridge",
+        "acquireTile"
+      ],
+      "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTiledDataManager",
+      "facts-owned": [
+        "transaction-lifetime",
+        "default-materialization",
+        "history-reachability"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreHistoryClearStagesAbsence",
+        "KisTiledDataManagerTest::testPageStorePackedWriteNative"
+      ],
+      "id": "BR1-PS-DM-ROUTING-004",
+      "path": "libs/image/tiles3/kis_tiled_data_manager.cc",
+      "remove-after": "R4/M8 backend becomes semantic-only adapter",
+      "replacement-type": "canonical PageStore facade operations",
+      "runtime-counter": "existing:KisPageStoreSessionStats",
+      "static-callers": [
+        "KisTiledDataManager::writeBytes",
+        "KisTiledDataManager::readBytes",
+        "KisTiledDataManager::setDefaultPixel"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "m_pageStoreBackend",
+        "refreshPageStorePages",
+        "capturePageStoreReadScope",
+        "writePageStoreOperation"
+      ],
+      "target-owner": "KisPageStore facade and store-private coordinators"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTiledDataManagerPageStoreBackend::Private RAII batch registry",
+      "facts-owned": [
+        "transaction-lifetime"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent",
+        "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims"
+      ],
+      "id": "BR1-PS-BACKEND-ADMISSION-005",
+      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
+      "remove-after": "R4/M8 explicit operation scopes cover compatibility callers",
+      "replacement-type": "adapter RAII operation handle",
+      "runtime-counter": "existing:KisPageStoreSessionStats writePageClaimChecks/writePageClaimConflicts/activeCpuWritePages",
+      "static-callers": [
+        "reserveWritablePage",
+        "reserveMutationPage",
+        "finishOwnedTransaction"
+      ],
+      "status": "callers-migrated",
+      "symbols": [
+        "cpuMutationBatches"
+      ],
+      "target-owner": "explicit adapter operation scope"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTiledDataManagerPageStoreBackend::Private",
+      "facts-owned": [
+        "transaction-lifetime",
+        "legacy-unlock"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+      ],
+      "id": "BR1-PS-BACKEND-ANON-006",
+      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
+      "remove-after": "R4/M8 explicit operation scopes cover callers",
+      "replacement-type": "adapter RAII operation handle",
+      "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/preparedPageProofs/committedTransactions",
+      "static-callers": [
+        "writableTransaction",
+        "registerAnonymousLease",
+        "cancelAnonymousLeasesForBarrier"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "anonymousTransaction",
+        "anonymousClients",
+        "anonymousLeases",
+        "KisTiledDataManagerPageStoreLease"
+      ],
+      "target-owner": "KisPageMutationSession adapter handle"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisTiledDataManagerPageStoreBackend::Private",
+      "facts-owned": [
+        "iterator-write-boundary"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility"
+      ],
+      "id": "BR1-PS-BACKEND-ITERATOR-007",
+      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
+      "remove-after": "R4/M8 iterator operation scopes migrated",
+      "replacement-type": "operation-scoped write batch",
+      "runtime-counter": "static-only: balanced registry callers plus iterator fixed-view/live-write behavior tests",
+      "static-callers": [
+        "KisTiledDataManager::registerPageStoreWriteBoundary",
+        "KisBaseIterator"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "iteratorWriteBoundaries",
+        "registerIteratorWriteBoundary",
+        "unregisterIteratorWriteBoundary"
+      ],
+      "target-owner": "KisPageWriteCoordinator operation scope"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisMutationPageEntry lifecycle and alias input; sparse ColdPageSet for backing and proof resources",
+      "facts-owned": [
+        "pending-generation",
+        "page-writer",
+        "alias-source"
+      ],
+      "failure-tests": [
+        "KisPageStoreCpuMutationTest::repeatedGuardAndSegment",
+        "KisPageStoreCpuMutationTest::mixedSemanticAtomicity"
+      ],
+      "id": "BR1-PS-SESSION-WRITESET-008",
+      "path": "libs/image/pagestore/KisPageStore.cpp",
+      "remove-after": "never: canonical session write set remains; backend duplication exits in M5B",
+      "replacement-type": "KisMutationWriteSet and ColdPageSet",
+      "runtime-counter": "existing:KisPageMutationStatistics",
+      "static-callers": [
+        "KisPageMutationSession::beginWriteImpl",
+        "KisPageMutationSession::removePage",
+        "KisPageMutationSession::aliasPage"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisMutationWriteSet",
+        "ColdPageSet"
+      ],
+      "target-owner": "KisPageWriteCoordinator"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageWriteAdmission plus KisPageWriteCoordinator transaction activity",
+      "facts-owned": [
+        "page-writer",
+        "transaction-lifetime"
+      ],
+      "failure-tests": [
+        "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims",
+        "KisPageStoreReferenceTest::indexedCompetingPreparedTransactions"
+      ],
+      "id": "BR1-PS-STORE-WRITER-MAPS-009",
+      "path": "libs/image/pagestore/KisPageStore.cpp",
+      "remove-after": "never: store-scoped write admission remains canonical",
+      "replacement-type": "KisPageWriteAdmission and KisPageWriteCoordinator::TransactionActivity",
+      "runtime-counter": "existing:KisPageStoreSessionStats",
+      "static-callers": [
+        "KisPageStore::acquireWrite",
+        "KisPageStore::beginMutation"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "claimEntryLocked"
+      ],
+      "target-owner": "KisPageWriteAdmission and KisPageWriteCoordinator"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageDefaultStorage",
+      "facts-owned": [
+        "default-buffer-cache",
+        "default-materialization-admission"
+      ],
+      "failure-tests": [
+        "KisPageStoreResidentReadTest::defaultMaterializationAdmissionIsBounded",
+        "KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded",
+        "KisTiledDataManagerTest::testPageStoreDefaultLifecycleDoesNotMaterialize",
+        "KisPageStoreCpuMutationTest::virtualDefaultOnlyAllocatesTarget"
+      ],
+      "id": "BR1-PS-STORE-DEFAULT-010",
+      "path": "libs/image/pagestore/KisPageDefaultStorage.cpp",
+      "remove-after": "never: canonical R1 leaf service",
+      "replacement-type": "KisPageDefaultStorage",
+      "runtime-counter": "existing:default cache bytes/entries plus materialization request/live/peak/wait counters",
+      "static-callers": [
+        "KisCapturedReadView::Private::defaultReadBuffer",
+        "KisPageStore::Private::ensureDefaultPageLocked"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisPageDefaultStorage",
+        "readBuffer",
+        "beginPreparationLocked",
+        "finishPreparationLocked"
+      ],
+      "target-owner": "KisPageDefaultStorage"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageHistoryCollector",
+      "facts-owned": [
+        "history-reachability"
+      ],
+      "failure-tests": [
+        "KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget",
+        "KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits"
+      ],
+      "id": "BR1-PS-STORE-HISTORY-011",
+      "path": "libs/image/pagestore/KisPageHistoryCollector.cpp",
+      "remove-after": "never: canonical R1 leaf service",
+      "replacement-type": "KisPageHistoryCollector",
+      "runtime-counter": "existing:KisPageStoreReadScopeStatistics.history*",
+      "static-callers": [
+        "KisPageReadCoordinator::releaseSnapshot",
+        "KisPageReadCoordinator::cancelLocked",
+        "KisPageStore::finishWrite",
+        "KisPagePublicationCoordinator::commitLocked"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisPageHistoryCollector",
+        "collectUnreachableLocked",
+        "collectEpochBookkeepingLocked",
+        "scheduleLocked"
+      ],
+      "target-owner": "KisPageHistoryCollector"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageReadCoordinator",
+      "facts-owned": [
+        "read-request-lifecycle",
+        "active-read-lease",
+        "captured-view-release",
+        "pending-read-last-use"
+      ],
+      "failure-tests": [
+        "KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFacade",
+        "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges",
+        "KisPageStoreCpuMutationTest::supersededOverlayUsesHistoricalLifetime",
+        "KisPageStoreResidentReadTest::concurrentCommitAndRead"
+      ],
+      "id": "BR1-PS-STORE-READ-018",
+      "path": "libs/image/pagestore/KisPageReadCoordinator.cpp",
+      "remove-after": "never: canonical R1 read service",
+      "replacement-type": "KisPageReadCoordinator",
+      "runtime-counter": "existing:KisPageStoreSessionStats read request/lease/last-use fields plus KisPageStoreReadScopeStatistics captured-view fields",
+      "static-callers": [
+        "KisPageStore::acquireReadImpl",
+        "KisPageStore::resolve",
+        "KisCapturedReadView::Private::~Private"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisPageReadCoordinator",
+        "registerRequestLocked",
+        "resolveLocked",
+        "releaseSnapshot"
+      ],
+      "target-owner": "KisPageReadCoordinator"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPagePublicationCoordinator",
+      "facts-owned": [
+        "prepared-publication-delta",
+        "prepared-commit-capability",
+        "surface-default-revision-high-water",
+        "descriptor-side-table",
+        "commit-restore-abort-orchestration"
+      ],
+      "failure-tests": [
+        "KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication",
+        "KisPageStoreCpuMutationTest::restoreProtectsSourceAndRevalidatesLease",
+        "KisPageStoreCpuMutationTest::capturedOverlayDefaultIdentitySurvivesAbortAndRestore"
+      ],
+      "id": "BR1-PS-STORE-PUBLICATION-019",
+      "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp",
+      "remove-after": "never: canonical coordinator; R2/M4 parallel side maps were replaced by one transaction state and KisPreparedMutationCommit",
+      "replacement-type": "KisPreparedMutationCommit installed by KisPagePublicationCoordinator",
+      "runtime-counter": "existing:KisPageStorePublicationStatistics plus prepared delta/session counters",
+      "static-callers": [
+        "KisPageStore::stageSurfaceMetadata",
+        "KisPageStore::commit",
+        "KisPageStore::restoreRetainedEpochImpl",
+        "KisPageStore::abort"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisPagePublicationCoordinator",
+        "KisPreparedMutationCommit",
+        "PreparedTransactionState",
+        "stageSurfaceMetadataLocked",
+        "commitLocked",
+        "restoreRetainedEpochLocked",
+        "abortLocked"
+      ],
+      "target-owner": "KisPagePublicationCoordinator"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageMetadataCoordinator",
+      "facts-owned": [
+        "authoritative-version-record",
+        "authoritative-replica-record",
+        "rare-metadata-overflow",
+        "snapshot-projection"
+      ],
+      "failure-tests": [
+        "KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip",
+        "KisPageStoreReferenceTest::indexedMutationTransitions",
+        "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges"
+      ],
+      "id": "BR1-PS-METADATA-RECORDS-020",
+      "path": "libs/image/pagestore/KisPageMetadataCoordinator_p.h",
+      "remove-after": "never: compact record schema remains canonical across M2 arena migration",
+      "replacement-type": "KisVersionRecord, KisReplicaRecord and KisMetadataOverflowNode in typed generational slots",
+      "runtime-counter": "existing:KisPageMetadataMetrics local/full projection counters plus KisPageMetadataFootprint record totals",
+      "static-callers": [
+        "KisPageMetadataCoordinator::registerPage",
+        "KisPageMetadataCoordinator::applyOwnerSequence",
+        "KisPageMetadataCoordinator::pageSnapshot"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisVersionRecord",
+        "KisReplicaRecord",
+        "KisMetadataOverflowNode"
+      ],
+      "target-owner": "KisPageMetadataCoordinator shard-owned typed arenas"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageMetadataCoordinator::MetadataArenas",
+      "facts-owned": [
+        "stable-record-address",
+        "slot-generation",
+        "block-generation",
+        "metadata-hard-budget",
+        "empty-block-return"
+      ],
+      "failure-tests": [
+        "KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline",
+        "KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease",
+        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithinBudget"
+      ],
+      "id": "BR1-PS-METADATA-ARENA-021",
+      "path": "libs/image/pagestore/KisPageMetadataArena_p.h",
+      "remove-after": "never: shard-owned stable slot allocation remains canonical metadata storage",
+      "replacement-type": "KisShardSlotArena with lock-external prepared growth admission in M2B",
+      "runtime-counter": "KisPageMetadataMetrics arena growth candidates/attaches/conflicts/failures plus KisPageMetadataFootprint arena allocated/used/free/high-water/released counters",
+      "static-callers": [
+        "KisPageMetadataCoordinator::registerPage",
+        "KisPageMetadataCoordinator::applyOwnerSequence",
+        "KisPageMetadataCoordinator::installPublicationImpl"
+      ],
+      "status": "callers-migrated",
+      "symbols": [
+        "KisShardSlotArena",
+        "PreparedBlock",
+        "ReleasedBlocks"
+      ],
+      "target-owner": "KisPageMetadataCoordinator shard-owned typed arenas"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisBaseIterator",
+      "facts-owned": [
+        "read-pin",
+        "iterator-write-boundary"
+      ],
+      "failure-tests": [
+        "KisTiledDataManagerTest::testPageStoreIteratorFixedView",
+        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility"
+      ],
+      "id": "BR1-PS-ITERATOR-BASE-012",
+      "path": "libs/image/tiles3/kis_base_iterator.h",
+      "remove-after": "R4/M8 iterator adapter migrated",
+      "replacement-type": "canonical operation cursor and write batch",
+      "runtime-counter": "existing:KisPageStoreReadScopeStatistics plus source-bound iterator boundary callers",
+      "static-callers": [
+        "KisHLineIterator",
+        "KisVLineIterator"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "m_readScope",
+        "m_readCursor",
+        "registerPageStoreWriteBoundary"
+      ],
+      "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisRandomAccessor2",
+      "facts-owned": [
+        "read-pin"
+      ],
+      "failure-tests": [
+        "KisPageStoreReferenceTest::randomAccessorMatchesTiles3AcrossNegativePageBoundary"
+      ],
+      "id": "BR1-PS-ACCESSOR-RANDOM-013",
+      "path": "libs/image/tiles3/kis_random_accessor.h",
+      "remove-after": "R4/M8 accessor adapter migrated",
+      "replacement-type": "canonical PageStore read cursor",
+      "runtime-counter": "existing:KisPageStoreReadScopeStatistics plus source-bound accessor boundary callers",
+      "static-callers": [
+        "KisRandomAccessor2::moveTo"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "KisPageStoreReadPage"
+      ],
+      "target-owner": "KisPageReadCoordinator"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisPaintDeviceStrategy",
+      "facts-owned": [
+        "page-writer",
+        "operation-diagnostics"
+      ],
+      "failure-tests": [
+        "KisPainterTest::testPageStoreBitBltReadBoundary",
+        "KisPainterTest::testPageStoreBitBltWriteOperation"
+      ],
+      "id": "BR1-PS-PAINTER-OP-014",
+      "path": "libs/image/kis_paint_device_strategies.h",
+      "remove-after": "R4/M8 generic pixel operation facade",
+      "replacement-type": "backend-neutral pixel operation facade",
+      "runtime-counter": "existing:PixelOperationBody and MutationSealPrivatePublish diagnostics",
+      "static-callers": [
+        "KisPainter::bitBlt",
+        "KisPaintDeviceStrategy::applyPixelOperation"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "applyPixelOperation",
+        "writePageStoreOperation",
+        "KisPageStorePixelOperation"
+      ],
+      "target-owner": "generic pixel operation facade"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisCpuResidentBinding",
+      "facts-owned": [
+        "physical-allocation-owner",
+        "writable-pin",
+        "swap-exclusion"
+      ],
+      "failure-tests": [
+        "KisPageStorePhysicalClaimTest::parkedWriterReservation",
+        "KisPageStorePhysicalClaimTest::parkedWriterConcurrentConsumers",
+        "KisPageStorePhysicalClaimTest::sourceConsumersRespectWriter"
+      ],
+      "id": "BR1-PS-PHYSICAL-GATE-015",
+      "path": "libs/image/pagestore/KisCpuResidentBinding_p.h",
+      "remove-after": "M6 generation-tagged provider handoff may replace this fresh-write reservation",
+      "replacement-type": "provider-private generation-checked allocation owner gate",
+      "runtime-counter": "existing:writable pin acquire/release and active CPU write page statistics plus reverse callers",
+      "static-callers": [
+        "KisPageMutationSession::beginWriteImpl"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisCpuWriteBindingReservation",
+        "acquire"
+      ],
+      "target-owner": "stable physical binding coordinated with provider allocation record"
+    },
+    {
+      "category": "canonical",
+      "current-owner": "KisPageRetirementQueue",
+      "facts-owned": [
+        "retirement-debt",
+        "provider-last-use"
+      ],
+      "failure-tests": [
+        "KisPageStoreCpuMutationTest::rejectedRetirementsPreserveDebtAndBudget",
+        "KisPageStoreCpuMutationTest::firstRetirementRunsOffThreadAndCloseDrains",
+        "KisPageStoreCpuMutationTest::blockedRetirementDoesNotBlockPublication",
+        "KisPageStoreCpuMutationTest::closeRetriesDetachedReplicas",
+        "KisPageStoreCpuMutationTest::closePollsDetachedRetirement"
+      ],
+      "id": "BR1-PS-STORE-RETIREMENT-017",
+      "path": "libs/image/pagestore/KisPageRetirementQueue.cpp",
+      "remove-after": "never: canonical R1 leaf service",
+      "replacement-type": "KisPageRetirementQueue",
+      "runtime-counter": "instrumented:KisPageStoreSessionStats retirement live/peak/budget/retry/drain fields",
+      "static-callers": [
+        "KisPageStore::processRetirements",
+        "KisPageStore::closeSession"
+      ],
+      "status": "delegated",
+      "symbols": [
+        "KisPageRetirementQueue",
+        "retireOrDefer",
+        "retireEffects",
+        "takeForClose"
+      ],
+      "target-owner": "KisPageRetirementQueue"
+    },
+    {
+      "category": "compatibility-intrusion",
+      "current-owner": "KisVulkanPageReplicaProvider",
+      "facts-owned": [
+        "gpu-last-use",
+        "retirement-debt"
+      ],
+      "failure-tests": [
+        "KisVulkanFoundationContractsTest::pageProviderFailsClosedBeforeBr3"
+      ],
+      "id": "BR1-PS-VULKAN-PROVIDER-016",
+      "path": "libs/vulkanbackend/KisVulkanPageReplicaProvider.cpp",
+      "remove-after": "BR3 provider implementation consumes canonical owner ledger",
+      "replacement-type": "canonical provider operation and retirement contract",
+      "runtime-counter": "deferred:BR3 provider is fail-closed and has no production runtime path",
+      "static-callers": [
+        "KisPageStore provider directory"
+      ],
+      "status": "inventoried",
+      "symbols": [
+        "KisVulkanPageReplicaProvider",
+        "lastUse",
+        "retire"
+      ],
+      "target-owner": "KisPageOwnerLedger and KisPageRetirementQueue"
+    }
+  ],
+  "milestone": "BR1-R3-M5B",
+  "schema": 1
+}

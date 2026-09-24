@@ -68,6 +68,17 @@ KisTileData::KisTileData(qint32 pixelSize, const quint8 *defPixel, KisTileDataSt
 }
 
 
+KisTileData::KisTileData(qint32 pixelSize, const quint8 *source, qsizetype sourceStride, KisTileDataStore *store)
+    : m_state(NORMAL), m_mementoFlag(0), m_age(0), m_usersCount(0),
+      m_refCount(0), m_pixelSize(pixelSize), m_store(store)
+{
+    m_store->checkFreeMemory();
+    m_data = allocateData(m_pixelSize);
+    const qsizetype rowBytes = qsizetype(WIDTH) * m_pixelSize;
+    for (int row = 0; row < HEIGHT; ++row)
+        memcpy(m_data + row * rowBytes, source + row * sourceStride, size_t(rowBytes));
+}
+
 /**
  * Duplicating tiledata
  * + new object loaded in memory

@@ -221,4 +221,3 @@ private:
 
 
 #endif /* KIS_MEMENTO_ITEM_H_ */
-

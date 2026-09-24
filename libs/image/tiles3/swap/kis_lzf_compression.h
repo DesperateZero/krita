@@ -19,9 +19,6 @@ public:
     qint32 decompress(const quint8* input, qint32 inputLength, quint8* output, qint32 outputLength) override;
 
     qint32 outputBufferSize(qint32 dataSize) override;
-
-    //void adjustForDataSize(qint32 dataSize);
 };
 
 #endif /* __KIS_LZF_COMPRESSION_H */
-

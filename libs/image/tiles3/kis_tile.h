@@ -15,11 +15,15 @@
 #include <QRect>
 #include <QStack>
 
+#include <memory>
+#include <vector>
+
 #include <kis_shared.h>
 #include <kis_shared_ptr.h>
 
 #include "kis_tile_data.h"
 #include "kis_tile_data_store.h"
+#include "KisTilePageStoreBridge.h"
 
 //#define DEAD_TILES_SANITY_CHECK
 
@@ -27,8 +31,6 @@ class KisTile;
 typedef KisSharedPtr<KisTile> KisTileSP;
 
 class KisMementoManager;
-
-
 /**
  * Provides abstraction to a tile.
  * + A tile contains a part of a PaintDevice,
@@ -70,8 +72,20 @@ public:
      */
     void notifyAttachedToDataManager(KisMementoManager *mm);
 
-public:
+    void setPageStoreBridge(KisTilePageStoreBridge *bridge, bool oldData);
+    /**
+     * Marks the currently cached TileData as the exact native CPU view for
+     * this wrapper.  Used for virtual/default reads and after a successful
+     * PageStore refresh so lockForRead() can use the normal tile-local swap
+     * pin without issuing a second generic PageStore request.
+    */
+    void setPageStoreNativeReadReady();
+    bool refreshPageStoreData();
+    // The caller holds an exact canonical read capability over replacement.
+    // Existing borrowed pointers are not revoked; refresh waits for unlock.
+    void installPageStoreReadCache(KisTileData *replacement);
 
+public:
     void debugPrintInfo();
     void debugDumpTile();
 
@@ -80,12 +94,21 @@ public:
     void unlockForWrite();
     void unlockForRead() const;
 
+    // Fallible mutable-pointer entry for bulk operations. Do not return the
+    // cached before-image when PageStore denies write authorization.
+    quint8 *tryWriteData() const;
+    // Compatibility classification only, not a pixel/access capability.
+    // Includes a borrowed write intent before its first mutable data exposure.
+    bool hasPageStoreWriteIntent() const;
+
 
     /* this allows us work directly on tile's data */
     inline quint8 *data() const {
+        markPageStoreWriteDirty();
         return m_tileData->data();
     }
     inline void setData(const quint8 *data) {
+        markPageStoreWriteDirty();
         m_tileData->setData(data);
     }
 
@@ -98,8 +121,6 @@ public:
 
     inline QRect extent() const {
         return m_extent;
-//QRect(m_col * KisTileData::WIDTH, m_row * KisTileData::HEIGHT,
-//                     KisTileData::WIDTH, KisTileData::HEIGHT);
     }
 
     inline KisTileSP next() const {
@@ -116,10 +137,26 @@ public:
     }
 
     inline KisTileData*  tileData() const {
+        markPageStoreWriteDirty();
         return m_tileData;
     }
 
 private:
+    inline KisTilePageStoreLease *pageStoreWriteLease() const {
+        for (auto it = m_pageStoreLeases.rbegin(); it != m_pageStoreLeases.rend(); ++it)
+            if ((*it)->writable()) return it->get();
+        return nullptr;
+    }
+
+    inline void markPageStoreWriteDirty() const {
+        KisTilePageStoreLease *lease = pageStoreWriteLease();
+        if (!lease && Q_UNLIKELY(m_pageStoreWriteLockCount > 0)) {
+            KIS_SAFE_ASSERT_RECOVER_NOOP(ensurePageStoreWriteAccess());
+            lease = pageStoreWriteLease();
+        }
+        if (lease) lease->markDirty();
+    }
+
     void init(qint32 col, qint32 row,
               KisTileData *defaultTileData, KisMementoManager* mm);
 
@@ -127,8 +164,13 @@ private:
     inline void unblockSwapping() const;
 
     inline void safeReleaseOldTileData(KisTileData *td);
+    bool ensurePageStoreWriteAccess() const;
 
 private:
+    KisTilePageStoreBridge *resolvePageStoreBridge(KisMementoManager *manager) const;
+    void replacePageStoreReadCacheLocked(KisTileData *replacement) const;
+    bool releasePageStoreLeasesLocked() const;
+
     KisTileData *m_tileData;
     mutable QStack<KisTileData*> m_oldTileData;
     mutable volatile int m_lockCounter;
@@ -147,6 +189,12 @@ private:
     KisTileSP m_nextTile;
 
     QAtomicPointer<KisMementoManager> m_mementoManager;
+    QAtomicInteger<int> m_pageStoreOldDataView{0};
+    mutable QAtomicInteger<int> m_pageStoreNativeReadReady{0};
+    mutable qint32 m_pageStoreWriteLockCount = 0;
+    mutable bool m_pageStoreWriteIntentOwnsNativePin = false;
+    QAtomicPointer<KisTilePageStoreBridge> m_pageStoreBridge;
+    mutable std::vector<std::unique_ptr<KisTilePageStoreLease>> m_pageStoreLeases;
 
     /**
      * This is a special mutex for guarding copy-on-write
@@ -178,4 +226,3 @@ private:
 };
 
 #endif // KIS_TILE_H_
-

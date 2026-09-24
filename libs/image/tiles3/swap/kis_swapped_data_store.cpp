@@ -5,6 +5,9 @@
  */
 
 #include <QMutexLocker>
+#include <QHash>
+#include <cstring>
+#include <limits>
 //#include "kis_debug.h"
 #include "kis_swapped_data_store.h"
 #include "kis_memory_window.h"
@@ -12,10 +15,18 @@
 
 #include "kis_tile_compressor_2.h"
 
+class KisSwappedDataStore::RawPrivate
+{
+public:
+    quint64 nextRecord = 1;
+    QHash<quint64, KisChunk> chunks;
+};
+
 //#define COMPRESSOR_VERSION 2
 
 KisSwappedDataStore::KisSwappedDataStore()
     : m_totalSwapMemoryUsed(0)
+    , m_raw(new RawPrivate)
 {
     KisImageConfig config(true);
     const quint64 maxSwapSize = config.maxSwapSize() * MiB;
@@ -31,6 +42,7 @@ KisSwappedDataStore::KisSwappedDataStore()
 
 KisSwappedDataStore::~KisSwappedDataStore()
 {
+    delete m_raw;
     delete m_compressor;
     delete m_swapSpace;
     delete m_allocator;
@@ -38,9 +50,7 @@ KisSwappedDataStore::~KisSwappedDataStore()
 
 quint64 KisSwappedDataStore::numTiles() const
 {
-    // We are not acquiring the lock here...
-    // Hope QLinkedList will ensure atomic access to it's size...
-
+    QMutexLocker locker(&m_lock);
     return m_allocator->numChunks();
 }
 
@@ -109,7 +119,58 @@ void KisSwappedDataStore::forgetTileData(KisTileData *td)
 
 qint64 KisSwappedDataStore::totalSwapMemoryUsed() const
 {
+    QMutexLocker locker(&m_lock);
     return m_totalSwapMemoryUsed;
+}
+
+quint64 KisSwappedDataStore::storeRawRecord(const QByteArray &bytes)
+{
+    if (bytes.isEmpty() || m_raw->nextRecord == 0) return 0;
+    QMutexLocker locker(&m_lock);
+    KisChunk chunk;
+    if (!m_allocator->tryGetChunk(quint64(bytes.size()), &chunk)) return 0;
+    quint8 *destination = m_swapSpace->getWriteChunkPtr(chunk);
+    if (!destination) {
+        m_allocator->freeChunk(chunk);
+        return 0;
+    }
+    std::memcpy(destination, bytes.constData(), size_t(bytes.size()));
+    const quint64 record = m_raw->nextRecord++;
+    if (record == 0 || m_raw->nextRecord == 0) {
+        m_allocator->freeChunk(chunk);
+        return 0;
+    }
+    m_raw->chunks.insert(record, chunk);
+    m_totalSwapMemoryUsed += bytes.size();
+    return record;
+}
+
+bool KisSwappedDataStore::loadRawRecord(quint64 record, QByteArray *bytes)
+{
+    if (record == 0 || !bytes) return false;
+    QMutexLocker locker(&m_lock);
+    const auto it = m_raw->chunks.constFind(record);
+    if (it == m_raw->chunks.constEnd() ||
+        it->size() > quint64(std::numeric_limits<qsizetype>::max())) {
+        return false;
+    }
+    quint8 *source = m_swapSpace->getReadChunkPtr(it.value());
+    if (!source) return false;
+    *bytes = QByteArray(reinterpret_cast<const char *>(source),
+                        qsizetype(it->size()));
+    return true;
+}
+
+bool KisSwappedDataStore::forgetRawRecord(quint64 record)
+{
+    QMutexLocker locker(&m_lock);
+    auto it = m_raw->chunks.find(record);
+    if (record == 0 || it == m_raw->chunks.end()) return false;
+    const quint64 size = it->size();
+    m_allocator->freeChunk(it.value());
+    m_raw->chunks.erase(it);
+    m_totalSwapMemoryUsed -= qint64(size);
+    return true;
 }
 
 void KisSwappedDataStore::debugStatistics()

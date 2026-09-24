@@ -11,7 +11,8 @@
 
 QString KisVulkanPageBindingSnapshot::validationError() const
 {
-    if (providerId == 0 || operationId == 0 || tableGeneration == 0) {
+    if (providerId == 0 || providerEpoch == 0 || operationId == 0 ||
+        tableGeneration == 0) {
         return QStringLiteral("Binding snapshot identity or generation is missing");
     }
     if (bindings.isEmpty() || !ready.isValid()) {
@@ -20,6 +21,7 @@ QString KisVulkanPageBindingSnapshot::validationError() const
     for (const KisVulkanPageBinding &binding : bindings) {
         if (!binding.isValid() ||
             binding.access.providerId != providerId ||
+            binding.access.providerEpoch != providerEpoch ||
             binding.access.operationId != operationId ||
             binding.access.bindingTableGeneration != tableGeneration) {
             return QStringLiteral("Binding snapshot contains an invalid or foreign binding");
@@ -33,6 +35,7 @@ class KisVulkanPageBindingTable::Private
 public:
     mutable QMutex mutex;
     quint64 providerId = 0;
+    quint64 providerEpoch = 0;
     KisVulkanPageBindingSnapshot current;
 };
 
@@ -43,19 +46,28 @@ KisVulkanPageBindingTable::KisVulkanPageBindingTable()
 
 KisVulkanPageBindingTable::~KisVulkanPageBindingTable() = default;
 
-bool KisVulkanPageBindingTable::configure(quint64 providerId)
+bool KisVulkanPageBindingTable::configure(quint64 providerId, quint64 providerEpoch)
 {
-    if (providerId == 0) return false;
+    if (providerId == 0 || providerEpoch == 0) return false;
     QMutexLocker locker(&d->mutex);
     if (d->providerId != 0) return false;
     d->providerId = providerId;
+    d->providerEpoch = providerEpoch;
     return true;
 }
 
 bool KisVulkanPageBindingTable::isOperational() const
 {
     QMutexLocker locker(&d->mutex);
-    return d->providerId != 0;
+    return d->providerId != 0 && d->providerEpoch != 0;
+}
+
+bool KisVulkanPageBindingTable::matchesProvider(quint64 providerId,
+                                                quint64 providerEpoch) const
+{
+    QMutexLocker locker(&d->mutex);
+    return providerId != 0 && providerEpoch != 0 &&
+           d->providerId == providerId && d->providerEpoch == providerEpoch;
 }
 
 bool KisVulkanPageBindingTable::publishCompleted(
@@ -69,13 +81,12 @@ bool KisVulkanPageBindingTable::publishCompleted(
         if (error) *error = snapshotError;
         return false;
     }
-    if (snapshot.providerId != d->providerId) {
-        if (error) *error = QStringLiteral("Binding snapshot belongs to another provider");
+    if (snapshot.providerId != d->providerId ||
+        snapshot.providerEpoch != d->providerEpoch) {
+        if (error) *error = QStringLiteral("Binding snapshot belongs to another provider epoch");
         return false;
     }
-    if (!completedTicket.isValid() ||
-        completedTicket.source() != snapshot.ready.source() ||
-        completedTicket.value() < snapshot.ready.value()) {
+    if (!(completedTicket == snapshot.ready)) {
         if (error) *error = QStringLiteral("Binding snapshot producer has not completed");
         return false;
     }

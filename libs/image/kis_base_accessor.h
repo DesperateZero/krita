@@ -22,8 +22,12 @@ public:
     virtual const quint8 * oldRawData() const = 0;
 
     /**
-     * @return a pointer to the most actual pixel data, this points to the same data as rawData()
-     * method of a writable accessor.
+     * @return the current pixel selection of this access operation. PageStore
+     * immutable const traversals keep the view captured at construction, even
+     * across cache eviction/reset; create a new accessor for a new operation.
+     * Writable accessors return the same bytes as rawData(). A legacy read
+     * overlapping a live same-thread writer remains a compatibility observer,
+     * not an immutable snapshot; constructing it must not revoke write pointers.
      */
     virtual const quint8 * rawDataConst() const = 0;
 

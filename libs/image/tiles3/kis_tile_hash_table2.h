@@ -52,6 +52,13 @@ public:
     }
 
     bool tileExists(qint32 col, qint32 row);
+    // The packed key reserves zero and the (0x7fff, 0x7fff) origin escape.
+    // Let bulk entry points reject unsupported ranges before opening a write
+    // transaction instead of silently using detached, unindexed tiles.
+    static bool supportsCoordinates(qint32 col, qint32 row)
+    {
+        return col > -0x7fff && col < 0x7fff && row > -0x7fff && row < 0x7fff;
+    }
 
     /**
      * Returns a tile in position (col,row). If no tile exists,
@@ -136,7 +143,7 @@ private:
     inline quint32 calculateHash(qint32 col, qint32 row)
     {
 #ifdef SANITY_CHECK
-        KIS_ASSERT_RECOVER_NOOP(qAbs(row) < 0x7FFF && qAbs(col) < 0x7FFF);
+        KIS_ASSERT_RECOVER_NOOP(supportsCoordinates(col, row));
 #endif // SANITY_CHECK
 
         return calculateHashImpl(col, row);
@@ -148,7 +155,7 @@ private:
      */
     inline quint32 calculateHashSafe(qint32 col, qint32 row)
     {
-        KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(qAbs(row) < 0x7FFF && qAbs(col) < 0x7FFF, 0);
+        KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(supportsCoordinates(col, row), 0);
         return calculateHashImpl(col, row);
     }
 
@@ -517,7 +524,6 @@ inline KisTileData* KisTileHashTableTraits2<T>::refAndFetchDefaultTileData()
     m_defaultTileData->ref();
     return m_defaultTileData;
 }
-
 
 template <class T>
 void KisTileHashTableTraits2<T>::debugPrintInfo()

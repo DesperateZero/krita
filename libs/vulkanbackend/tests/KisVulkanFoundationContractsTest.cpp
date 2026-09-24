@@ -15,7 +15,10 @@
 #include "KisSurfaceCodecRegistry.h"
 #include "KisVulkanMemory.h"
 #include "KisVulkanDeviceService.h"
+#include "KisVulkanPageBindingTable.h"
+#include "KisVulkanPageReplicaProvider.h"
 #include "KisVulkanPipelineRepository.h"
+#include "KisVulkanResourceRetirementQueue.h"
 #include "KisVulkanShaderCatalog.h"
 #include "KisVulkanSubmissionCoordinator.h"
 #include "KisVulkanWsiService.h"
@@ -33,15 +36,16 @@ private Q_SLOTS:
     void shaderCatalogSealsOnlyCompleteAssets();
     void memoryLedgerEnforcesHardBudget();
     void pipelineRepositoryEnforcesStateOrder();
+    void pageBindingTableRejectsForeignProviderEpoch();
+    void pageProviderFailsClosedBeforeBr3();
     void coordinatorAndWsiValidateGenerations();
+    void retirementQueueRequiresOneGpuTimelineDomain();
 };
 
 void KisVulkanFoundationContractsTest::completionRegistryRejectsConflictingTerminalState()
 {
     KisCompletionRegistry registry;
-    KisCompletionSourceDescriptor source;
-    source.name = QStringLiteral("test timeline");
-    source.gpuTimeline = true;
+    const KisCompletionDomain source = KisCompletionDomain::GpuTimeline;
     const quint64 sourceId = registry.registerSource(source);
     QVERIFY(sourceId != 0);
 
@@ -52,6 +56,54 @@ void KisVulkanFoundationContractsTest::completionRegistryRejectsConflictingTermi
     QVERIFY(registry.complete(first, KisCompletionStatus::Succeeded));
     QVERIFY(!registry.complete(first, KisCompletionStatus::Failed));
     QCOMPARE(registry.status(first), KisCompletionStatus::Succeeded);
+    QCOMPARE(first.domain(), KisCompletionDomain::GpuTimeline);
+    QVERIFY(first.isOrderedWith(second));
+
+    const KisCompletionDomain cpuSource = KisCompletionDomain::CpuJob;
+    const KisCompletionTicket cpuTicket =
+        registry.allocatePending(registry.registerSource(cpuSource));
+    QVERIFY(cpuTicket.isValid());
+    QCOMPARE(cpuTicket.domain(), KisCompletionDomain::CpuJob);
+    QVERIFY(!first.isOrderedWith(cpuTicket));
+
+    KisCompletionRegistry foreignRegistry;
+    const quint64 foreignSource = foreignRegistry.registerSource(source);
+    const KisCompletionTicket foreign =
+        foreignRegistry.allocatePending(foreignSource);
+    QVERIFY(foreign.isValid());
+    QCOMPARE(foreign.source(), first.source());
+    QCOMPARE(foreign.value(), first.value());
+    QVERIFY(foreign.registry() != first.registry());
+    QVERIFY(!first.isOrderedWith(foreign));
+    QCOMPARE(registry.status(foreign), KisCompletionStatus::Unknown);
+    QVERIFY(!registry.complete(foreign, KisCompletionStatus::Succeeded));
+}
+
+void KisVulkanFoundationContractsTest::retirementQueueRequiresOneGpuTimelineDomain()
+{
+    KisCompletionRegistry registry;
+    const KisCompletionDomain gpuSource = KisCompletionDomain::GpuTimeline;
+    const quint64 gpuSourceId = registry.registerSource(gpuSource);
+    const KisCompletionTicket first = registry.allocatePending(gpuSourceId);
+    const KisCompletionTicket second = registry.allocatePending(gpuSourceId);
+
+    const KisCompletionDomain cpuSource = KisCompletionDomain::CpuJob;
+    const KisCompletionTicket cpu =
+        registry.allocatePending(registry.registerSource(cpuSource));
+
+    KisVulkanResourceRetirementQueue queue;
+    KisVulkanRetiredResource resource;
+    resource.resourceId = 7;
+    resource.deviceGeneration = 3;
+    resource.debugName = QStringLiteral("typed retirement resource");
+    resource.lastUse = cpu;
+    QVERIFY(!queue.enqueue(resource));
+
+    resource.lastUse = second;
+    QVERIFY(queue.enqueue(resource));
+    QVERIFY(queue.collectCompleted(cpu).isEmpty());
+    QVERIFY(queue.collectCompleted(first).isEmpty());
+    QCOMPARE(queue.collectCompleted(second).size(), 1);
 }
 
 void KisVulkanFoundationContractsTest::surfaceRegistryAllocatesStableIdentity()
@@ -82,7 +134,8 @@ void KisVulkanFoundationContractsTest::surfaceRegistryAllocatesStableIdentity()
     QVERIFY(first.isValid());
     QVERIFY(second.isValid());
     QVERIFY(first.value != second.value);
-    QCOMPARE(registry.surfaceCount(), 2);
+    QVERIFY(registry.contains(first));
+    QVERIFY(registry.contains(second));
     QVERIFY(registry.unregisterSurface(first));
     QVERIFY(!registry.contains(first));
 }
@@ -279,6 +332,94 @@ void KisVulkanFoundationContractsTest::pipelineRepositoryEnforcesStateOrder()
     QVERIFY(repository.beginPreparation(handle));
     QVERIFY(repository.markPrepared(handle));
     QVERIFY(repository.isPrepared(key));
+}
+
+void KisVulkanFoundationContractsTest::pageBindingTableRejectsForeignProviderEpoch()
+{
+    KisCompletionRegistry registry;
+    const KisCompletionDomain source = KisCompletionDomain::CpuJob;
+    const quint64 sourceId = registry.registerSource(source);
+    const KisCompletionTicket ready = registry.allocatePending(sourceId);
+    QVERIFY(registry.complete(ready, KisCompletionStatus::Succeeded));
+
+    KisVulkanPageBindingTable table;
+    QVERIFY(table.configure(7, 3));
+    QVERIFY(table.matchesProvider(7, 3));
+    QVERIFY(!table.matchesProvider(7, 4));
+    QVERIFY(!table.configure(7, 3));
+
+    KisPageVersion version;
+    version.key.surface = KisSurfaceId{5};
+    version.key.page = KisLogicalPageId{2, 4};
+    version.generation = KisPageGeneration{9};
+
+    KisVulkanPageBindingSnapshot snapshot;
+    snapshot.providerId = 7;
+    snapshot.providerEpoch = 4;
+    snapshot.operationId = 11;
+    snapshot.tableGeneration = 1;
+    snapshot.ready = ready;
+
+    KisVulkanPageBinding binding;
+    binding.version = version;
+    binding.access.providerId = 7;
+    binding.access.providerEpoch = 4;
+    binding.access.operationId = 11;
+    binding.access.bindingTableGeneration = 1;
+    binding.access.bindingIndex = 0;
+    binding.access.byteSize = 4096;
+    binding.resourceId = 13;
+    binding.resourceGeneration = 2;
+    snapshot.bindings = {binding};
+    QVERIFY(snapshot.isValid());
+
+    QString error;
+    QVERIFY(!table.publishCompleted(snapshot, ready, &error));
+    QVERIFY(!error.isEmpty());
+
+    snapshot.providerEpoch = 3;
+    snapshot.bindings.first().access.providerEpoch = 3;
+    const KisCompletionTicket foreignCompletion =
+        registry.allocatePending(sourceId);
+    QVERIFY(registry.complete(foreignCompletion,
+                              KisCompletionStatus::Succeeded));
+    QVERIFY(!table.publishCompleted(snapshot, foreignCompletion, &error));
+    QVERIFY(table.publishCompleted(snapshot, ready, &error));
+    QVERIFY(table.lookup(version, 11).isValid());
+    QVERIFY(!table.lookup(version, 12).isValid());
+    version.generation.value++;
+    QVERIFY(!table.lookup(version, 11).isValid());
+
+    QVERIFY(!table.publishCompleted(snapshot, ready, &error));
+    table.invalidateOperation(11);
+    QCOMPARE(table.currentTableGeneration(), quint64(0));
+}
+
+void KisVulkanFoundationContractsTest::pageProviderFailsClosedBeforeBr3()
+{
+    KisVulkanPageReplicaProvider provider;
+    QVERIFY(!provider.providerId().isValid());
+    QVERIFY(!provider.providerEpoch().isValid());
+    QVERIFY(!provider.capabilities().synchronousOperations);
+
+    const KisReplicaOperation read = provider.requestReplica(
+        {}, {}, {}, KisPageAccessDomain::DiscreteVram,
+        KisPageAccessMode::Read, KisPagePriority::Normal);
+    QCOMPARE(read.status, KisPageRequestStatus::Failed);
+    QVERIFY(!read.isValid());
+    QVERIFY(!read.error.isEmpty());
+
+    const KisReplicaOperation write = provider.prepareWrite(
+        {}, {}, {}, KisPageAccessDomain::DiscreteVram,
+        KisPageWriteMode::PreserveContents, KisPagePriority::Interactive);
+    QCOMPARE(write.status, KisPageRequestStatus::Failed);
+    QVERIFY(!write.isValid());
+    QVERIFY(!write.error.isEmpty());
+
+    const KisReplicaOperation retirement = provider.retire({}, {}, {});
+    QCOMPARE(retirement.status, KisPageRequestStatus::Failed);
+    QVERIFY(!retirement.isValid());
+    QVERIFY(!retirement.error.isEmpty());
 }
 
 void KisVulkanFoundationContractsTest::coordinatorAndWsiValidateGenerations()

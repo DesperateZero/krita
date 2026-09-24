@@ -57,6 +57,7 @@ private:
     qint32 m_offsetX, m_offsetY;
     QRect m_dataRect;
     T* m_iterator;
+    QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
     KisIteratorCompleteListener *m_completeListener;
 };
 
@@ -138,6 +139,7 @@ KisRepeatLineIteratorPixelBase<T>::KisRepeatLineIteratorPixelBase(KisDataManager
     m_offsetX(offsetx), m_offsetY(offsety),
     m_dataRect(_rc),
     m_iterator(0),
+    m_readScope(dm->capturePageStoreReadScope(false)),
     m_completeListener(completeListener)
 {
 }
@@ -206,7 +208,7 @@ void KisRepeatHLineIteratorPixelBase<T>::createIterator()
     }
 
     int width = this->m_dataRect.x() + this->m_dataRect.width() - this->m_startIteratorX;
-    this->m_iterator = new T(this->m_dm, this->m_startIteratorX, startY, width, this->m_offsetX, this->m_offsetY, false, this->m_completeListener);
+    this->m_iterator = new T(this->m_dm, this->m_startIteratorX, startY, width, this->m_offsetX, this->m_offsetY, false, this->m_completeListener, this->m_readScope);
     this->m_realX = this->m_startX;
 }
 
@@ -268,7 +270,7 @@ void KisRepeatVLineIteratorPixelBase<T>::createIterator()
     }
 
     int height = this->m_dataRect.y() + this->m_dataRect.height() - this->m_startIteratorY;
-    this->m_iterator = new T(this->m_dm, startX, this->m_startIteratorY, height, this->m_offsetX, this->m_offsetY, false, this->m_completeListener);
+    this->m_iterator = new T(this->m_dm, startX, this->m_startIteratorY, height, this->m_offsetX, this->m_offsetY, false, this->m_completeListener, this->m_readScope);
     this->m_realY = this->m_startY;
 }
 

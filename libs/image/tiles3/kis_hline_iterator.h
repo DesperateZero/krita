@@ -10,6 +10,7 @@
 #include "kis_base_iterator.h"
 #include "kritaimage_export.h"
 #include "kis_iterator_ng.h"
+#include <vector>
 
 class KRITAIMAGE_EXPORT KisHLineIterator2 : public KisHLineIteratorNG, public KisBaseIterator {
     KisHLineIterator2(const KisHLineIterator2&);
@@ -19,13 +20,15 @@ public:
     struct KisTileInfo {
         KisTileSP tile;
         KisTileSP oldtile;
+        KisPageStoreReadPage before;
         quint8* data {nullptr};
         quint8* oldData {nullptr};
     };
 
 
 public:    
-    KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint32 y, qint32 w, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *listener);
+    KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint32 y, qint32 w, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *listener,
+                      QSharedPointer<const KisPageStoreIteratorReadScope> scope = {});
     ~KisHLineIterator2() override;
     
     bool nextPixel() override;
@@ -49,7 +52,6 @@ private:
     qint32 m_y {0};        // current y position
     qint32 m_row {0};    // current row in tilemgr
     quint32 m_index {0};    // current col in tilemgr
-    quint32 m_tileWidth {0};
     quint8 *m_data {nullptr};
     quint8 *m_oldData {nullptr};
     bool m_havePixels {false};
@@ -65,13 +67,11 @@ private:
     qint32 m_leftInLeftmostTile {0};
     qint32 m_yInTile {0};
 
-    QVector<KisTileInfo> m_tilesCache;
-    quint32 m_tilesCacheSize {0};
+    std::vector<KisTileInfo> m_tilesCache;
     
 private:
 
     void switchToTile(qint32 xInTile);
-    void fetchTileDataForCache(KisTileInfo& kti, qint32 col, qint32 row);
     void preallocateTiles();
 };
 #endif

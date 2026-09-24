@@ -1,0 +1,444 @@
+{
+  "facts": [
+    {
+      "creation-paths": [
+        "KisImageEpochReferenceModel::beginTransaction",
+        "KisTiledDataManagerPageStoreBackend::writableTransaction"
+      ],
+      "current-writers": [
+        "KisImageEpochReferenceModel",
+        "KisPageStore::Private transaction maps",
+        "KisTiledDataManagerPageStoreBackend::Private anonymous transaction"
+      ],
+      "fact": "transaction lifetime",
+      "id": "BR1-OWN-TRANSACTION",
+      "lock-or-claim": "epoch model mutex plus backend transaction mutex",
+      "read-only-observers": [
+        "KisPagePublicationCoordinator",
+        "KisPageMutationSession"
+      ],
+      "status": "split",
+      "target-authoritative-owner": "KisImageEpochReferenceModel",
+      "terminal-paths": [
+        "commitTransaction",
+        "abortTransaction",
+        "closeSession"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageStore::acquireWrite",
+        "KisPageMutationSession::beginWriteImpl",
+        "KisTiledDataManagerPageStoreBackend::reserveWritablePage"
+      ],
+      "current-writers": [
+        "KisPageWriteAdmission through KisPageWriteCoordinator"
+      ],
+      "fact": "page writer admission",
+      "id": "BR1-OWN-WRITER-ADMISSION",
+      "lock-or-claim": "store owner mutex and KisPageWriteAdmission::ClaimSet",
+      "read-only-observers": [
+        "providers",
+        "legacy tile bridge"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageWriteAdmission",
+      "terminal-paths": [
+        "seal",
+        "cancel",
+        "publishHostWrite",
+        "closeSession"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageMetadataCoordinator::reserveGeneration"
+      ],
+      "current-writers": [
+        "KisPageMetadataCoordinator"
+      ],
+      "fact": "pending generation",
+      "id": "BR1-OWN-PENDING-GENERATION",
+      "lock-or-claim": "metadata shard mutex and transaction writer token",
+      "read-only-observers": [
+        "KisPageMutationSession",
+        "KisImageEpochReferenceModel"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageMetadataCoordinator",
+      "terminal-paths": [
+        "publish",
+        "abort prepared version",
+        "detach superseded prepared version into canonical historical collection"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisTiles3PageReplicaProvider::prepareWrite",
+        "KisCpuPageReplicaProvider::prepareWrite"
+      ],
+      "current-writers": [
+        "replica provider allocation records",
+        "KisCpuResidentBinding physical claim"
+      ],
+      "fact": "physical allocation owner",
+      "id": "BR1-OWN-PHYSICAL-ALLOCATION",
+      "lock-or-claim": "provider mutex plus resident binding mutex and TileData exclusive claim",
+      "read-only-observers": [
+        "KisPageOwnerLedger",
+        "KisPageMetadataCoordinator"
+      ],
+      "status": "split",
+      "target-authoritative-owner": "provider-private allocation owner gate",
+      "terminal-paths": [
+        "provider retire",
+        "provider close",
+        "future backing handoff commit or cancel"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisCpuResidentBinding::acquireRead",
+        "KisCpuWriteBindingReservation::acquire"
+      ],
+      "current-writers": [
+        "KisCpuResidentBinding"
+      ],
+      "fact": "read pin and writable pin",
+      "id": "BR1-OWN-PINS",
+      "lock-or-claim": "resident binding mutex and provider allocation gate",
+      "read-only-observers": [
+        "KisPageReadCoordinator",
+        "KisPageMutationSession"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "stable physical KisCpuResidentBinding",
+      "terminal-paths": [
+        "read guard release",
+        "write guard release",
+        "binding revoke"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageStore::captureCommittedEpoch",
+        "KisPageStore::captureTransactionOverlay"
+      ],
+      "current-writers": [
+        "KisImageEpochReferenceModel"
+      ],
+      "fact": "captured and retained exact version",
+      "id": "BR1-OWN-CAPTURE",
+      "lock-or-claim": "epoch capture gate and retention token",
+      "read-only-observers": [
+        "KisCapturedReadView",
+        "KisPageMetadataCoordinator history collector"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisImageEpochReferenceModel",
+      "terminal-paths": [
+        "captured view release",
+        "transaction overlay release",
+        "closeSession drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageOwnerLedger::beginProviderOperation"
+      ],
+      "current-writers": [
+        "KisPageOwnerLedger"
+      ],
+      "fact": "provider operation",
+      "id": "BR1-OWN-PROVIDER-OP",
+      "lock-or-claim": "owner ledger mutex and provider epoch token",
+      "read-only-observers": [
+        "KisCompletionRegistry",
+        "KisPageStore retirement paths"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageOwnerLedger",
+      "terminal-paths": [
+        "releaseTerminalProviderOperation",
+        "provider unregister",
+        "closeSession drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "provider operation completion",
+        "read or write guard release"
+      ],
+      "current-writers": [
+        "KisPageMetadataCoordinator replica state",
+        "provider allocation record"
+      ],
+      "fact": "GPU and IO last-use",
+      "id": "BR1-OWN-LAST-USE",
+      "lock-or-claim": "metadata shard transition plus provider operation identity",
+      "read-only-observers": [
+        "KisPageRetirementQueue",
+        "KisCompletionRegistry"
+      ],
+      "status": "split",
+      "target-authoritative-owner": "KisPageMetadataCoordinator qualified by KisPageOwnerLedger",
+      "terminal-paths": [
+        "acknowledge last use",
+        "retire replica",
+        "device loss failure"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageRetirementQueue::retireEffects",
+        "KisPageRetirementQueue::retireOrDefer"
+      ],
+      "current-writers": [
+        "KisPageRetirementQueue"
+      ],
+      "fact": "retirement debt",
+      "id": "BR1-OWN-RETIREMENT",
+      "lock-or-claim": "store owner mutex and completion-qualified provider operation",
+      "read-only-observers": [
+        "sessionStats",
+        "closeSession"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageRetirementQueue",
+      "terminal-paths": [
+        "retired",
+        "provider failure retained for retry",
+        "close drain report"
+      ]
+    },
+    {
+      "creation-paths": [
+        "epoch root retention change",
+        "published version supersession"
+      ],
+      "current-writers": [
+        "KisImageEpochReferenceModel roots plus KisPageHistoryCollector cursor"
+      ],
+      "fact": "history reachability",
+      "id": "BR1-OWN-HISTORY",
+      "lock-or-claim": "epoch root retention plus incremental metadata scan cursor",
+      "read-only-observers": [
+        "KisPageMetadataCoordinator",
+        "KisPageStoreMementoManager"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisImageEpochReferenceModel with KisPageHistoryCollector cursor",
+      "terminal-paths": [
+        "retained root release",
+        "historical discard transition",
+        "close drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "virtual default read buffer creation",
+        "generic default materialization admission"
+      ],
+      "current-writers": [
+        "KisPageDefaultStorage"
+      ],
+      "fact": "default byte cache and materialization admission",
+      "id": "BR1-OWN-DEFAULT-STORAGE",
+      "lock-or-claim": "service cache mutex plus store owner-gated preparation admission",
+      "read-only-observers": [
+        "KisCapturedReadView",
+        "KisPageReadCoordinator and KisPageWriteCoordinator candidate"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageDefaultStorage",
+      "terminal-paths": [
+        "materialization completion or failure",
+        "default cache eviction",
+        "close drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "surface registration",
+        "default pixel replacement",
+        "restore retained epoch"
+      ],
+      "current-writers": [
+        "KisPagePublicationCoordinator default revision high-water map",
+        "KisImageEpochReferenceModel surface state"
+      ],
+      "fact": "default revision and surface association",
+      "id": "BR1-OWN-DEFAULT-REVISION",
+      "lock-or-claim": "store owner mutex plus epoch root validation",
+      "read-only-observers": [
+        "KisPageDefaultStorage",
+        "KisPageReadCoordinator and KisPagePublicationCoordinator"
+      ],
+      "status": "split",
+      "target-authoritative-owner": "KisImageEpochReferenceModel",
+      "terminal-paths": [
+        "surface publication",
+        "transaction abort",
+        "retained epoch restore"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageReadCoordinator::registerRequestLocked",
+        "KisPageStore::captureReadView"
+      ],
+      "current-writers": [
+        "KisPageReadCoordinator"
+      ],
+      "fact": "read request, lease, last-use and captured-view lifecycle",
+      "id": "BR1-OWN-READ-COORDINATION",
+      "lock-or-claim": "store owner mutex plus exact version/lease identity",
+      "read-only-observers": [
+        "KisPageStore facade",
+        "KisPagePublicationCoordinator abort preflight"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageReadCoordinator",
+      "terminal-paths": [
+        "read request cancellation",
+        "read lease release and last-use acknowledgement",
+        "captured view and retained snapshot release"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageMutationSession::seal",
+        "KisPageStore::stageSurfaceMetadata",
+        "KisPageStore::stagePageRemoval",
+        "KisPagePublicationCoordinator::commitLocked prepared commit construction"
+      ],
+      "current-writers": [
+        "KisPagePublicationCoordinator"
+      ],
+      "fact": "prepared publication delta and publication orchestration",
+      "id": "BR1-OWN-PREPARED-PUBLICATION",
+      "lock-or-claim": "store owner mutex plus transaction commit-preparation claim; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
+      "read-only-observers": [
+        "KisCapturedReadView",
+        "KisPageMutationSession",
+        "KisPageStore session statistics"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPreparedMutationCommit installed by KisPagePublicationCoordinator",
+      "terminal-paths": [
+        "Prepared -> Installed commit installation",
+        "Prepared -> Cancelled conflict or metadata rejection",
+        "transaction abort",
+        "move-from -> Empty"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageMetadataCoordinator::registerPage",
+        "MetadataShard::assign and installHeader",
+        "KisPageMetadataCoordinator transition installation",
+        "KisPageMetadataCoordinator publication installation"
+      ],
+      "current-writers": [
+        "KisPageMetadataCoordinator compact shard page/activity records and typed arenas"
+      ],
+      "fact": "logical page header, activity, version, replica and rare protection metadata",
+      "id": "BR1-OWN-METADATA-RECORDS",
+      "lock-or-claim": "single metadata shard mutex plus page revision/publication claim",
+      "read-only-observers": [
+        "reference state machine through touched-record projections",
+        "diagnostic and checkpoint snapshot exporters",
+        "KisPageReadCoordinator and KisPagePublicationCoordinator"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageMetadataCoordinator compact shard page/activity records and typed arenas",
+      "terminal-paths": [
+        "record transition replacement",
+        "historical collection and retirement",
+        "coordinator close"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisShardSlotArena::prepareBlock",
+        "KisShardSlotArena::attachPreparedBlock",
+        "KisShardSlotArena::reserveSlots",
+        "MetadataArenaGrowth::prepare",
+        "growMetadataArenasOutsideLock",
+        "ShardRecordStore::putReserved"
+      ],
+      "current-writers": [
+        "KisPageMetadataCoordinator::MetadataArenas"
+      ],
+      "fact": "metadata slot and block lifetime, generation and hard budget",
+      "id": "BR1-OWN-METADATA-ARENAS",
+      "lock-or-claim": "single owning metadata shard mutex; block payload allocation before attach; prepared publication holds explicit slot reservations through install/cancel",
+      "read-only-observers": [
+        "KisPageMetadataCoordinator::footprint",
+        "diagnostic snapshot projection"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "three typed arenas embedded by value in each metadata shard",
+      "terminal-paths": [
+        "slot erase with generation advance",
+        "prepared slot reservation consumption or cancellation",
+        "empty block intrusive return batch",
+        "arena close and drain",
+        "coordinator destruction after owner quiescence"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisShardSlotIndex::reserveInsertions",
+        "KisPageMetadataCoordinator::preparePublicationImpl",
+        "ShardRecordStore::putBatch",
+        "ShardRecordStore::replaceAll",
+        "ShardRecordStore::installPreparedAdditions"
+      ],
+      "current-writers": [
+        "KisPageMetadataCoordinator::ShardRecordStore"
+      ],
+      "fact": "exact version and physical allocation ownership indexes",
+      "id": "BR1-OWN-METADATA-SHARD-INDEXES",
+      "lock-or-claim": "single owning metadata shard mutex plus explicit insertion reservation token",
+      "read-only-observers": [
+        "touched-record projection",
+        "history and physical-owner lookup",
+        "KisPageMetadataCoordinator::footprint"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "two KisShardSlotIndex values embedded by value in each metadata shard",
+      "terminal-paths": [
+        "eraseExact during version or replica retirement",
+        "prepared reservation consumption on install or cancellation on conflict",
+        "coordinator destruction after owner quiescence"
+      ]
+    },
+    {
+      "creation-paths": [
+        "provider allocation binding creation",
+        "tile read cache installation"
+      ],
+      "current-writers": [
+        "KisCpuResidentBinding",
+        "KisTile PageStore compatibility cache flags"
+      ],
+      "fact": "binding and cache validity",
+      "id": "BR1-OWN-BINDING",
+      "lock-or-claim": "binding mutex plus allocation generation and tile cache gate",
+      "read-only-observers": [
+        "KisCapturedReadView",
+        "iterators and accessors"
+      ],
+      "status": "split",
+      "target-authoritative-owner": "stable physical KisCpuResidentBinding generation tag",
+      "terminal-paths": [
+        "generation mismatch retry",
+        "binding revoke",
+        "physical slot retirement"
+      ]
+    }
+  ],
+  "milestone": "BR1-R3-M5B",
+  "schema": 1
+}

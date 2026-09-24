@@ -25,11 +25,6 @@ KisSurfaceRegistry::KisSurfaceRegistry()
 
 KisSurfaceRegistry::~KisSurfaceRegistry() = default;
 
-bool KisSurfaceRegistry::isOperational() const
-{
-    return true;
-}
-
 KisSurfaceId KisSurfaceRegistry::registerSurface(const KisSurfaceDescriptor &descriptor)
 {
     if (!descriptor.isValid()) {
@@ -73,10 +68,4 @@ bool KisSurfaceRegistry::contains(KisSurfaceId surface) const
 {
     QMutexLocker locker(&d->mutex);
     return surface.isValid() && d->descriptors.contains(surface.value);
-}
-
-int KisSurfaceRegistry::surfaceCount() const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->descriptors.size();
 }

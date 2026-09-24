@@ -1,5 +1,8 @@
 kis_add_test(
     KisVulkanFoundationContractsTest.cpp
+    ../KisVulkanPageBindingTable.cpp
+    ../KisVulkanPageReplicaProvider.cpp
+    TEST_NAME KisVulkanFoundationContractsTest
     LINK_LIBRARIES kritavulkanbackend kritavulkanbase kritatestsdk
 )
 

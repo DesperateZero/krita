@@ -33,10 +33,8 @@ public:
     KisSurfaceCodecRegistry();
     ~KisSurfaceCodecRegistry();
 
-    bool isOperational() const;
     bool registerCodec(const QSharedPointer<KisSurfaceCodec> &codec);
     QSharedPointer<const KisSurfaceCodec> codecFor(const KisSurfaceFormat &format) const;
-    int codecCount() const;
 
 private:
     class Private;

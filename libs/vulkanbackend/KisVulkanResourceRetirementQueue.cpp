@@ -35,7 +35,8 @@ KisVulkanResourceRetirementQueue::~KisVulkanResourceRetirementQueue() = default;
 
 bool KisVulkanResourceRetirementQueue::enqueue(const KisVulkanRetiredResource &resource)
 {
-    if (!resource.isValid()) {
+    if (!resource.isValid() ||
+        resource.lastUse.domain() != KisCompletionDomain::GpuTimeline) {
         return false;
     }
     QMutexLocker locker(&d->mutex);
@@ -58,7 +59,7 @@ QVector<KisVulkanRetiredResource> KisVulkanResourceRetirementQueue::collectCompl
     QMutexLocker locker(&d->mutex);
     for (auto it = d->pending.begin(); it != d->pending.end();) {
         const KisCompletionTicket lastUse = it->lastUse;
-        if (lastUse.source() == completedThrough.source() &&
+        if (lastUse.isOrderedWith(completedThrough) &&
             lastUse.value() <= completedThrough.value()) {
             completed.append(it.value());
             it = d->pending.erase(it);

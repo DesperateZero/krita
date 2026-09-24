@@ -13,16 +13,26 @@
 #include "kis_types.h"
 #include "kis_shared.h"
 #include "kis_iterator_complete_listener.h"
+#include "pagestore/KisPageStoreIteratorReadScope_p.h"
+#include <optional>
+#include <utility>
+#include <vector>
 
 class KisBaseIterator {
 protected:
-    KisBaseIterator(KisTiledDataManager * _dataManager, bool _writable, KisIteratorCompleteListener *listener) {
+    KisBaseIterator(KisTiledDataManager * _dataManager, bool _writable, KisIteratorCompleteListener *listener,
+                    QSharedPointer<const KisPageStoreIteratorReadScope> scope = {}) {
         m_dataManager = _dataManager;
         m_pixelSize = m_dataManager->pixelSize();
         m_writable = _writable;
         m_completeListener = listener;
+        m_readScope = m_dataManager->capturePageStoreReadScope(_writable, std::move(scope));
+        if (m_readScope && m_readScope->observesLiveLegacyWriter()) m_readScope.clear();
+        if (m_readScope && !_writable) m_readCursor.emplace(m_readScope);
     }
     ~KisBaseIterator() {
+        m_readCursor.reset();
+        m_readScope.clear();
         if (m_writable && m_completeListener) {
             m_completeListener->notifyWritableIteratorCompleted();
         }
@@ -31,6 +41,17 @@ protected:
     KisTiledDataManager *m_dataManager;
     qint32 m_pixelSize;        // bytes per pixel
     bool m_writable;
+    QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
+    std::optional<KisPageStoreReadCursor> m_readCursor;
+    void registerWriteBoundary(const void *key, KisPageStoreWriteBoundary boundary) {
+        if (!m_writable || !m_readScope) return;
+        m_boundaryKey = key;
+        m_boundaryThread = m_dataManager->registerPageStoreWriteBoundary(key, boundary);
+    }
+    void unregisterWriteBoundary() {
+        if (m_boundaryThread) m_dataManager->unregisterPageStoreWriteBoundary(m_boundaryThread, m_boundaryKey);
+        m_boundaryThread = nullptr;
+    }
     inline void lockTile(KisTileSP &tile) {
         if (m_writable)
             tile->lockForWrite();
@@ -42,6 +63,7 @@ protected:
         tile->lockForRead();
     }
     inline void unlockTile(KisTileSP &tile) {
+        if (!tile) return;
         if (m_writable) {
             tile->unlockForWrite();
         } else {
@@ -50,7 +72,50 @@ protected:
     }
 
     inline void unlockOldTile(KisTileSP &tile) {
-        tile->unlockForRead();
+        if (tile) tile->unlockForRead();
+    }
+
+    template<typename TileInfo>
+    void fetchTileDataForCache(TileInfo &info, qint32 column, qint32 row) {
+        if (m_readScope) info.tile = m_dataManager->getTile(column, row, m_writable);
+        else m_dataManager->getTilesPair(column, row, m_writable, &info.tile, &info.oldtile);
+        lockTile(info.tile);
+        info.data = info.tile->data();
+        if (m_readScope) {
+            if (m_readScope->beforeAliasesWrite()) info.oldData = info.data;
+            else {
+                info.before = m_readScope->readPage(column, row, true);
+                info.oldData = const_cast<quint8 *>(info.before.data());
+            }
+            KIS_SAFE_ASSERT_RECOVER_RETURN(info.oldData);
+        } else {
+            lockOldTile(info.oldtile);
+            info.oldData = info.oldtile->data();
+        }
+    }
+
+    template<typename TileInfo>
+    void populateTileCache(std::vector<TileInfo> &cache, qsizetype count,
+                           qint32 column, qint32 row, qint32 columnStep, qint32 rowStep) {
+        if (m_readCursor) return;
+        if (cache.empty()) cache.resize(size_t(count));
+        for (size_t i = 0; i < cache.size(); ++i) {
+            unlockTile(cache[i].tile);
+            unlockOldTile(cache[i].oldtile);
+            fetchTileDataForCache(cache[i], column + qint32(i) * columnStep,
+                                  row + qint32(i) * rowStep);
+        }
+    }
+
+    template<typename TileInfo>
+    void releaseTileCache(std::vector<TileInfo> &cache, quint8 *&data, quint8 *&oldData) {
+        for (TileInfo &info : cache) {
+            unlockTile(info.tile);
+            unlockOldTile(info.oldtile);
+        }
+        cache.clear();
+        m_readScope.clear();
+        data = oldData = nullptr;
     }
 
     inline quint32 xToCol(quint32 x) const {
@@ -69,6 +134,8 @@ protected:
     }
     
 private:
+    Qt::HANDLE m_boundaryThread = nullptr;
+    const void *m_boundaryKey = nullptr;
     KisIteratorCompleteListener *m_completeListener;
 };
 

@@ -67,7 +67,10 @@ KisVulkanCommandBufferLease KisVulkanCommandArena::acquire(KisVulkanQueueRole qu
 bool KisVulkanCommandArena::retire(const KisVulkanCommandBufferLease &lease,
                                    const KisCompletionTicket &completion)
 {
-    if (!lease.isValid() || !completion.isValid()) return false;
+    if (!lease.isValid() || !completion.isValid() ||
+        completion.domain() != KisCompletionDomain::GpuTimeline) {
+        return false;
+    }
     QMutexLocker locker(&d->mutex);
     if (lease.arenaGeneration != d->config.arenaGeneration ||
         !d->nativePoolReady || d->inFlight.contains(lease.leaseId)) {
@@ -83,7 +86,7 @@ int KisVulkanCommandArena::collect(const KisCompletionTicket &completedThrough)
     QMutexLocker locker(&d->mutex);
     int collected = 0;
     for (auto it = d->inFlight.begin(); it != d->inFlight.end();) {
-        if (it->source() == completedThrough.source() &&
+        if (it->isOrderedWith(completedThrough) &&
             it->value() <= completedThrough.value()) {
             it = d->inFlight.erase(it);
             ++collected;

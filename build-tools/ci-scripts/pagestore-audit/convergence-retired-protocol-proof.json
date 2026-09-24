@@ -1,0 +1,447 @@
+{
+  "apis": [
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 30,
+          "line": 353,
+          "path": "libs/image/pagestore/KisPageReplicaProvider.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 42,
+          "line": 75,
+          "path": "libs/image/pagestore/KisPageReplicaProvider.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "adoptSynchronousHostReplica",
+      "production-callers": [
+        {
+          "caller": "KisPageStore::adoptSynchronousHostWriteImpl",
+          "caller-usr": "c:@S@KisPageStore@F@adoptSynchronousHostWriteImpl#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#*$@S@KisPageStoreLegacyPage#*$@S@QString#",
+          "column": 19,
+          "dynamic": true,
+          "implicit": false,
+          "line": 3884,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        }
+      ],
+      "qualified-name": "KisPageReplicaProvider::adoptSynchronousHostReplica",
+      "specializations-and-overrides": [],
+      "test-callers": [],
+      "usr": "c:@S@KisPageReplicaProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 458,
+          "path": "libs/image/pagestore/KisPageStore.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 20,
+          "line": 3748,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "adoptSynchronousHostWrite",
+      "production-callers": [],
+      "qualified-name": "KisPageStore::adoptSynchronousHostWrite",
+      "specializations-and-overrides": [],
+      "test-callers": [
+        {
+          "caller": "KisPageStoreCpuMutationTest::adoptionRemovalRemainsAbsentUntilSeal",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@adoptionRemovalRemainsAbsentUntilSeal#",
+          "column": 23,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1581,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@concurrentWritePreparationClaims#",
+          "column": 32,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1680,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        }
+      ],
+      "usr": "c:@S@KisPageStore@F@adoptSynchronousHostWrite#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#*$@S@QString#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 559,
+          "path": "libs/image/pagestore/KisPageStore.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 20,
+          "line": 3761,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "adoptSynchronousHostWriteFromLegacy",
+      "production-callers": [],
+      "qualified-name": "KisPageStore::adoptSynchronousHostWriteFromLegacy",
+      "specializations-and-overrides": [],
+      "test-callers": [],
+      "usr": "c:@S@KisPageStore@F@adoptSynchronousHostWriteFromLegacy#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#&$@S@KisPageStoreLegacyPage#*$@S@QString#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 567,
+          "path": "libs/image/pagestore/KisPageStore.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 20,
+          "line": 3772,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "adoptSynchronousHostWriteImpl",
+      "production-callers": [
+        {
+          "caller": "KisPageStore::adoptSynchronousHostWrite",
+          "caller-usr": "c:@S@KisPageStore@F@adoptSynchronousHostWrite#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#*$@S@QString#",
+          "column": 12,
+          "dynamic": false,
+          "implicit": false,
+          "line": 3756,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
+          "caller": "KisPageStore::adoptSynchronousHostWriteFromLegacy",
+          "caller-usr": "c:@S@KisPageStore@F@adoptSynchronousHostWriteFromLegacy#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#&$@S@KisPageStoreLegacyPage#*$@S@QString#",
+          "column": 12,
+          "dynamic": false,
+          "implicit": false,
+          "line": 3767,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        }
+      ],
+      "qualified-name": "KisPageStore::adoptSynchronousHostWriteImpl",
+      "specializations-and-overrides": [],
+      "test-callers": [],
+      "usr": "c:@S@KisPageStore@F@adoptSynchronousHostWriteImpl#&1$@S@KisPageTransaction#&1$@S@KisPageKey#$@S@KisReplicaProviderId#$@S@KisReplicaProviderEpoch#$@E@KisPagePriority#*$@S@KisReplicaHandle#*$@S@KisPageStoreLegacyPage#*$@S@QString#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 223,
+          "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 43,
+          "line": 2399,
+          "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "replaceFullTile",
+      "production-callers": [],
+      "qualified-name": "KisTiledDataManagerPageStoreBackend::replaceFullTile",
+      "specializations-and-overrides": [],
+      "test-callers": [],
+      "usr": "c:@S@KisTiledDataManagerPageStoreBackend@F@replaceFullTile#I#I#*$@S@KisTileData#b#*$@S@QString#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 22,
+          "line": 100,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 48,
+          "line": 525,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "adoptSynchronousHostReplica",
+      "production-callers": [],
+      "qualified-name": "KisTiles3PageReplicaProvider::adoptSynchronousHostReplica",
+      "specializations-and-overrides": [
+        {
+          "column": 48,
+          "line": 525,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp",
+          "related": "KisPageReplicaProvider::adoptSynchronousHostReplica",
+          "related-usr": "c:@S@KisPageReplicaProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#",
+          "relation": "override"
+        },
+        {
+          "column": 22,
+          "line": 100,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h",
+          "related": "KisPageReplicaProvider::adoptSynchronousHostReplica",
+          "related-usr": "c:@S@KisPageReplicaProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#",
+          "relation": "override"
+        },
+        {
+          "column": 22,
+          "line": 100,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h",
+          "related": "KisPageReplicaProvider::adoptSynchronousHostReplica",
+          "related-usr": "c:@S@KisPageReplicaProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#",
+          "relation": "override"
+        }
+      ],
+      "test-callers": [
+        {
+          "caller": "TestProvider::adoptSynchronousHostReplica",
+          "caller-usr": "c:KisPageStoreCpuMutationTest.cpp@aN@S@TestProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#",
+          "column": 84,
+          "dynamic": true,
+          "implicit": false,
+          "line": 94,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStorePhysicalClaimTest::aliasAndSeedReferences",
+          "caller-usr": "c:@S@KisPageStorePhysicalClaimTest@F@aliasAndSeedReferences#",
+          "column": 30,
+          "dynamic": true,
+          "implicit": false,
+          "line": 314,
+          "path": "libs/image/tests/KisPageStorePhysicalClaimTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreReferenceTest::tiles3WriteSeedIsOnlyConsumedByAdoption",
+          "caller-usr": "c:@S@KisPageStoreReferenceTest@F@tiles3WriteSeedIsOnlyConsumedByAdoption#",
+          "column": 19,
+          "dynamic": true,
+          "implicit": false,
+          "line": 5570,
+          "path": "libs/image/tests/KisPageStoreReferenceTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreReferenceTest::tiles3WriteSeedIsOnlyConsumedByAdoption",
+          "caller-usr": "c:@S@KisPageStoreReferenceTest@F@tiles3WriteSeedIsOnlyConsumedByAdoption#",
+          "column": 18,
+          "dynamic": true,
+          "implicit": false,
+          "line": 5574,
+          "path": "libs/image/tests/KisPageStoreReferenceTest.cpp"
+        }
+      ],
+      "usr": "c:@S@KisTiles3PageReplicaProvider@F@adoptSynchronousHostReplica#&1$@S@KisPageVersion#&1$@S@KisPageAllocationDescriptor#$@E@KisPageAccessDomain#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 161,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 36,
+          "line": 715,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "discardWriteSeed",
+      "production-callers": [],
+      "qualified-name": "KisTiles3PageReplicaProvider::discardWriteSeed",
+      "specializations-and-overrides": [],
+      "test-callers": [
+        {
+          "caller": "KisPageStoreCpuMutationTest::adoptionRemovalRemainsAbsentUntilSeal",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@adoptionRemovalRemainsAbsentUntilSeal#",
+          "column": 20,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1584,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@concurrentWritePreparationClaims#",
+          "column": 24,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1724,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::mutablePreparationDoesNotAdoptSeed",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@mutablePreparationDoesNotAdoptSeed#",
+          "column": 63,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1868,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::mutablePreparationDoesNotAdoptSeed",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@mutablePreparationDoesNotAdoptSeed#",
+          "column": 20,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1889,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        }
+      ],
+      "usr": "c:@S@KisTiles3PageReplicaProvider@F@discardWriteSeed#&1$@S@KisPageKey#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 10,
+          "line": 157,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 36,
+          "line": 691,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "seedNextWrite",
+      "production-callers": [],
+      "qualified-name": "KisTiles3PageReplicaProvider::seedNextWrite",
+      "specializations-and-overrides": [],
+      "test-callers": [
+        {
+          "caller": "KisPageStoreCpuMutationTest::adoptionRemovalRemainsAbsentUntilSeal",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@adoptionRemovalRemainsAbsentUntilSeal#",
+          "column": 28,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1569,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@concurrentWritePreparationClaims#",
+          "column": 32,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1668,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreCpuMutationTest::mutablePreparationDoesNotAdoptSeed",
+          "caller-usr": "c:@S@KisPageStoreCpuMutationTest@F@mutablePreparationDoesNotAdoptSeed#",
+          "column": 28,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1866,
+          "path": "libs/image/tests/KisPageStoreCpuMutationTest.cpp"
+        },
+        {
+          "caller": "KisPageStorePhysicalClaimTest::aliasAndSeedReferences",
+          "caller-usr": "c:@S@KisPageStorePhysicalClaimTest@F@aliasAndSeedReferences#",
+          "column": 25,
+          "dynamic": false,
+          "implicit": false,
+          "line": 312,
+          "path": "libs/image/tests/KisPageStorePhysicalClaimTest.cpp"
+        },
+        {
+          "caller": "KisPageStoreReferenceTest::tiles3WriteSeedIsOnlyConsumedByAdoption",
+          "caller-usr": "c:@S@KisPageStoreReferenceTest@F@tiles3WriteSeedIsOnlyConsumedByAdoption#",
+          "column": 22,
+          "dynamic": false,
+          "implicit": false,
+          "line": 5558,
+          "path": "libs/image/tests/KisPageStoreReferenceTest.cpp"
+        }
+      ],
+      "usr": "c:@S@KisTiles3PageReplicaProvider@F@seedNextWrite#&1$@S@KisPageKey#&1$@S@KisPageAllocationDescriptor#*$@S@KisTileData#*$@S@QString#"
+    },
+    {
+      "callback-registrations": [],
+      "codegen-name": "",
+      "declarations": [
+        {
+          "column": 18,
+          "line": 175,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.h"
+        }
+      ],
+      "definitions": [
+        {
+          "column": 44,
+          "line": 1038,
+          "path": "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp"
+        }
+      ],
+      "kind": "instance-method",
+      "name": "tileDataForLeasedReplica",
+      "production-callers": [],
+      "qualified-name": "KisTiles3PageReplicaProvider::tileDataForLeasedReplica",
+      "specializations-and-overrides": [],
+      "test-callers": [],
+      "usr": "c:@S@KisTiles3PageReplicaProvider@F@tileDataForLeasedReplica#&1$@S@KisReplicaHandle#$@S@KisPageLeaseId#1"
+    }
+  ],
+  "audit-input-fingerprints": {
+    "_build-br0-cpu/compile_commands.json": "d099f9e30d18227616de18ba58307ff8ae2ee046774768ced0543eb60c45f92e",
+    "build-tools/ci-scripts/generate-pagestore-callgraph.py": "c049de0f5105163c415e8b8dff3ce20d9966128da918b94fdb24417daff53cca",
+    "build-tools/ci-scripts/pagestore-audit/intrusion-manifest.json": "60777913ecb23202eaad1faa593423d1f82a24cad4f9c17ba0cff700656e48f3",
+    "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "a43668c8f53864942450c6f832844c021c1269d988d3382abfaf407fce08fbc8",
+    "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "b21db0004b02f51fc13ca630ea190b60ce7d9079a7c08cd4869685ebc4f8859d"
+  },
+  "full-graph-api-count": 1614,
+  "full-graph-call-edge-count": 13683,
+  "full-graph-callback-registration-count": 14,
+  "full-graph-sha256": "5ee3d81345e912fe6f880b10a028db5253a2d1db25180641ca10eae9d7aaab96",
+  "full-graph-translation-unit-count": 85,
+  "kind": "pre-deletion-evidence-subset-not-a-current-gate-graph",
+  "schema": 1,
+  "source-checkpoint": "convergence-start-source.json",
+  "source-fingerprints": {
+    "libs/image/pagestore/KisPageReplicaProvider.cpp": "5dcd1577b849dec17e16716ff67cc06caf6167c02c2b9ccb27b1351d9c001f04",
+    "libs/image/pagestore/KisPageReplicaProvider.h": "edd6f9809d8c26bc80a539f402b37ea07422dabb3394c48f690359efc293d80a",
+    "libs/image/pagestore/KisPageStore.cpp": "59c54ab401b69db2a1d03deaf78cb2d274a47ebdb78706208eabb4969bb10fc7",
+    "libs/image/pagestore/KisPageStore.h": "a40277fa029ab21792cdbf06de7ddf72b32a9065832595ee11928170f37015a1",
+    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "54a05570f6d110df02ffb9182439479d5cf3c5a9b008f430ab6d571af2a76ca3",
+    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": "89d9bfb81953ea3429ef3bde1189119e61da6c98c8f935b9a3e5a9cf7757a78d",
+    "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp": "7cca46f921e2c5a0f425b8c107098132aea92094cf2a9918e8a42f55e909a438",
+    "libs/image/pagestore/KisTiles3PageReplicaProvider.h": "2e4212706d37650aac4b8799ec2e50f4c541fa5b063555a541c252c71903e597"
+  }
+}

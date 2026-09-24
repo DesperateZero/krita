@@ -60,6 +60,16 @@ public:
     qint64 totalSwapMemoryUsed() const;
 
     /**
+     * Raw record bridge used by the canonical PageStore migration. The legacy
+     * tile API continues to own KisTileData identity; these methods only put
+     * opaque bytes into the same chunk allocator and swap file so the BR1
+     * exact-generation index does not create a parallel SSD store.
+     */
+    quint64 storeRawRecord(const QByteArray &bytes);
+    bool loadRawRecord(quint64 record, QByteArray *bytes);
+    bool forgetRawRecord(quint64 record);
+
+    /**
      * Some debugging output
      */
     void debugStatistics();
@@ -71,10 +81,11 @@ private:
     KisChunkAllocator *m_allocator;
     KisMemoryWindow *m_swapSpace;
 
-    QMutex m_lock;
+    mutable QMutex m_lock;
 
     qint64 m_totalSwapMemoryUsed;
+    class RawPrivate;
+    RawPrivate *m_raw;
 };
 
 #endif /* __KIS_SWAPPED_DATA_STORE_H */
-
