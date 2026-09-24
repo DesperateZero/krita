@@ -2588,6 +2588,171 @@ void KisTiledDataManagerTest::testPageStoreBulkNoOpAndBitBltBatching()
              afterBitBlt.committedTransactions);
 }
 
+void KisTiledDataManagerTest::testIteratorSwapInFailureDropsPointers_data()
+{
+    QTest::addColumn<int>("failurePoint");
+    QTest::newRow("mapping")
+        << int(KisSwapInFailurePoint::Mapping);
+    QTest::newRow("allocation")
+        << int(KisSwapInFailurePoint::Allocation);
+    QTest::newRow("decompression")
+        << int(KisSwapInFailurePoint::Decompression);
+}
+
+void KisTiledDataManagerTest::testIteratorSwapInFailureDropsPointers()
+{
+    QFETCH(int, failurePoint);
+    const quint8 defaultPixel = 0;
+    const quint8 value = 0x56;
+    const quint8 horizontalValue = 0x57;
+    const quint8 verticalValue = 0x58;
+    KisDataManager dm(1, &defaultPixel);
+    dm.m_mementoManager->setPageStoreBridge(nullptr);
+    delete dm.m_pageStoreBackend;
+    dm.m_pageStoreBackend = nullptr;
+    dm.clear(0, 0, 128, 128, &value);
+    dm.setPixel(64, 0, &horizontalValue);
+    dm.setPixel(0, 64, &verticalValue);
+
+    bool existing = false;
+    auto tile = dm.getReadOnlyTileLazy(0, 0, existing);
+    QVERIFY(existing);
+    auto *tileData = tile->tileData();
+    QVERIFY(tileData->ref());
+    const auto release = qScopeGuard([&] { tileData->deref(); });
+    auto *store = KisTileDataStore::instance();
+    QVERIFY(store->trySwapTileData(tileData));
+    QVERIFY(!tileData->isResident());
+
+    const auto inject = [&] {
+        store->testingFailNextSwapIn(
+            KisSwapInFailurePoint(failurePoint));
+    };
+    inject();
+    {
+        KisHLineIterator2 iterator(
+            &dm, 0, 0, 1, 0, 0, false, nullptr);
+        QVERIFY(!iterator.rawDataConst());
+    }
+    QVERIFY(!tileData->isResident());
+
+    inject();
+    {
+        KisVLineIterator2 iterator(
+            &dm, 0, 0, 1, 0, 0, false, nullptr);
+        QVERIFY(!iterator.rawDataConst());
+    }
+    QVERIFY(!tileData->isResident());
+
+    inject();
+    {
+        KisRandomAccessor2 accessor(
+            &dm, 0, 0, false, nullptr);
+        accessor.moveTo(0, 0);
+        QVERIFY(!accessor.rawDataConst());
+        QVERIFY(!accessor.oldRawData());
+    }
+    QVERIFY(!tileData->isResident());
+
+    QVERIFY(tile->lockForRead());
+    QCOMPARE(tile->data()[0], value);
+    tile->unlockForRead();
+
+    bool horizontalExists = false;
+    auto horizontalTile = dm.getReadOnlyTileLazy(
+        1, 0, horizontalExists);
+    QVERIFY(horizontalExists);
+    auto *horizontalData = horizontalTile->tileData();
+    QVERIFY(horizontalData != tileData);
+    QVERIFY(horizontalData->ref());
+    const auto releaseHorizontal = qScopeGuard(
+        [&] { horizontalData->deref(); });
+    QVERIFY(store->trySwapTileData(horizontalData));
+    QVERIFY(!horizontalData->isResident());
+
+    inject();
+    QVERIFY(!horizontalTile->lockForRead());
+    QVERIFY(!horizontalData->isResident());
+    inject();
+    {
+        KisHLineIterator2 iterator(
+            &dm, 0, 0, 65, 0, 0, false, nullptr);
+        QVERIFY(!iterator.rawDataConst());
+    }
+    QVERIFY(!horizontalData->isResident());
+    QVERIFY(tile->lockForRead());
+    QCOMPARE(tile->data()[0], value);
+    tile->unlockForRead();
+
+    bool verticalExists = false;
+    auto verticalTile = dm.getReadOnlyTileLazy(
+        0, 1, verticalExists);
+    QVERIFY(verticalExists);
+    auto *verticalData = verticalTile->tileData();
+    QVERIFY(verticalData != tileData);
+    QVERIFY(verticalData != horizontalData);
+    QVERIFY(verticalData->ref());
+    const auto releaseVertical = qScopeGuard(
+        [&] { verticalData->deref(); });
+    QVERIFY(store->trySwapTileData(verticalData));
+    QVERIFY(!verticalData->isResident());
+
+    inject();
+    {
+        KisVLineIterator2 iterator(
+            &dm, 0, 0, 65, 0, 0, false, nullptr);
+        QVERIFY(!iterator.rawDataConst());
+    }
+    QVERIFY(!verticalData->isResident());
+    QVERIFY(tile->lockForRead());
+    QCOMPARE(tile->data()[0], value);
+    tile->unlockForRead();
+
+    inject();
+    {
+        KisHLineIterator2 iterator(
+            &dm, 0, 63, 1, 0, 0, false, nullptr);
+        QVERIFY(iterator.rawDataConst());
+        iterator.nextRow();
+        QVERIFY(!iterator.rawDataConst());
+        QVERIFY(!iterator.oldRawData());
+    }
+    QVERIFY(!verticalData->isResident());
+
+    inject();
+    {
+        KisVLineIterator2 iterator(
+            &dm, 63, 0, 1, 0, 0, false, nullptr);
+        QVERIFY(iterator.rawDataConst());
+        iterator.nextColumn();
+        QVERIFY(!iterator.rawDataConst());
+        QVERIFY(!iterator.oldRawData());
+    }
+    QVERIFY(!horizontalData->isResident());
+
+    {
+        KisRandomAccessor2 accessor(
+            &dm, 0, 0, false, nullptr);
+        accessor.moveTo(0, 0);
+        QVERIFY(accessor.rawDataConst());
+        QCOMPARE(*accessor.rawDataConst(), value);
+
+        inject();
+        accessor.moveTo(64, 0);
+        QVERIFY(!accessor.rawDataConst());
+        QVERIFY(!accessor.oldRawData());
+        QVERIFY(!horizontalData->isResident());
+
+        accessor.moveTo(0, 0);
+        QVERIFY(accessor.rawDataConst());
+        QCOMPARE(*accessor.rawDataConst(), value);
+    }
+
+    QVERIFY(horizontalTile->lockForRead());
+    QCOMPARE(horizontalTile->data()[0], horizontalValue);
+    horizontalTile->unlockForRead();
+}
+
 //#include <valgrind/callgrind.h>
 
 void KisTiledDataManagerTest::benchmarkReadOnlyTileLazy()

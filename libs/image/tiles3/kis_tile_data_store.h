@@ -25,6 +25,7 @@
 class KisTileDataStoreIterator;
 class KisTileDataStoreReverseIterator;
 class KisTileDataStoreClockIterator;
+class KisTileDataStoreTestAccess;
 struct KisTileDataResidencyState;
 
 class KRITAIMAGE_EXPORT KisTileDataResidencyTransition
@@ -225,6 +226,9 @@ private:
     friend class KisTiledDataManagerTest;
     void testingSuspendPooler();
     void testingResumePooler();
+    void testingFailNextSwapIn(KisSwapInFailurePoint point);
+
+    friend class KisTileDataStoreTestAccess;
 
     friend class KisLowMemoryBenchmark;
     void testingRereadConfig();

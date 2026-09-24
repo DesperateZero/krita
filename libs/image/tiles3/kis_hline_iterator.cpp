@@ -43,9 +43,16 @@ KisHLineIterator2::KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint
     m_leftInLeftmostTile = m_left - m_leftCol * KisTileData::WIDTH;
 
     // let's preallocate first row
-    populateTileCache(m_tilesCache, m_rightCol - m_leftCol + 1, m_leftCol, m_row, 1, 0);
+    if (!populateTileCache(m_tilesCache, m_rightCol - m_leftCol + 1,
+                           m_leftCol, m_row, 1, 0)) {
+        m_havePixels = false;
+        return;
+    }
     m_index = 0;
-    switchToTile(m_leftInLeftmostTile);
+    if (!switchToTile(m_leftInLeftmostTile)) {
+        m_havePixels = false;
+        return;
+    }
     registerWriteBoundary(this, [](const void *context) {
         return !static_cast<const KisHLineIterator2 *>(context)->m_tilesCache.empty();
     });
@@ -56,9 +63,7 @@ void KisHLineIterator2::resetPixelPos()
     m_x = m_left;
 
     m_index = 0;
-    switchToTile(m_leftInLeftmostTile);
-
-    m_havePixels = true;
+    m_havePixels = switchToTile(m_leftInLeftmostTile);
 }
 
 void KisHLineIterator2::resetRowPos()
@@ -67,7 +72,10 @@ void KisHLineIterator2::resetRowPos()
 
     m_row = yToRow(m_y);
     m_yInTile = calcYInTile(m_y, m_row);
-    preallocateTiles();
+    if (!preallocateTiles()) {
+        m_havePixels = false;
+        return;
+    }
 
     resetPixelPos();
 }
@@ -85,7 +93,8 @@ bool KisHLineIterator2::nextPixel()
         else {
             // Switching to the beginning of the next tile
             ++m_index;
-            switchToTile(0);
+            if (!switchToTile(0))
+                return m_havePixels = false;
         }
     }
 
@@ -103,12 +112,13 @@ void KisHLineIterator2::nextRow()
     } else {
         ++m_row;
         m_yInTile = 0;
-        preallocateTiles();
+        if (!preallocateTiles()) {
+            m_havePixels = false;
+            return;
+        }
     }
     m_index = 0;
-    switchToTile(m_leftInLeftmostTile);
-
-    m_havePixels = true;
+    m_havePixels = switchToTile(m_leftInLeftmostTile);
 }
 
 
@@ -135,7 +145,8 @@ bool KisHLineIterator2::nextPixels(qint32 n)
         } else {
             qint32 xInTile = calcXInTile(m_x, col);
             m_index += col - previousCol;
-            switchToTile(xInTile);
+            if (!switchToTile(xInTile))
+                m_havePixels = false;
         }
     }
     return m_havePixels;
@@ -166,21 +177,29 @@ const quint8* KisHLineIterator2::rawDataConst() const
     return m_data;
 }
 
-void KisHLineIterator2::switchToTile(qint32 xInTile)
+bool KisHLineIterator2::switchToTile(qint32 xInTile)
 {
     // The caller must ensure that we are not out of bounds
     Q_ASSERT(m_index < quint32(m_rightCol - m_leftCol + 1));
-    if (!m_readCursor && m_tilesCache.empty()) preallocateTiles();
+    if (!m_readCursor && m_tilesCache.empty() && !preallocateTiles())
+        return false;
 
     if (m_readCursor) {
         const auto pair = m_readCursor->read(m_leftCol + qint32(m_index), m_row);
         m_data = const_cast<quint8 *>(pair.current);
         m_oldData = const_cast<quint8 *>(pair.before);
-        KIS_SAFE_ASSERT_RECOVER_RETURN(pair.isValid() && pair.currentStride == quint32(m_pixelSize * KisTileData::WIDTH) &&
-                                       pair.beforeStride == pair.currentStride);
+        if (!pair.isValid()
+            || pair.currentStride != quint32(m_pixelSize * KisTileData::WIDTH)
+            || pair.beforeStride != pair.currentStride) {
+            m_data = nullptr;
+            m_oldData = nullptr;
+            return false;
+        }
     } else {
         m_data = m_tilesCache[m_index].data;
         m_oldData = m_tilesCache[m_index].oldData;
+        if (!m_data || !m_oldData)
+            return false;
     }
 
     int offset_row = m_pixelSize * (m_yInTile * KisTileData::WIDTH);
@@ -189,13 +208,19 @@ void KisHLineIterator2::switchToTile(qint32 xInTile)
     int offset_col = m_pixelSize * xInTile;
     m_data  += offset_col;
     m_oldData += offset_row + offset_col;
+    return true;
 }
 
 
-void KisHLineIterator2::preallocateTiles()
+bool KisHLineIterator2::preallocateTiles()
 {
     if (m_writable && !m_readScope) m_readScope = m_dataManager->capturePageStoreReadScope(true);
-    populateTileCache(m_tilesCache, m_rightCol - m_leftCol + 1, m_leftCol, m_row, 1, 0);
+    const bool populated = populateTileCache(
+        m_tilesCache, m_rightCol - m_leftCol + 1,
+        m_leftCol, m_row, 1, 0);
+    if (!populated)
+        m_data = m_oldData = nullptr;
+    return populated;
 }
 
 qint32 KisHLineIterator2::x() const

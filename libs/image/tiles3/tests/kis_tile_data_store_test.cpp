@@ -12,6 +12,7 @@
 #include "kis_image_config.h"
 
 #include "tiles3/kis_tiled_data_manager.h"
+#include "tiles3/kis_tile.h"
 #include "tiles_test_utils.h"
 
 #include "tiles3/kis_tile_data_store.h"
@@ -125,7 +126,7 @@ void KisTileDataStoreTest::testLeaks()
     KisTiledDataManager *dm = new KisTiledDataManager(pixelSize, &defaultPixel);
 
     KisTileSP tile = dm->getTile(0, 0, true);
-    tile->lockForWrite();
+    QVERIFY(tile->lockForWrite());
     tile->unlockForWrite();
 
     tile = 0;
@@ -153,7 +154,7 @@ void KisTileDataStoreTest::testSwapping()
 
     for(qint32 col = 0; col < 1000; col++) {
         KisTileSP tile = dm.getTile(col, 0, true);
-        tile->lockForWrite();
+        QVERIFY(tile->lockForWrite());
 
         KisTileData *td = tile->tileData();
         QVERIFY(memoryIsFilled(defaultPixel, td->data(), TILESIZE));
@@ -168,13 +169,50 @@ void KisTileDataStoreTest::testSwapping()
 
     for(qint32 col = 0; col < 1000; col++) {
         KisTileSP tile = dm.getTile(col, 0, true);
-        tile->lockForRead();
+        QVERIFY(tile->lockForRead());
 
         KisTileData *td = tile->tileData();
         QVERIFY(memoryIsFilled(COLUMN2COLOR(col), td->data(), TILESIZE));
-        tile->unlockForWrite();
+        tile->unlockForRead();
+    }
+}
+
+void KisTileDataStoreTest::testTileLockPropagatesSwapInFailure_data()
+{
+    QTest::addColumn<int>("failurePoint");
+    QTest::newRow("mapping")
+        << int(KisSwapInFailurePoint::Mapping);
+    QTest::newRow("allocation")
+        << int(KisSwapInFailurePoint::Allocation);
+    QTest::newRow("decompression")
+        << int(KisSwapInFailurePoint::Decompression);
+}
+
+void KisTileDataStoreTest::testTileLockPropagatesSwapInFailure()
+{
+    QFETCH(int, failurePoint);
+    auto *store = KisTileDataStore::instance();
+    const quint8 initial = 0x45;
+    auto *tileData = store->createDefaultTileData(1, &initial);
+    {
+        KisTile tile(0, 0, tileData, nullptr);
+        QVERIFY(store->trySwapTileData(tileData));
+        QVERIFY(!tileData->isResident());
+
+        store->testingFailNextSwapIn(
+            KisSwapInFailurePoint(failurePoint));
+        QVERIFY(!tile.lockForRead());
+        QVERIFY(!tileData->isResident());
+
+        store->testingFailNextSwapIn(
+            KisSwapInFailurePoint(failurePoint));
+        QVERIFY(!tile.lockForWrite());
+        QVERIFY(!tileData->isResident());
+
+        QVERIFY(tile.lockForRead());
+        QCOMPARE(tile.data()[0], initial);
+        tile.unlockForRead();
     }
 }
 
 SIMPLE_TEST_MAIN(KisTileDataStoreTest)
-

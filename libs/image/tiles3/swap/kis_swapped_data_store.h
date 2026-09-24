@@ -18,6 +18,14 @@ class KisTileData;
 class KisAbstractTileCompressor;
 class KisChunkAllocator;
 class KisMemoryWindow;
+class KisSwappedDataStoreTest;
+
+enum class KisSwapInFailurePoint : quint8 {
+    None,
+    Mapping,
+    Allocation,
+    Decompression
+};
 
 class KRITAIMAGE_EXPORT KisSwappedDataStore
 {
@@ -77,6 +85,8 @@ public:
     void debugStatistics();
 
 private:
+    void testingFailNextSwapIn(KisSwapInFailurePoint point);
+
     QByteArray m_buffer;
     KisAbstractTileCompressor *m_compressor;
 
@@ -88,6 +98,11 @@ private:
     qint64 m_totalSwapMemoryUsed;
     class RawPrivate;
     RawPrivate *m_raw;
+    KisSwapInFailurePoint m_nextSwapInFailure =
+        KisSwapInFailurePoint::None;
+
+    friend class KisTileDataStore;
+    friend class KisSwappedDataStoreTest;
 };
 
 #endif /* __KIS_SWAPPED_DATA_STORE_H */

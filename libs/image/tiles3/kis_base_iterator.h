@@ -52,15 +52,12 @@ protected:
         if (m_boundaryThread) m_dataManager->unregisterPageStoreWriteBoundary(m_boundaryThread, m_boundaryKey);
         m_boundaryThread = nullptr;
     }
-    inline void lockTile(KisTileSP &tile) {
-        if (m_writable)
-            tile->lockForWrite();
-        else
-            tile->lockForRead();
+    inline bool lockTile(KisTileSP &tile) {
+        return m_writable ? tile->lockForWrite() : tile->lockForRead();
     }
-    inline void lockOldTile(KisTileSP &tile) {
+    inline bool lockOldTile(KisTileSP &tile) {
         // Doesn't depend on current access type
-        tile->lockForRead();
+        return tile->lockForRead();
     }
     inline void unlockTile(KisTileSP &tile) {
         if (!tile) return;
@@ -79,7 +76,13 @@ protected:
     void fetchTileDataForCache(TileInfo &info, qint32 column, qint32 row) {
         if (m_readScope) info.tile = m_dataManager->getTile(column, row, m_writable);
         else m_dataManager->getTilesPair(column, row, m_writable, &info.tile, &info.oldtile);
-        lockTile(info.tile);
+        if (!lockTile(info.tile)) {
+            info.tile.clear();
+            info.oldtile.clear();
+            info.data = nullptr;
+            info.oldData = nullptr;
+            return;
+        }
         info.data = info.tile->data();
         if (m_readScope) {
             if (m_readScope->beforeAliasesWrite()) info.oldData = info.data;
@@ -87,24 +90,50 @@ protected:
                 info.before = m_readScope->readPage(column, row, true);
                 info.oldData = const_cast<quint8 *>(info.before.data());
             }
-            KIS_SAFE_ASSERT_RECOVER_RETURN(info.oldData);
+            if (!info.oldData) {
+                unlockTile(info.tile);
+                info.tile.clear();
+                info.data = nullptr;
+                return;
+            }
         } else {
-            lockOldTile(info.oldtile);
+            if (!lockOldTile(info.oldtile)) {
+                unlockTile(info.tile);
+                info.tile.clear();
+                info.oldtile.clear();
+                info.data = nullptr;
+                info.oldData = nullptr;
+                return;
+            }
             info.oldData = info.oldtile->data();
         }
     }
 
     template<typename TileInfo>
-    void populateTileCache(std::vector<TileInfo> &cache, qsizetype count,
+    bool populateTileCache(std::vector<TileInfo> &cache, qsizetype count,
                            qint32 column, qint32 row, qint32 columnStep, qint32 rowStep) {
-        if (m_readCursor) return;
+        if (m_readCursor) return true;
         if (cache.empty()) cache.resize(size_t(count));
         for (size_t i = 0; i < cache.size(); ++i) {
             unlockTile(cache[i].tile);
             unlockOldTile(cache[i].oldtile);
+            cache[i].tile.clear();
+            cache[i].oldtile.clear();
+            cache[i].before = {};
+            cache[i].data = nullptr;
+            cache[i].oldData = nullptr;
             fetchTileDataForCache(cache[i], column + qint32(i) * columnStep,
                                   row + qint32(i) * rowStep);
+            if (!cache[i].data || !cache[i].oldData) {
+                for (TileInfo &entry : cache) {
+                    unlockTile(entry.tile);
+                    unlockOldTile(entry.oldtile);
+                }
+                cache.clear();
+                return false;
+            }
         }
+        return true;
     }
 
     template<typename TileInfo>

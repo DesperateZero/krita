@@ -71,7 +71,7 @@ private:
 
 private:
 
-    void switchToTile(qint32 xInTile);
-    void preallocateTiles();
+    bool switchToTile(qint32 xInTile);
+    bool preallocateTiles();
 };
 #endif

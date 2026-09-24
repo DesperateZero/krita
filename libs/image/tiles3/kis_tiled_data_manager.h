@@ -350,11 +350,11 @@ private:
     template<bool useOldSrcData>
         void bitBltRoughImpl(KisTiledDataManager *srcDM, const QRect &rect);
 
-    void writeBytesBody(const quint8 *data,
+    bool writeBytesBody(const quint8 *data,
                         qint32 x, qint32 y,
                         qint32 width, qint32 height,
                         qint32 dataRowStride = -1);
-    void readBytesBody(quint8 *data,
+    bool readBytesBody(quint8 *data,
                        qint32 x, qint32 y,
                        qint32 width, qint32 height,
                        qint32 dataRowStride = -1) const;

@@ -8,6 +8,7 @@
 #include <QHash>
 #include <cstring>
 #include <limits>
+#include <utility>
 //#include "kis_debug.h"
 #include "kis_swapped_data_store.h"
 #include "kis_memory_window.h"
@@ -98,15 +99,23 @@ bool KisSwappedDataStore::swapInTileData(KisTileData *td)
 
     // see comment in swapOutTileData()
 
+    const KisSwapInFailurePoint failure =
+        std::exchange(m_nextSwapInFailure,
+                      KisSwapInFailurePoint::None);
     KisChunk chunk = td->swapChunk();
+    if (failure == KisSwapInFailurePoint::Mapping)
+        return false;
     quint8 *ptr = m_swapSpace->getReadChunkPtr(chunk);
     if (!ptr)
         return false;
 
+    if (failure == KisSwapInFailurePoint::Allocation)
+        return false;
     td->allocateMemory();
     if (!td->data())
         return false;
-    if (!m_compressor->decompressTileData(ptr, chunk.size(), td)) {
+    if (failure == KisSwapInFailurePoint::Decompression
+        || !m_compressor->decompressTileData(ptr, chunk.size(), td)) {
         td->releaseMemory();
         return false;
     }
@@ -115,6 +124,13 @@ bool KisSwappedDataStore::swapInTileData(KisTileData *td)
     td->setSwapChunk(KisChunk());
     m_allocator->freeChunk(chunk);
     return true;
+}
+
+void KisSwappedDataStore::testingFailNextSwapIn(
+    KisSwapInFailurePoint point)
+{
+    QMutexLocker locker(&m_lock);
+    m_nextSwapInFailure = point;
 }
 
 void KisSwappedDataStore::forgetTileData(KisTileData *td)

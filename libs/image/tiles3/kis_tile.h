@@ -89,8 +89,10 @@ public:
     void debugPrintInfo();
     void debugDumpTile();
 
-    void lockForRead() const;
-    void lockForWrite();
+    // False means no tile lock or backing pin was acquired; callers must not
+    // access data() or call the matching unlock method in that case.
+    bool lockForRead() const;
+    bool lockForWrite();
     void unlockForWrite();
     void unlockForRead() const;
 
@@ -160,7 +162,7 @@ private:
     void init(qint32 col, qint32 row,
               KisTileData *defaultTileData, KisMementoManager* mm);
 
-    inline void blockSwapping() const;
+    inline bool blockSwapping() const;
     inline void unblockSwapping() const;
 
     inline void safeReleaseOldTileData(KisTileData *td);

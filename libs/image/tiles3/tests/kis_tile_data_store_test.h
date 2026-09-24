@@ -18,7 +18,8 @@ private Q_SLOTS:
     void testClockIterator();
     void testLeaks();
     void testSwapping();
+    void testTileLockPropagatesSwapInFailure_data();
+    void testTileLockPropagatesSwapInFailure();
 };
 
 #endif /* KIS_TILE_DATA_STORE_TEST_H */
-

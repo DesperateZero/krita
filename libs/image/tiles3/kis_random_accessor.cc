@@ -61,7 +61,8 @@ void KisRandomAccessor2::moveTo(qint32 x, qint32 y)
         const qint32 col = xToCol(x), row = yToRow(y);
         const auto pair = m_readCursor->read(col, row);
         m_data = nullptr; m_oldData = nullptr;
-        KIS_SAFE_ASSERT_RECOVER_RETURN(pair.isValid());
+        if (!pair.isValid())
+            return;
         const qsizetype localX = qint64(x) - qint64(col) * KisTileData::WIDTH;
         const qsizetype localY = qint64(y) - qint64(row) * KisTileData::HEIGHT;
         m_data = const_cast<quint8 *>(pair.current + localY * pair.currentStride + localX * m_pixelSize);
@@ -90,17 +91,27 @@ void KisRandomAccessor2::moveTo(qint32 x, qint32 y)
         unlockTile(m_tilesCache[CACHESIZE-1]->tile);
         unlockOldTile(m_tilesCache[CACHESIZE-1]->oldtile);
         delete m_tilesCache[CACHESIZE-1];
-    } else {
-        m_tilesCacheSize++;
     }
     quint32 col = xToCol(x);
     quint32 row = yToRow(y);
     KisTileInfo* kti = fetchTileData(col, row);
+    if (!kti) {
+        m_data = nullptr;
+        m_oldData = nullptr;
+        if (m_tilesCacheSize == KisRandomAccessor2::CACHESIZE)
+            --m_tilesCacheSize;
+        return;
+    }
+    if (m_tilesCacheSize < KisRandomAccessor2::CACHESIZE)
+        ++m_tilesCacheSize;
     quint32 offset = x - kti->area_x1 + (y - kti->area_y1) * KisTileData::WIDTH;
     offset *= m_pixelSize;
     m_data = kti->data + offset;
     m_oldData = kti->oldData + offset;
-    memmove(m_tilesCache + 1, m_tilesCache, (KisRandomAccessor2::CACHESIZE - 1) * sizeof(KisTileInfo*));
+    const quint32 entriesToShift = qMin(
+        m_tilesCacheSize - 1, KisRandomAccessor2::CACHESIZE - 1);
+    memmove(m_tilesCache + 1, m_tilesCache,
+            entriesToShift * sizeof(KisTileInfo*));
     m_tilesCache[0] = kti;
 }
 
@@ -129,6 +140,10 @@ KisRandomAccessor2::KisTileInfo* KisRandomAccessor2::fetchTileData(qint32 col, q
     KisTileInfo* kti = new KisTileInfo;
     if (m_writable && !m_readScope) m_readScope = m_dataManager->capturePageStoreReadScope(true);
     fetchTileDataForCache(*kti, col, row);
+    if (!kti->data || !kti->oldData) {
+        delete kti;
+        return nullptr;
+    }
 
     kti->area_x1 = col * KisTileData::HEIGHT;
     kti->area_y1 = row * KisTileData::WIDTH;

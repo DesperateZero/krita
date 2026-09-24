@@ -44,10 +44,10 @@ public:
         m_offset = pixelIndex * dm->pixelSize();
 
         if (type == READ) {
-            m_tile->lockForRead();
+            m_locked = m_tile->lockForRead();
         }
         else {
-            m_tile->lockForWrite();
+            m_locked = m_tile->lockForWrite();
         }
 
         m_type = type;
@@ -55,7 +55,9 @@ public:
 
     virtual ~KisTileDataWrapper()
     {
-        if (m_type == READ) {
+        if (!m_locked) {
+            return;
+        } else if (m_type == READ) {
             m_tile->unlockForRead();
         } else {
             m_tile->unlockForWrite();
@@ -89,8 +91,10 @@ public:
      */
     inline quint8* data() const
     {
-        return m_tile->data() + m_offset;
+        return m_locked ? m_tile->data() + m_offset : nullptr;
     }
+
+    inline bool isValid() const { return m_locked; }
 
 private:
     Q_DISABLE_COPY(KisTileDataWrapper)
@@ -98,5 +102,6 @@ private:
     KisTileSP m_tile;
     qint32 m_offset;
     KisTileDataWrapper::accessType m_type;
+    bool m_locked = false;
 };
 #endif /* __KIS_TILE_DATA_WRAPPER_H */

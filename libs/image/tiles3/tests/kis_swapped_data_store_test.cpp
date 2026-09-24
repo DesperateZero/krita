@@ -156,4 +156,51 @@ void KisSwappedDataStoreTest::testCapacityFailurePreservesResidentTile()
         delete tile;
 }
 
+void KisSwappedDataStoreTest::testReadFailurePreservesSwappedTile_data()
+{
+    QTest::addColumn<int>("failurePoint");
+    QTest::newRow("mapping")
+        << int(KisSwapInFailurePoint::Mapping);
+    QTest::newRow("allocation")
+        << int(KisSwapInFailurePoint::Allocation);
+    QTest::newRow("decompression")
+        << int(KisSwapInFailurePoint::Decompression);
+}
+
+void KisSwappedDataStoreTest::testReadFailurePreservesSwappedTile()
+{
+    QFETCH(int, failurePoint);
+    KisImageConfig config(false);
+    config.setMaxSwapSize(1);
+    config.setSwapSlabSize(1);
+    config.setSwapWindowSize(1);
+
+    KisSwappedDataStore store;
+    const quint8 defaultPixel = 0x37;
+    auto *tile = new KisTileData(
+        1, &defaultPixel, KisTileDataStore::instance());
+    std::memset(tile->data(), 0x6d, TILESIZE);
+    QVERIFY(store.trySwapOutTileData(tile));
+    QVERIFY(!tile->data());
+    const quint64 chunkBegin = tile->swapChunk().begin();
+    const quint64 chunkSize = tile->swapChunk().size();
+    const qint64 swapBytes = store.totalSwapMemoryUsed();
+    const quint64 chunks = store.numTiles();
+
+    store.testingFailNextSwapIn(
+        KisSwapInFailurePoint(failurePoint));
+    QVERIFY(!store.swapInTileData(tile));
+    QVERIFY(!tile->data());
+    QCOMPARE(tile->swapChunk().begin(), chunkBegin);
+    QCOMPARE(tile->swapChunk().size(), chunkSize);
+    QCOMPARE(store.totalSwapMemoryUsed(), swapBytes);
+    QCOMPARE(store.numTiles(), chunks);
+
+    QVERIFY(store.swapInTileData(tile));
+    QVERIFY(memoryIsFilled(0x6d, tile->data(), TILESIZE));
+    QCOMPARE(store.totalSwapMemoryUsed(), qint64(0));
+    QCOMPARE(store.numTiles(), quint64(0));
+    delete tile;
+}
+
 SIMPLE_TEST_MAIN(KisSwappedDataStoreTest)

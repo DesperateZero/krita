@@ -523,7 +523,11 @@ void KisTiledDataManager::purge(const QRect& area)
 
         while ((tile = iter.tile())) {
             if (tile->extent().intersects(area)) {
-                tile->lockForRead();
+                if (!tile->lockForRead()) {
+                    tileData->unblockSwapping();
+                    tileData->deref();
+                    return;
+                }
                 if(memcmp(defaultData, tile->data(), tileDataSize) == 0) {
                     tilesToDelete.push_back(tile);
                 }
@@ -656,7 +660,11 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                      KisTileSP current = m_hashTable->getReadOnlyTileLazy(
                          column, row, existingTile);
                      if (existingTile) {
-                         current->lockForRead();
+                         if (!current->lockForRead()) {
+                             if (td) td->release();
+                             delete[] clearPixelData;
+                             return;
+                         }
                          const bool alreadyCleared = current->tileData() == td;
                          current->unlockForRead();
                          if (alreadyCleared) continue;
@@ -693,6 +701,11 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                                       clearTileRect.top(),
                                       KisTileDataWrapper::WRITE);
                 quint8* tileIt = tw.data();
+                if (!tileIt) {
+                    if (td) td->release();
+                    delete[] clearPixelData;
+                    return;
+                }
 
                 if (pixelBytesAreTheSame) {
                     while (rowsRemaining > 0) {
@@ -875,7 +888,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
 
             if (cloneTileRect == tileRect) {
                  // Clone whole tile
-                 srcTile->lockForRead();
+                 if (!srcTile->lockForRead()) return;
                  KisTileData *td = srcTile->tileData();
                  const bool sparseDefault =
                      !srcTileExists && defaultPixelsCoincide;
@@ -884,7 +897,10 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                      column, row, dstTileExists);
                  bool unchanged = sparseDefault && !dstTileExists;
                  if (!sparseDefault && dstTileExists) {
-                     dstTile->lockForRead();
+                     if (!dstTile->lockForRead()) {
+                         srcTile->unlockForRead();
+                         return;
+                     }
                      KisTileData *dstData = dstTile->tileData();
                      unchanged = dstData == td ||
                          memcmp(dstData->data(), td->data(),
@@ -927,7 +943,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                                       cloneTileRect.left(),
                                       cloneTileRect.top(),
                                       KisTileDataWrapper::WRITE);
-                srcTile->lockForRead();
+                if (!tw.isValid() || !srcTile->lockForRead()) return;
                 // We suppose that the shift in both tiles is the same
                 const quint8* srcTileIt = srcTile->data() + tw.offset();
                 quint8* dstTileIt = tw.data();
@@ -987,7 +1003,7 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
                 srcDM->getOldTile(column, row, srcTileExists) :
                 srcDM->getReadOnlyTileLazy(column, row, srcTileExists);
 
-            srcTile->lockForRead();
+            if (!srcTile->lockForRead()) return;
             KisTileData *td = srcTile->tileData();
             const bool sparseDefault =
                 !srcTileExists && defaultPixelsCoincide;
@@ -996,7 +1012,10 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
                 column, row, dstTileExists);
             bool unchanged = sparseDefault && !dstTileExists;
             if (!sparseDefault && dstTileExists) {
-                dstTile->lockForRead();
+                if (!dstTile->lockForRead()) {
+                    srcTile->unlockForRead();
+                    return;
+                }
                 KisTileData *dstData = dstTile->tileData();
                 unchanged = dstData == td ||
                     memcmp(dstData->data(), td->data(),
@@ -1096,7 +1115,7 @@ void KisTiledDataManager::setExtent(QRect newRect)
 
                 const qint32 pixelSize = this->pixelSize();
 
-                tile->lockForWrite();
+                if (!tile->lockForWrite()) return;
                 quint8* data = tile->data();
                 quint8* ptr;
 
@@ -1165,7 +1184,8 @@ KisRegion KisTiledDataManager::region() const
 void KisTiledDataManager::setPixel(qint32 x, qint32 y, const quint8 * data)
 {
     KisTileDataWrapper tw(this, x, y, KisTileDataWrapper::WRITE);
-    memcpy(tw.data(), data, pixelSize());
+    if (quint8 *destination = tw.data())
+        memcpy(destination, data, pixelSize());
 }
 
 void KisTiledDataManager::writeBytes(const quint8 *data,
@@ -1223,9 +1243,10 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
         diagnostic.next(Phase::WriteBytesBody, 1);
         // Actual bytes reading/writing is done in private header. Child
         // PageStore acquire/resolve/publish timers are inclusive in Body.
-        writeBytesBody(data, x, y, width, height, dataRowStride);
+        const bool written = writeBytesBody(
+            data, x, y, width, height, dataRowStride);
         diagnostic.next(Phase::WriteBytesBatchFinish, 1);
-        if (!pageStoreBatch.finish()) {
+        if (!pageStoreBatch.finish(written)) {
             // Unpublished COW was cancelled; do not leave compatibility tiles
             // marked ready with bytes that canonical PageStore never exposed.
             refreshPageStoreIndex(QRect(x, y, width, height));
@@ -1243,7 +1264,8 @@ void KisTiledDataManager::readBytes(quint8 *data,
     if (m_pageStoreBackend) {
         QString error;
         if (m_pageStoreBackend->hasCurrentThreadIteratorWrites()) {
-            readBytesBody(data, x, y, width, height, dataRowStride);
+            KIS_SAFE_ASSERT_RECOVER_NOOP(
+                readBytesBody(data, x, y, width, height, dataRowStride));
             return;
         }
         const bool read = m_pageStoreBackend->readBytes(data, x, y, width, height, dataRowStride, &error);
@@ -1252,7 +1274,8 @@ void KisTiledDataManager::readBytes(quint8 *data,
         return;
     }
     // Actual bytes reading/writing is done in private header
-    readBytesBody(data, x, y, width, height, dataRowStride);
+    KIS_SAFE_ASSERT_RECOVER_NOOP(
+        readBytesBody(data, x, y, width, height, dataRowStride));
 }
 
 QSharedPointer<const KisPageStoreIteratorReadScope>

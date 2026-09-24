@@ -429,12 +429,14 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
 
         bool loaded = false;
         bool stale = false;
+        bool attemptedLoad = false;
         quint64 revision = 0;
         if (!td->data()) {
             td->m_swapLock.lockForWrite();
             if (!validateResidencyChangeLocked(td, prepared)) {
                 stale = true;
             } else {
+                attemptedLoad = true;
                 loaded = m_swappedStore.swapInTileData(td);
                 if (loaded) {
                     registerTileDataImp(td);
@@ -453,6 +455,8 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
 
         if (stale)
             continue;
+        if (attemptedLoad && !loaded)
+            return false;
 
         /**
          * <-- In theory, livelock is possible here...
@@ -602,4 +606,10 @@ void KisTileDataStore::testingSuspendPooler()
 void KisTileDataStore::testingResumePooler()
 {
     m_pooler.start();
+}
+
+void KisTileDataStore::testingFailNextSwapIn(
+    KisSwapInFailurePoint point)
+{
+    m_swappedStore.testingFailNextSwapIn(point);
 }

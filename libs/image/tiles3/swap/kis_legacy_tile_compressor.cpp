@@ -33,7 +33,8 @@ bool KisLegacyTileCompressor::writeTile(KisTileSP tile, KisPaintDeviceWriter &st
 
     store.write((char *)headerBuffer.data(), strlen((char *)headerBuffer.data()));
 
-    tile->lockForRead();
+    if (!tile->lockForRead())
+        return false;
     retval = store.write((char *)tile->data(), tileDataSize);
     tile->unlockForRead();
 
@@ -58,7 +59,8 @@ bool KisLegacyTileCompressor::readTile(QIODevice *stream, KisTiledDataManager *d
 
     KisTileSP tile = dm->getTile(col, row, true);
 
-    tile->lockForWrite();
+    if (!tile->lockForWrite())
+        return false;
     stream->read((char *)tile->data(), tileDataSize);
     tile->unlockForWrite();
 

@@ -22,6 +22,8 @@ private Q_SLOTS:
     void testRoundTrip();
     void testRandomAccess();
     void testCapacityFailurePreservesResidentTile();
+    void testReadFailurePreservesSwappedTile_data();
+    void testReadFailurePreservesSwappedTile();
 
 };
 

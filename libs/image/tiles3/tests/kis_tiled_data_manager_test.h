@@ -102,6 +102,8 @@ private Q_SLOTS:
     void testPageStorePackedWriteBodyAllowsReader();
     void testPageStoreWholeTileFillUsesSynchronousAdoption();
     void testPageStoreBulkNoOpAndBitBltBatching();
+    void testIteratorSwapInFailureDropsPointers_data();
+    void testIteratorSwapInFailureDropsPointers();
     void testPageStoreFixedPageWork_data();
     void testPageStoreFixedPageWork();
 
