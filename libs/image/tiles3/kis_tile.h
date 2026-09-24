@@ -15,8 +15,8 @@
 #include <QRect>
 #include <QStack>
 
+#include <array>
 #include <memory>
-#include <vector>
 
 #include <kis_shared.h>
 #include <kis_shared_ptr.h>
@@ -145,9 +145,12 @@ public:
 
 private:
     inline KisTilePageStoreLease *pageStoreWriteLease() const {
-        for (auto it = m_pageStoreLeases.rbegin(); it != m_pageStoreLeases.rend(); ++it)
-            if ((*it)->writable()) return it->get();
-        return nullptr;
+        return m_pageStoreLeases[WriteLease].get();
+    }
+
+    inline bool hasPageStoreLeases() const {
+        return bool(m_pageStoreLeases[ReadLease]) ||
+               bool(m_pageStoreLeases[WriteLease]);
     }
 
     inline void markPageStoreWriteDirty() const {
@@ -196,7 +199,11 @@ private:
     mutable qint32 m_pageStoreWriteLockCount = 0;
     mutable bool m_pageStoreWriteIntentOwnsNativePin = false;
     QAtomicPointer<KisTilePageStoreBridge> m_pageStoreBridge;
-    mutable std::vector<std::unique_ptr<KisTilePageStoreLease>> m_pageStoreLeases;
+    enum PageStoreLeaseSlot : std::size_t { ReadLease, WriteLease, LeaseCount };
+    // lockCounter makes nested locks share the outer capability. A read-first
+    // write can temporarily need both exact backings, so the bound is two.
+    mutable std::array<std::unique_ptr<KisTilePageStoreLease>, LeaseCount>
+        m_pageStoreLeases;
 
     /**
      * This is a special mutex for guarding copy-on-write

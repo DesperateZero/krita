@@ -76445,12 +76445,39 @@
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 35,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2551,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2581,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2584,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
           "caller": "KisTiledDataManagerTest::testPageStoreBulkNoOpAndBitBltBatching",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreBulkNoOpAndBitBltBatching#",
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 2585,
+          "line": 2693,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76459,7 +76486,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2589,
+          "line": 2697,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76468,7 +76495,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 2604,
+          "line": 2712,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76477,7 +76504,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2721,
+          "line": 2829,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76486,7 +76513,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2733,
+          "line": 2841,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76495,7 +76522,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2739,
+          "line": 2847,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76504,7 +76531,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2748,
+          "line": 2856,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -76513,7 +76540,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2751,
+          "line": 2859,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -84217,12 +84244,57 @@
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
-          "caller": "KisTiledDataManagerTest::testPageStoreWholeTileFillUsesSynchronousAdoption",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWholeTileFillUsesSynchronousAdoption#",
-          "column": 52,
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2534,
+          "line": 2550,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2586,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 34,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2611,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2628,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2629,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2630,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84231,7 +84303,16 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 2537,
+          "line": 2642,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreWholeTileFillUsesSynchronousAdoption",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWholeTileFillUsesSynchronousAdoption#",
+          "column": 52,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2645,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84240,7 +84321,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 2550,
+          "line": 2658,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84249,7 +84330,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 2562,
+          "line": 2670,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84258,7 +84339,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2584,
+          "line": 2692,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84267,7 +84348,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 2588,
+          "line": 2696,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84276,7 +84357,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 2601,
+          "line": 2709,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84285,7 +84366,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 2612,
+          "line": 2720,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84294,7 +84375,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 2614,
+          "line": 2722,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84303,7 +84384,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 2622,
+          "line": 2730,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84312,7 +84393,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2720,
+          "line": 2828,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84321,7 +84402,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2740,
+          "line": 2848,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84330,7 +84411,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2753,
+          "line": 2861,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -84339,7 +84420,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 3251,
+          "line": 3359,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -90050,7 +90131,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3092,
+          "line": 3200,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -90652,7 +90733,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3207,
+          "line": 3315,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -112650,7 +112731,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2676,
+          "line": 2784,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112659,7 +112740,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2679,
+          "line": 2787,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112668,7 +112749,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2683,
+          "line": 2791,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112677,7 +112758,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2686,
+          "line": 2794,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112686,7 +112767,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2689,
+          "line": 2797,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112695,7 +112776,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2692,
+          "line": 2800,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112704,7 +112785,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2694,
+          "line": 2802,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112713,7 +112794,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2732,
+          "line": 2840,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112722,7 +112803,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2738,
+          "line": 2846,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112731,7 +112812,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2747,
+          "line": 2855,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -114804,12 +114885,30 @@
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
+          "caller": "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreNestedTileCapabilityLifetime#",
+          "column": 42,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2549,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 42,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2610,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
           "caller": "KisTiledDataManagerTest::testPageStoreWholeTileFillUsesSynchronousAdoption",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWholeTileFillUsesSynchronousAdoption#",
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2532,
+          "line": 2640,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -114818,7 +114917,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2577,
+          "line": 2685,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -114827,7 +114926,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2718,
+          "line": 2826,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -114836,7 +114935,7 @@
           "column": 94,
           "dynamic": false,
           "implicit": false,
-          "line": 3243,
+          "line": 3351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -114845,7 +114944,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 3251,
+          "line": 3359,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -160602,11 +160701,11 @@
   "audit-input-fingerprints": {
     "_build-br0-cpu/compile_commands.json": "980087ea8da10e1599d38b6f82b91cb49ac3bec80468caeea5705bd43cd650b8",
     "build-tools/ci-scripts/generate-pagestore-callgraph.py": "6ea227322679be3a242559aa24845e9a36be88d28a0219f2d109e56ce07eaa35",
-    "build-tools/ci-scripts/pagestore-audit/intrusion-manifest.json": "c81dd21588a5ad460cb1424956d30113e429e5ff75ff2f01c1c7b3fee8658c59",
-    "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "15b501333c8eb11d7683bc2f707f46184199a36febfca42e63db9687a358e0a0",
+    "build-tools/ci-scripts/pagestore-audit/intrusion-manifest.json": "20ea8fa0020e840d3f7fbe82ae3447ec46e1f3ffaf52450d9edf05ba816ac79f",
+    "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "16afcfe29e22a12f989dfd961242b1d23a14db4edd2f2b862f0a4c92cbd12f07",
     "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "2444a88b66ea5a7e3b951a1433b2d52f3ebdd8b6024b7d2774132b8cc72340ed"
   },
-  "call-edge-count": 13721,
+  "call-edge-count": 13732,
   "callback-registration-count": 15,
   "compile-commands": {
     "path": "_build-br0-cpu/compile_commands.json",
@@ -177430,7 +177529,7 @@
     "libs/image/pagestore/KisSurfaceCodecRegistry.h": "45f328dc935804030a96ce78926ecfbe2c3956eef80ccfc3e9f39a1a922e0a49",
     "libs/image/pagestore/KisSurfaceRegistry.cpp": "aa5bf7439e389666e6e916dc1f33ba185efe0d69837f4373ca42aa3732c4536c",
     "libs/image/pagestore/KisSurfaceRegistry.h": "098c4d4793e8368ed3ddedfdac71d456270be72a414153a770a4260a387a4cf0",
-    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "42456226dfdc013c6e4c87662effc9c1167a0a7d9d167b2cbf8948888a394907",
+    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "b9f4c594dcbb01961d37f5a8abf845b71a53b2f7cf8a13b2a09d9e49fe6cbf66",
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": "27d122299662d18d466079f340d34b548bfaae4e1c808abfa718f390841da313",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp": "5bfa71352f52605f4a2920f75c405138caebde8d7c3239b88d691771c3ab6e85",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.h": "e786d84d58fb66e573f6b699e6aa46023cdc5f94461f9908ffc540986e1b05f7",
@@ -177721,8 +177820,8 @@
     "libs/image/tiles3/kis_memento_manager.h": "ff4db589476e8495dc9be4934813146d6ceaa7babac84f4936fbda6f8d2cef9c",
     "libs/image/tiles3/kis_random_accessor.cc": "09a8e06b34856e0f56b9c7c0a7fc2bfd956fe34fc57863c0ff471462d57f5715",
     "libs/image/tiles3/kis_random_accessor.h": "60915b6c9de4f5ff7cf9bff585e3bbd38f5cffbb37d59c668a088e9479f077cc",
-    "libs/image/tiles3/kis_tile.cc": "80c5b5a2b718efd869fc8b8fe406edc02acbee2f98689a2b63d929646c85e5aa",
-    "libs/image/tiles3/kis_tile.h": "dd3dc245a06285ee444da145634ba1f4481c4641e44b8af302af047032f8db51",
+    "libs/image/tiles3/kis_tile.cc": "048a507a3e9980cb391e1542df00b699c26b10b95199a543a9afa06e0c85a953",
+    "libs/image/tiles3/kis_tile.h": "3aeacd6c602bc09fdadc460f740472f7404d07b7acf55dc53a46af08fb342fc3",
     "libs/image/tiles3/kis_tile_data.cc": "0228f0f05b7e1db98073f089f91ba222670266d8813b7556fdb608c175edb27e",
     "libs/image/tiles3/kis_tile_data.h": "ad79b49dee9045d92f4aaa84a59977cf02080f16230ff3a42828eb776cf447e9",
     "libs/image/tiles3/kis_tile_data_interface.h": "ea7d485c167f85d44816b0d76fc4f3386107656e6ec69b44d5f405971dacfe44",
@@ -177783,8 +177882,8 @@
     "libs/image/tiles3/tests/kis_tile_data_store_test.cpp": "58bc51857b35b1eb3a7a609ae069464d79e9be0f536944794c3c2e4faf3534cb",
     "libs/image/tiles3/tests/kis_tile_data_store_test.h": "1fcbf348dbdd8dfa1d0c6d5f891475e947f749d1574edcd6164cb19d7fe62501",
     "libs/image/tiles3/tests/kis_tile_data_store_test_access.h": "ae3b27c985501fb553918b780a6e8ab27caa40211c90d688dabccffc73073a28",
-    "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp": "2b7788bccdbcc61566fd0389db9fc2badb2a4e13dd398821a92aa1f1e87a4130",
-    "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": "a7eb3d2d574569f19ec5fee8b7992b0c50c627952ab7773ca5d2d67217443dd5",
+    "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp": "5cf9a48f4c6e9f12dd5ebd5736c1d7bb2c9024c472cf370db56424c863ef1a95",
+    "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": "20c9bf8fe56c186fcfdf05815142fca8fc96a72fe8641704d6bd11021a8e760b",
     "libs/image/tiles3/tests/kis_tiles3_cpu_baseline_test.cpp": "4caba36adde8bcf3a18245a7ae9be86391b5e9b3071591dba4e6ab0c6e9761c3",
     "libs/image/tiles3/tests/tiles_test_utils.h": "badf5d58a7a91bf7d5386410c7d71d0889070cc1f2c9652363c3f5474720e704",
     "libs/image/vc_extra_math.h": "f85e2d16004f409c3099342b9d147308fa4ab96f1a3327f636f6ef025040b8c7",

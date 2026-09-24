@@ -1834,9 +1834,9 @@ bool KisTiledDataManagerPageStoreBackend::setDefaultPixel(
 
 bool KisTiledDataManagerPageStoreBackend::clearAll(QString *error)
 {
-    // Legacy callers may retain a completed writable iterator across clear().
-    // clearAll is the sequencing barrier that invalidates those anonymous
-    // capabilities before creating the post-clear transaction.
+    // A legacy tile caller may retain a raw writable pointer across clear().
+    // clearAll is the sequencing barrier that cancels its anonymous
+    // mutation before creating the post-clear transaction.
     if (!cancelAnonymousLeasesForBarrier(error)) return false;
     return removePages(allocatedPages(), error);
 }

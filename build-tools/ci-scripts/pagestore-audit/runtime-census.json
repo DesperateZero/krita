@@ -9,16 +9,16 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "Source-bound callers and RAII ownership identify every legacy tile lease. The compatibility behavior and cancellation tests cover successful, rejected, cancelled, and terminal release paths without retaining a second hot-path census.",
+      "evidence": "KisTile owns at most one exact read and one writable source-bound capability in fixed slots. Cache validity, pre-exposure write intent, native-pin handoff, read-first/write-first nesting, history, cancellation, and terminal release have direct behavior tests.",
       "id": "legacy-tile-leases",
       "manifest-entries": [
         "BR1-PS-TILE-STATE-001",
         "BR1-PS-TILE-LEASE-003"
       ],
-      "metrics-source": "source-bound reverse callgraph and Store capability snapshots",
+      "metrics-source": "source-bound reverse callgraph, Store capability snapshots, and nested tile lifetime tests",
       "representative-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
-        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+        "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
       ],
       "status": "static-only"
     },
@@ -95,15 +95,15 @@
           "KisPageStoreSessionStats.committedTransactions"
         ]
       },
-      "evidence": "Anonymous compatibility clients share a real PageStore transaction and RAII lease registry. Canonical Store snapshots expose transaction/proof lifetime and commits; cancellation and failure remain covered by behavior tests rather than a second backend transaction ledger.",
+      "evidence": "Standalone legacy tile writers share one real PageStore transaction while retaining independent mutation sessions. The client count delays publication, the failed bit rejects new joins and forces final abort, and the lease set is the barrier cancellation capability; Store snapshots remain the canonical transaction/proof observer.",
       "id": "anonymous-compatibility-transactions",
       "manifest-entries": [
         "BR1-PS-BACKEND-ANON-006"
       ],
       "metrics-source": "KisPageStoreSessionStats",
       "representative-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
-        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
       ],
       "status": "existing"
     },

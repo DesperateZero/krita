@@ -92,6 +92,9 @@ private Q_SLOTS:
     void testPageStoreHistoryClearStagesAbsence();
     void testPageStoreResidentReadReusesNativeGuard();
     void testPageStoreWriteIntentDoesNotAllocateUntilDataExposure();
+    void testPageStoreNestedTileCapabilityLifetime_data();
+    void testPageStoreNestedTileCapabilityLifetime();
+    void testPageStoreClearBarrierCancelsLegacyWriter();
     void testPageStoreNativeIteratorEntryPoints_data();
     void testPageStoreNativeIteratorEntryPoints();
     void testPageStoreWriteBytesPinWorkingSet_data();

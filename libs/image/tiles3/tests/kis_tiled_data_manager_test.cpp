@@ -2524,6 +2524,114 @@ void KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataEx
     readTile->unlockForRead();
 }
 
+void KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime_data()
+{
+    QTest::addColumn<bool>("history");
+    QTest::addColumn<bool>("writeFirst");
+    for (bool history : {false, true}) {
+        for (bool writeFirst : {false, true}) {
+            QTest::newRow(qPrintable(QStringLiteral("history%1-write-first%2")
+                              .arg(history).arg(writeFirst)))
+                << history << writeFirst;
+        }
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime()
+{
+    QFETCH(bool, history);
+    QFETCH(bool, writeFirst);
+    const quint8 blank = 0;
+    const quint8 initial = 0x31;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(QRect(0, 0, 64, 64), &initial);
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    auto *store = dm.m_pageStoreBackend->store();
+    const auto sessions = store->sessionStats();
+    const auto mutations = store->mutationStatistics();
+    KisTileSP tile = dm.getTile(0, 0, true);
+    QVERIFY(tile);
+
+    quint8 *outerRead = nullptr;
+    if (writeFirst) {
+        QVERIFY(tile->lockForWrite());
+        QVERIFY(tile->lockForRead());
+    } else {
+        QVERIFY(tile->lockForRead());
+        outerRead = tile->data();
+        QVERIFY(outerRead);
+        QCOMPARE(*outerRead, initial);
+        QVERIFY(tile->lockForWrite());
+    }
+    quint8 *write = tile->tryWriteData();
+    QVERIFY(write);
+    *write = 0x62;
+
+    if (writeFirst) {
+        tile->unlockForRead();
+        QCOMPARE(*write, quint8(0x62));
+        tile->unlockForWrite();
+    } else {
+        tile->unlockForWrite();
+        QCOMPARE(*outerRead, initial);
+        QCOMPARE(*write, quint8(0x62));
+        tile->unlockForRead();
+    }
+
+    QCOMPARE(store->mutationStatistics().generationsReserved -
+                 mutations.generationsReserved,
+             quint64(1));
+    QCOMPARE(store->mutationStatistics().pagesSealed - mutations.pagesSealed,
+             quint64(1));
+    QCOMPARE(store->sessionStats().committedTransactions -
+                 sessions.committedTransactions,
+             quint64(history ? 0 : 1));
+    quint8 actual = 0;
+    dm.readBytes(&actual, 0, 0, 1, 1);
+    QCOMPARE(actual, quint8(0x62));
+    if (history) {
+        dm.commit();
+        dm.rollback(memento);
+        dm.readBytes(&actual, 0, 0, 1, 1);
+        QCOMPARE(actual, initial);
+        dm.rollforward(memento);
+        dm.readBytes(&actual, 0, 0, 1, 1);
+        QCOMPARE(actual, quint8(0x62));
+        dm.purgeHistory(memento);
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter()
+{
+    const quint8 blank = 0;
+    const quint8 initial = 0x31;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(QRect(0, 0, 64, 64), &initial);
+    auto *store = dm.m_pageStoreBackend->store();
+    const auto sessions = store->sessionStats();
+    KisTileSP writer = dm.getTile(0, 0, true);
+    QVERIFY(writer->lockForWrite());
+    quint8 *borrowed = writer->tryWriteData();
+    QVERIFY(borrowed);
+    *borrowed = 0x62;
+
+    // The void legacy clear is a sequencing barrier. It cancels the live
+    // compatibility mutation before publishing the removal; later writes
+    // through the detached raw pointer cannot republish that transaction.
+    dm.clear();
+    *borrowed = 0x73;
+    writer->unlockForWrite();
+
+    quint8 actual = 0xff;
+    dm.readBytes(&actual, 0, 0, 1, 1);
+    QCOMPARE(actual, blank);
+    QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(store->sessionStats().committedTransactions -
+                 sessions.committedTransactions,
+             quint64(1));
+}
+
 void KisTiledDataManagerTest::testPageStoreWholeTileFillUsesSynchronousAdoption()
 {
     quint8 defaultPixel = 0;

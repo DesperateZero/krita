@@ -8,7 +8,7 @@
     "libs/image/tiles3/kis_tile.h": {
       "identifier_occurrences": 6,
       "direct_includes": 1,
-      "reason": "The zero-allocation tile compatibility boundary now stores and releases source-bound move-only leases in one inline capability vector; it does not own PageStore state."
+      "reason": "The tile compatibility boundary stores one exact read and one writable move-only capability in fixed slots; cache validity and pre-exposure write intent remain distinct non-authoritative lifetime facts."
     },
     "libs/image/tiles3/kis_tiled_data_manager.cc": {
       "identifier_occurrences": 21,
@@ -24,28 +24,28 @@
   "entries": [
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTile",
+      "current-owner": "KisTile fixed read/write capability slots",
       "facts-owned": [
+        "binding-cache-validity",
         "old-view",
-        "read-pin",
-        "page-writer"
+        "legacy-lock-lifetime"
       ],
       "failure-tests": [
-        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility",
-        "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent"
+        "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+        "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure"
       ],
       "id": "BR1-PS-TILE-STATE-001",
       "path": "libs/image/tiles3/kis_tile.h",
-      "remove-after": "R4/M8 canonical cursor and guard coverage",
-      "replacement-type": "KisPageReadCoordinator and KisPageWriteCoordinator adapters",
-      "runtime-counter": "static-only: source-bound lease callers plus Store capability snapshots and terminal behavior tests",
+      "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
+      "replacement-type": "fixed source-bound read/write capabilities",
+      "runtime-counter": "existing:Store capability snapshots plus nested tile lifetime tests",
       "static-callers": [
         "KisTile::lockForRead",
         "KisTile::lockForWrite",
         "KisTile::unlockForRead",
         "KisTile::unlockForWrite"
       ],
-      "status": "inventoried",
+      "status": "quarantined",
       "symbols": [
         "m_pageStoreOldDataView",
         "m_pageStoreNativeReadReady",
@@ -54,7 +54,7 @@
         "m_pageStoreBridge",
         "m_pageStoreLeases"
       ],
-      "target-owner": "KisPageReadCoordinator and KisPageWriteAdmission"
+      "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator adapters"
     },
     {
       "category": "compatibility-intrusion",
@@ -64,18 +64,19 @@
         "page-writer"
       ],
       "failure-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior"
+        "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+        "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard"
       ],
       "id": "BR1-PS-TILE-BRIDGE-002",
       "path": "libs/image/tiles3/kis_tile.cc",
-      "remove-after": "R4/M8 tile bridge quarantine",
+      "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
       "replacement-type": "operation-scoped read/write guard",
       "runtime-counter": "static-only: four source-bound refresh callers plus Store request/materialization snapshots",
       "static-callers": [
         "KisTiledDataManager::getTile",
         "KisTiledDataManager::refreshPageStorePages"
       ],
-      "status": "inventoried",
+      "status": "quarantined",
       "symbols": [
         "refreshPageStoreData",
         "ensurePageStoreWriteAccess",
@@ -92,8 +93,8 @@
         "legacy-unlock"
       ],
       "failure-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
-        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+        "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
       ],
       "id": "BR1-PS-TILE-LEASE-003",
       "path": "libs/image/tiles3/KisTilePageStoreBridge.h",
@@ -104,7 +105,7 @@
         "KisTile::ensurePageStoreWriteAccess",
         "KisTile::lockForRead"
       ],
-      "status": "inventoried",
+      "status": "quarantined",
       "symbols": [
         "KisTilePageStoreLease",
         "KisTilePageStoreBridge",
@@ -171,33 +172,34 @@
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManagerPageStoreBackend::Private",
+      "current-owner": "KisTiledDataManagerPageStoreBackend anonymous transaction group",
       "facts-owned": [
         "transaction-lifetime",
         "legacy-unlock"
       ],
       "failure-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
-        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient"
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
       ],
       "id": "BR1-PS-BACKEND-ANON-006",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "R4/M8 explicit operation scopes cover callers",
-      "replacement-type": "adapter RAII operation handle",
-      "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/preparedPageProofs/committedTransactions",
+      "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
+      "replacement-type": "adapter RAII transaction group",
+      "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/activeCpuWritePages/committedTransactions",
       "static-callers": [
         "writableTransaction",
         "registerAnonymousLease",
         "cancelAnonymousLeasesForBarrier"
       ],
-      "status": "inventoried",
+      "status": "quarantined",
       "symbols": [
         "anonymousTransaction",
         "anonymousClients",
+        "anonymousFailed",
         "anonymousLeases",
         "KisTiledDataManagerPageStoreLease"
       ],
-      "target-owner": "KisPageMutationSession adapter handle"
+      "target-owner": "KisPageMutationSession adapter transaction group"
     },
     {
       "category": "compatibility-intrusion",

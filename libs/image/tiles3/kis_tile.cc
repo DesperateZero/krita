@@ -98,13 +98,14 @@ void KisTile::replacePageStoreReadCacheLocked(KisTileData *replacement) const
 
 bool KisTile::releasePageStoreLeasesLocked() const
 {
-    if (m_pageStoreLeases.empty()) return false;
+    if (!hasPageStoreLeases()) return false;
     Q_ASSERT(m_lockCounter > 0);
     --m_lockCounter;
     if (m_lockCounter != 0) return true;
-    for (const auto &lease : m_pageStoreLeases)
-        KIS_SAFE_ASSERT_RECOVER_NOOP(lease->finish());
-    m_pageStoreLeases.clear();
+    for (auto &lease : m_pageStoreLeases) {
+        if (lease) KIS_SAFE_ASSERT_RECOVER_NOOP(lease->finish());
+        lease.reset();
+    }
     for (KisTileData *tileData : m_oldTileData) {
         tileData->unblockSwapping();
         tileData->release();
@@ -339,7 +340,8 @@ bool KisTile::lockForRead() const
             replacePageStoreReadCacheLocked(lease->tileData());
             m_pageStoreNativeReadReady.storeRelease(1);
             ++m_lockCounter;
-            m_pageStoreLeases.push_back(std::move(lease));
+            Q_ASSERT(!hasPageStoreLeases());
+            m_pageStoreLeases[ReadLease] = std::move(lease);
             return succeeded();
         }
     }
@@ -367,7 +369,7 @@ bool KisTile::ensurePageStoreWriteAccess() const
         bridge->acquireTile(m_col, m_row, true, false);
     if (!lease || !lease->tileData() || !lease->writable()) return false;
 
-    const bool hadPageStoreLease = !m_pageStoreLeases.empty();
+    const bool hadPageStoreLease = hasPageStoreLeases();
     KisTileData *replacement = lease->tileData();
     KisTileData *previous = m_tileData;
     if (replacement != previous) {
@@ -395,7 +397,8 @@ bool KisTile::ensurePageStoreWriteAccess() const
     }
 
     m_pageStoreNativeReadReady.storeRelease(1);
-    m_pageStoreLeases.push_back(std::move(lease));
+    Q_ASSERT(!m_pageStoreLeases[WriteLease]);
+    m_pageStoreLeases[WriteLease] = std::move(lease);
     return true;
 }
 
