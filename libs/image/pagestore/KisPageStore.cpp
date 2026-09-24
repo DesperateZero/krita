@@ -1700,6 +1700,15 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         completion = owner->readyHostCompletion;
     QString failure;
     bool success = !privatePageCount || completion.isValid();
+    if (!success)
+        failure = QStringLiteral("ready host completion is unavailable for private publication");
+    const auto validateClaims = [&](const char *stage) {
+        if (success && !d->claimsHeldLocked()) {
+            success = false;
+            failure = QStringLiteral("mutation claims were lost %1")
+                          .arg(QString::fromLatin1(stage));
+        }
+    };
     for (qsizetype i = 0; i < d->writes.size(); ++i) {
         const auto index = KisMutationWriteSet::EntryIndex(i);
         auto *page = d->pageAtEntry(index);
@@ -1710,14 +1719,17 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         const auto applied = owner->writeCoordinator.publishPrivateWrite(
             d->writeTransition(index, *page));
         success = applied.accepted;
-        if (!success)
-            failure = applied.rejectionReason;
+        if (!success) {
+            failure = applied.rejectionReason.isEmpty()
+                ? QStringLiteral("private publication was rejected")
+                : applied.rejectionReason;
+        }
     }
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
     --owner->activeProviderCalls;
     phase.next(Phase::MutationSealInputs, pageWork);
-    success = success && d->claimsHeldLocked();
+    validateClaims("after private publication");
     qsizetype sealedPageCount = privatePageCount;
     if (success)
         for (qsizetype i = 0; i < d->writes.size(); ++i) {
@@ -1737,7 +1749,10 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     phase.next(Phase::MutationSealProofPrepare, quint64(sealedPageCount));
     if (success && sealedPageCount && !completion.isValid())
         completion = owner->readyHostCompletion;
-    success = success && (!sealedPageCount || completion.isValid());
+    if (success && sealedPageCount && !completion.isValid()) {
+        success = false;
+        failure = QStringLiteral("ready host completion is unavailable for proof preparation");
+    }
     if (success)
         for (qsizetype i = 0; i < d->writes.size(); ++i) {
             auto *page = d->pageAtEntry(KisMutationWriteSet::EntryIndex(i));
@@ -1764,7 +1779,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
     phase.next(Phase::MutationSealInputs, pageWork);
-    success = success && d->claimsHeldLocked();
+    validateClaims("after proof preparation");
     QVector<KisPagePublicationCoordinator::OverlayChange> overlayChanges;
     overlayChanges.reserve(d->writes.size());
     quint64 sealedCpuWrites = 0;
@@ -1787,12 +1802,16 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
             sealedSources += bool(entry->initializationSource());
         }
     }
-    auto overlay = success && !overlayChanges.isEmpty()
+    const bool hasOverlay = success && !overlayChanges.isEmpty();
+    auto overlay = hasOverlay
         ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
               d->transaction, std::move(overlayChanges), &failure)
         : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
-    const bool hasOverlay = success && d->writes.size() != 0;
-    success = success && (!hasOverlay || overlay.isValid());
+    if (success && hasOverlay && !overlay.isValid()) {
+        success = false;
+        if (failure.isEmpty())
+            failure = QStringLiteral("overlay update preparation was rejected");
+    }
     if (success && hasOverlay) {
         // The aggregate now owns every new sealed proof. A failed prepare or
         // install revokes them together while the former overlay stays live.
@@ -1807,16 +1826,21 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     lock.unlock();
     phase.next(Phase::MutationSealMetadataPrepare,
                quint64(metadataChangeCount));
-    if (success && hasOverlay)
-        success = overlay.prepare(&failure);
+    if (success && hasOverlay && !overlay.prepare(&failure)) {
+        success = false;
+        if (failure.isEmpty())
+            failure = QStringLiteral("overlay metadata preparation was rejected");
+    }
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
     phase.next(Phase::MutationSealInstall, pageWork);
-    success = success && d->claimsHeldLocked();
-    if (success && hasOverlay) {
-        success = overlay.tryInstallLocked(
-            &retirements, &metadataCleanup, &failure);
+    validateClaims("before overlay installation");
+    if (success && hasOverlay && !overlay.tryInstallLocked(
+            &retirements, &metadataCleanup, &failure)) {
+        success = false;
+        if (failure.isEmpty())
+            failure = QStringLiteral("overlay installation was rejected");
     }
     --owner->activeProviderCalls;
     owner->mutationStats.sealMetadataPreparations +=
