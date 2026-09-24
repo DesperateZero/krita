@@ -9,6 +9,5 @@
 // may follow executed pixel work: it must never trigger replay.
 enum class KisPageStoreWriteOperationResult { Unavailable, Borrowed, Failed, Succeeded };
 using KisPageStorePixelOperation = std::function<bool(KisPixelWriteCursor *)>;
-using KisPageStoreWriteBoundary = bool (*)(const void *);
 
 #endif

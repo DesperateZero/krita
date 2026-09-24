@@ -80,7 +80,7 @@ public:
     // immutable selection; a supplied selection must match owner and mode.
     QSharedPointer<const KisPageStoreIteratorReadScope> capturePageStoreReadScope(
         bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
-    Qt::HANDLE registerPageStoreWriteBoundary(const void *key, KisPageStoreWriteBoundary hasLiveAccess);
+    Qt::HANDLE registerPageStoreWriteBoundary(const void *key);
     void unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key);
     KisPageStoreWriteOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,

@@ -25,14 +25,10 @@ KisRandomAccessor2::KisRandomAccessor2(KisTiledDataManager *ktm, qint32 offsetX,
 {
     Q_ASSERT(ktm != 0);
     if (!m_readCursor) m_tilesCache = new KisTileInfo*[CACHESIZE];
-    registerWriteBoundary(this, [](const void *context) {
-        return static_cast<const KisRandomAccessor2 *>(context)->m_tilesCacheSize != 0;
-    });
 }
 
 KisRandomAccessor2::~KisRandomAccessor2()
 {
-    unregisterWriteBoundary();
     releaseWriteCache();
     delete [] m_tilesCache;
 }
@@ -46,6 +42,7 @@ void KisRandomAccessor2::releaseWriteCache()
     }
     m_tilesCacheSize = 0;
     m_data = nullptr; m_oldData = nullptr;
+    setWriteBoundaryActive(this, false);
     m_readScope.clear();
 }
 
@@ -144,6 +141,7 @@ KisRandomAccessor2::KisTileInfo* KisRandomAccessor2::fetchTileData(qint32 col, q
         delete kti;
         return nullptr;
     }
+    setWriteBoundaryActive(this, true);
 
     kti->area_x1 = col * KisTileData::HEIGHT;
     kti->area_y1 = row * KisTileData::WIDTH;

@@ -695,7 +695,7 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityBehavior()
 
     int boundaryKey = 0;
     const Qt::HANDLE thread = backend->registerIteratorWriteBoundary(
-        &boundaryKey, [](const void *) { return true; });
+        &boundaryKey);
     QVERIFY(thread);
     QVERIFY(backend->hasCurrentThreadIteratorWrites());
     backend->unregisterIteratorWriteBoundary(thread, &boundaryKey);
@@ -929,35 +929,19 @@ void KisTiledDataManagerTest::testPageStoreIteratorOtherThreadReadsSealedView()
         QCOMPARE(writer.rawData()[0], quint8(0x47));
     }
     quint8 seen = 0; dm.readBytes(&seen, 0, 0, 1, 1); QCOMPARE(seen, quint8(0x47));
-    // Registry observation must fence cross-thread final destruction. The
-    // callback represents a cursor's raw receiver; unregister cannot return
-    // (and let its destructor free that receiver) while inspection is active.
+    // The token names the originating thread even when final destruction and
+    // unregister happen elsewhere.
     auto *backend = dm.m_pageStoreBackend;
-    QSemaphore entered, unregisterStarted, unregistered;
-    bool prematureUnregister = false;
-    struct BoundaryProbe {
-        QSemaphore *entered;
-        QSemaphore *unregisterStarted;
-        QSemaphore *unregistered;
-        bool *prematureUnregister;
-    } probe{&entered, &unregisterStarted, &unregistered, &prematureUnregister};
-    const auto token = backend->registerIteratorWriteBoundary(&probe, [](const void *context) {
-        const auto &probe = *static_cast<const BoundaryProbe *>(context);
-        probe.entered->release();
-        probe.unregisterStarted->acquire();
-        *probe.prematureUnregister = probe.unregistered->tryAcquire(1, 50);
-        return false;
-    });
+    int boundaryKey = 0;
+    const auto token = backend->registerIteratorWriteBoundary(&boundaryKey);
+    QSemaphore unregisterStarted;
     std::thread finalRelease([&] {
-        entered.acquire();
-        unregisterStarted.release();
-        backend->unregisterIteratorWriteBoundary(token, &probe);
-        unregistered.release();
+        unregisterStarted.acquire();
+        backend->unregisterIteratorWriteBoundary(token, &boundaryKey);
     });
-    const bool active = backend->hasCurrentThreadIteratorWrites();
+    QVERIFY(backend->hasCurrentThreadIteratorWrites());
+    unregisterStarted.release();
     finalRelease.join();
-    QVERIFY(!active); QVERIFY(!prematureUnregister);
-    QVERIFY(unregistered.tryAcquire());
     QVERIFY(!backend->hasCurrentThreadIteratorWrites());
 }
 
@@ -2651,6 +2635,72 @@ void KisTiledDataManagerTest::testPageStoreBulkNoOpAndBitBltBatching()
              afterBitBlt.synchronousHostWrites);
     QCOMPARE(afterRepeatedBitBlt.committedTransactions,
              afterBitBlt.committedTransactions);
+}
+
+void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache_data()
+{
+    QTest::addColumn<int>("entry");
+    QTest::addColumn<int>("failurePoint");
+    for (int entry = 0; entry < 3; ++entry) {
+        for (KisSwapInFailurePoint point : {
+                 KisSwapInFailurePoint::Mapping,
+                 KisSwapInFailurePoint::Allocation,
+                 KisSwapInFailurePoint::Decompression}) {
+            QTest::newRow(qPrintable(QStringLiteral("entry%1-failure%2")
+                              .arg(entry).arg(int(point))))
+                << entry << int(point);
+        }
+    }
+}
+
+void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache()
+{
+    QFETCH(int, entry);
+    QFETCH(int, failurePoint);
+    const quint8 blank = 0;
+    const quint8 first = 0x51;
+    const quint8 second = 0x62;
+    KisDataManager dm(1, &blank);
+    auto *backend = dm.m_pageStoreBackend;
+    const bool horizontal = entry == 0;
+    const qint32 secondColumn = horizontal ? 0 : entry == 1 ? 1 : 0;
+    const qint32 secondRow = horizontal ? 1 : 0;
+    dm.clear(0, 0, 64, 64, &first);
+    dm.clear(secondColumn * 64, secondRow * 64, 64, 64, &second);
+
+    bool existing = false;
+    const auto secondTile = dm.getReadOnlyTileLazy(
+        secondColumn, secondRow, existing);
+    QVERIFY(existing);
+    KisTileData *secondData = secondTile->tileData();
+    QVERIFY(secondData->ref());
+    const auto release = qScopeGuard([&] { secondData->deref(); });
+    auto *tileStore = KisTileDataStore::instance();
+    QVERIFY(tileStore->trySwapTileData(secondData));
+    QVERIFY(!secondData->isResident());
+
+    tileStore->testingFailNextSwapIn(
+        KisSwapInFailurePoint(failurePoint));
+    if (entry == 0) {
+        KisHLineIterator2 writer(&dm, 0, 63, 1, 0, 0, true, nullptr);
+        QVERIFY(writer.rawData());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
+        writer.nextRow();
+        QVERIFY(!writer.rawData());
+    } else if (entry == 1) {
+        KisVLineIterator2 writer(&dm, 63, 0, 1, 0, 0, true, nullptr);
+        QVERIFY(writer.rawData());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
+        writer.nextColumn();
+        QVERIFY(!writer.rawData());
+    } else {
+        KisRandomAccessor2 writer(&dm, 0, 0, true, nullptr);
+        QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+        writer.moveTo(0, 0);
+        QVERIFY(!writer.rawData());
+    }
+    QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+    QVERIFY(!secondData->isResident());
 }
 
 void KisTiledDataManagerTest::testIteratorSwapInFailureDropsPointers_data()

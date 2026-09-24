@@ -290,7 +290,7 @@ public:
     }
 
     mutable QMutex mutex;
-    QHash<Qt::HANDLE, QHash<const void *, KisPageStoreWriteBoundary>> iteratorWriteBoundaries;
+    QHash<Qt::HANDLE, QSet<const void *>> iteratorWriteBoundaries;
     QMutex transactionMutex;
     QReadWriteLock publicationLock;
     QSharedPointer<KisTiles3PageReplicaProvider> provider;
@@ -1046,12 +1046,11 @@ KisCapturedReadView KisTiledDataManagerPageStoreBackend::captureReadView(
 }
 
 Qt::HANDLE KisTiledDataManagerPageStoreBackend::registerIteratorWriteBoundary(
-    const void *key, KisPageStoreWriteBoundary boundary)
+    const void *key)
 {
     const auto thread = QThread::currentThreadId();
     QMutexLocker locker(&d->mutex);
-    auto &boundaries = d->iteratorWriteBoundaries[thread];
-    boundaries.insert(key, boundary);
+    d->iteratorWriteBoundaries[thread].insert(key);
     return thread;
 }
 void KisTiledDataManagerPageStoreBackend::unregisterIteratorWriteBoundary(Qt::HANDLE thread, const void *key)
@@ -1064,19 +1063,12 @@ void KisTiledDataManagerPageStoreBackend::unregisterIteratorWriteBoundary(Qt::HA
 }
 bool KisTiledDataManagerPageStoreBackend::hasCurrentThreadIteratorWrites() const
 {
-    // Inspection only. A read must never release another iterator's write
-    // pointer or publish its unfinished backing. Invocation and unregister
-    // share the gate: final destruction may happen on another thread and must
-    // finish unregistering before changing/destroying the inspected cache.
-    // Callbacks only inspect local state; they must not reenter this backend.
+    // Iterator cache lifetime is the explicit same-thread visibility scope.
+    // Reads never publish or release another iterator's unfinished backing.
     const auto thread = QThread::currentThreadId();
     QMutexLocker locker(&d->mutex);
     const auto found = d->iteratorWriteBoundaries.constFind(thread);
-    if (found == d->iteratorWriteBoundaries.cend()) return false;
-    for (auto callback = found->cbegin(); callback != found->cend(); ++callback) {
-        if (callback.value() && callback.value()(callback.key())) return true;
-    }
-    return false;
+    return found != d->iteratorWriteBoundaries.cend() && !found->isEmpty();
 }
 
 bool KisTiledDataManagerPageStoreBackend::readBytes(

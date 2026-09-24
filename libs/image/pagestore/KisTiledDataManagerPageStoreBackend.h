@@ -103,10 +103,10 @@ public:
     QSharedPointer<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
         bool writable, QString *error = nullptr,
         QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
-    // Observer is a short, non-reentrant cache-state inspection, never a
-    // publish/unlock callback. It runs under the registry gate so unregister
-    // (including final destruction on another thread) fences its raw receiver.
-    Qt::HANDLE registerIteratorWriteBoundary(const void *key, KisPageStoreWriteBoundary hasLiveAccess);
+    // Writable iterators explicitly register only while they retain a live
+    // cache. The originating thread uses this visibility boundary to select
+    // legacy reads of its unpublished raw pointers.
+    Qt::HANDLE registerIteratorWriteBoundary(const void *key);
     void unregisterIteratorWriteBoundary(Qt::HANDLE thread, const void *key);
     bool hasCurrentThreadIteratorWrites() const;
     // Synchronous operation-private cursor, never backed by compatibility

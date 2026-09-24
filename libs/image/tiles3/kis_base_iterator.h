@@ -43,10 +43,14 @@ protected:
     bool m_writable;
     QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
     std::optional<KisPageStoreReadCursor> m_readCursor;
-    void registerWriteBoundary(const void *key, KisPageStoreWriteBoundary boundary) {
-        if (!m_writable || !m_readScope) return;
+    void setWriteBoundaryActive(const void *key, bool active) {
+        if (!active) {
+            unregisterWriteBoundary();
+            return;
+        }
+        if (!m_writable || !m_readScope || m_boundaryThread) return;
         m_boundaryKey = key;
-        m_boundaryThread = m_dataManager->registerPageStoreWriteBoundary(key, boundary);
+        m_boundaryThread = m_dataManager->registerPageStoreWriteBoundary(key);
     }
     void unregisterWriteBoundary() {
         if (m_boundaryThread) m_dataManager->unregisterPageStoreWriteBoundary(m_boundaryThread, m_boundaryKey);

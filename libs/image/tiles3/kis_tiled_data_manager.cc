@@ -1300,9 +1300,9 @@ KisTiledDataManager::capturePageStoreReadScope(
 }
 
 Qt::HANDLE KisTiledDataManager::registerPageStoreWriteBoundary(
-    const void *key, KisPageStoreWriteBoundary boundary)
+    const void *key)
 {
-    return m_pageStoreBackend ? m_pageStoreBackend->registerIteratorWriteBoundary(key, boundary) : nullptr;
+    return m_pageStoreBackend ? m_pageStoreBackend->registerIteratorWriteBoundary(key) : nullptr;
 }
 void KisTiledDataManager::unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key)
 {
