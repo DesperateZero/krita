@@ -159068,7 +159068,7 @@
     "build-tools/ci-scripts/generate-pagestore-callgraph.py": "6ea227322679be3a242559aa24845e9a36be88d28a0219f2d109e56ce07eaa35",
     "build-tools/ci-scripts/pagestore-audit/intrusion-manifest.json": "20ea8fa0020e840d3f7fbe82ae3447ec46e1f3ffaf52450d9edf05ba816ac79f",
     "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "16afcfe29e22a12f989dfd961242b1d23a14db4edd2f2b862f0a4c92cbd12f07",
-    "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "a422c50232876fe837270e4cdd752af630ce79f96fbcd47a49dc3f8fa15d8be8"
+    "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "ac0bd65a1219915b4504a67adee6d0fd97c0d589a92681d309ed47de0f4d421e"
   },
   "call-edge-count": 13648,
   "callback-registration-count": 15,
@@ -160514,12 +160514,11 @@
     "d0-eligible": false,
     "decision": "retain-fresh-write-reservation-until-M6-provider-handoff",
     "ownership-fact": "BR1-OWN-PHYSICAL-ALLOCATION",
-    "ownership-status": "split",
+    "ownership-status": "canonical",
     "production-call-site-count": 1,
     "reasons": [
       "fresh native writes retain the move-only binding reservation",
-      "test-only callers retain the physical-claim failure contract",
-      "physical allocation ownership remains split"
+      "test-only callers retain the physical-claim failure contract"
     ],
     "static-proof": "production-callers-bound",
     "test-call-site-count": 6
