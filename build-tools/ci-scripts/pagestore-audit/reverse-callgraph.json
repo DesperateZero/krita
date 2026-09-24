@@ -3346,7 +3346,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1688,
+          "line": 1697,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -3355,7 +3355,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1796,
+          "line": 1805,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -3364,7 +3364,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1796,
+          "line": 1805,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -4313,7 +4313,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1334,
+          "line": 1351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -4322,7 +4322,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1399,
+          "line": 1416,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -4331,7 +4331,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1528,
+          "line": 1545,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -4340,7 +4340,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1705,
+          "line": 1722,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -4349,7 +4349,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2261,
+          "line": 2278,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -4890,7 +4890,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1640,
+          "line": 1649,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -5380,7 +5380,7 @@
           "column": 70,
           "dynamic": false,
           "implicit": false,
-          "line": 1611,
+          "line": 1628,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -5389,7 +5389,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1665,
+          "line": 1682,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -5398,7 +5398,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2212,
+          "line": 2229,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -5461,7 +5461,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1688,
+          "line": 1697,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -5470,7 +5470,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1796,
+          "line": 1805,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -5479,7 +5479,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1796,
+          "line": 1805,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -6419,7 +6419,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1334,
+          "line": 1351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -6428,7 +6428,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1399,
+          "line": 1416,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -6437,7 +6437,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1528,
+          "line": 1545,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -6446,7 +6446,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 1705,
+          "line": 1722,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -6455,7 +6455,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2261,
+          "line": 2278,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -6526,7 +6526,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1754,
+          "line": 1763,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -6535,7 +6535,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 1768,
+          "line": 1777,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -7124,7 +7124,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 1332,
+          "line": 1349,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7133,7 +7133,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1397,
+          "line": 1414,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7142,7 +7142,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1526,
+          "line": 1543,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7151,7 +7151,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1631,
+          "line": 1648,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7160,7 +7160,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1702,
+          "line": 1719,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7169,7 +7169,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 2226,
+          "line": 2243,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -7178,7 +7178,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 2259,
+          "line": 2276,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -7292,7 +7292,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1743,
+          "line": 1752,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -7301,7 +7301,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1744,
+          "line": 1753,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -7500,7 +7500,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1725,
+          "line": 1734,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -7509,7 +7509,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1726,
+          "line": 1735,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -13475,7 +13475,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1334,
+          "line": 1351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -13484,7 +13484,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1399,
+          "line": 1416,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -13493,7 +13493,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1528,
+          "line": 1545,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -13502,7 +13502,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 2261,
+          "line": 2278,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -13698,7 +13698,7 @@
           "column": 72,
           "dynamic": false,
           "implicit": false,
-          "line": 1527,
+          "line": 1544,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -13707,7 +13707,7 @@
           "column": 105,
           "dynamic": false,
           "implicit": false,
-          "line": 1527,
+          "line": 1544,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -13716,7 +13716,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 2260,
+          "line": 2277,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -13752,7 +13752,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 1770,
+          "line": 1779,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -14440,7 +14440,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 1333,
+          "line": 1350,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14449,7 +14449,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 1398,
+          "line": 1415,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14458,7 +14458,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1527,
+          "line": 1544,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14467,7 +14467,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 1632,
+          "line": 1649,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14476,7 +14476,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1703,
+          "line": 1720,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14485,7 +14485,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 2227,
+          "line": 2244,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -14494,7 +14494,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 2260,
+          "line": 2277,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -14602,7 +14602,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1770,
+          "line": 1779,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -14611,7 +14611,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1772,
+          "line": 1781,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -14620,7 +14620,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1804,
+          "line": 1813,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -15452,7 +15452,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1333,
+          "line": 1350,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15461,7 +15461,7 @@
           "column": 73,
           "dynamic": false,
           "implicit": false,
-          "line": 1397,
+          "line": 1414,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15470,7 +15470,7 @@
           "column": 72,
           "dynamic": false,
           "implicit": false,
-          "line": 1526,
+          "line": 1543,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15479,7 +15479,7 @@
           "column": 72,
           "dynamic": false,
           "implicit": false,
-          "line": 1631,
+          "line": 1648,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15488,7 +15488,7 @@
           "column": 84,
           "dynamic": false,
           "implicit": false,
-          "line": 1702,
+          "line": 1719,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15497,7 +15497,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 2227,
+          "line": 2244,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -15506,7 +15506,7 @@
           "column": 73,
           "dynamic": false,
           "implicit": false,
-          "line": 2259,
+          "line": 2276,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -16065,7 +16065,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1334,
+          "line": 1351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -16074,7 +16074,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 1399,
+          "line": 1416,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -16083,7 +16083,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 1528,
+          "line": 1545,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -16092,7 +16092,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 2261,
+          "line": 2278,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -18768,7 +18768,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1554,
+          "line": 1563,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -18777,7 +18777,7 @@
           "column": 114,
           "dynamic": false,
           "implicit": false,
-          "line": 1563,
+          "line": 1572,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -18786,7 +18786,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1567,
+          "line": 1576,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -18795,7 +18795,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1684,
+          "line": 1693,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -19420,7 +19420,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1584,
+          "line": 1601,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -19429,7 +19429,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1627,
+          "line": 1644,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -19438,7 +19438,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1686,
+          "line": 1703,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -19447,7 +19447,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2289,
+          "line": 2306,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -19456,7 +19456,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 2290,
+          "line": 2307,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -19465,7 +19465,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 2309,
+          "line": 2326,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -19704,7 +19704,7 @@
           "column": 99,
           "dynamic": false,
           "implicit": false,
-          "line": 1562,
+          "line": 1571,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -19924,7 +19924,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1565,
+          "line": 1574,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -19933,7 +19933,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1679,
+          "line": 1688,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -20729,7 +20729,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 1583,
+          "line": 1600,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -20828,7 +20828,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1553,
+          "line": 1562,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -20837,7 +20837,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1557,
+          "line": 1566,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -20846,7 +20846,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1677,
+          "line": 1686,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -21777,7 +21777,7 @@
           "column": 75,
           "dynamic": false,
           "implicit": false,
-          "line": 1561,
+          "line": 1578,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -21786,7 +21786,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 1613,
+          "line": 1630,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -21795,7 +21795,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 1667,
+          "line": 1684,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -21804,7 +21804,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 2304,
+          "line": 2321,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -21873,7 +21873,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1554,
+          "line": 1563,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -21882,7 +21882,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1556,
+          "line": 1565,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -21891,7 +21891,7 @@
           "column": 112,
           "dynamic": false,
           "implicit": false,
-          "line": 1563,
+          "line": 1572,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -21900,7 +21900,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1567,
+          "line": 1576,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -21909,7 +21909,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1684,
+          "line": 1693,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -22615,7 +22615,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1584,
+          "line": 1601,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -22624,7 +22624,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1627,
+          "line": 1644,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -22633,7 +22633,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1686,
+          "line": 1703,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -22642,7 +22642,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2290,
+          "line": 2307,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -22651,7 +22651,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 2295,
+          "line": 2312,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -22660,7 +22660,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 2309,
+          "line": 2326,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -22788,7 +22788,7 @@
           "column": 107,
           "dynamic": false,
           "implicit": false,
-          "line": 1560,
+          "line": 1569,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -22797,7 +22797,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1562,
+          "line": 1571,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -22806,7 +22806,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 1681,
+          "line": 1690,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -47770,7 +47770,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1511,
+          "line": 1520,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -47824,7 +47824,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 1757,
+          "line": 1766,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -47833,7 +47833,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1779,
+          "line": 1788,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -47996,7 +47996,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1676,
+          "line": 1685,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -48141,7 +48141,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1556,
+          "line": 1565,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -48982,7 +48982,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1561,
+          "line": 1578,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -48991,7 +48991,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1613,
+          "line": 1630,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49000,7 +49000,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1667,
+          "line": 1684,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49009,7 +49009,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2295,
+          "line": 2312,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -49451,7 +49451,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1584,
+          "line": 1601,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49460,7 +49460,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1627,
+          "line": 1644,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49469,7 +49469,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1686,
+          "line": 1703,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49478,7 +49478,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 2290,
+          "line": 2307,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49487,7 +49487,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2309,
+          "line": 2326,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -49740,7 +49740,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 1560,
+          "line": 1577,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -49749,7 +49749,7 @@
           "column": 69,
           "dynamic": false,
           "implicit": false,
-          "line": 2288,
+          "line": 2305,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -49905,7 +49905,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1672,
+          "line": 1681,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -50249,7 +50249,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 1756,
+          "line": 1765,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -50258,7 +50258,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 1778,
+          "line": 1787,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -58827,7 +58827,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2016,
+          "line": 2025,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -59010,7 +59010,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 1513,
+          "line": 1522,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -59019,7 +59019,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 1635,
+          "line": 1644,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -59028,7 +59028,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 1817,
+          "line": 1826,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -59037,7 +59037,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 1897,
+          "line": 1906,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -59046,7 +59046,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2017,
+          "line": 2026,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -59055,7 +59055,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 2020,
+          "line": 2029,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -60863,7 +60863,7 @@
           "column": 79,
           "dynamic": false,
           "implicit": false,
-          "line": 1698,
+          "line": 1707,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -65660,7 +65660,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1584,
+          "line": 1601,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -65669,7 +65669,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1627,
+          "line": 1644,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -65678,7 +65678,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1686,
+          "line": 1703,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -65687,7 +65687,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 2290,
+          "line": 2307,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -65696,7 +65696,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 2309,
+          "line": 2326,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -66255,7 +66255,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2128,
+          "line": 2145,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -68310,7 +68310,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1559,
+          "line": 1576,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68319,7 +68319,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1612,
+          "line": 1629,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68328,7 +68328,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1666,
+          "line": 1683,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68337,7 +68337,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2287,
+          "line": 2304,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -68509,7 +68509,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1560,
+          "line": 1577,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68518,7 +68518,7 @@
           "column": 75,
           "dynamic": false,
           "implicit": false,
-          "line": 1612,
+          "line": 1629,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68527,7 +68527,7 @@
           "column": 75,
           "dynamic": false,
           "implicit": false,
-          "line": 1666,
+          "line": 1683,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -68536,7 +68536,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 2288,
+          "line": 2305,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -69255,7 +69255,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1969,
+          "line": 1978,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -69508,7 +69508,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1639,
+          "line": 1648,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -70466,7 +70466,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1363,
+          "line": 1380,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -70475,7 +70475,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1500,
+          "line": 1517,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -70790,7 +70790,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2024,
+          "line": 2041,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -74495,7 +74495,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1302,
+          "line": 1319,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74504,7 +74504,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1342,
+          "line": 1359,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74513,7 +74513,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1382,
+          "line": 1399,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74522,7 +74522,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1384,
+          "line": 1401,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74531,7 +74531,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1448,
+          "line": 1465,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74540,7 +74540,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1465,
+          "line": 1482,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74549,7 +74549,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1476,
+          "line": 1493,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74558,7 +74558,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1487,
+          "line": 1504,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74567,7 +74567,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1502,
+          "line": 1519,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74576,7 +74576,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1510,
+          "line": 1527,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74585,7 +74585,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1564,
+          "line": 1581,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74594,7 +74594,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1575,
+          "line": 1592,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74603,7 +74603,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1576,
+          "line": 1593,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74612,7 +74612,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1577,
+          "line": 1594,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74621,7 +74621,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1614,
+          "line": 1631,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74630,7 +74630,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1618,
+          "line": 1635,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74639,7 +74639,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1668,
+          "line": 1685,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74648,7 +74648,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1676,
+          "line": 1693,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74657,7 +74657,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 2039,
+          "line": 2056,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74666,7 +74666,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 2068,
+          "line": 2085,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74675,7 +74675,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 2219,
+          "line": 2236,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74684,7 +74684,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2231,
+          "line": 2248,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74693,7 +74693,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2299,
+          "line": 2316,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74702,7 +74702,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2305,
+          "line": 2322,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74711,7 +74711,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2329,
+          "line": 2346,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74720,7 +74720,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2331,
+          "line": 2348,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74729,7 +74729,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 2378,
+          "line": 2395,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74738,7 +74738,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2384,
+          "line": 2401,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74747,7 +74747,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2409,
+          "line": 2426,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74756,7 +74756,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2437,
+          "line": 2454,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74765,7 +74765,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 2488,
+          "line": 2505,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74774,7 +74774,7 @@
           "column": 64,
           "dynamic": false,
           "implicit": false,
-          "line": 2513,
+          "line": 2530,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74783,7 +74783,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2551,
+          "line": 2568,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74792,7 +74792,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2581,
+          "line": 2598,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74801,7 +74801,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2584,
+          "line": 2601,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74810,7 +74810,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 2693,
+          "line": 2710,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74819,7 +74819,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2714,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74828,7 +74828,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 2712,
+          "line": 2729,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74837,7 +74837,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2829,
+          "line": 2846,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74846,7 +74846,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2841,
+          "line": 2858,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74855,7 +74855,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2847,
+          "line": 2864,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74864,7 +74864,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2856,
+          "line": 2873,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -74873,7 +74873,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2859,
+          "line": 2876,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -75145,7 +75145,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1977,
+          "line": 1986,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -77013,7 +77013,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1477,
+          "line": 1494,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -77022,7 +77022,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1488,
+          "line": 1505,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -77031,7 +77031,7 @@
           "column": 64,
           "dynamic": false,
           "implicit": false,
-          "line": 1788,
+          "line": 1805,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -77040,7 +77040,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 1795,
+          "line": 1812,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -77049,7 +77049,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2220,
+          "line": 2237,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -77058,7 +77058,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2246,
+          "line": 2263,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -77969,7 +77969,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 2134,
+          "line": 2151,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -78339,7 +78339,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 2139,
+          "line": 2156,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -78417,7 +78417,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1505,
+          "line": 1514,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -78970,7 +78970,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2131,
+          "line": 2148,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -79228,7 +79228,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2024,
+          "line": 2033,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -79382,7 +79382,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1515,
+          "line": 1524,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -79391,7 +79391,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1819,
+          "line": 1828,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -79400,7 +79400,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1899,
+          "line": 1908,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -82069,7 +82069,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1280,
+          "line": 1297,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82078,7 +82078,7 @@
           "column": 83,
           "dynamic": false,
           "implicit": false,
-          "line": 1382,
+          "line": 1399,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82087,7 +82087,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1391,
+          "line": 1408,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82096,7 +82096,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1392,
+          "line": 1409,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82105,7 +82105,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 1463,
+          "line": 1480,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82114,7 +82114,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1475,
+          "line": 1492,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82123,7 +82123,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1483,
+          "line": 1500,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82132,25 +82132,25 @@
           "column": 83,
           "dynamic": false,
           "implicit": false,
-          "line": 1502,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreTrimMutation",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreTrimMutation#",
-          "column": 21,
-          "dynamic": false,
-          "implicit": false,
-          "line": 1517,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreTrimMutation",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreTrimMutation#",
-          "column": 21,
-          "dynamic": false,
-          "implicit": false,
           "line": 1519,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreTrimMutation",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreTrimMutation#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1534,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreTrimMutation",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreTrimMutation#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1536,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82159,7 +82159,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1565,
+          "line": 1582,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82168,7 +82168,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1578,
+          "line": 1595,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82177,7 +82177,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1579,
+          "line": 1596,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82186,7 +82186,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1585,
+          "line": 1602,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82195,7 +82195,7 @@
           "column": 82,
           "dynamic": false,
           "implicit": false,
-          "line": 1614,
+          "line": 1631,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82204,7 +82204,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1622,
+          "line": 1639,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82213,7 +82213,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1623,
+          "line": 1640,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82222,7 +82222,7 @@
           "column": 82,
           "dynamic": false,
           "implicit": false,
-          "line": 1668,
+          "line": 1685,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82231,7 +82231,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1681,
+          "line": 1698,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82240,7 +82240,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1682,
+          "line": 1699,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82249,7 +82249,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1687,
+          "line": 1704,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82258,7 +82258,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1695,
+          "line": 1712,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82267,7 +82267,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1696,
+          "line": 1713,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82276,22 +82276,13 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1734,
+          "line": 1751,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
           "caller": "KisTiledDataManagerTest::testPageStoreCopyFixedView",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreCopyFixedView#",
           "column": 69,
-          "dynamic": false,
-          "implicit": false,
-          "line": 1735,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreCopyFixedView",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreCopyFixedView#",
-          "column": 21,
           "dynamic": false,
           "implicit": false,
           "line": 1752,
@@ -82303,7 +82294,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1753,
+          "line": 1769,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82312,7 +82303,16 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1754,
+          "line": 1770,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreCopyFixedView",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreCopyFixedView#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1771,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82321,7 +82321,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1755,
+          "line": 1772,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82330,7 +82330,7 @@
           "column": 64,
           "dynamic": false,
           "implicit": false,
-          "line": 1853,
+          "line": 1870,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82339,7 +82339,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1861,
+          "line": 1878,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82348,7 +82348,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1881,
+          "line": 1898,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82357,7 +82357,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1888,
+          "line": 1905,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82366,7 +82366,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1891,
+          "line": 1908,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82375,7 +82375,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1909,
+          "line": 1926,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82384,7 +82384,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1913,
+          "line": 1930,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82393,7 +82393,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1938,
+          "line": 1955,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82402,7 +82402,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1940,
+          "line": 1957,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82411,7 +82411,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 2029,
+          "line": 2046,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82420,7 +82420,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2036,
+          "line": 2053,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82429,7 +82429,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2067,
+          "line": 2084,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82438,7 +82438,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2142,
+          "line": 2159,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82447,7 +82447,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2219,
+          "line": 2236,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82456,7 +82456,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2241,
+          "line": 2258,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82465,7 +82465,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2242,
+          "line": 2259,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82474,7 +82474,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2243,
+          "line": 2260,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82483,7 +82483,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2334,
+          "line": 2351,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82492,7 +82492,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2340,
+          "line": 2357,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82501,7 +82501,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2377,
+          "line": 2394,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82510,7 +82510,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2385,
+          "line": 2402,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82519,7 +82519,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2408,
+          "line": 2425,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82528,7 +82528,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2435,
+          "line": 2452,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82537,21 +82537,12 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2462,
+          "line": 2479,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
           "caller": "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreResidentReadReusesNativeGuard#",
-          "column": 41,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2470,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
           "column": 41,
           "dynamic": false,
           "implicit": false,
@@ -82564,7 +82555,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2494,
+          "line": 2504,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82573,7 +82564,16 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2508,
+          "line": 2511,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
+          "column": 41,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2525,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82582,7 +82582,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2550,
+          "line": 2567,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82591,22 +82591,13 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2586,
+          "line": 2603,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
           "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
           "column": 34,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2611,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
-          "column": 21,
           "dynamic": false,
           "implicit": false,
           "line": 2628,
@@ -82618,7 +82609,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2629,
+          "line": 2645,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82627,7 +82618,16 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2630,
+          "line": 2646,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreClearBarrierCancelsLegacyWriter#",
+          "column": 21,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2647,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82636,7 +82636,7 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 2642,
+          "line": 2659,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82645,7 +82645,7 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 2645,
+          "line": 2662,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82654,7 +82654,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 2658,
+          "line": 2675,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82663,7 +82663,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 2670,
+          "line": 2687,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82672,7 +82672,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2692,
+          "line": 2709,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82681,7 +82681,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 2696,
+          "line": 2713,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82690,7 +82690,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 2709,
+          "line": 2726,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82699,7 +82699,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 2720,
+          "line": 2737,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82708,7 +82708,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 2722,
+          "line": 2739,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82717,7 +82717,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 2730,
+          "line": 2747,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82726,7 +82726,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2828,
+          "line": 2845,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82735,7 +82735,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2848,
+          "line": 2865,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82744,7 +82744,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 2861,
+          "line": 2878,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -82753,7 +82753,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 3359,
+          "line": 3376,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -82859,7 +82859,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1828,
+          "line": 1837,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -83773,7 +83773,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1912,
+          "line": 1929,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -87399,10 +87399,19 @@
         {
           "caller": "KisTiledDataManagerPageStoreBackend::QSet>::KisLogicalPageId::QList>::QString::KisPageStoreWriteOperationResult::runCpuMutationOperation",
           "caller-usr": "c:@S@KisTiledDataManagerPageStoreBackend@FT@>1#TrunCpuMutationOperation#&1$@S@QSet>#$@S@KisLogicalPageId#b#&&t0.0#*$@S@QList>#S2_#*$@S@QString#$@E@KisPageStoreWriteOperationResult#",
+          "column": 37,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1505,
+          "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerPageStoreBackend::QSet>::KisLogicalPageId::QList>::QString::KisPageStoreWriteOperationResult::runCpuMutationOperation",
+          "caller-usr": "c:@S@KisTiledDataManagerPageStoreBackend@FT@>1#TrunCpuMutationOperation#&1$@S@QSet>#$@S@KisLogicalPageId#b#&&t0.0#*$@S@QList>#S2_#*$@S@QString#$@E@KisPageStoreWriteOperationResult#",
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1500,
+          "line": 1509,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87411,7 +87420,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1535,
+          "line": 1544,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87420,7 +87429,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1593,
+          "line": 1602,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87429,7 +87438,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 1607,
+          "line": 1616,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87438,7 +87447,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1610,
+          "line": 1619,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87447,7 +87456,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1630,
+          "line": 1639,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87456,7 +87465,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1822,
+          "line": 1831,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87465,7 +87474,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1848,
+          "line": 1857,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87474,7 +87483,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1867,
+          "line": 1876,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87483,7 +87492,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1888,
+          "line": 1897,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87492,7 +87501,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1901,
+          "line": 1910,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87501,7 +87510,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1916,
+          "line": 1925,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87510,7 +87519,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1921,
+          "line": 1930,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -87519,7 +87528,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1945,
+          "line": 1954,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -88437,7 +88446,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 1317,
+          "line": 1334,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88446,7 +88455,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1688,
+          "line": 1705,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88455,7 +88464,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1737,
+          "line": 1754,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88464,7 +88473,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2042,
+          "line": 2059,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88473,7 +88482,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2221,
+          "line": 2238,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88482,7 +88491,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2292,
+          "line": 2309,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88491,7 +88500,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 2352,
+          "line": 2369,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88500,7 +88509,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3200,
+          "line": 3217,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -88651,6 +88660,15 @@
           "path": "libs/image/tests/kis_painter_test.cpp"
         },
         {
+          "caller": "KisPainterTest::testPageStoreBitBltWriteOperation",
+          "caller-usr": "c:@S@KisPainterTest@F@testPageStoreBitBltWriteOperation#",
+          "column": 27,
+          "dynamic": false,
+          "implicit": false,
+          "line": 269,
+          "path": "libs/image/tests/kis_painter_test.cpp"
+        },
+        {
           "caller": "kisBr1StageMetrics",
           "caller-usr": "c:@F@kisBr1StageMetrics#&1$@S@KisPageStoreDiagnosticRecorder#",
           "column": 37,
@@ -88674,7 +88692,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1693,
+          "line": 1710,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88683,7 +88701,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2065,
+          "line": 2082,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -88946,7 +88964,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1318,
+          "line": 1335,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88955,7 +88973,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 1738,
+          "line": 1755,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88964,7 +88982,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 2223,
+          "line": 2240,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88973,7 +88991,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 2293,
+          "line": 2310,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -88982,7 +89000,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 2353,
+          "line": 2370,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -89045,7 +89063,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2047,
+          "line": 2064,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -89054,7 +89072,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 2062,
+          "line": 2079,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -89093,7 +89111,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 2158,
+          "line": 2175,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -89102,7 +89120,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3315,
+          "line": 3332,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -89379,7 +89397,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1634,
+          "line": 1643,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89388,7 +89406,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1720,
+          "line": 1729,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89920,7 +89938,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1521,
+          "line": 1530,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89929,7 +89947,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1523,
+          "line": 1532,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89938,7 +89956,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1651,
+          "line": 1660,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89947,7 +89965,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1665,
+          "line": 1674,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89956,7 +89974,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1678,
+          "line": 1687,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89965,7 +89983,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1683,
+          "line": 1692,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89974,7 +89992,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 1687,
+          "line": 1696,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89983,7 +90001,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1736,
+          "line": 1745,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -89992,7 +90010,7 @@
           "column": 11,
           "dynamic": false,
           "implicit": false,
-          "line": 1795,
+          "line": 1804,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -90303,7 +90321,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 1962,
+          "line": 1971,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -90312,7 +90330,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 2014,
+          "line": 2023,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -91868,7 +91886,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1654,
+          "line": 1663,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -91877,7 +91895,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1762,
+          "line": 1771,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92115,7 +92133,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1655,
+          "line": 1664,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92124,7 +92142,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1657,
+          "line": 1666,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92133,7 +92151,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1763,
+          "line": 1772,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92142,7 +92160,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 1770,
+          "line": 1779,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92151,7 +92169,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 1789,
+          "line": 1798,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92506,7 +92524,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1774,
+          "line": 1783,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92515,7 +92533,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 1776,
+          "line": 1785,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92524,7 +92542,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1805,
+          "line": 1814,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92533,7 +92551,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 1805,
+          "line": 1814,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -92563,7 +92581,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1772,
+          "line": 1781,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92572,7 +92590,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 1773,
+          "line": 1782,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92581,7 +92599,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 1804,
+          "line": 1813,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92590,7 +92608,7 @@
           "column": 85,
           "dynamic": false,
           "implicit": false,
-          "line": 1804,
+          "line": 1813,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -92954,7 +92972,7 @@
           "column": 73,
           "dynamic": false,
           "implicit": false,
-          "line": 1657,
+          "line": 1666,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -92963,7 +92981,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 1763,
+          "line": 1772,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -93929,7 +93947,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 1815,
+          "line": 1824,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -93938,7 +93956,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1975,
+          "line": 1984,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -93947,7 +93965,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2018,
+          "line": 2027,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -95287,7 +95305,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1746,
+          "line": 1755,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -95296,7 +95314,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 1748,
+          "line": 1757,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -95305,7 +95323,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1769,
+          "line": 1778,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -95314,7 +95332,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 1769,
+          "line": 1778,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -95323,7 +95341,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2026,
+          "line": 2035,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -95993,7 +96011,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2026,
+          "line": 2035,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -99975,7 +99993,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 1978,
+          "line": 1987,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -100698,7 +100716,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 2134,
+          "line": 2151,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -101194,7 +101212,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 2133,
+          "line": 2150,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -101783,7 +101801,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2132,
+          "line": 2149,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -101810,7 +101828,7 @@
           "column": 84,
           "dynamic": false,
           "implicit": false,
-          "line": 1776,
+          "line": 1785,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -101819,7 +101837,7 @@
           "column": 84,
           "dynamic": false,
           "implicit": false,
-          "line": 1805,
+          "line": 1814,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -102433,7 +102451,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2130,
+          "line": 2147,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -107163,7 +107181,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2025,
+          "line": 2042,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -107857,7 +107875,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 1753,
+          "line": 1762,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -107866,7 +107884,7 @@
           "column": 98,
           "dynamic": false,
           "implicit": false,
-          "line": 1773,
+          "line": 1782,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -107875,7 +107893,7 @@
           "column": 83,
           "dynamic": false,
           "implicit": false,
-          "line": 1775,
+          "line": 1784,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -108982,7 +109000,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1539,
+          "line": 1548,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -108991,7 +109009,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1622,
+          "line": 1631,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -109163,7 +109181,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1821,
+          "line": 1830,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109172,7 +109190,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1829,
+          "line": 1838,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -109217,7 +109235,7 @@
           "column": 26,
           "dynamic": true,
           "implicit": false,
-          "line": 1783,
+          "line": 1792,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109226,7 +109244,7 @@
           "column": 22,
           "dynamic": true,
           "implicit": false,
-          "line": 1914,
+          "line": 1923,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -109506,7 +109524,7 @@
           "column": 31,
           "dynamic": true,
           "implicit": false,
-          "line": 1267,
+          "line": 1284,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -109525,7 +109543,7 @@
       "definitions": [
         {
           "column": 38,
-          "line": 1953,
+          "line": 1962,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -109539,7 +109557,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1841,
+          "line": 1850,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109548,7 +109566,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1881,
+          "line": 1890,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109793,7 +109811,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1509,
+          "line": 1518,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109802,7 +109820,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1728,
+          "line": 1737,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109811,7 +109829,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1849,
+          "line": 1858,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109820,7 +109838,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1871,
+          "line": 1880,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -109923,7 +109941,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1266,
+          "line": 1283,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -109956,7 +109974,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1840,
+          "line": 1849,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -110046,7 +110064,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1731,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -110055,7 +110073,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1723,
+          "line": 1732,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -110131,7 +110149,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 1331,
+          "line": 1348,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110140,7 +110158,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1611,
+          "line": 1628,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110149,7 +110167,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1665,
+          "line": 1682,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110158,7 +110176,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2212,
+          "line": 2229,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110167,7 +110185,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 2226,
+          "line": 2243,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -110186,7 +110204,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 1835,
+          "line": 1844,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -110222,7 +110240,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1616,
+          "line": 1633,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110231,7 +110249,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1628,
+          "line": 1645,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -110586,7 +110604,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 1713,
+          "line": 1722,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -110622,7 +110640,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1673,
+          "line": 1690,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -110884,7 +110902,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1674,
+          "line": 1691,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -110893,7 +110911,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 1740,
+          "line": 1757,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -110944,7 +110962,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1826,
+          "line": 1835,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -110953,7 +110971,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 1832,
+          "line": 1841,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -111119,7 +111137,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2784,
+          "line": 2801,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111128,7 +111146,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2787,
+          "line": 2804,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111137,7 +111155,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2791,
+          "line": 2808,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111146,7 +111164,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2794,
+          "line": 2811,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111155,7 +111173,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2797,
+          "line": 2814,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111164,7 +111182,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2800,
+          "line": 2817,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111173,7 +111191,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2802,
+          "line": 2819,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111182,7 +111200,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2840,
+          "line": 2857,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111191,7 +111209,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2846,
+          "line": 2863,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111200,7 +111218,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2855,
+          "line": 2872,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -111251,7 +111269,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1719,
+          "line": 1728,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -111260,7 +111278,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1719,
+          "line": 1728,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -111269,7 +111287,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 1848,
+          "line": 1857,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -111498,7 +111516,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 2002,
+          "line": 2011,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -111579,7 +111597,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 1503,
+          "line": 1520,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111588,7 +111606,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1516,
+          "line": 1533,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111597,7 +111615,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 2038,
+          "line": 2055,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111606,7 +111624,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 2061,
+          "line": 2078,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111615,7 +111633,7 @@
           "column": 84,
           "dynamic": false,
           "implicit": false,
-          "line": 2220,
+          "line": 2237,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111624,7 +111642,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 2231,
+          "line": 2248,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -111852,7 +111870,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 1844,
+          "line": 1853,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -111866,7 +111884,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1841,
+          "line": 1850,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -111888,7 +111906,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 1616,
+          "line": 1633,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -111897,7 +111915,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 1628,
+          "line": 1645,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -112125,7 +112143,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 1808,
+          "line": 1817,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -112197,7 +112215,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 1741,
+          "line": 1758,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -112329,7 +112347,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1505,
+          "line": 1514,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112338,7 +112356,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1515,
+          "line": 1524,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112347,7 +112365,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 1634,
+          "line": 1643,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112356,7 +112374,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1639,
+          "line": 1648,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112365,7 +112383,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 1654,
+          "line": 1663,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112374,7 +112392,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 1720,
+          "line": 1729,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112383,7 +112401,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1745,
+          "line": 1754,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112392,7 +112410,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1745,
+          "line": 1754,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112401,7 +112419,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 1762,
+          "line": 1771,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112410,7 +112428,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1814,
+          "line": 1823,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112419,7 +112437,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 1872,
+          "line": 1881,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -112963,7 +112981,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1280,
+          "line": 1297,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112972,7 +112990,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1301,
+          "line": 1318,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112981,7 +112999,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1362,
+          "line": 1379,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112990,7 +113008,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 1447,
+          "line": 1464,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -112999,7 +113017,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 1463,
+          "line": 1480,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113008,7 +113026,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1465,
+          "line": 1482,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113017,7 +113035,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1474,
+          "line": 1491,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113026,7 +113044,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1499,
+          "line": 1516,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113035,7 +113053,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 1556,
+          "line": 1573,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113044,7 +113062,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 1608,
+          "line": 1625,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113053,7 +113071,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 1664,
+          "line": 1681,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113062,7 +113080,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1733,
+          "line": 1750,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113071,7 +113089,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 1735,
+          "line": 1752,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113080,7 +113098,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1755,
+          "line": 1772,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113089,7 +113107,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1788,
+          "line": 1805,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113098,7 +113116,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 1795,
+          "line": 1812,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113107,7 +113125,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 1853,
+          "line": 1870,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113116,7 +113134,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1861,
+          "line": 1878,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113125,7 +113143,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1879,
+          "line": 1896,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113134,7 +113152,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 1929,
+          "line": 1946,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113143,7 +113161,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2014,
+          "line": 2031,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113152,7 +113170,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 2209,
+          "line": 2226,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113161,7 +113179,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 2284,
+          "line": 2301,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113170,7 +113188,7 @@
           "column": 67,
           "dynamic": false,
           "implicit": false,
-          "line": 2324,
+          "line": 2341,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113179,7 +113197,7 @@
           "column": 74,
           "dynamic": false,
           "implicit": false,
-          "line": 2352,
+          "line": 2369,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113188,7 +113206,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2376,
+          "line": 2393,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113197,7 +113215,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2407,
+          "line": 2424,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113206,30 +113224,12 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2462,
+          "line": 2479,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
           "caller": "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreResidentReadReusesNativeGuard#",
-          "column": 32,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2470,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
-          "column": 36,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2484,
-          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
-        },
-        {
-          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
-          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
           "column": 32,
           "dynamic": false,
           "implicit": false,
@@ -113239,10 +113239,28 @@
         {
           "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
           "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
+          "column": 36,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2501,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
+          "column": 32,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2504,
+          "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
+        },
+        {
+          "caller": "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
+          "caller-usr": "c:@S@KisTiledDataManagerTest@F@testPageStoreWriteIntentDoesNotAllocateUntilDataExposure#",
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2488,
+          "line": 2505,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113251,7 +113269,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2494,
+          "line": 2511,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113260,7 +113278,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2508,
+          "line": 2525,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113269,7 +113287,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 2513,
+          "line": 2530,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113278,7 +113296,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2549,
+          "line": 2566,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113287,7 +113305,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2610,
+          "line": 2627,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113296,7 +113314,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2640,
+          "line": 2657,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113305,7 +113323,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2685,
+          "line": 2702,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113314,7 +113332,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2826,
+          "line": 2843,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113323,7 +113341,7 @@
           "column": 94,
           "dynamic": false,
           "implicit": false,
-          "line": 3351,
+          "line": 3368,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113332,7 +113350,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 3359,
+          "line": 3376,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -113374,7 +113392,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 1515,
+          "line": 1524,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113383,7 +113401,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1589,
+          "line": 1598,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113392,7 +113410,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1642,
+          "line": 1651,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113401,7 +113419,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1725,
+          "line": 1734,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113410,7 +113428,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1726,
+          "line": 1735,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113419,7 +113437,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1737,
+          "line": 1746,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113428,7 +113446,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1738,
+          "line": 1747,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -113558,7 +113576,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 2127,
+          "line": 2144,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -113577,7 +113595,7 @@
       "definitions": [
         {
           "column": 51,
-          "line": 1802,
+          "line": 1811,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113631,7 +113649,7 @@
       "definitions": [
         {
           "column": 43,
-          "line": 1858,
+          "line": 1867,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113667,7 +113685,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1573,
+          "line": 1590,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -113686,7 +113704,7 @@
       "definitions": [
         {
           "column": 81,
-          "line": 1693,
+          "line": 1702,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113709,7 +113727,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1753,
+          "line": 1762,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113799,7 +113817,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 1813,
+          "line": 1822,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113821,7 +113839,7 @@
       "definitions": [
         {
           "column": 71,
-          "line": 1601,
+          "line": 1610,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -113848,7 +113866,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2300,
+          "line": 2317,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113857,7 +113875,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2330,
+          "line": 2347,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113866,7 +113884,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2335,
+          "line": 2352,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113875,7 +113893,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2337,
+          "line": 2354,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113884,7 +113902,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2338,
+          "line": 2355,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         },
         {
@@ -113893,7 +113911,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2339,
+          "line": 2356,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -113912,7 +113930,7 @@
       "definitions": [
         {
           "column": 71,
-          "line": 1529,
+          "line": 1538,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -114583,7 +114601,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1269,
+          "line": 1286,
           "path": "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp"
         }
       ],
@@ -114634,7 +114652,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 1524,
+          "line": 1533,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114643,7 +114661,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1797,
+          "line": 1806,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114652,7 +114670,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1855,
+          "line": 1864,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114661,7 +114679,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1949,
+          "line": 1958,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114781,7 +114799,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1749,
+          "line": 1758,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114790,7 +114808,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1852,
+          "line": 1861,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -114799,7 +114817,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1911,
+          "line": 1920,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -116022,7 +116040,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1705,
+          "line": 1714,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -116031,7 +116049,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 1775,
+          "line": 1784,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -116149,7 +116167,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 1773,
+          "line": 1782,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -118265,7 +118283,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 1755,
+          "line": 1764,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -118274,7 +118292,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 1777,
+          "line": 1786,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -118310,7 +118328,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 1804,
+          "line": 1813,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -118483,7 +118501,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 1776,
+          "line": 1785,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -118492,7 +118510,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 1805,
+          "line": 1814,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -135428,7 +135446,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 1553,
+          "line": 1562,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -143518,7 +143536,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1971,
+          "line": 1980,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -143527,7 +143545,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1980,
+          "line": 1989,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -143536,7 +143554,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 1983,
+          "line": 1992,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -145097,7 +145115,7 @@
           "column": 92,
           "dynamic": false,
           "implicit": false,
-          "line": 1698,
+          "line": 1707,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -147989,7 +148007,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 1745,
+          "line": 1754,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -156158,7 +156176,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1552,
+          "line": 1561,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156167,7 +156185,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 1552,
+          "line": 1561,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156176,7 +156194,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1570,
+          "line": 1579,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156185,7 +156203,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 1573,
+          "line": 1582,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156194,7 +156212,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1615,
+          "line": 1624,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156203,7 +156221,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 1616,
+          "line": 1625,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156212,7 +156230,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1617,
+          "line": 1626,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156221,7 +156239,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1618,
+          "line": 1627,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156230,7 +156248,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1732,
+          "line": 1741,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156239,7 +156257,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 1733,
+          "line": 1742,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156248,7 +156266,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1734,
+          "line": 1743,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         },
         {
@@ -156257,7 +156275,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1735,
+          "line": 1744,
           "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
         }
       ],
@@ -159070,7 +159088,7 @@
     "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "16afcfe29e22a12f989dfd961242b1d23a14db4edd2f2b862f0a4c92cbd12f07",
     "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "ac0bd65a1219915b4504a67adee6d0fd97c0d589a92681d309ed47de0f4d421e"
   },
-  "call-edge-count": 13648,
+  "call-edge-count": 13650,
   "callback-registration-count": 15,
   "compile-commands": {
     "path": "_build-br0-cpu/compile_commands.json",
@@ -174791,21 +174809,21 @@
         "c:@S@KisTiledDataManagerPageStoreBackend@F@commitHistory#*1c#i#*$@S@QString#": "KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3543",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@configure#i#*1c#*$@S@QString#": "KisPageStoreCpuMutationTest::compatibilityFinalUnlockCanTransferThreads at libs/image/tests/KisPageStoreCpuMutationTest.cpp:2332",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@configureClone#&1$@S@KisTiledDataManagerPageStoreBackend#*$@S@QString#": "KisPageStoreReferenceTest::tiles3BackendMapsIdentityDefaultExtentAndCow at libs/image/tests/KisPageStoreReferenceTest.cpp:7835",
-        "c:@S@KisTiledDataManagerPageStoreBackend@F@copyFrom#&1$@S@KisTiledDataManagerPageStoreBackend#&1$@S@QRect#b#b#*$@S@QString#*$@S@QList>#$@S@KisLogicalPageId#": "KisTiledDataManagerTest::testPageStoreAliasRegionFailure at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1673",
+        "c:@S@KisTiledDataManagerPageStoreBackend@F@copyFrom#&1$@S@KisTiledDataManagerPageStoreBackend#&1$@S@QRect#b#b#*$@S@QString#*$@S@QList>#$@S@KisLogicalPageId#": "KisTiledDataManagerTest::testPageStoreAliasRegionFailure at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1690",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@fillRect#&1$@S@QRect#&1$@S@QByteArray#*$@S@QString#*$@S@QList>#$@S@KisLogicalPageId#": "KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3445",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@hasCurrentThreadIteratorWrites#1": "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:872",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@pageAllocated#I#I#b#1": "KisPageStoreReferenceTest::tiles3BackendMapsIdentityDefaultExtentAndCow at libs/image/tests/KisPageStoreReferenceTest.cpp:7811",
-        "c:@S@KisTiledDataManagerPageStoreBackend@F@payloadWork#1": "KisTiledDataManagerTest::testPageStoreTrimMutation at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1503",
+        "c:@S@KisTiledDataManagerPageStoreBackend@F@payloadWork#1": "KisTiledDataManagerTest::testPageStoreTrimMutation at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1520",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@purgeHistory#&1$@S@KisSharedPtr>#$@S@KisMemento#*1c#i#*$@S@QString#": "KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3546",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@readBytes#*c#I#I#I#I#I#*$@S@QString#1": "KisPageStoreCpuMutationTest::concurrentBatchAbandonment at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3501",
-        "c:@S@KisTiledDataManagerPageStoreBackend@F@removePages#&1$@S@QList>#$@S@KisLogicalPageId#*$@S@QString#": "KisTiledDataManagerTest::testPageStoreSemanticRemovalFailure at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1616",
+        "c:@S@KisTiledDataManagerPageStoreBackend@F@removePages#&1$@S@QList>#$@S@KisLogicalPageId#*$@S@QString#": "KisTiledDataManagerTest::testPageStoreSemanticRemovalFailure at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:1633",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@rollback#&1$@S@KisSharedPtr>#$@S@KisMemento#*$@S@QString#": "KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3543",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@rollforward#&1$@S@KisSharedPtr>#$@S@KisMemento#*$@S@QString#": "KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3546",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@setDefaultPixel#&1$@S@QByteArray#*$@S@QString#": "KisPageStoreReferenceTest::tiles3BackendMapsIdentityDefaultExtentAndCow at libs/image/tests/KisPageStoreReferenceTest.cpp:7850",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@store#1": "KisPageStoreCpuMutationTest::compatibilityFinalUnlockCanTransferThreads at libs/image/tests/KisPageStoreCpuMutationTest.cpp:2337",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@surface#1": "KisPageStoreReferenceTest::tiles3BackendMapsIdentityDefaultExtentAndCow at libs/image/tests/KisPageStoreReferenceTest.cpp:7800",
         "c:@S@KisTiledDataManagerPageStoreBackend@F@trimToRect#&1$@S@QRect#*$@S@QString#": "KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3451",
-        "c:@S@KisTiledDataManagerPageStoreBackend@F@writeBytes#*1c#I#I#I#I#I#b#*$@S@QList>#$@S@KisLogicalPageId#*$@S@QString#": "KisTiledDataManagerTest::testPageStorePackedWritePreclaimExcludesLateWriter at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:2300",
+        "c:@S@KisTiledDataManagerPageStoreBackend@F@writeBytes#*1c#I#I#I#I#I#b#*$@S@QList>#$@S@KisLogicalPageId#*$@S@QString#": "KisTiledDataManagerTest::testPageStorePackedWritePreclaimExcludesLateWriter at libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp:2317",
         "c:@S@KisTiledDataManagerPageStoreWriteBatch@F@cancel#": "KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3529",
         "c:@S@KisTiledDataManagerPageStoreWriteBatch@F@finish#*$@S@QString#": "KisPageStoreCpuMutationTest::abandonedCompatibilityBatch at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3435",
         "c:@S@KisTiledDataManagerPageStoreWriteBatch@F@replaceFullTile#I#I#*$@S@KisTileData#b#*$@S@QString#": "KisPageStoreCpuMutationTest::invalidAliasCancelsSemanticBatch at libs/image/tests/KisPageStoreCpuMutationTest.cpp:3565",
@@ -175700,7 +175718,7 @@
     "libs/image/pagestore/KisSurfaceCodecRegistry.h": "45f328dc935804030a96ce78926ecfbe2c3956eef80ccfc3e9f39a1a922e0a49",
     "libs/image/pagestore/KisSurfaceRegistry.cpp": "aa5bf7439e389666e6e916dc1f33ba185efe0d69837f4373ca42aa3732c4536c",
     "libs/image/pagestore/KisSurfaceRegistry.h": "098c4d4793e8368ed3ddedfdac71d456270be72a414153a770a4260a387a4cf0",
-    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "b9f4c594dcbb01961d37f5a8abf845b71a53b2f7cf8a13b2a09d9e49fe6cbf66",
+    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "d89c66d350528a4dbab6179ac3cdb3d3d42109a580d8e31ad30ff9ff0d5274b1",
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": "27d122299662d18d466079f340d34b548bfaae4e1c808abfa718f390841da313",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp": "5bfa71352f52605f4a2920f75c405138caebde8d7c3239b88d691771c3ab6e85",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.h": "e786d84d58fb66e573f6b699e6aa46023cdc5f94461f9908ffc540986e1b05f7",
@@ -175905,7 +175923,7 @@
     "libs/image/tests/kis_paint_information_test.h": "e213ea70a3c90eeebb6597f9cde22bfd3636068eb2983fd374f1b1cf649ba072",
     "libs/image/tests/kis_paint_layer_test.cpp": "06043ed4c2e1acab3fcf04a0b0d1bc90a1df252b93a895df6a90875955560fb3",
     "libs/image/tests/kis_paint_layer_test.h": "071f681061f5769d92b27a976f5c9f82daaf74b586005a72bea871df9bb55e33",
-    "libs/image/tests/kis_painter_test.cpp": "9e76481eb3ae378aa5b5e9a7909ef6f993d4099efaa08774af887ec35c8bcfa0",
+    "libs/image/tests/kis_painter_test.cpp": "9928f020700c32e1ca1bb86201bd11abc657e84024d2f9a77077f4995ac205eb",
     "libs/image/tests/kis_painter_test.h": "690add04a77b681d59aee77c03caa42774b4e676c86233f91653ed2dc6a89ff5",
     "libs/image/tests/kis_paintop_test.cpp": "442d4b2babb7917365207e3158d5c1683aec0fbae225f6c5803932b0e9928ddd",
     "libs/image/tests/kis_paintop_test.h": "032228032feedc3d0da8e4c9fa502f3dc4de06d8091efa917f50bfb98e7923a0",
@@ -176055,7 +176073,7 @@
     "libs/image/tiles3/tests/kis_tile_data_store_test.cpp": "58bc51857b35b1eb3a7a609ae069464d79e9be0f536944794c3c2e4faf3534cb",
     "libs/image/tiles3/tests/kis_tile_data_store_test.h": "1fcbf348dbdd8dfa1d0c6d5f891475e947f749d1574edcd6164cb19d7fe62501",
     "libs/image/tiles3/tests/kis_tile_data_store_test_access.h": "ae3b27c985501fb553918b780a6e8ab27caa40211c90d688dabccffc73073a28",
-    "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp": "5cf9a48f4c6e9f12dd5ebd5736c1d7bb2c9024c472cf370db56424c863ef1a95",
+    "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp": "585332896393a0e80d159c417997143f4f30ec1c9cf0366b89705a6e810ebdc8",
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": "20c9bf8fe56c186fcfdf05815142fca8fc96a72fe8641704d6bd11021a8e760b",
     "libs/image/tiles3/tests/kis_tiles3_cpu_baseline_test.cpp": "4caba36adde8bcf3a18245a7ae9be86391b5e9b3071591dba4e6ab0c6e9761c3",
     "libs/image/tiles3/tests/tiles_test_utils.h": "badf5d58a7a91bf7d5386410c7d71d0889070cc1f2c9652363c3f5474720e704",

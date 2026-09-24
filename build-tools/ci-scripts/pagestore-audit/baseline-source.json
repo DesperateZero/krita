@@ -1946,7 +1946,7 @@
         "tiles3/kis_tiled_data_manager.h",
         "utility"
       ],
-      "lines": 2027,
+      "lines": 2036,
       "member_fields": [
         "m_batch",
         "m_dirty",
@@ -1984,7 +1984,7 @@
         "ProductBackingPolicy",
         "TrimPage"
       ],
-      "sha256": "b9f4c594dcbb01961d37f5a8abf845b71a53b2f7cf8a13b2a09d9e49fe6cbf66",
+      "sha256": "d89c66d350528a4dbab6179ac3cdb3d3d42109a580d8e31ad30ff9ff0d5274b1",
       "synchronization_declarations": 6
     },
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": {
@@ -2523,7 +2523,7 @@
         "testimage.h",
         "testutil.h"
       ],
-      "lines": 942,
+      "lines": 951,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStoreDiagnosticPhase",
@@ -2532,7 +2532,7 @@
       "public_types": [
         "PainterWrapBounds"
       ],
-      "sha256": "9e76481eb3ae378aa5b5e9a7909ef6f993d4099efaa08774af887ec35c8bcfa0",
+      "sha256": "9928f020700c32e1ca1bb86201bd11abc657e84024d2f9a77077f4995ac205eb",
       "synchronization_declarations": 0
     },
     "libs/image/tests/kis_painter_test.h": {
@@ -3814,7 +3814,7 @@
         "tiles3/kis_vline_iterator.h",
         "tiles_test_utils.h"
       ],
-      "lines": 3679,
+      "lines": 3696,
       "member_fields": [
         "m_accessRect",
         "m_index",
@@ -3843,7 +3843,7 @@
         "LazyCopyingStressJob",
         "TestableTiledDataManager"
       ],
-      "sha256": "5cf9a48f4c6e9f12dd5ebd5736c1d7bb2c9024c472cf370db56424c863ef1a95",
+      "sha256": "585332896393a0e80d159c417997143f4f30ec1c9cf0366b89705a6e810ebdc8",
       "synchronization_declarations": 9
     },
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": {
@@ -4437,5 +4437,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "ca1793a556607566aa2bcdb08bfc6f9dcd37b64c"
+  "working_tree_head": "37939881ba417cde01fc430ee0c1c223263d3a8c"
 }

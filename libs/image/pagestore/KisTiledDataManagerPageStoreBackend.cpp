@@ -1496,7 +1496,16 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     KisPageStoreDiagnosticTimer phase(store(), Phase::PixelOperationRangePrepare, quint64(targets.size()));
     {
         QMutexLocker lock(&d->mutex);
-        if (d->cpuMutationBatches.contains(QThread::currentThreadId())) {
+        const auto slot = d->cpuMutationBatches.constFind(
+            QThread::currentThreadId());
+        if (slot != d->cpuMutationBatches.cend()) {
+            const auto existing = slot.value().toStrongRef();
+            if (existing && existing->iteratorScope && !existing->failed
+                && existing->clients != 0) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("pixel operation intersects a legacy writer"));
+                return Result::Borrowed;
+            }
             KisPageStoreDetail::setError(error, QStringLiteral("pixel operation cannot enter an existing mutation batch"));
             return Result::Failed;
         }

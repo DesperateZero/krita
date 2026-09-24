@@ -1218,6 +1218,23 @@ void KisTiledDataManagerTest::testPageStorePixelOperationBorrowed()
     QCOMPARE(dm.writePageStoreOperation({QRect(0,0,128,2)}, [&](KisPixelWriteCursor *) { nestedCalled = true; return true; }),
         KisPageStoreWriteOperationResult::Failed);
     QVERIFY(!nestedCalled); QVERIFY(enclosing->finish()); enclosing.reset();
+    {
+        KisRandomAccessor2 iterator(&dm, 0, 0, true, nullptr);
+        iterator.moveTo(0, 0);
+        auto *iteratorPointer = iterator.rawData();
+        QVERIFY(iteratorPointer);
+        *iteratorPointer = 0x21;
+        bool iteratorCalled = false;
+        QCOMPARE(dm.writePageStoreOperation(
+                     {QRect(0,0,128,2)},
+                     [&](KisPixelWriteCursor *) {
+                         iteratorCalled = true;
+                         return true;
+                     }),
+                 KisPageStoreWriteOperationResult::Borrowed);
+        QVERIFY(!iteratorCalled);
+        QCOMPARE(iterator.rawData(), iteratorPointer);
+    }
     auto tile = dm.getTile(0,0,true); tile->lockForWrite();
     auto *pointer = tile->data(); QVERIFY(pointer); *pointer = 0x31;
     bool called = false;

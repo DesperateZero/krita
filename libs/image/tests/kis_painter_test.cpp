@@ -259,14 +259,23 @@ void KisPainterTest::testPageStoreBitBltWriteOperation()
     const auto seals = recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::MutationSealPrivatePublish)].intervals;
     QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::PixelOperationBody)].intervals, quint64(borrowed ? 0 : 1));
     if (!borrowed) QCOMPARE(seals, quint64(1));
-    else { QVERIFY(seals > 1); QCOMPARE(external->rawData(), pointer); }
+    else {
+        // The compatibility copy joins the accessor's single native mutation.
+        // Nothing publishes while its raw pointer is still live; the final
+        // iterator client seals the whole shared transaction exactly once.
+        QCOMPARE(seals, quint64(0));
+        QCOMPARE(external->rawData(), pointer);
+        external.clear();
+        QCOMPARE(recorder.metrics()[size_t(
+                     KisPageStoreDiagnosticPhase::MutationSealPrivatePublish)].intervals,
+                 quint64(1));
+    }
     QByteArray expected(storage.width() * storage.height(), char(initial));
     for (int y = 0; y < source.height(); ++y) for (int x = 0; x < source.width(); ++x) {
         const int dx = (wrapped ? (target.x() + x) % 128 : target.x() + x) - offset.x();
         const int dy = (wrapped ? (target.y() + y) % 96 : target.y() + y) - offset.y();
         expected[(dy - storage.y()) * storage.width() + dx - storage.x()] = input[y * source.width() + x];
     }
-    if (borrowed) external.clear();
     QByteArray actual(expected.size(), Qt::Uninitialized);
     dst->dataManager()->readBytes(reinterpret_cast<quint8 *>(actual.data()), storage.x(),storage.y(),storage.width(),storage.height());
     QCOMPARE(actual, expected);
