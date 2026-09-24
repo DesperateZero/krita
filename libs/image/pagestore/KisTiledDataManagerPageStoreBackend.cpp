@@ -11,6 +11,7 @@
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
 #include "kis_image_config.h"
+#include "tiles3/kis_tiled_data_manager.h"
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
 
@@ -290,7 +291,6 @@ public:
     }
 
     mutable QMutex mutex;
-    QHash<Qt::HANDLE, QSet<const void *>> iteratorWriteBoundaries;
     QMutex transactionMutex;
     QReadWriteLock publicationLock;
     QSharedPointer<KisTiles3PageReplicaProvider> provider;
@@ -328,15 +328,36 @@ public:
             finish();
         }
     }
+    bool finishClient(bool succeeded, QString *error = nullptr);
     bool finish(QString *error = nullptr);
     KisTiledDataManagerPageStoreBackend *backend = nullptr;
     KisPageTransaction transaction;
     bool owned = false;
     bool failed = false;
+    bool iteratorScope = false;
+    quint64 clients = 1;
     Qt::HANDLE thread = QThread::currentThreadId();
     KisPageMutationSession mutation;
     QHash<KisTileData *, QSharedPointer<const KisPageReplicaSource>> sources;
 };
+
+class KisTiledDataManagerIteratorWriteScope::Private
+{
+public:
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+};
+
+KisTiledDataManagerIteratorWriteScope::KisTiledDataManagerIteratorWriteScope()
+    : d(new Private)
+{
+}
+
+KisTiledDataManagerIteratorWriteScope::~KisTiledDataManagerIteratorWriteScope() = default;
+
+bool KisTiledDataManagerIteratorWriteScope::finish()
+{
+    return d && d->batch && d->batch->finish();
+}
 
 KisTiledDataManagerPageStoreWriteBatch::
 KisTiledDataManagerPageStoreWriteBatch(
@@ -351,20 +372,46 @@ KisTiledDataManagerPageStoreWriteBatch(
 }
 
 KisTiledDataManagerPageStoreWriteBatch::
+KisTiledDataManagerPageStoreWriteBatch(QSharedPointer<Private> shared)
+    : d(std::move(shared))
+{
+}
+
+KisTiledDataManagerPageStoreWriteBatch::
 ~KisTiledDataManagerPageStoreWriteBatch()
 {
-    if (d->backend) cancel();
+    if (!m_clientFinished) cancel();
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::finish(QString *error)
 {
-    return d->finish(error);
+    if (m_clientFinished || !d) return false;
+    m_clientFinished = true;
+    return d->finishClient(true, error);
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::cancel()
 {
-    if (d->backend) d->failed = true;
-    return d->finish();
+    if (m_clientFinished || !d) return false;
+    m_clientFinished = true;
+    return d->finishClient(false);
+}
+
+bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
+    bool succeeded, QString *error)
+{
+    KisTiledDataManagerPageStoreBackend *owner = backend;
+    if (!owner) return succeeded && !failed;
+    bool finalClient = false;
+    bool clientSucceeded = false;
+    {
+        QMutexLocker lock(&owner->d->mutex);
+        if (!succeeded) failed = true;
+        if (clients == 0) return false;
+        finalClient = --clients == 0;
+        clientSucceeded = !failed;
+    }
+    return finalClient ? finish(error) : clientSucceeded;
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error)
@@ -373,7 +420,10 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error)
     if (!transaction.isValid() || !mutation.isActive()) return false;
     bool privateCancelled = false;
     if (failed) KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore private mutation batch cancelled"));
-    if (failed || !mutation.seal(error)) {
+    const bool sealed = !failed && (iteratorScope
+        ? mutation.sealForLegacyUnlock(error)
+        : mutation.seal(error));
+    if (!sealed) {
         failed = true;
         if (!mutation.cancel()) return false;
         privateCancelled = true;
@@ -669,6 +719,43 @@ KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error)
     QMutexLocker lock(&d->mutex);
     d->cpuMutationBatches.insert(batch->d->thread, batch->d.toWeakRef());
     return batch;
+}
+
+std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
+KisTiledDataManagerPageStoreBackend::beginIteratorMutationScope(QString *error)
+{
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+    {
+        QMutexLocker lock(&d->mutex);
+        auto shared = d->cpuMutationBatches
+                          .value(QThread::currentThreadId()).toStrongRef();
+        if (shared) {
+            // Zero clients means the last scope has started terminal sealing.
+            // Keep the map entry as a barrier, but never revive that batch.
+            if (!shared->iteratorScope || shared->failed || shared->clients == 0) {
+                KisPageStoreDetail::setError(error, QStringLiteral(
+                    "iterator cannot join the current native CPU batch"));
+                return {};
+            }
+            ++shared->clients;
+            KisPageStoreDetail::setError(error, {});
+            batch.reset(new KisTiledDataManagerPageStoreWriteBatch(
+                std::move(shared)));
+        }
+    }
+
+    if (!batch) {
+        batch = beginMutationBatch(error);
+        if (!batch) return {};
+        {
+            QMutexLocker lock(&d->mutex);
+            batch->d->iteratorScope = true;
+        }
+    }
+    auto scope = std::unique_ptr<KisTiledDataManagerIteratorWriteScope>(
+        new KisTiledDataManagerIteratorWriteScope);
+    scope->d->batch = std::move(batch);
+    return scope;
 }
 
 KisPageTransaction KisTiledDataManagerPageStoreBackend::writableTransaction(
@@ -1045,30 +1132,14 @@ KisCapturedReadView KisTiledDataManagerPageStoreBackend::captureReadView(
     return pageStore->captureReadView(selector, error);
 }
 
-Qt::HANDLE KisTiledDataManagerPageStoreBackend::registerIteratorWriteBoundary(
-    const void *key)
-{
-    const auto thread = QThread::currentThreadId();
-    QMutexLocker locker(&d->mutex);
-    d->iteratorWriteBoundaries[thread].insert(key);
-    return thread;
-}
-void KisTiledDataManagerPageStoreBackend::unregisterIteratorWriteBoundary(Qt::HANDLE thread, const void *key)
-{
-    QMutexLocker locker(&d->mutex);
-    auto found = d->iteratorWriteBoundaries.find(thread);
-    if (found == d->iteratorWriteBoundaries.end()) return;
-    found->remove(key);
-    if (found->isEmpty()) d->iteratorWriteBoundaries.erase(found);
-}
 bool KisTiledDataManagerPageStoreBackend::hasCurrentThreadIteratorWrites() const
 {
-    // Iterator cache lifetime is the explicit same-thread visibility scope.
-    // Reads never publish or release another iterator's unfinished backing.
-    const auto thread = QThread::currentThreadId();
+    // The explicit iterator mutation scope is also the single same-thread
+    // discovery source for unpublished compatibility bytes.
     QMutexLocker locker(&d->mutex);
-    const auto found = d->iteratorWriteBoundaries.constFind(thread);
-    return found != d->iteratorWriteBoundaries.cend() && !found->isEmpty();
+    const auto batch = d->cpuMutationBatches
+                           .value(QThread::currentThreadId()).toStrongRef();
+    return batch && batch->iteratorScope && !batch->failed && batch->clients != 0;
 }
 
 bool KisTiledDataManagerPageStoreBackend::readBytes(
@@ -1176,6 +1247,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     {
         QMutexLocker lock(&d->mutex);
         batch = d->cpuMutationBatches.value(QThread::currentThreadId()).toStrongRef();
+        if (batch && (batch->failed || batch->clients == 0)) return {};
         mutation = batch ? &batch->mutation : nullptr;
     }
     if (mutation) {

@@ -58,7 +58,6 @@ KisVLineIterator2::KisVLineIterator2(KisDataManager *dataManager, qint32 x, qint
         m_havePixels = false;
         return;
     }
-    setWriteBoundaryActive(this, true);
 }
 
 void KisVLineIterator2::resetPixelPos()
@@ -158,7 +157,6 @@ bool KisVLineIterator2::nextPixels(qint32 n)
 KisVLineIterator2::~KisVLineIterator2()
 {
     releaseTileCache(m_tilesCache, m_data, m_oldData);
-    setWriteBoundaryActive(this, false);
 }
 
 
@@ -217,7 +215,6 @@ bool KisVLineIterator2::preallocateTiles()
     const bool populated = populateTileCache(
         m_tilesCache, m_bottomRow - m_topRow + 1,
         m_column, m_topRow, 0, 1);
-    setWriteBoundaryActive(this, populated);
     if (!populated)
         m_data = m_oldData = nullptr;
     return populated;

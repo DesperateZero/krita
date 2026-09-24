@@ -27,6 +27,7 @@ class KisTiledDataManager;
 class KisPageStoreIteratorReadScope;
 class KisPageStoreReadPage;
 class KisPageStoreWriteReservation;
+class KisTiledDataManagerIteratorWriteScope;
 
 /**
  * Opaque RAII anchor for one legacy multi-tile write operation. Keeping the
@@ -55,15 +56,18 @@ public:
     bool cancel();
 
 private:
+    class Private;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreLease;
     KisTiledDataManagerPageStoreWriteBatch(
         KisTiledDataManagerPageStoreBackend *backend,
         const KisPageTransaction &transaction,
         bool owned);
+    explicit KisTiledDataManagerPageStoreWriteBatch(
+        QSharedPointer<Private> shared);
 
-    class Private;
     QSharedPointer<Private> d;
+    bool m_clientFinished = false;
 };
 
 /**
@@ -93,6 +97,11 @@ public:
     // provider. Release tile leases before finish.
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> beginMutationBatch(
         QString *error = nullptr);
+    // Writable iterators on one thread share one native mutation. Each call
+    // returns a client scope; the final client publishes after all tile guards
+    // have ended.
+    std::unique_ptr<KisTiledDataManagerIteratorWriteScope> beginIteratorMutationScope(
+        QString *error = nullptr);
 
     std::unique_ptr<KisTilePageStoreLease> acquireTile(
         qint32 column, qint32 row, bool writable, bool oldData) override;
@@ -103,11 +112,6 @@ public:
     QSharedPointer<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
         bool writable, QString *error = nullptr,
         QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
-    // Writable iterators explicitly register only while they retain a live
-    // cache. The originating thread uses this visibility boundary to select
-    // legacy reads of its unpublished raw pointers.
-    Qt::HANDLE registerIteratorWriteBoundary(const void *key);
-    void unregisterIteratorWriteBoundary(Qt::HANDLE thread, const void *key);
     bool hasCurrentThreadIteratorWrites() const;
     // Synchronous operation-private cursor, never backed by compatibility
     // tile wrappers. Reserve the entire target set before executing callback;

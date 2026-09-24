@@ -1299,14 +1299,12 @@ KisTiledDataManager::capturePageStoreReadScope(
                               : QSharedPointer<const KisPageStoreIteratorReadScope>{};
 }
 
-Qt::HANDLE KisTiledDataManager::registerPageStoreWriteBoundary(
-    const void *key)
+std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
+KisTiledDataManager::beginIteratorWriteScope()
 {
-    return m_pageStoreBackend ? m_pageStoreBackend->registerIteratorWriteBoundary(key) : nullptr;
-}
-void KisTiledDataManager::unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key)
-{
-    if (m_pageStoreBackend && thread) m_pageStoreBackend->unregisterIteratorWriteBoundary(thread, key);
+    return m_pageStoreBackend
+        ? m_pageStoreBackend->beginIteratorMutationScope()
+        : std::unique_ptr<KisTiledDataManagerIteratorWriteScope>{};
 }
 
 KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(

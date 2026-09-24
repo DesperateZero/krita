@@ -201,30 +201,30 @@
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManagerPageStoreBackend::Private",
+      "current-owner": "KisTiledDataManagerPageStoreWriteBatch::Private shared iterator clients",
       "facts-owned": [
-        "iterator-write-boundary"
+        "iterator-write-scope"
       ],
       "failure-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testIteratorNestedWriteScope",
         "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility"
       ],
       "id": "BR1-PS-BACKEND-ITERATOR-007",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "R4/M8 iterator operation scopes migrated",
-      "replacement-type": "operation-scoped write batch",
-      "runtime-counter": "static-only: balanced registry callers plus iterator fixed-view/live-write behavior tests",
+      "remove-after": "R4/M8 iterator adapter migrated",
+      "replacement-type": "canonical shared mutation client scope",
+      "runtime-counter": "existing:KisPageMutationStatistics sessionsCreated/pagesSealed plus nested iterator scope tests",
       "static-callers": [
-        "KisTiledDataManager::registerPageStoreWriteBoundary",
+        "KisTiledDataManager::beginIteratorWriteScope",
         "KisBaseIterator"
       ],
-      "status": "inventoried",
+      "status": "callers-migrated",
       "symbols": [
-        "iteratorWriteBoundaries",
-        "registerIteratorWriteBoundary",
-        "unregisterIteratorWriteBoundary"
+        "iteratorScope",
+        "clients",
+        "beginIteratorMutationScope"
       ],
-      "target-owner": "KisPageWriteCoordinator operation scope"
+      "target-owner": "KisPageMutationSession adapter handle"
     },
     {
       "category": "canonical",
@@ -485,26 +485,26 @@
       "current-owner": "KisBaseIterator",
       "facts-owned": [
         "read-pin",
-        "iterator-write-boundary"
+        "iterator-write-scope"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreIteratorFixedView",
-        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility"
+        "KisTiledDataManagerTest::testIteratorNestedWriteScope"
       ],
       "id": "BR1-PS-ITERATOR-BASE-012",
       "path": "libs/image/tiles3/kis_base_iterator.h",
       "remove-after": "R4/M8 iterator adapter migrated",
-      "replacement-type": "canonical operation cursor and write batch",
-      "runtime-counter": "existing:KisPageStoreReadScopeStatistics plus source-bound iterator boundary callers",
+      "replacement-type": "canonical read cursor and shared mutation client scope",
+      "runtime-counter": "existing:KisPageStoreReadScopeStatistics and KisPageMutationStatistics",
       "static-callers": [
         "KisHLineIterator",
         "KisVLineIterator"
       ],
-      "status": "inventoried",
+      "status": "callers-migrated",
       "symbols": [
         "m_readScope",
         "m_readCursor",
-        "registerPageStoreWriteBoundary"
+        "m_writeScope"
       ],
       "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator"
     },

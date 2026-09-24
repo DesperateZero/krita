@@ -693,14 +693,6 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityBehavior()
 
     QVERIFY(!backend->acquireTile(0, 0, true, true));
 
-    int boundaryKey = 0;
-    const Qt::HANDLE thread = backend->registerIteratorWriteBoundary(
-        &boundaryKey);
-    QVERIFY(thread);
-    QVERIFY(backend->hasCurrentThreadIteratorWrites());
-    backend->unregisterIteratorWriteBoundary(thread, &boundaryKey);
-    QVERIFY(!backend->hasCurrentThreadIteratorWrites());
-
 }
 
 void KisTiledDataManagerTest::testPageStorePackedReadCapturesOneView_data()
@@ -929,18 +921,15 @@ void KisTiledDataManagerTest::testPageStoreIteratorOtherThreadReadsSealedView()
         QCOMPARE(writer.rawData()[0], quint8(0x47));
     }
     quint8 seen = 0; dm.readBytes(&seen, 0, 0, 1, 1); QCOMPARE(seen, quint8(0x47));
-    // The token names the originating thread even when final destruction and
-    // unregister happen elsewhere.
     auto *backend = dm.m_pageStoreBackend;
-    int boundaryKey = 0;
-    const auto token = backend->registerIteratorWriteBoundary(&boundaryKey);
-    QSemaphore unregisterStarted;
-    std::thread finalRelease([&] {
-        unregisterStarted.acquire();
-        backend->unregisterIteratorWriteBoundary(token, &boundaryKey);
-    });
+    auto finalWriter = std::make_unique<KisRandomAccessor2>(
+        &dm, 0, 0, true, nullptr);
+    finalWriter->moveTo(0, 0);
+    QVERIFY(finalWriter->rawData());
     QVERIFY(backend->hasCurrentThreadIteratorWrites());
-    unregisterStarted.release();
+    std::thread finalRelease([writer = std::move(finalWriter)]() mutable {
+        writer.reset();
+    });
     finalRelease.join();
     QVERIFY(!backend->hasCurrentThreadIteratorWrites());
 }
@@ -2637,7 +2626,7 @@ void KisTiledDataManagerTest::testPageStoreBulkNoOpAndBitBltBatching()
              afterBitBlt.committedTransactions);
 }
 
-void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache_data()
+void KisTiledDataManagerTest::testIteratorWriteScope_data()
 {
     QTest::addColumn<int>("entry");
     QTest::addColumn<int>("failurePoint");
@@ -2653,7 +2642,7 @@ void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache_data()
     }
 }
 
-void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache()
+void KisTiledDataManagerTest::testIteratorWriteScope()
 {
     QFETCH(int, entry);
     QFETCH(int, failurePoint);
@@ -2687,20 +2676,97 @@ void KisTiledDataManagerTest::testIteratorWriteBoundaryFollowsCache()
         QVERIFY(backend->hasCurrentThreadIteratorWrites());
         writer.nextRow();
         QVERIFY(!writer.rawData());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
     } else if (entry == 1) {
         KisVLineIterator2 writer(&dm, 63, 0, 1, 0, 0, true, nullptr);
         QVERIFY(writer.rawData());
         QVERIFY(backend->hasCurrentThreadIteratorWrites());
         writer.nextColumn();
         QVERIFY(!writer.rawData());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
     } else {
         KisRandomAccessor2 writer(&dm, 0, 0, true, nullptr);
-        QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
         writer.moveTo(0, 0);
         QVERIFY(!writer.rawData());
+        QVERIFY(backend->hasCurrentThreadIteratorWrites());
     }
     QVERIFY(!backend->hasCurrentThreadIteratorWrites());
     QVERIFY(!secondData->isResident());
+}
+
+void KisTiledDataManagerTest::testIteratorNestedWriteScope_data()
+{
+    QTest::addColumn<bool>("history");
+    QTest::addColumn<bool>("horizontalFirst");
+    for (bool history : {false, true}) {
+        for (bool horizontalFirst : {false, true}) {
+            QTest::newRow(qPrintable(QStringLiteral("history%1-horizontal-first%2")
+                              .arg(history).arg(horizontalFirst)))
+                << history << horizontalFirst;
+        }
+    }
+}
+
+void KisTiledDataManagerTest::testIteratorNestedWriteScope()
+{
+    QFETCH(bool, history);
+    QFETCH(bool, horizontalFirst);
+    const quint8 blank = 0;
+    KisDataManager dm(1, &blank);
+    auto *backend = dm.m_pageStoreBackend;
+    auto *store = backend->store();
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    const auto before = store->sessionStats();
+    const auto mutations = store->mutationStatistics();
+
+    auto horizontal = std::make_unique<KisHLineIterator2>(
+        &dm, 0, 0, 1, 0, 0, true, nullptr);
+    auto random = std::make_unique<KisRandomAccessor2>(
+        &dm, 0, 0, true, nullptr);
+    random->moveTo(64, 0);
+    QVERIFY(horizontal->rawData());
+    QVERIFY(random->rawData());
+    horizontal->rawData()[0] = 0x51;
+    random->rawData()[0] = 0x62;
+    QVERIFY(backend->hasCurrentThreadIteratorWrites());
+    QCOMPARE(store->mutationStatistics().sessionsCreated - mutations.sessionsCreated,
+             quint64(1));
+
+    if (horizontalFirst) horizontal.reset();
+    else random.reset();
+    QVERIFY(backend->hasCurrentThreadIteratorWrites());
+    QCOMPARE(store->mutationStatistics().pagesSealed, mutations.pagesSealed);
+    QCOMPARE(store->sessionStats().committedTransactions,
+             before.committedTransactions);
+    if (horizontalFirst) QCOMPARE(random->rawData()[0], quint8(0x62));
+    else QCOMPARE(horizontal->rawData()[0], quint8(0x51));
+
+    horizontal.reset();
+    random.reset();
+    QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+    QCOMPARE(store->mutationStatistics().generationsReserved -
+                 mutations.generationsReserved,
+             quint64(2));
+    QCOMPARE(store->mutationStatistics().pagesSealed - mutations.pagesSealed,
+             quint64(2));
+    QCOMPARE(store->sessionStats().committedTransactions -
+                 before.committedTransactions,
+             quint64(history ? 0 : 1));
+
+    quint8 actual[2] = {};
+    dm.readBytes(actual, 0, 0, 1, 1);
+    dm.readBytes(actual + 1, 64, 0, 1, 1);
+    QCOMPARE(actual[0], quint8(0x51));
+    QCOMPARE(actual[1], quint8(0x62));
+    if (history) {
+        dm.commit();
+        dm.rollback(memento);
+        dm.readBytes(actual, 0, 0, 1, 1);
+        dm.readBytes(actual + 1, 64, 0, 1, 1);
+        QCOMPARE(actual[0], blank);
+        QCOMPARE(actual[1], blank);
+    }
 }
 
 void KisTiledDataManagerTest::testIteratorSwapInFailureDropsPointers_data()

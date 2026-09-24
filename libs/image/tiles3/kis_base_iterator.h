@@ -26,6 +26,9 @@ protected:
         m_pixelSize = m_dataManager->pixelSize();
         m_writable = _writable;
         m_completeListener = listener;
+        if (m_writable) {
+            m_writeScope = m_dataManager->beginIteratorWriteScope();
+        }
         m_readScope = m_dataManager->capturePageStoreReadScope(_writable, std::move(scope));
         if (m_readScope && m_readScope->observesLiveLegacyWriter()) m_readScope.clear();
         if (m_readScope && !_writable) m_readCursor.emplace(m_readScope);
@@ -33,6 +36,10 @@ protected:
     ~KisBaseIterator() {
         m_readCursor.reset();
         m_readScope.clear();
+        if (m_writeScope) {
+            KIS_SAFE_ASSERT_RECOVER_NOOP(m_writeScope->finish());
+            m_writeScope.reset();
+        }
         if (m_writable && m_completeListener) {
             m_completeListener->notifyWritableIteratorCompleted();
         }
@@ -43,19 +50,6 @@ protected:
     bool m_writable;
     QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
     std::optional<KisPageStoreReadCursor> m_readCursor;
-    void setWriteBoundaryActive(const void *key, bool active) {
-        if (!active) {
-            unregisterWriteBoundary();
-            return;
-        }
-        if (!m_writable || !m_readScope || m_boundaryThread) return;
-        m_boundaryKey = key;
-        m_boundaryThread = m_dataManager->registerPageStoreWriteBoundary(key);
-    }
-    void unregisterWriteBoundary() {
-        if (m_boundaryThread) m_dataManager->unregisterPageStoreWriteBoundary(m_boundaryThread, m_boundaryKey);
-        m_boundaryThread = nullptr;
-    }
     inline bool lockTile(KisTileSP &tile) {
         return m_writable ? tile->lockForWrite() : tile->lockForRead();
     }
@@ -167,8 +161,7 @@ protected:
     }
     
 private:
-    Qt::HANDLE m_boundaryThread = nullptr;
-    const void *m_boundaryKey = nullptr;
+    std::unique_ptr<KisTiledDataManagerIteratorWriteScope> m_writeScope;
     KisIteratorCompleteListener *m_completeListener;
 };
 

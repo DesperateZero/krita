@@ -42,7 +42,6 @@ void KisRandomAccessor2::releaseWriteCache()
     }
     m_tilesCacheSize = 0;
     m_data = nullptr; m_oldData = nullptr;
-    setWriteBoundaryActive(this, false);
     m_readScope.clear();
 }
 
@@ -141,8 +140,6 @@ KisRandomAccessor2::KisTileInfo* KisRandomAccessor2::fetchTileData(qint32 col, q
         delete kti;
         return nullptr;
     }
-    setWriteBoundaryActive(this, true);
-
     kti->area_x1 = col * KisTileData::HEIGHT;
     kti->area_y1 = row * KisTileData::WIDTH;
     kti->area_x2 = kti->area_x1 + KisTileData::HEIGHT - 1;

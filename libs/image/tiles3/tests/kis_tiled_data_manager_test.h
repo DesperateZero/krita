@@ -104,8 +104,10 @@ private Q_SLOTS:
     void testPageStorePackedWriteBodyAllowsReader();
     void testPageStoreWholeTileFillUsesSynchronousAdoption();
     void testPageStoreBulkNoOpAndBitBltBatching();
-    void testIteratorWriteBoundaryFollowsCache_data();
-    void testIteratorWriteBoundaryFollowsCache();
+    void testIteratorWriteScope_data();
+    void testIteratorWriteScope();
+    void testIteratorNestedWriteScope_data();
+    void testIteratorNestedWriteScope();
     void testIteratorSwapInFailureDropsPointers_data();
     void testIteratorSwapInFailureDropsPointers();
     void testPageStoreFixedPageWork_data();

@@ -14,6 +14,8 @@
 #include <QSharedPointer>
 #include <KisRegion.h>
 
+#include <memory>
+
 #include <kis_shared.h>
 #include <kis_shared_ptr.h>
 #include "config-hash-table-implementation.h"
@@ -43,6 +45,23 @@ class KisTiledDataManagerPageStoreBackend;
 class KisCapturedReadView;
 class KisPageStoreIteratorReadScope;
 struct KisLogicalPageId;
+
+/**
+ * Opaque lifetime token for a writable iterator's native mutation. Iterators
+ * use this tiles3 seam without depending on the storage backend type.
+ */
+class KRITAIMAGE_EXPORT KisTiledDataManagerIteratorWriteScope
+{
+public:
+    ~KisTiledDataManagerIteratorWriteScope();
+    bool finish();
+
+private:
+    friend class KisTiledDataManagerPageStoreBackend;
+    KisTiledDataManagerIteratorWriteScope();
+    class Private;
+    std::unique_ptr<Private> d;
+};
 
 /**
  * KisTiledDataManager implements the interface that KisDataManager defines
@@ -80,8 +99,8 @@ public:
     // immutable selection; a supplied selection must match owner and mode.
     QSharedPointer<const KisPageStoreIteratorReadScope> capturePageStoreReadScope(
         bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
-    Qt::HANDLE registerPageStoreWriteBoundary(const void *key);
-    void unregisterPageStoreWriteBoundary(Qt::HANDLE thread, const void *key);
+    std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
+        beginIteratorWriteScope();
     KisPageStoreWriteOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
         QString *error = nullptr);

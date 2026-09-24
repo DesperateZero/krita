@@ -116,16 +116,16 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "Iterator boundary registration, probing, and teardown share one backend registry mutex. Source-bound callers and fixed-view/live-write race tests cover the balanced lifetime without per-probe counter writes.",
+      "evidence": "Writable iterators on one thread share the backend native mutation client scope; the last client seals after tile guards end. Nested lifetime, failure, fixed-view, live-write, and cross-thread final-destruction tests cover the boundary.",
       "id": "iterator-compatibility-boundaries",
       "manifest-entries": [
         "BR1-PS-BACKEND-ITERATOR-007",
         "BR1-PS-ITERATOR-BASE-012",
         "BR1-PS-ACCESSOR-RANDOM-013"
       ],
-      "metrics-source": "source-bound reverse callgraph and iterator behavior tests",
+      "metrics-source": "KisPageMutationStatistics, source-bound reverse callgraph, and iterator behavior tests",
       "representative-tests": [
-        "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
+        "KisTiledDataManagerTest::testIteratorNestedWriteScope",
         "KisTiledDataManagerTest::testPageStoreIteratorFixedView"
       ],
       "status": "static-only"

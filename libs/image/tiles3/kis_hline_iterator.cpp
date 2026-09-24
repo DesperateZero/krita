@@ -53,7 +53,6 @@ KisHLineIterator2::KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint
         m_havePixels = false;
         return;
     }
-    setWriteBoundaryActive(this, true);
 }
 
 void KisHLineIterator2::resetPixelPos()
@@ -155,7 +154,6 @@ bool KisHLineIterator2::nextPixels(qint32 n)
 KisHLineIterator2::~KisHLineIterator2()
 {
     releaseTileCache(m_tilesCache, m_data, m_oldData);
-    setWriteBoundaryActive(this, false);
 }
 
 
@@ -216,7 +214,6 @@ bool KisHLineIterator2::preallocateTiles()
     const bool populated = populateTileCache(
         m_tilesCache, m_rightCol - m_leftCol + 1,
         m_leftCol, m_row, 1, 0);
-    setWriteBoundaryActive(this, populated);
     if (!populated)
         m_data = m_oldData = nullptr;
     return populated;
