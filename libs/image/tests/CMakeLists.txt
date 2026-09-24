@@ -13,6 +13,7 @@ endif()
 
 # Standalone PageStore reference helpers are not part of kritaimage.
 add_library(kritapagestoretestsupport STATIC
+    pagestore/KisCpuPageReplicaProvider.cpp
     pagestore/KisPageStoreCpuAccessSession.cpp
     pagestore/KisPageStoreRandomAccessor.cpp
     pagestore/KisPageStoreCpuSurfaceOps.cpp

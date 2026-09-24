@@ -20,7 +20,7 @@
  * shared completion registry, so an asynchronous tiles3 adapter can preserve
  * the same contract.
  */
-class KRITAIMAGE_EXPORT KisCpuPageReplicaProvider final
+class KisCpuPageReplicaProvider final
     : public KisPageReplicaProvider
 {
 public:

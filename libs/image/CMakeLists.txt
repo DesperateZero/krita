@@ -32,7 +32,6 @@ set(kritaimage_LIB_SRCS
    gpustroke/KisStrokeCoordinator.cpp
    pagestore/KisBackendServiceRegistry.cpp
    pagestore/KisCompletionRegistry.cpp
-   pagestore/KisCpuPageReplicaProvider.cpp
    pagestore/KisTiles3PageReplicaProvider.cpp
    pagestore/KisDocumentGpuSession.cpp
    pagestore/KisDerivedSurfaceCache.cpp

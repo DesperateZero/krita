@@ -11,7 +11,6 @@
 #include "KisPageWriteCoordinator_p.h"
 
 #include <QAtomicInteger>
-#include <QElapsedTimer>
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
@@ -1717,8 +1716,6 @@ public:
     std::vector<std::shared_ptr<MetadataShard>> shards;
     QAtomicInteger<quint64> acceptedTransitions{0};
     QAtomicInteger<quint64> rejectedTransitions{0};
-    QAtomicInteger<quint64> transitionDecisionNanoseconds{0};
-    std::atomic<quint64> maximumTransitionDecisionNanoseconds{0};
     QAtomicInteger<quint64> preparedPublicationPages{0};
     QAtomicInteger<quint64> installedPublicationPages{0};
     QAtomicInteger<quint64> rejectedPublicationInstalls{0};
@@ -2852,31 +2849,17 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             shard->backgroundLocalVersionInputs += quint64(input.versions.size());
         }
         auto next = input;
-        {
-            QElapsedTimer timer;
-            timer.start();
-            const auto recordTime = qScopeGuard([&] {
-                const auto elapsed = quint64(qMax<qint64>(0, timer.nsecsElapsed()));
-                d->transitionDecisionNanoseconds.fetchAndAddRelaxed(elapsed);
-                quint64 maximum = d->maximumTransitionDecisionNanoseconds.load(std::memory_order_relaxed);
-                while (maximum < elapsed
-                       && !d->maximumTransitionDecisionNanoseconds.compare_exchange_weak(maximum,
-                                                                                         elapsed,
-                                                                                         std::memory_order_relaxed,
-                                                                                         std::memory_order_relaxed)) { }
-            });
-            const KisPageStateMachine machine;
-            for (const auto &transition : transitions) {
-                auto step = machine.applyKnownValid(next, transition);
-                if (!step.accepted) {
-                    d->rejectedTransitions.fetchAndAddRelaxed(1);
-                    result.rejectionReason = step.rejectionReason;
-                    result.effects.clear();
-                    return result; // no authoritative record has changed
-                }
-                next = std::move(step.next);
-                result.effects += step.effects;
+        const KisPageStateMachine machine;
+        for (const auto &transition : transitions) {
+            auto step = machine.applyKnownValid(next, transition);
+            if (!step.accepted) {
+                d->rejectedTransitions.fetchAndAddRelaxed(1);
+                result.rejectionReason = step.rejectionReason;
+                result.effects.clear();
+                return result; // no authoritative record has changed
             }
+            next = std::move(step.next);
+            result.effects += step.effects;
         }
         // Only projected records are installed/removed. Unrelated history and its
         // reader/pin/last-use state are neither copied nor overwritten.
@@ -3068,9 +3051,6 @@ KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
     KisPageMetadataMetrics metrics;
     metrics.acceptedTransitions = d->acceptedTransitions.loadRelaxed();
     metrics.rejectedTransitions = d->rejectedTransitions.loadRelaxed();
-    metrics.transitionDecisionNanoseconds = d->transitionDecisionNanoseconds.loadRelaxed();
-    metrics.maximumTransitionDecisionNanoseconds =
-        d->maximumTransitionDecisionNanoseconds.load(std::memory_order_relaxed);
     metrics.preparedPublicationPages = d->preparedPublicationPages.loadRelaxed();
     metrics.installedPublicationPages = d->installedPublicationPages.loadRelaxed();
     metrics.rejectedPublicationInstalls = d->rejectedPublicationInstalls.loadRelaxed();

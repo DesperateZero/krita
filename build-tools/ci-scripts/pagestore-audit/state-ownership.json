@@ -75,7 +75,7 @@
     {
       "creation-paths": [
         "KisTiles3PageReplicaProvider::prepareWrite",
-        "KisCpuPageReplicaProvider::prepareWrite"
+        "test-only KisCpuPageReplicaProvider::prepareWrite"
       ],
       "current-writers": [
         "replica provider allocation records",

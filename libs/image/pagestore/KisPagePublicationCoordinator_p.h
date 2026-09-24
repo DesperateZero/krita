@@ -108,6 +108,7 @@ public:
     bool resolveSurfaceLocked(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
+    bool importDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
                                     const KisSurfaceEpochState &after,
@@ -151,8 +152,6 @@ public:
 
 
     void setRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key, bool removed);
-
-    quint64 &defaultRevisionHighWaterLocked(KisSurfaceId surface);
 
     void putDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
@@ -225,6 +224,8 @@ private:
     quint64 m_committedTransactions = 0;
 
     bool hasActiveTransactionLocked(const KisPageTransaction &transaction) const;
+    quint64 currentDefaultRevisionLocked(KisSurfaceId surface) const;
+    bool reserveDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
     void retireEffectsUnlocked(QVector<KisPageTransitionEffect> effects,
                                QMutexLocker<QMutex> &ownerLock);
 };

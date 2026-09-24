@@ -2504,7 +2504,11 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     d->completions = completions;
     d->readyHostCompletion = ready;
     for (const auto &surface : initialEpoch.surfaces) {
-        d->publicationCoordinator.defaultRevisionHighWaterLocked(surface.surface) = surface.defaultPixelRevision;
+        if (!d->publicationCoordinator.importDefaultRevisionLocked(
+                surface.surface, surface.defaultPixelRevision, &failure)) {
+            KisPageStoreDetail::setError(error, failure);
+            return false;
+        }
     }
     KisPageStoreDetail::setError(error, {});
     return true;

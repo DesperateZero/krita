@@ -499,7 +499,7 @@ bool KisPagePublicationCoordinator::stageSurfaceDefaultPixelLocked(const KisPage
         return false;
     }
     if (after.format.defaultPixel != pixel) {
-        const auto highWater = defaultRevisionHighWaterLocked(surface);
+        const auto highWater = currentDefaultRevisionLocked(surface);
         if (highWater == std::numeric_limits<quint64>::max()) {
             KisPageStoreDetail::setError(error, QStringLiteral("default pixel revision exhausted"));
             return false;
@@ -567,12 +567,8 @@ bool KisPagePublicationCoordinator::stageSurfaceMetadataLocked(const KisPageTran
     }
     const auto &previous = existing ? existing->after : before;
     if (previous.defaultPixelRevision != after.defaultPixelRevision) {
-        auto &highWater = defaultRevisionHighWaterLocked(after.surface);
-        if (after.defaultPixelRevision <= highWater) {
-            KisPageStoreDetail::setError(error, QStringLiteral("default pixel revision must be fresh across abort and restore"));
+        if (!reserveDefaultRevisionLocked(after.surface, after.defaultPixelRevision, error))
             return false;
-        }
-        highWater = after.defaultPixelRevision;
     }
     if (existing)
         existing->after = after;
@@ -1363,9 +1359,38 @@ void KisPagePublicationCoordinator::setRemovalLocked(
     }
 }
 
-quint64 &KisPagePublicationCoordinator::defaultRevisionHighWaterLocked(KisSurfaceId surface)
+bool KisPagePublicationCoordinator::importDefaultRevisionLocked(
+    KisSurfaceId surface, quint64 revision, QString *error)
 {
-    return m_defaultRevisionHighWater[surface.value];
+    if (!surface.isValid() || revision == 0
+        || m_defaultRevisionHighWater.contains(surface.value)) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("default pixel revision import is invalid or duplicated"));
+        return false;
+    }
+    m_defaultRevisionHighWater.insert(surface.value, revision);
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
+quint64 KisPagePublicationCoordinator::currentDefaultRevisionLocked(KisSurfaceId surface) const
+{
+    return m_defaultRevisionHighWater.value(surface.value);
+}
+
+bool KisPagePublicationCoordinator::reserveDefaultRevisionLocked(
+    KisSurfaceId surface, quint64 revision, QString *error)
+{
+    auto highWater = m_defaultRevisionHighWater.find(surface.value);
+    if (!surface.isValid() || highWater == m_defaultRevisionHighWater.end()
+        || revision <= highWater.value()) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("default pixel revision must be fresh across abort and restore"));
+        return false;
+    }
+    highWater.value() = revision;
+    KisPageStoreDetail::setError(error, {});
+    return true;
 }
 
 void KisPagePublicationCoordinator::putDescriptorLocked(const KisPageVersion &version,

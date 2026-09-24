@@ -69,7 +69,7 @@ struct KisCpuBindingLease
     KisPageAccessMode mode;
 };
 
-struct KisCpuResidentProviderState
+struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
 {
     static constexpr quint64 OperationReplayWindow = 4096;
 
@@ -118,12 +118,12 @@ struct KisCpuResidentProviderState
     quint64 consumedOperationHighWater = 0;
 };
 
-KisReplicaAccess kisAcquireCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
+KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
     const QSharedPointer<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
     const KisReplicaHandle &replica, KisPageAccessRequirement requirement, KisPageAccessMode mode);
-void kisReleaseCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
+KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
     const QSharedPointer<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
-KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
+KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
     const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
     const QSharedPointer<KisCpuResidentBinding> &source,
     const QSharedPointer<KisCpuResidentBinding> &target, const QString &providerLabel);

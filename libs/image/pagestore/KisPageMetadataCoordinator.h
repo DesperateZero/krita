@@ -73,10 +73,8 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
 struct KRITAIMAGE_EXPORT KisPageMetadataMetrics : KisPageMetadataShardMetrics {
     quint64 acceptedTransitions = 0;
     quint64 rejectedTransitions = 0;
-    quint64 transitionDecisionNanoseconds = 0;
-    quint64 maximumTransitionDecisionNanoseconds = 0;
     // Prepared publications are measured separately from local owner
-    // transitions. Do not divide their install count into that decision timer.
+    // transitions.
     quint64 preparedPublicationPages = 0;
     quint64 installedPublicationPages = 0;
     quint64 rejectedPublicationInstalls = 0;
