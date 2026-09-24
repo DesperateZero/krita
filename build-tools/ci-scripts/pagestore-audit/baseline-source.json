@@ -3803,6 +3803,7 @@
         "kis_wrapped_hline_iterator.h",
         "kis_wrapped_vline_iterator.h",
         "pagestore/KisPageStoreDiagnostics_p.h",
+        "pagestore/KisPageWriteCoordinator_p.h",
         "pagestore/KisTiledDataManagerPageStoreBackend.h",
         "pagestore/KisTiles3PageReplicaProvider.h",
         "simpletest.h",
@@ -3814,7 +3815,7 @@
         "tiles3/kis_vline_iterator.h",
         "tiles_test_utils.h"
       ],
-      "lines": 3696,
+      "lines": 3728,
       "member_fields": [
         "m_accessRect",
         "m_index",
@@ -3843,7 +3844,7 @@
         "LazyCopyingStressJob",
         "TestableTiledDataManager"
       ],
-      "sha256": "585332896393a0e80d159c417997143f4f30ec1c9cf0366b89705a6e810ebdc8",
+      "sha256": "546a5b528ac4796a792ced4fd855c6bb71d8a5bda364f3bd1b1fc85744f515a9",
       "synchronization_declarations": 9
     },
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": {
@@ -4437,5 +4438,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "37939881ba417cde01fc430ee0c1c223263d3a8c"
+  "working_tree_head": "db42387d2db76432ab0cfc471bd7eb447f795eb0"
 }

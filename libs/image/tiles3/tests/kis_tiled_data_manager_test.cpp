@@ -25,6 +25,7 @@
 #include "pagestore/KisTiles3PageReplicaProvider.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "pagestore/KisPageStoreDiagnostics_p.h"
+#include "pagestore/KisPageWriteCoordinator_p.h"
 
 #include "tiles_test_utils.h"
 #include "config-limit-long-tests.h"
@@ -3370,10 +3371,41 @@ void KisTiledDataManagerTest::stressTest()
         accessRect.translate(512, 0);
     }
     pool.waitForDone();
+
+    KisPageStore *store = dm.m_pageStoreBackend->store();
+    QVERIFY(store->waitForRetirementIdle());
+    const KisPageStoreSessionStats settled = store->sessionStats();
+    QVERIFY(!settled.hasOutstandingCapabilities());
+    QCOMPARE(settled.pendingHistoricalPages, qsizetype(0));
+    QCOMPARE(settled.deferredHistoricalPages, qsizetype(0));
+    QCOMPARE(settled.activeHistoryScans, qsizetype(0));
+    QCOMPARE(settled.scheduledReclamationJobs, qsizetype(0));
+
+    const KisPageBackingUsage usage = store->backingUsage();
+    for (const KisPageBackingUsageBucket &bucket : usage.buckets) {
+        QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+        QCOMPARE(bucket.reserved.umaShared, quint64(0));
+        QCOMPARE(bucket.reserved.discreteVram, quint64(0));
+        QCOMPARE(bucket.reserved.ssd, quint64(0));
+    }
+    const auto transientLive = [&usage](KisBackingBudgetClass kind) {
+        return usage.buckets[size_t(kind)].live;
+    };
+    for (const KisBackingBudgetClass kind : {
+             KisBackingBudgetClass::ActivePending,
+             KisBackingBudgetClass::InFlight,
+             KisBackingBudgetClass::RetirementDebt}) {
+        const KisPageDomainBytes live = transientLive(kind);
+        QCOMPARE(live.cpuRam, quint64(0));
+        QCOMPARE(live.umaShared, quint64(0));
+        QCOMPARE(live.discreteVram, quint64(0));
+        QCOMPARE(live.ssd, quint64(0));
+    }
+
     if (qEnvironmentVariableIntValue("KIS_BR1_PROFILE") && dm.m_pageStoreBackend) {
         // Counters are captured once after workers finish, outside timed
         // operation bodies. There is no diagnostic lock in the pixel path.
-        const KisPageStoreSessionStats stats = dm.m_pageStoreBackend->store()->sessionStats();
+        const KisPageStoreSessionStats stats = store->sessionStats();
         qInfo().noquote() << "BR1_COUNTERS" << QJsonDocument(QJsonObject{
             {"threads", pool.maxThreadCount()},
             {"read_requests", double(stats.readRequestsCreated)},
