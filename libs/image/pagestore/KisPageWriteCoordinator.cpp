@@ -965,6 +965,11 @@ KisPageWritePlanKind KisPageWriteCoordinator::select(
     const KisPageWriteIntent &intent,
     const KisMutationPageEntry *pending) const
 {
+    if (intent.inputKind == KisPageWriteInputKind::MutableGuard
+        && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
+        && intent.mode == KisPageWriteMode::PreserveContents) {
+        return KisPageWritePlanKind::FreshCow;
+    }
     if (intent.inputKind == KisPageWriteInputKind::MutableGuard) {
         if (intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
             return KisPageWritePlanKind::FreshPayload;

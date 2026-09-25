@@ -1768,7 +1768,7 @@
         "algorithm",
         "utility"
       ],
-      "lines": 1181,
+      "lines": 1186,
       "member_fields": [
         "m_usage"
       ],
@@ -1776,7 +1776,7 @@
         "KisPageStoreDetail"
       ],
       "public_types": [],
-      "sha256": "91e757870dead4bfcecb91a0d4460ac48f7a5c95ded4231a28f5f6a275a976a4",
+      "sha256": "607d0d486292c6e849dfa0a89609a3418d632833bf912496a96d53f8f8353c50",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -4474,5 +4474,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "a0400cf0f7484004dd520e5c03dbc71cbe6827b4"
+  "working_tree_head": "6ac53223efcb152253786b69ac4a92224151a12a"
 }

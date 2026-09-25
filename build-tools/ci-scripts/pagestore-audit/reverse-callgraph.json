@@ -11080,7 +11080,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 990,
+          "line": 995,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11089,7 +11089,7 @@
           "column": 99,
           "dynamic": false,
           "implicit": false,
-          "line": 994,
+          "line": 999,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11098,7 +11098,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1039,
+          "line": 1044,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11107,7 +11107,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1049,
+          "line": 1054,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11116,7 +11116,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1062,
+          "line": 1067,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11125,7 +11125,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1068,
+          "line": 1073,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11134,7 +11134,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1076,
+          "line": 1081,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -11143,7 +11143,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 1080,
+          "line": 1085,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -35748,7 +35748,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1087,
+          "line": 1092,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -35757,7 +35757,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1088,
+          "line": 1093,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -35864,7 +35864,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 975,
+          "line": 980,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -35873,7 +35873,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 1112,
+          "line": 1117,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -53110,7 +53110,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1078,
+          "line": 1083,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -53300,7 +53300,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1042,
+          "line": 1047,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -53889,7 +53889,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 1036,
+          "line": 1041,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -59501,7 +59501,7 @@
           "column": 29,
           "dynamic": true,
           "implicit": false,
-          "line": 1004,
+          "line": 1009,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -59887,7 +59887,7 @@
           "column": 35,
           "dynamic": true,
           "implicit": false,
-          "line": 993,
+          "line": 998,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -59932,7 +59932,7 @@
           "column": 25,
           "dynamic": true,
           "implicit": false,
-          "line": 996,
+          "line": 1001,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -59968,7 +59968,7 @@
           "column": 29,
           "dynamic": true,
           "implicit": false,
-          "line": 1007,
+          "line": 1012,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -60008,7 +60008,7 @@
           "column": 21,
           "dynamic": true,
           "implicit": false,
-          "line": 1011,
+          "line": 1016,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -60129,7 +60129,7 @@
           "column": 59,
           "dynamic": true,
           "implicit": false,
-          "line": 1003,
+          "line": 1008,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -60241,7 +60241,7 @@
           "column": 54,
           "dynamic": true,
           "implicit": false,
-          "line": 1002,
+          "line": 1007,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -60810,7 +60810,7 @@
           "column": 36,
           "dynamic": true,
           "implicit": false,
-          "line": 1054,
+          "line": 1059,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -61206,7 +61206,7 @@
           "column": 26,
           "dynamic": true,
           "implicit": false,
-          "line": 1058,
+          "line": 1063,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -61236,7 +61236,7 @@
           "column": 29,
           "dynamic": true,
           "implicit": false,
-          "line": 1018,
+          "line": 1023,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -61266,7 +61266,7 @@
           "column": 30,
           "dynamic": true,
           "implicit": false,
-          "line": 1070,
+          "line": 1075,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -87026,15 +87026,6 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1033,
-          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
-          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
-          "column": 29,
-          "dynamic": false,
-          "implicit": false,
           "line": 1038,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
@@ -87044,25 +87035,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1048,
-          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
-          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
-          "column": 37,
-          "dynamic": false,
-          "implicit": false,
-          "line": 1061,
-          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
-          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
-          "column": 33,
-          "dynamic": false,
-          "implicit": false,
-          "line": 1067,
+          "line": 1043,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -87071,7 +87044,34 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1074,
+          "line": 1053,
+          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
+          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
+          "column": 37,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1066,
+          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
+          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
+          "column": 33,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1072,
+          "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageWriteCoordinator::initializeFreshReplica",
+          "caller-usr": "c:@S@KisPageWriteCoordinator@F@initializeFreshReplica#&1$@S@KisPageWriteIntent#b#&1$@S@KisReplicaHandle#S2_#&1$@S@KisPageAllocationDescriptor#&1$@S@QSharedPointer>#$@S@KisPageReplicaProvider#$@E@KisPagePriority#&1$@S@KisCompletionTicket#*$@S@QString#1",
+          "column": 29,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1079,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -95078,7 +95078,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1124,
+          "line": 1129,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -95087,7 +95087,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1135,
+          "line": 1140,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -95096,7 +95096,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1146,
+          "line": 1151,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -95568,7 +95568,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 1088,
+          "line": 1093,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -96283,7 +96283,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 975,
+          "line": 980,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -98509,7 +98509,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1179,
+          "line": 1184,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98531,7 +98531,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1144,
+          "line": 1149,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98577,7 +98577,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1133,
+          "line": 1138,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98641,7 +98641,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1122,
+          "line": 1127,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98732,7 +98732,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1172,
+          "line": 1177,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98746,7 +98746,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 1130,
+          "line": 1135,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -98755,7 +98755,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 1141,
+          "line": 1146,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -98764,7 +98764,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 1152,
+          "line": 1157,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98786,7 +98786,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1150,
+          "line": 1155,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98832,7 +98832,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1139,
+          "line": 1144,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98896,7 +98896,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1128,
+          "line": 1133,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98942,7 +98942,7 @@
       "definitions": [
         {
           "column": 46,
-          "line": 1024,
+          "line": 1029,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -98978,7 +98978,7 @@
       "definitions": [
         {
           "column": 46,
-          "line": 980,
+          "line": 985,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99167,7 +99167,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1099,
+          "line": 1104,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99231,7 +99231,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1083,
+          "line": 1088,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99286,7 +99286,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1015,
+          "line": 1020,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99463,7 +99463,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 991,
+          "line": 996,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -99472,7 +99472,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 1032,
+          "line": 1037,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99540,7 +99540,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1155,
+          "line": 1160,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99595,7 +99595,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1166,
+          "line": 1171,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99650,7 +99650,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 1160,
+          "line": 1165,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -99696,7 +99696,7 @@
       "definitions": [
         {
           "column": 44,
-          "line": 1105,
+          "line": 1110,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -105811,7 +105811,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1073,
+          "line": 1078,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -106748,7 +106748,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 1053,
+          "line": 1058,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -106824,7 +106824,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1047,
+          "line": 1052,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -121060,7 +121060,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 1080,
+          "line": 1085,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -142008,7 +142008,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 1003,
+          "line": 1008,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -142732,7 +142732,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 1002,
+          "line": 1007,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -146789,7 +146789,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1087,
+          "line": 1092,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -146798,7 +146798,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 1088,
+          "line": 1093,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         },
         {
@@ -151871,7 +151871,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 1073,
+          "line": 1078,
           "path": "libs/image/pagestore/KisPageWriteCoordinator.cpp"
         }
       ],
@@ -176670,7 +176670,7 @@
     "libs/image/pagestore/KisPageStoreReclamation_p.h": "ee00de7daada8e0d2ccfdee715fc6b945aa2a7a859be2308c65bab889fbb8bd9",
     "libs/image/pagestore/KisPageStoreTypes.h": "9465266a4eee2a5170d98ac689eeee3392aad47e707c0f932c8367e7e111895f",
     "libs/image/pagestore/KisPageStoreWriteOperation_p.h": "5370759e9e895da6147509a41ec1bd808df778e5e7a72929698f8261138d5364",
-    "libs/image/pagestore/KisPageWriteCoordinator.cpp": "91e757870dead4bfcecb91a0d4460ac48f7a5c95ded4231a28f5f6a275a976a4",
+    "libs/image/pagestore/KisPageWriteCoordinator.cpp": "607d0d486292c6e849dfa0a89609a3418d632833bf912496a96d53f8f8353c50",
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": "663713ceccdb24e8707af91a1647683c9c4085436e7eeacbfcf251a0b7938b2a",
     "libs/image/pagestore/KisPaintExecutionContext.h": "4c9ce6ca338ba19e2152ea68453e942f9734396fd3b2266cf231690923577071",
     "libs/image/pagestore/KisResidencyController.cpp": "732d7eb9d2069b654ab5428d4eb8904631b9935eb3821d17b1167c541688ff11",
