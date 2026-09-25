@@ -6,6 +6,7 @@
 
 #include "kis_tile_data_store_test.h"
 #include <simpletest.h>
+#include <QScopeGuard>
 
 #include "kis_debug.h"
 
@@ -141,10 +142,18 @@ void KisTileDataStoreTest::testLeaks()
 void KisTileDataStoreTest::testSwapping()
 {
     KisImageConfig config(false);
+    const qreal oldHard = config.memoryHardLimitPercent();
+    const qreal oldSoft = config.memorySoftLimitPercent();
+    const auto restore = qScopeGuard([&] {
+        config.setMemoryHardLimitPercent(oldHard);
+        config.setMemorySoftLimitPercent(oldSoft);
+        KisTileDataStore::instance()->testingRereadConfig();
+    });
     config.setMemoryHardLimitPercent(100.0 / KisImageConfig::totalRAM());
     config.setMemorySoftLimitPercent(0);
 
     KisTileDataStore::instance()->debugClear();
+    KisTileDataStore::instance()->testingRereadConfig();
 
 
 
@@ -213,6 +222,50 @@ void KisTileDataStoreTest::testTileLockPropagatesSwapInFailure()
         QCOMPARE(tile.data()[0], initial);
         tile.unlockForRead();
     }
+}
+
+void KisTileDataStoreTest::testResidentHardAdmission()
+{
+    KisImageConfig config(false);
+    const qreal oldHard = config.memoryHardLimitPercent();
+    const qreal oldSoft = config.memorySoftLimitPercent();
+    const qreal oldPool = config.memoryPoolLimitPercent();
+    const auto restore = qScopeGuard([&] {
+        config.setMemoryHardLimitPercent(oldHard);
+        config.setMemorySoftLimitPercent(oldSoft);
+        config.setMemoryPoolLimitPercent(oldPool);
+        KisTileDataStore::instance()->testingRereadConfig();
+    });
+    config.setMemoryHardLimitPercent(1.1 * 100.0 / KisImageConfig::totalRAM());
+    config.setMemorySoftLimitPercent(0);
+    config.setMemoryPoolLimitPercent(0);
+
+    KisTileDataStore *store = KisTileDataStore::instance();
+    store->debugClear();
+    store->testingRereadConfig();
+    const quint64 hardBytes = quint64(KisImageConfig(true).tilesHardLimit()) << 20;
+    constexpr qint32 pixelSize = 4;
+    const quint64 tileBytes = quint64(pixelSize) * KisTileData::WIDTH * KisTileData::HEIGHT;
+    QVERIFY(hardBytes >= tileBytes);
+    const int maximumTiles = int(hardBytes / tileBytes);
+    quint8 pixel[pixelSize]{};
+    QVector<KisTileData *> pinned;
+    pinned.reserve(maximumTiles);
+    for (int i = 0; i < maximumTiles; ++i) {
+        KisTileData *tile = store->createDefaultTileData(pixelSize, pixel);
+        QVERIFY(tile);
+        QVERIFY(tile->ref());
+        QVERIFY(tile->blockSwapping());
+        pinned.append(tile);
+    }
+    QCOMPARE(quint64(store->memoryMetric()) * KisTileData::WIDTH * KisTileData::HEIGHT,
+             quint64(maximumTiles) * tileBytes);
+    QVERIFY(!store->createDefaultTileData(pixelSize, pixel));
+    for (KisTileData *tile : std::as_const(pinned)) {
+        tile->unblockSwapping();
+        tile->deref();
+    }
+    QCOMPARE(store->memoryMetric(), qint64(0));
 }
 
 SIMPLE_TEST_MAIN(KisTileDataStoreTest)

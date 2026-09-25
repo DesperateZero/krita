@@ -12,13 +12,24 @@
 #include <limits>
 #include <utility>
 
+#include <QScopeGuard>
+
 #include "kis_tile_data_store.h"
 #include "kis_tile_data.h"
 #include "kis_debug.h"
+#include "kis_image_config.h"
 
 #include "kis_tile_data_store_iterators.h"
 
 Q_GLOBAL_STATIC(KisTileDataStore, s_instance)
+
+namespace {
+quint64 configuredResidentHardLimitBytes()
+{
+    const int limitMiB = KisImageConfig(true).tilesHardLimit();
+    return limitMiB > 0 ? quint64(limitMiB) << 20 : 0;
+}
+}
 
 //#define DEBUG_PRECLONE
 
@@ -63,7 +74,8 @@ KisTileDataStore::KisTileDataStore()
       m_numTiles(0),
       m_memoryMetric(0),
       m_counter(1),
-      m_clockIndex(1)
+      m_clockIndex(1),
+      m_residentHardLimitBytes(configuredResidentHardLimitBytes())
 {
     m_pooler.start();
     m_swapper.start();
@@ -166,8 +178,61 @@ void KisTileDataStore::unregisterTileData(KisTileData *td)
     unregisterTileDataImp(td);
 }
 
+bool KisTileDataStore::reserveResidentMemory(qint32 pixelSize)
+{
+    if (pixelSize <= 0)
+        return false;
+    checkFreeMemory();
+    const quint64 pagePixels = quint64(KisTileData::WIDTH) * KisTileData::HEIGHT;
+    if (quint64(pixelSize) > std::numeric_limits<quint64>::max() / pagePixels)
+        return false;
+    const quint64 requestedBytes = quint64(pixelSize) * pagePixels;
+    for (;;) {
+        quint64 excessBytes = 0;
+        {
+            QMutexLocker locker(&m_residentMemoryAdmissionLock);
+            const qint64 metric = memoryMetric();
+            if (metric < 0 || quint64(metric) > std::numeric_limits<quint64>::max() / pagePixels)
+                return false;
+            const quint64 residentBytes = quint64(metric) * pagePixels;
+            if (requestedBytes <= m_residentHardLimitBytes
+                && residentBytes <= m_residentHardLimitBytes - requestedBytes
+                && m_reservedResidentBytes <= m_residentHardLimitBytes
+                    - requestedBytes - residentBytes) {
+                m_reservedResidentBytes += requestedBytes;
+                return true;
+            }
+            if (requestedBytes > m_residentHardLimitBytes
+                || m_reservedResidentBytes > m_residentHardLimitBytes - requestedBytes) {
+                return false;
+            }
+            excessBytes = residentBytes + m_reservedResidentBytes
+                + requestedBytes - m_residentHardLimitBytes;
+        }
+        const qint64 needMetric = qint64((excessBytes + pagePixels - 1) / pagePixels);
+        if (m_swapper.tryFreeMemory(needMetric) <= 0)
+            return false;
+    }
+}
+
+void KisTileDataStore::releaseResidentMemoryReservation(qint32 pixelSize) noexcept
+{
+    if (pixelSize <= 0)
+        return;
+    const quint64 bytes = quint64(pixelSize) * KisTileData::WIDTH * KisTileData::HEIGHT;
+    QMutexLocker locker(&m_residentMemoryAdmissionLock);
+    Q_ASSERT(m_reservedResidentBytes >= bytes);
+    m_reservedResidentBytes = bytes > m_reservedResidentBytes
+        ? 0 : m_reservedResidentBytes - bytes;
+}
+
 KisTileData *KisTileDataStore::allocTileData(qint32 pixelSize, const quint8 *defPixel)
 {
+    if (!reserveResidentMemory(pixelSize))
+        return nullptr;
+    const auto releaseReservation = qScopeGuard([&] {
+        releaseResidentMemoryReservation(pixelSize);
+    });
     KisTileData *td = new KisTileData(pixelSize, defPixel, this);
     registerTileData(td);
     return td;
@@ -184,6 +249,11 @@ KisTileData *KisTileDataStore::createTileDataFromRows(
         sourceBytes < (KisTileData::HEIGHT - 1) * sourceStride + rowBytes) return nullptr;
     const qsizetype required = (KisTileData::HEIGHT - 1) * sourceStride + rowBytes;
     if (quintptr(source) > std::numeric_limits<quintptr>::max() - quintptr(required - 1)) return nullptr;
+    if (!reserveResidentMemory(pixelSize))
+        return nullptr;
+    const auto releaseReservation = qScopeGuard([&] {
+        releaseResidentMemoryReservation(pixelSize);
+    });
     KisTileData *td = new KisTileData(pixelSize, source, sourceStride, this);
     registerTileData(td);
     return td;
@@ -197,6 +267,12 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs)
 KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *precloneHit)
 {
     KisTileData *td = 0;
+
+    if (!rhs || !reserveResidentMemory(qint32(rhs->pixelSize())))
+        return nullptr;
+    const auto releaseReservation = qScopeGuard([&] {
+        releaseResidentMemoryReservation(qint32(rhs->pixelSize()));
+    });
 
     if (rhs->m_clonesStack.pop(td)) {
         if (precloneHit) *precloneHit = true;
@@ -219,6 +295,11 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *preclon
 KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit)
 {
     Q_ASSERT(rhs && rhs->data());
+    if (!rhs || !reserveResidentMemory(qint32(rhs->pixelSize())))
+        return nullptr;
+    const auto releaseReservation = qScopeGuard([&] {
+        releaseResidentMemoryReservation(qint32(rhs->pixelSize()));
+    });
     KisTileData *td = nullptr;
     if (rhs->m_clonesStack.pop(td)) {
         if (precloneHit) *precloneHit = true;
@@ -407,6 +488,13 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
         PreparedResidencyChange prepared = prepareResidencyChange(td, true);
         if (!prepared.valid)
             return false;
+        if (!reserveResidentMemory(qint32(td->pixelSize()))) {
+            prepared.transitions.clear();
+            return false;
+        }
+        const auto releaseReservation = qScopeGuard([&] {
+            releaseResidentMemoryReservation(qint32(td->pixelSize()));
+        });
 
         /**
          * The order of this heavy locking is very important.
@@ -593,6 +681,10 @@ void KisTileDataStore::debugClear()
 
 void KisTileDataStore::testingRereadConfig()
 {
+    {
+        QMutexLocker locker(&m_residentMemoryAdmissionLock);
+        m_residentHardLimitBytes = configuredResidentHardLimitBytes();
+    }
     m_pooler.testingRereadConfig();
     m_swapper.testingRereadConfig();
     kickPooler();

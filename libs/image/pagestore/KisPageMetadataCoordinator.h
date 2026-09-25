@@ -149,6 +149,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataFootprint {
     quint64 readLeases = 0;
     quint64 pendingLastUses = 0;
     quint64 trackedPayloadBytes = 0;
+    // Conservative live charge for retained shard object/QHash capacity.
+    // This is budget accounting, not an allocator-specific RSS estimate.
+    quint64 owningCapacityBytes = 0;
     KisPageMetadataArenaStatistics versionArena;
     KisPageMetadataArenaStatistics replicaArena;
     KisPageMetadataArenaStatistics overflowArena;

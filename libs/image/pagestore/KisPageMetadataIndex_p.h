@@ -36,20 +36,40 @@ public:
     KisShardSlotIndex(const KisShardSlotIndex &) = delete;
     KisShardSlotIndex &operator=(const KisShardSlotIndex &) = delete;
 
-    Reservation reserveInsertions(qsizetype count)
+    qsizetype requiredCapacity(qsizetype count) const
     {
         const qsizetype maximum = std::numeric_limits<qsizetype>::max();
         if (count <= 0 || m_outstandingReservations > maximum - m_entries.size()
             || count > maximum - m_entries.size() - m_outstandingReservations) {
+            return 0;
+        }
+        return m_entries.size() + m_outstandingReservations + count;
+    }
+
+    bool prepareCapacity(qsizetype required)
+    {
+        if (required <= 0)
+            return false;
+        try {
+            m_entries.reserve(required);
+        } catch (const std::bad_alloc &) {
+            ++m_rejectedReservations;
+            return false;
+        }
+        return m_entries.capacity() >= required;
+    }
+
+    Reservation reserveInsertions(qsizetype count)
+    {
+        const qsizetype required = requiredCapacity(count);
+        if (required <= 0) {
             if (count > 0)
                 ++m_rejectedReservations;
             return {};
         }
-
-        const qsizetype required = m_entries.size() + m_outstandingReservations + count;
-        try {
-            m_entries.reserve(required);
-        } catch (const std::bad_alloc &) {
+        // Owning capacity is prepared and budgeted by MetadataShard before a
+        // reservation token can exist. Insertion must not grow this QHash.
+        if (m_entries.capacity() < required) {
             ++m_rejectedReservations;
             return {};
         }

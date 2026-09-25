@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QScopeGuard>
 #include <QTemporaryFile>
 #include <QTest>
 
@@ -24,6 +25,7 @@
 #include <vector>
 
 #include "KisCompletionRegistry.h"
+#include "kis_image_config.h"
 #include "KisCpuPageReplicaProvider.h"
 #include "KisImageEpochReferenceModel.h"
 #include "KisPageDefaultStorage_p.h"
@@ -48,6 +50,7 @@
 #include "tiles3/kis_vline_iterator.h"
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
+#include "tiles3/tests/kis_tile_data_store_test_access.h"
 
 namespace
 {
@@ -925,6 +928,7 @@ private Q_SLOTS:
     void metadataArenaGrowthCausalBaseline();
     void metadataSlotArenaGenerationAndRelease();
     void metadataShardSlotIndexReservations();
+    void metadataOwningCapacityIsBudgeted();
     void metadataShardIndexesEnforcePhysicalOwnership();
     void indexedHistoricalDiscard_data()
     {
@@ -1063,6 +1067,7 @@ private Q_SLOTS:
     void tiles3BackendCoalescesOverlappingAnonymousLeases();
     void tiles3BackendReclaimsPurgedHistoryVersions();
     void tiles3BackendCoalescesConcurrentProductWrites();
+    void tiles3BackendsShareProcessResidentLimit();
 };
 
 void KisPageStoreReferenceTest::lastRootDestructionIsIncrementalAndOffThread()
@@ -2912,6 +2917,7 @@ void KisPageStoreReferenceTest::metadataShardSlotIndexReservations()
     using Index = KisShardSlotIndex<quint64, KisVersionSlotId>;
     Index index;
 
+    QVERIFY(index.prepareCapacity(index.requiredCapacity(2)));
     auto first = index.reserveInsertions(2);
     QVERIFY(first.isValid());
     QCOMPARE(first.remaining(), qsizetype(2));
@@ -2932,6 +2938,7 @@ void KisPageStoreReferenceTest::metadataShardSlotIndexReservations()
     QVERIFY(index.findExact(12, &slot));
     QCOMPARE(slot, (KisVersionSlotId{2, 1}));
 
+    QVERIFY(index.prepareCapacity(index.requiredCapacity(1)));
     auto duplicate = index.reserveInsertions(1);
     QVERIFY(duplicate.isValid());
     QVERIFY(!index.insertReserved(&duplicate, 11, {3, 1}));
@@ -2948,6 +2955,59 @@ void KisPageStoreReferenceTest::metadataShardSlotIndexReservations()
     QCOMPARE(stats.outstandingReservations, quint64(0));
     QCOMPARE(stats.highWaterEntries, quint64(2));
     QCOMPARE(stats.reservationBatches, quint64(2));
+}
+
+void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
+{
+    QString error;
+    quint64 oneCapacityBatch = 0;
+    {
+        KisBackingBudgetController budget;
+        KisPageMetadataCoordinator metadata;
+        metadata.attachBackingBudget(budget);
+        QVERIFY2(metadata.configure(1, &error), qPrintable(error));
+        const auto first = pageVersion(0, 1);
+        QVERIFY2(metadata.registerPage(
+                     initialPageState(first, replica(first, 1, 1, 1)), &error),
+                 qPrintable(error));
+        oneCapacityBatch = budget.usage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        const auto footprint = metadata.footprint();
+        QVERIFY(oneCapacityBatch > 0);
+        QVERIFY(footprint.owningCapacityBytes > 0);
+        QCOMPARE(footprint.exactVersionIndex.capacity, quint64(64));
+        QCOMPARE(footprint.physicalSlotIndex.capacity, quint64(64));
+    }
+
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = oneCapacityBatch;
+    KisBackingBudgetController budget(limits);
+    {
+        KisPageMetadataCoordinator metadata;
+        metadata.attachBackingBudget(budget);
+        QVERIFY2(metadata.configure(1, &error), qPrintable(error));
+        for (int i = 0; i < 64; ++i) {
+            const auto version = pageVersion(i, 1);
+            QVERIFY2(metadata.registerPage(
+                         initialPageState(version, replica(version, 1, 1, quint64(i + 1))), &error),
+                     qPrintable(error));
+        }
+        const auto before = budget.usage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        QCOMPARE(before.live.cpuRam, oneCapacityBatch);
+        const auto rejected = pageVersion(64, 1);
+        QVERIFY(!metadata.registerPage(
+            initialPageState(rejected, replica(rejected, 1, 1, 65)), &error));
+        QVERIFY(error.contains(QStringLiteral("budget")));
+        QCOMPARE(metadata.pageCount(), qsizetype(64));
+        const auto after = budget.usage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        QCOMPARE(after.live.cpuRam, oneCapacityBatch);
+        QCOMPARE(after.reserved.cpuRam, quint64(0));
+    }
+    QCOMPARE(budget.usage()
+                 .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
+             quint64(0));
 }
 
 void KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership()
@@ -8088,6 +8148,73 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesConcurrentProductWrites()
     QVERIFY2(backend.purgeHistory(memento, &initialDefault, 1, &error), qPrintable(error));
     QVERIFY(backend.store()->waitForRetirementIdle());
     QVERIFY(!backend.store()->sessionStats().hasOutstandingCapabilities());
+}
+
+void KisPageStoreReferenceTest::tiles3BackendsShareProcessResidentLimit()
+{
+    KisImageConfig config(false);
+    const qreal oldHard = config.memoryHardLimitPercent();
+    const qreal oldSoft = config.memorySoftLimitPercent();
+    const qreal oldPool = config.memoryPoolLimitPercent();
+    const int oldSwap = config.maxSwapSize();
+    const auto restore = qScopeGuard([&] {
+        config.setMemoryHardLimitPercent(oldHard);
+        config.setMemorySoftLimitPercent(oldSoft);
+        config.setMemoryPoolLimitPercent(oldPool);
+        config.setMaxSwapSize(oldSwap);
+        KisTileDataStoreTestAccess::rereadConfig();
+    });
+    config.setMemoryHardLimitPercent(100.0 * 8.5 / KisImageConfig::totalRAM());
+    config.setMemorySoftLimitPercent(0);
+    config.setMemoryPoolLimitPercent(0);
+    config.setMaxSwapSize(0);
+    KisTileDataStoreTestAccess::rereadConfig();
+    KisTileDataStoreTestAccess::clear();
+    const quint64 hardBytes = quint64(KisImageConfig(true).tilesHardLimit()) << 20;
+    QCOMPARE(hardBytes, quint64(8 * 1024 * 1024));
+    QCOMPARE(KisTileDataStore::instance()->memoryMetric(), qint64(0));
+
+    const int width = 384 * KisTileData::WIDTH;
+    QByteArray pixels(width * KisTileData::HEIGHT * 4, Qt::Uninitialized);
+    for (int y = 0; y < KisTileData::HEIGHT; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const quint32 value = quint32(1 + x / KisTileData::WIDTH)
+                | (quint32(y) << 16);
+            memcpy(pixels.data() + (y * width + x) * 4, &value, 4);
+        }
+    }
+
+    quint8 initialDefault[4]{};
+    QString error;
+    KisTiledDataManagerPageStoreBackend first;
+    KisTiledDataManagerPageStoreBackend second;
+    QVERIFY2(first.configure(4, initialDefault, &error), qPrintable(error));
+    QVERIFY2(second.configure(4, initialDefault, &error), qPrintable(error));
+    QVector<KisLogicalPageId> changed;
+    const auto firstResult = first.writeBytes(
+        reinterpret_cast<const quint8 *>(pixels.constData()),
+        0, 0, width, KisTileData::HEIGHT, width * 4, false,
+        &changed, &error);
+    QVERIFY2(firstResult == KisPageStoreWriteOperationResult::Succeeded,
+             qPrintable(error));
+    QCOMPARE(first.store()->backingUsage()
+                 .buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
+             quint64(6 * 1024 * 1024));
+    changed.clear();
+    const auto secondResult = second.writeBytes(
+                reinterpret_cast<const quint8 *>(pixels.constData()),
+                0, 0, width, KisTileData::HEIGHT, width * 4, false,
+                &changed, &error);
+    QVERIFY2(secondResult != KisPageStoreWriteOperationResult::Succeeded,
+             qPrintable(error));
+    QVERIFY(changed.isEmpty());
+    QVERIFY2(second.store()->waitForRetirementIdle(), "failed batch did not drain");
+    const quint64 residentBytes = quint64(KisTileDataStore::instance()->memoryMetric())
+        * KisTileData::WIDTH * KisTileData::HEIGHT;
+    QVERIFY(residentBytes <= hardBytes);
+    QVERIFY2(first.store()->closeSession(&error), qPrintable(error));
+    QVERIFY2(second.store()->closeSession(&error), qPrintable(error));
+    QCOMPARE(KisTileDataStore::instance()->memoryMetric(), qint64(0));
 }
 
 QTEST_GUILESS_MAIN(KisPageStoreReferenceTest)

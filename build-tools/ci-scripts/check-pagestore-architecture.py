@@ -233,6 +233,16 @@ def production_source_paths() -> list[str]:
     return sorted(set(paths))
 
 
+@functools.cache
+def production_identifier_tokens() -> set[str]:
+    tokens: set[str] = set()
+    for path_name in production_source_paths():
+        text = code_only((REPOSITORY_ROOT / path_name).read_text(
+            encoding="utf-8", errors="replace"))
+        tokens.update(re.findall(r"\b[A-Za-z_]\w*\b", text))
+    return tokens
+
+
 def test_method_names() -> set[str]:
     methods: set[str] = set()
     for root in INVENTORY_ROOTS:
@@ -552,6 +562,17 @@ def validate_runtime_census(census: dict[str, Any], manifest: dict[str, Any]) ->
                 not isinstance(value, str) or not value for value in values
             ):
                 errors.append(f"{context}: dimensions.{dimension} must be a string list")
+            elif isinstance(values, list):
+                for value in values:
+                    if not re.fullmatch(
+                        r"[A-Za-z_]\w*(?:(?:::|\.)[A-Za-z_]\w*)+", value
+                    ):
+                        continue
+                    identifier = re.split(r"::|\.", value)[-1]
+                    if identifier not in production_identifier_tokens():
+                        errors.append(
+                            f"{context}: dimensions.{dimension} references missing production identifier {value}"
+                        )
 
         tests = entry.get("representative-tests")
         if status in {"instrumented", "existing"}:

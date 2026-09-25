@@ -15,6 +15,16 @@ public:
     {
         KisTileDataStore::instance()->testingFailNextSwapIn(point);
     }
+
+    static void rereadConfig()
+    {
+        KisTileDataStore::instance()->testingRereadConfig();
+    }
+
+    static void clear()
+    {
+        KisTileDataStore::instance()->debugClear();
+    }
 };
 
 #endif

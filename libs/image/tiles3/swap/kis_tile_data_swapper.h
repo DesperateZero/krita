@@ -27,6 +27,7 @@ public:
     void kick();
     void terminateSwapper();
     void checkFreeMemory();
+    qint64 tryFreeMemory(qint64 memoryMetric);
 
     void testingRereadConfig();
 
@@ -49,4 +50,3 @@ private:
 
 
 #endif /* KIS_TILE_DATA_SWAPPER_H_ */
-

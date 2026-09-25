@@ -254,12 +254,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
                 return reject(QStringLiteral("backing reservation exceeds its hard budget"));
         }
         const quint64 liveTotal = sumComponents(live);
-        quint64 reservedTotal = 0;
-        for (const ReservationSlot &slot : m_slots) {
-            if (slot.active)
-                reservedTotal = saturatedAdd(
-                    reservedTotal, slot.aggregateBytes[bucketIndex]);
-        }
+        const quint64 reservedTotal = m_reservedAggregateBytes[bucketIndex];
         const quint64 requestedTotal = aggregateBytes[bucketIndex];
         const quint64 limit = aggregateLimit(m_limits, budgetClass);
         if (requestedTotal > limit || liveTotal > limit - requestedTotal
@@ -268,11 +263,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     }
 
     quint64 liveSsd = 0;
-    quint64 reservedSsd = 0;
-    for (const ReservationSlot &slot : m_slots) {
-        if (slot.active)
-            reservedSsd = saturatedAdd(reservedSsd, slot.durableBytes);
-    }
+    const quint64 reservedSsd = m_reservedDurableBytes;
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
         liveSsd = saturatedAdd(liveSsd, m_usage.buckets[bucketIndex].live.ssd);
     }
@@ -302,6 +293,11 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     slot.aggregateBytes = aggregateBytes;
     slot.durableBytes = durableBytes;
     slot.active = true;
+    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
+        m_reservedAggregateBytes[bucketIndex] = saturatedAdd(
+            m_reservedAggregateBytes[bucketIndex], aggregateBytes[bucketIndex]);
+    }
+    m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, durableBytes);
 
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
         auto reserved = components(m_usage.buckets[bucketIndex].reserved);
@@ -415,6 +411,14 @@ bool KisBackingBudgetController::commitRetaining(
     if (!slot) return 0;
 
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
+        Q_ASSERT(m_reservedAggregateBytes[bucketIndex]
+                 >= slot->aggregateBytes[bucketIndex]);
+        m_reservedAggregateBytes[bucketIndex] -= slot->aggregateBytes[bucketIndex];
+    }
+    Q_ASSERT(m_reservedDurableBytes >= slot->durableBytes);
+    m_reservedDurableBytes -= slot->durableBytes;
+
+    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
         auto live = components(m_usage.buckets[bucketIndex].live);
         auto peak = components(m_usage.buckets[bucketIndex].peak);
         auto reserved = components(m_usage.buckets[bucketIndex].reserved);
@@ -452,7 +456,11 @@ bool KisBackingBudgetController::commitRetaining(
         if (bucket.ssd > 0)
             slot->durableBytes = saturatedAdd(
                 slot->durableBytes, quint64(bucket.ssd));
+        m_reservedAggregateBytes[i] = saturatedAdd(
+            m_reservedAggregateBytes[i], slot->aggregateBytes[i]);
     }
+    m_reservedDurableBytes = saturatedAdd(
+        m_reservedDurableBytes, slot->durableBytes);
     const bool retainedReservation = hasPositiveBytes(retained);
     if (!retainedReservation) {
         slot->active = false;

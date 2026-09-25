@@ -98,6 +98,14 @@ void KisTileDataSwapper::checkFreeMemory()
         doJob();
 }
 
+qint64 KisTileDataSwapper::tryFreeMemory(qint64 memoryMetric)
+{
+    if (memoryMetric <= 0)
+        return 0;
+    QMutexLocker locker(&m_d->cycleLock);
+    return pass<AggressiveSwapStrategy>(memoryMetric);
+}
+
 void KisTileDataSwapper::doJob()
 {
     /**

@@ -525,6 +525,128 @@ struct MetadataPageActivity {
 
 static_assert(sizeof(MetadataPageActivity) <= 96);
 
+enum class MetadataOwnedHash : quint8 {
+    ExactVersions,
+    PhysicalSlots,
+    Pages,
+    Activities,
+    CpuBindings,
+    Count
+};
+
+/**
+ * Conservative byte admission for shard-owned QHash storage. Qt deliberately
+ * hides node/bucket allocation details, so the contract charges a stable
+ * upper bound per power-of-two capacity slot before reserve()/insert(). The
+ * charge follows retained capacity and is released only with the shard.
+ */
+class MetadataOwnedCapacity
+{
+public:
+    MetadataOwnedCapacity(std::shared_ptr<MetadataBudgetAuthority> authority,
+                          MetadataBudgetRelease *charge)
+        : m_authority(std::move(authority)), m_charge(charge) {}
+
+    template<class Allocate>
+    bool ensure(MetadataOwnedHash kind, qsizetype required, Allocate allocate,
+                QString *error = nullptr)
+    {
+        if (required <= 0)
+            return true;
+        const size_t index = size_t(kind);
+        if (index >= m_capacities.size())
+            return false;
+        if (quint64(required) <= m_capacities[index])
+            return true;
+        const quint64 planned = plannedCapacity(quint64(required));
+        if (!planned)
+            return false;
+        if (planned <= m_capacities[index])
+            return true;
+        const quint64 unit = bytesPerCapacitySlot(kind);
+        const quint64 growth = planned - m_capacities[index];
+        if (!unit || growth > quint64(std::numeric_limits<qint64>::max()) / unit) {
+            KisPageStoreDetail::setError(error, QStringLiteral("metadata owning capacity overflows"));
+            return false;
+        }
+        const quint64 bytes = growth * unit;
+        KisBackingBudgetDelta delta;
+        delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+            qint64(bytes);
+        auto reservation = m_authority->reserve(delta, error);
+        if (!reservation.isValid())
+            return false;
+        if (!allocate(qsizetype(required), planned)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("metadata owning capacity allocation failed"));
+            return false;
+        }
+        KisBackingBudgetDelta installed;
+        installed.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+            qint64(bytes);
+        m_authority->commitReservation(std::move(reservation), installed);
+        m_charge->add(bytes);
+        m_capacities[index] = planned;
+        KisPageStoreDetail::setError(error, {});
+        return true;
+    }
+
+    quint64 chargedBytes() const
+    {
+        quint64 result = 0;
+        for (size_t i = 0; i < m_capacities.size(); ++i)
+            result += m_capacities[i] * bytesPerCapacitySlot(MetadataOwnedHash(i));
+        return result;
+    }
+
+private:
+    static quint64 plannedCapacity(quint64 required)
+    {
+        quint64 result = 64;
+        // QHash keeps one bucket tier of headroom when reserve() lands
+        // exactly on a tier boundary (for example, 512 entries use 1024
+        // buckets). Its minimum allocated tier is 64.
+        while (result <= required) {
+            if (result > quint64(std::numeric_limits<qsizetype>::max()) / 2)
+                return 0;
+            result *= 2;
+        }
+        return result;
+    }
+
+    template<class Key, class Value>
+    static constexpr quint64 hashSlotBytes()
+    {
+        // One key/value node, bucket/link storage, hash/alignment and a full
+        // extra slot of slack. This is deliberately an upper-bound contract,
+        // not a claim about one Qt build's private node layout.
+        return 2 * (quint64(sizeof(Key)) + quint64(sizeof(Value))
+                    + 3 * quint64(sizeof(void *)) + quint64(sizeof(size_t)));
+    }
+
+    static constexpr quint64 bytesPerCapacitySlot(MetadataOwnedHash kind)
+    {
+        switch (kind) {
+        case MetadataOwnedHash::ExactVersions:
+            return hashSlotBytes<KisPageVersion, KisVersionSlotId>();
+        case MetadataOwnedHash::PhysicalSlots:
+            return hashSlotBytes<PhysicalSlot, KisReplicaSlotId>();
+        case MetadataOwnedHash::Pages:
+            return hashSlotBytes<KisPageKey, MetadataPage>();
+        case MetadataOwnedHash::Activities:
+            return hashSlotBytes<KisPageKey, MetadataPageActivity>();
+        case MetadataOwnedHash::CpuBindings:
+            return hashSlotBytes<KisPageVersion, QSharedPointer<KisCpuReadBindingLink>>();
+        case MetadataOwnedHash::Count:
+            break;
+        }
+        return 0;
+    }
+
+    std::shared_ptr<MetadataBudgetAuthority> m_authority;
+    MetadataBudgetRelease *m_charge = nullptr;
+    std::array<quint64, size_t(MetadataOwnedHash::Count)> m_capacities{};
+};
+
 /**
  * One record/index owner per shard. Pages contain only intrusive slot heads,
  * tails and counts; no page owns a list, map, set, hash or shared heap object.
@@ -534,13 +656,15 @@ struct ShardRecordStore {
     using PhysicalIndex = KisShardSlotIndex<PhysicalSlot, KisReplicaSlotId>;
     using HistoryPosition = std::pair<quint64, quint64>;
 
-    explicit ShardRecordStore(MetadataArenas *storage)
-        : arenas(storage)
+    explicit ShardRecordStore(MetadataArenas *storage,
+                              MetadataOwnedCapacity *capacity)
+        : arenas(storage), ownedCapacity(capacity)
     {
-        Q_ASSERT(arenas);
+        Q_ASSERT(arenas && ownedCapacity);
     }
 
     MetadataArenas *arenas = nullptr;
+    MetadataOwnedCapacity *ownedCapacity = nullptr;
     ExactIndex exactVersions;
     PhysicalIndex physicalSlots;
 
@@ -568,6 +692,16 @@ struct ShardRecordStore {
             return false;
         }
         if (exactInsertions > 0) {
+            const qsizetype required = exactVersions.requiredCapacity(exactInsertions);
+            if (!required || !ownedCapacity->ensure(
+                    MetadataOwnedHash::ExactVersions, required,
+                    [&](qsizetype value, quint64 planned) {
+                        return exactVersions.prepareCapacity(value)
+                            && quint64(exactVersions.statistics().capacity) <= planned;
+                    })) {
+                reservation->cancel(this);
+                return false;
+            }
             reservation->exactVersions = exactVersions.reserveInsertions(exactInsertions);
             if (!reservation->exactVersions.isValid()) {
                 reservation->cancel(this);
@@ -575,6 +709,16 @@ struct ShardRecordStore {
             }
         }
         if (physicalInsertions > 0) {
+            const qsizetype required = physicalSlots.requiredCapacity(physicalInsertions);
+            if (!required || !ownedCapacity->ensure(
+                    MetadataOwnedHash::PhysicalSlots, required,
+                    [&](qsizetype value, quint64 planned) {
+                        return physicalSlots.prepareCapacity(value)
+                            && quint64(physicalSlots.statistics().capacity) <= planned;
+                    })) {
+                reservation->cancel(this);
+                return false;
+            }
             reservation->physicalSlots = physicalSlots.reserveInsertions(physicalInsertions);
             if (!reservation->physicalSlots.isValid()) {
                 reservation->cancel(this);
@@ -1433,18 +1577,31 @@ struct MetadataShard : KisPageMetadataShardMetrics {
     explicit MetadataShard(std::shared_ptr<MetadataBudgetAuthority> authority,
                            quint64 directoryBytes)
         : budgetAuthority(std::move(authority))
-        , budgetCharge(budgetAuthority, directoryBytes) {}
+        , budgetCharge(budgetAuthority, directoryBytes)
+        , ownedCapacity(budgetAuthority, &budgetCharge)
+        , records(&arenas, &ownedCapacity) {}
 
     mutable QMutex mutex;
     std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
     // Declared before arenas so arena payloads are destroyed before their
     // remaining live charge is released.
     MetadataBudgetRelease budgetCharge;
+    MetadataOwnedCapacity ownedCapacity;
     MetadataArenas arenas;
-    ShardRecordStore records{&arenas};
+    ShardRecordStore records;
     QHash<KisPageKey, MetadataPage> pages;
     QHash<KisPageKey, MetadataPageActivity> activities;
     QHash<KisPageVersion, QSharedPointer<KisCpuReadBindingLink>> cpuBindings;
+    quint64 acceptedTransitions = 0;
+    quint64 rejectedTransitions = 0;
+    quint64 preparedPublicationPages = 0;
+    quint64 installedPublicationPages = 0;
+    quint64 rejectedPublicationInstalls = 0;
+    quint64 preparedMutationPages = 0;
+    quint64 installedMutationPages = 0;
+    quint64 rejectedMutationInstalls = 0;
+    quint64 publicationHistoryNodesPrepared = 0;
+    quint64 publicationAdditionRecordsPrepared = 0;
     const MetadataPageActivity *activity(const KisPageKey &key) const
     {
         const auto found = activities.constFind(key);
@@ -1489,8 +1646,43 @@ struct MetadataShard : KisPageMetadataShardMetrics {
             activities.erase(current);
     }
 
-    bool reservePublicationActivity(const KisPageKey &key)
+    bool ensureActivityCapacity(const KisPageKey &key,
+                                const KisPageStateSnapshot *state = nullptr,
+                                QString *error = nullptr)
     {
+        const bool needsEntry = activities.contains(key)
+            || (state && (state->writer.phase != KisPageWriterPhase::None
+                          || state->authorityHandoff.operation.isValid()));
+        if (!needsEntry)
+            return true;
+        const qsizetype required = activities.contains(key)
+            ? activities.size() : activities.size() + 1;
+        return ownedCapacity.ensure(MetadataOwnedHash::Activities, required,
+            [&](qsizetype value, quint64 planned) {
+                try {
+                    activities.reserve(value);
+                } catch (const std::bad_alloc &) {
+                    return false;
+                }
+                return quint64(activities.capacity()) <= planned;
+            }, error);
+    }
+
+    bool reservePublicationActivity(const KisPageKey &key, QString *error)
+    {
+        if (!activities.contains(key)
+            && !ownedCapacity.ensure(MetadataOwnedHash::Activities,
+                                     activities.size() + 1,
+                                     [&](qsizetype value, quint64 planned) {
+                                         try {
+                                             activities.reserve(value);
+                                         } catch (const std::bad_alloc &) {
+                                             return false;
+                                         }
+                                         return quint64(activities.capacity()) <= planned;
+                                     }, error)) {
+            return false;
+        }
         MetadataPageActivity next;
         if (const MetadataPageActivity *current = activity(key))
             next = *current;
@@ -1714,16 +1906,6 @@ public:
     // its final live charge is released.
     MetadataBudgetRelease directoryCharge;
     std::vector<std::shared_ptr<MetadataShard>> shards;
-    QAtomicInteger<quint64> acceptedTransitions{0};
-    QAtomicInteger<quint64> rejectedTransitions{0};
-    QAtomicInteger<quint64> preparedPublicationPages{0};
-    QAtomicInteger<quint64> installedPublicationPages{0};
-    QAtomicInteger<quint64> rejectedPublicationInstalls{0};
-    QAtomicInteger<quint64> preparedMutationPages{0};
-    QAtomicInteger<quint64> installedMutationPages{0};
-    QAtomicInteger<quint64> rejectedMutationInstalls{0};
-    QAtomicInteger<quint64> publicationHistoryNodesPrepared{0};
-    QAtomicInteger<quint64> publicationAdditionRecordsPrepared{0};
     QAtomicInteger<quint64> registeredPages{0};
     void *retirementDebtContext = nullptr;
     PrepareRetirementDebt prepareRetirementDebt = nullptr;
@@ -1916,16 +2098,6 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         return result;
     }
     auto data = std::make_unique<PreparedPublication::Data>();
-    quint64 historyNodesPrepared = 0;
-    quint64 additionRecordsPrepared = 0;
-    const auto recordPreparationWork = qScopeGuard([&] {
-        // Include completed work from a later-rejected batch, but fold once
-        // outside shard gates instead of adding an atomic per changed page.
-        if (historyNodesPrepared)
-            d->publicationHistoryNodesPrepared.fetchAndAddRelaxed(historyNodesPrepared);
-        if (additionRecordsPrepared)
-            d->publicationAdditionRecordsPrepared.fetchAndAddRelaxed(additionRecordsPrepared);
-    });
     data->owner = d->publicationOwner;
     data->transaction = transaction;
     data->minimumEpoch = minimumEpoch;
@@ -2010,10 +2182,21 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
             }
         }
         if (mutation) {
-            ++historyNodesPrepared;
+            QMutexLocker locker(&entry.shardOwner->mutex);
+            ++entry.shardOwner->publicationHistoryNodesPrepared;
             data->entries.push_back(std::move(entry));
             continue;
         }
+        quint64 entryHistoryNodesPrepared = 0;
+        quint64 entryAdditionRecordsPrepared = 0;
+        const std::shared_ptr<MetadataShard> preparationShard = entry.shardOwner;
+        const auto recordEntryPreparationWork = qScopeGuard([&] {
+            QMutexLocker locker(&preparationShard->mutex);
+            preparationShard->publicationHistoryNodesPrepared +=
+                entryHistoryNodesPrepared;
+            preparationShard->publicationAdditionRecordsPrepared +=
+                entryAdditionRecordsPrepared;
+        });
         // The expensive deterministic work is outside the shard lock and is
         // reused at installation. Revision revalidation includes leases,
         // Only coordinator-owned state reaches this private capability. Like
@@ -2048,17 +2231,17 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
                 }
                 entry.additions.push_back(version);
                 if (version.publication == KisPagePublicationState::Historical)
-                    ++historyNodesPrepared;
+                    ++entryHistoryNodesPrepared;
             } else if (found.value()->publication != version.publication
                        || !(found.value()->preparedBy == version.preparedBy)) {
                 entry.deltas.append({version.version, version.publication, version.preparedBy});
                 if (version.publication == KisPagePublicationState::Historical)
-                    ++historyNodesPrepared;
+                    ++entryHistoryNodesPrepared;
             }
         }
         // Installation must not replace dynamic protection/replica lists.
         // Strict page revision is still required; this is not stale merge.
-        additionRecordsPrepared += quint64(entry.additions.size());
+        entryAdditionRecordsPrepared += quint64(entry.additions.size());
         // Headers never own version records at install.
         step.next.versions.clear();
         entry.next = std::move(step.next);
@@ -2171,7 +2354,7 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         } else if (stillValid) {
             stillValid = page->revision == entry.revision;
         }
-        if (!stillValid || !entry.shardOwner->reservePublicationActivity(entry.key())) {
+        if (!stillValid || !entry.shardOwner->reservePublicationActivity(entry.key(), error)) {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication activity"));
             result.m_conflicted = !stillValid;
             return result;
@@ -2179,7 +2362,11 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         entry.activityReservation = true;
     }
     result.data = std::move(data);
-    (mutation ? d->preparedMutationPages : d->preparedPublicationPages).fetchAndAddRelaxed(quint64(transitions.size()));
+    for (const auto &entry : result.data->entries) {
+        QMutexLocker locker(&entry.shardOwner->mutex);
+        ++(mutation ? entry.shardOwner->preparedMutationPages
+                    : entry.shardOwner->preparedPublicationPages);
+    }
     KisPageStoreDetail::setError(error, {});
     return result;
 }
@@ -2210,6 +2397,13 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
 {
     // Consume even on rejection: callers must prepare again after a conflict.
     auto data = std::move(prepared.data);
+    const auto recordRejectedInstall = [&] {
+        if (!data || data->entries.empty() || !data->entries.front().shardOwner)
+            return;
+        QMutexLocker locker(&data->entries.front().shardOwner->mutex);
+        ++(mutation ? data->entries.front().shardOwner->rejectedMutationInstalls
+                    : data->entries.front().shardOwner->rejectedPublicationInstalls);
+    };
     const bool canDeferCleanup = deferredCleanup && deferredCleanup->isEmpty();
     const auto transferCleanup = qScopeGuard([&] {
         if (canDeferCleanup && data)
@@ -2221,7 +2415,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         || (!mutation && (!epoch.isValid() || epoch.value < data->minimumEpoch.value))
         || (mutation && epoch.isValid())) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication capability is stale or foreign"));
-        (mutation ? d->rejectedMutationInstalls : d->rejectedPublicationInstalls).fetchAndAddRelaxed(1);
+        recordRejectedInstall();
         return false;
     }
     qsizetype claimed = 0;
@@ -2254,7 +2448,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             entry.shardOwner->setPublicationClaim(entry.key(), nullptr);
         }
         KisPageStoreDetail::setError(error, QStringLiteral("metadata changed after publication preparation"));
-        (mutation ? d->rejectedMutationInstalls : d->rejectedPublicationInstalls).fetchAndAddRelaxed(1);
+        recordRejectedInstall();
         return false;
     }
     for (auto &entry : data->entries) {
@@ -2311,6 +2505,8 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             entry.shardOwner->publicationVersionInstalls += quint64(entry.deltas.size()) + additionRecords;
         }
         entry.shardOwner->publicationHistoryNodesTransferred += installedHistoryLinks;
+        ++(mutation ? entry.shardOwner->installedMutationPages
+                    : entry.shardOwner->installedPublicationPages);
         // All page facts were claimed before the first install; after this
         // page's final write no later step can overwrite a new reader/last-use
         // mutation here. Release under the same lock, not a third lock pass.
@@ -2327,8 +2523,6 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             &growth.shardOwner->budgetCharge);
     }
     data->owner.reset();
-    (mutation ? d->installedMutationPages : d->installedPublicationPages)
-        .fetchAndAddRelaxed(quint64(data->entries.size()));
     if (effects)
         *effects = std::move(data->effects);
     KisPageStoreDetail::setError(error, {});
@@ -2389,6 +2583,18 @@ KisPageMetadataCoordinator::installCpuReadBinding(const KisReplicaHandle &replic
     const auto existing = shard->cpuBindings.constFind(replica.version);
     if (existing != shard->cpuBindings.constEnd())
         return existing.value();
+    if (!shard->ownedCapacity.ensure(
+            MetadataOwnedHash::CpuBindings, shard->cpuBindings.size() + 1,
+            [&](qsizetype value, quint64 planned) {
+                try {
+                    shard->cpuBindings.reserve(value);
+                } catch (const std::bad_alloc &) {
+                    return false;
+                }
+                return quint64(shard->cpuBindings.capacity()) <= planned;
+            })) {
+        return {};
+    }
     auto link = QSharedPointer<KisCpuReadBindingLink>::create(replica, provider);
     shard->cpuBindings.insert(replica.version, link);
     return link;
@@ -2452,7 +2658,10 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         return false;
     }
     const quint64 count = quint64(shardCount);
-    const quint64 perShardMaximum = MetadataArenas::maximumDirectoryBytes();
+    const quint64 shardObjectBytes = quint64(sizeof(MetadataShard))
+        + 2 * quint64(sizeof(void *)); // make_shared control block/alignment allowance
+    const quint64 perShardMaximum = MetadataArenas::maximumDirectoryBytes()
+        + shardObjectBytes;
     const quint64 shardPointers = count * quint64(sizeof(std::shared_ptr<MetadataShard>));
     if (perShardMaximum > (quint64(std::numeric_limits<qint64>::max()) - shardPointers) / count) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata directory budget overflows"));
@@ -2479,7 +2688,8 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
     quint64 actualBytes = quint64(d->shards.capacity())
         * quint64(sizeof(std::shared_ptr<MetadataShard>));
     for (const auto &shard : d->shards)
-        actualBytes += shard->arenas.allocatedDirectoryBytes();
+        actualBytes += shard->arenas.allocatedDirectoryBytes()
+            + shardObjectBytes;
     if (actualBytes > quint64(directoryReservation
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam)) {
         d->shards.clear();
@@ -2494,7 +2704,8 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         * quint64(sizeof(std::shared_ptr<MetadataShard>));
     d->directoryCharge = MetadataBudgetRelease(d->budgetAuthority, pointerBytes);
     for (const auto &shard : d->shards)
-        shard->budgetCharge.add(shard->arenas.allocatedDirectoryBytes());
+        shard->budgetCharge.add(shard->arenas.allocatedDirectoryBytes()
+                                + shardObjectBytes);
     d->operational.store(true, std::memory_order_release);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -2546,6 +2757,20 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
                  storage == MetadataGrowthResult::Stale
                      ? QStringLiteral("page was registered while preparing metadata storage")
                      : QStringLiteral("metadata arena budget is exhausted"));
+        return false;
+    }
+    if (!shard->ownedCapacity.ensure(
+            MetadataOwnedHash::Pages, shard->pages.size() + 1,
+            [&](qsizetype value, quint64 planned) {
+                try {
+                    shard->pages.reserve(value);
+                } catch (const std::bad_alloc &) {
+                    return false;
+                }
+                return quint64(shard->pages.capacity()) <= planned;
+            }, error)
+        || !shard->ensureActivityCapacity(initial.key, &initial, error)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata owning capacity budget is exhausted"));
         return false;
     }
     MetadataPage page;
@@ -2853,7 +3078,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         for (const auto &transition : transitions) {
             auto step = machine.applyKnownValid(next, transition);
             if (!step.accepted) {
-                d->rejectedTransitions.fetchAndAddRelaxed(1);
+                ++shard->rejectedTransitions;
                 result.rejectionReason = step.rejectionReason;
                 result.effects.clear();
                 return result; // no authoritative record has changed
@@ -2892,7 +3117,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
                                           result.effects,
                                           &retirementDebtCookie,
                                           &debtError)) {
-                d->rejectedTransitions.fetchAndAddRelaxed(1);
+                ++shard->rejectedTransitions;
                 result.rejectionReason = debtError.isEmpty()
                     ? QStringLiteral("retirement debt budget is exhausted") : debtError;
                 result.effects.clear();
@@ -2921,13 +3146,18 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             continue;
         }
         if (storage != MetadataGrowthResult::Ready) {
-            d->rejectedTransitions.fetchAndAddRelaxed(1);
+            ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata arena budget is exhausted");
             result.effects.clear();
             return result;
         }
+        if (!shard->ensureActivityCapacity(key, &next, &result.rejectionReason)) {
+            result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
+            result.effects.clear();
+            return result;
+        }
         if (!shard->records.putBatch(&page.value(), next.versions)) {
-            d->rejectedTransitions.fetchAndAddRelaxed(1);
+            ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             result.effects.clear();
             return result;
@@ -2953,7 +3183,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             shard->backgroundLocalVersionInstalls += quint64(next.versions.size());
             shard->backgroundLocalVersionRemovals += removed;
         }
-        d->acceptedTransitions.fetchAndAddRelaxed(quint64(transitions.size()));
+        shard->acceptedTransitions += quint64(transitions.size());
         result.accepted = true;
         auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
@@ -3049,19 +3279,19 @@ qsizetype KisPageMetadataCoordinator::pageCount() const
 KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
 {
     KisPageMetadataMetrics metrics;
-    metrics.acceptedTransitions = d->acceptedTransitions.loadRelaxed();
-    metrics.rejectedTransitions = d->rejectedTransitions.loadRelaxed();
-    metrics.preparedPublicationPages = d->preparedPublicationPages.loadRelaxed();
-    metrics.installedPublicationPages = d->installedPublicationPages.loadRelaxed();
-    metrics.rejectedPublicationInstalls = d->rejectedPublicationInstalls.loadRelaxed();
-    metrics.preparedMutationPages = d->preparedMutationPages.loadRelaxed();
-    metrics.installedMutationPages = d->installedMutationPages.loadRelaxed();
-    metrics.rejectedMutationInstalls = d->rejectedMutationInstalls.loadRelaxed();
-    metrics.publicationHistoryNodesPrepared = d->publicationHistoryNodesPrepared.loadRelaxed();
-    metrics.publicationAdditionRecordsPrepared = d->publicationAdditionRecordsPrepared.loadRelaxed();
     if (d->operational.load(std::memory_order_acquire))
         for (const auto &shard : d->shards) {
             QMutexLocker lock(&shard->mutex);
+            metrics.acceptedTransitions += shard->acceptedTransitions;
+            metrics.rejectedTransitions += shard->rejectedTransitions;
+            metrics.preparedPublicationPages += shard->preparedPublicationPages;
+            metrics.installedPublicationPages += shard->installedPublicationPages;
+            metrics.rejectedPublicationInstalls += shard->rejectedPublicationInstalls;
+            metrics.preparedMutationPages += shard->preparedMutationPages;
+            metrics.installedMutationPages += shard->installedMutationPages;
+            metrics.rejectedMutationInstalls += shard->rejectedMutationInstalls;
+            metrics.publicationHistoryNodesPrepared += shard->publicationHistoryNodesPrepared;
+            metrics.publicationAdditionRecordsPrepared += shard->publicationAdditionRecordsPrepared;
             metrics.localTransitionSequences += shard->localTransitionSequences;
             metrics.localVersionInputs += shard->localVersionInputs;
             metrics.localVersionInstalls += shard->localVersionInstalls;
@@ -3107,6 +3337,8 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
         result.overflowArena += shard->arenas.overflow.statistics();
         result.exactVersionIndex += shard->records.exactVersions.statistics();
         result.physicalSlotIndex += shard->records.physicalSlots.statistics();
+        result.owningCapacityBytes += shard->ownedCapacity.chargedBytes()
+            + quint64(sizeof(MetadataShard)) + 2 * quint64(sizeof(void *));
         result.pages += quint64(shard->pages.size());
         result.pageActivities += quint64(shard->activities.size());
         const quint64 pageBytes = quint64(shard->pages.size()) * sizeof(MetadataPage);

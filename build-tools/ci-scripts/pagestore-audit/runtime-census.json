@@ -46,16 +46,12 @@
     },
     {
       "dimensions": {
-        "fallback": [
-          "KisPageStoreSessionStats.writePageClaimConflicts"
-        ],
+        "fallback": [],
         "live": [
           "KisPageStoreSessionStats.activeControlWritePages",
           "KisPageStoreSessionStats.activeCpuWritePages"
         ],
-        "operation": [
-          "KisPageStoreSessionStats.writePageClaimChecks"
-        ],
+        "operation": [],
         "page": [
           "KisPageMutationStatistics.generationsReserved"
         ],
@@ -132,16 +128,13 @@
     },
     {
       "dimensions": {
-        "fallback": [
-          "KisPageStoreSessionStats.writePageClaimConflicts"
-        ],
+        "fallback": [],
         "live": [
           "KisPageStoreSessionStats.activeControlWritePages",
           "KisPageStoreSessionStats.activeCpuWritePages"
         ],
         "operation": [
-          "KisPageMutationStatistics.operationSessionsCreated",
-          "KisPageStoreSessionStats.writePageClaimChecks"
+          "KisPageMutationStatistics.operationSessionsCreated"
         ],
         "page": [
           "KisPageMutationStatistics.generationsReserved",
@@ -200,10 +193,7 @@
         "peak": [
           "KisPageMetadataFootprint.Arena.highWaterSlots"
         ],
-        "terminal": [
-          "KisShardSlotArena::close",
-          "KisShardSlotArena::drain"
-        ]
+        "terminal": []
       },
       "evidence": "Each metadata shard owns lazy version, replica and overflow arenas. Authoritative records use typed generation-checked slots; demand is measured under the shard mutex, block candidates are allocated after unlock, page revision is revalidated before attach, and empty blocks detach through an intrusive batch for lock-external destruction.",
       "id": "metadata-slot-arenas",
@@ -324,9 +314,7 @@
           "KisPageStoreSessionStats.stagedPageRemovals"
         ],
         "operation": [
-          "KisPageStorePublicationStatistics.commitCandidates",
-          "KisPageStorePublicationStatistics.preparedMutationCommits",
-          "KisPageStorePublicationStatistics.restoreCandidates"
+          "KisPageStorePublicationStatistics.preparedMutationCommits"
         ],
         "page": [
           "KisPageStorePublicationStatistics.descriptorInstallations"
@@ -408,7 +396,6 @@
         ],
         "page": [
           "KisPageStoreReadScopeStatistics.historicalGcPagesVisited",
-          "KisPageStoreReadScopeStatistics.historicalGcVersionsVisited",
           "KisPageStoreReadScopeStatistics.historyReachabilityRootsVisited"
         ],
         "peak": [
@@ -442,8 +429,7 @@
           "KisPageStoreSessionStats.pendingRetiredBytes"
         ],
         "operation": [
-          "KisPageStoreSessionStats.backgroundRetirementPasses",
-          "KisPageStoreSessionStats.retirementIdleWaits"
+          "KisPageStoreSessionStats.backgroundRetirementPasses"
         ],
         "page": [],
         "peak": [
@@ -455,7 +441,7 @@
           "KisPageStoreSessionStats.retirementCloseDrainedReplicas"
         ]
       },
-      "evidence": "KisPageRetirementQueue is the sole owner of detached physical debt. Session snapshots expose live/active debt, the 32-replica worker budget, peaks, retry requeues, idle waits and close-drain terminals; provider work remains outside both owner and queue locks.",
+      "evidence": "KisPageRetirementQueue is the sole owner of detached physical debt. Session snapshots expose live/active debt, the 32-replica worker budget, peaks, retry requeues and close-drain terminals; provider work remains outside both owner and queue locks.",
       "id": "retirement-queue",
       "manifest-entries": [
         "BR1-PS-STORE-RETIREMENT-017"
@@ -477,15 +463,17 @@
         ],
         "live": [],
         "operation": [
-          "KisPageStoreDiagnosticPhase.PainterBitBltPrepare",
-          "KisPageStoreDiagnosticPhase.PainterBitBltFinish"
+          "KisPageStoreDiagnosticPhase.PainterSourceResolve",
+          "KisPageStoreDiagnosticPhase.PixelOperationRangePrepare",
+          "KisPageStoreDiagnosticPhase.PixelOperationBody",
+          "KisPageStoreDiagnosticPhase.PixelOperationFinish"
         ],
         "page": [
           "KisPageStoreDiagnosticMetric.workItems"
         ],
         "peak": [],
         "terminal": [
-          "KisPageStoreDiagnosticPhase.PainterBitBltFinish"
+          "KisPageStoreDiagnosticPhase.PixelOperationFinish"
         ]
       },
       "evidence": "The operation recorder reports painter prepare/source/composite/finish intervals and work items without adding a hot-path global counter.",

@@ -20,6 +20,7 @@ private Q_SLOTS:
     void testSwapping();
     void testTileLockPropagatesSwapInFailure_data();
     void testTileLockPropagatesSwapInFailure();
+    void testResidentHardAdmission();
 };
 
 #endif /* KIS_TILE_DATA_STORE_TEST_H */

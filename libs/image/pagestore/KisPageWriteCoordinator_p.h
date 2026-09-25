@@ -233,6 +233,12 @@ private:
     KisPageBackingUsage m_usage;
     std::vector<ReservationSlot> m_slots;
     std::vector<quint32> m_freeSlots;
+    // Aggregate/durable reservations are authoritative derivatives of the
+    // active slots. Keep them current at every slot transition so admission
+    // cost depends on this request, not on a historical concurrency peak.
+    std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
+        m_reservedAggregateBytes{};
+    quint64 m_reservedDurableBytes = 0;
 
     friend class KisBackingBudgetReservation;
     friend class KisPageOwnerLedger;

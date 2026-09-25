@@ -213,6 +213,8 @@ private:
         PreparedResidencyChange &prepared, quint64 revision) noexcept;
 
     KisTileData *allocTileData(qint32 pixelSize, const quint8 *defPixel);
+    bool reserveResidentMemory(qint32 pixelSize);
+    void releaseResidentMemoryReservation(qint32 pixelSize) noexcept;
 
     inline void registerTileDataImp(KisTileData *td);
     inline void unregisterTileDataImp(KisTileData *td);
@@ -253,6 +255,9 @@ private:
     QReadWriteLock m_iteratorLock;
     QMutex m_residencyObserverLock;
     QHash<KisTileData *, ResidencyObservers> m_residencyObservers;
+    QMutex m_residentMemoryAdmissionLock;
+    quint64 m_reservedResidentBytes = 0;
+    quint64 m_residentHardLimitBytes = 0;
 };
 
 template<typename T>

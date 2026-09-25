@@ -417,10 +417,12 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
 bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error)
 {
     if (!backend) return !failed;
-    if (!transaction.isValid() || !mutation.isActive()) return false;
+    if (!transaction.isValid()) return false;
+    const bool mutationActive = mutation.isActive();
+    if (!mutationActive && !failed) return false;
     bool privateCancelled = false;
     if (failed) KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore private mutation batch cancelled"));
-    const bool sealed = !failed && (iteratorScope
+    const bool sealed = mutationActive && !failed && (iteratorScope
         ? mutation.sealForLegacyUnlock(error)
         : mutation.seal(error));
     if (!sealed) {
