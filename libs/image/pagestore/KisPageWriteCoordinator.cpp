@@ -957,15 +957,16 @@ KisPageWritePlanKind KisPageWriteCoordinator::select(
     const KisPageWriteIntent &intent,
     const KisMutationPageEntry *pending) const
 {
-    if (intent.inputKind == KisPageWriteInputKind::Semantic) {
-        return pending && pending->preparedTargetVersion().isValid()
-            ? KisPageWritePlanKind::ReusePending
-            : KisPageWritePlanKind::SemanticOnly;
+    if (intent.inputKind == KisPageWriteInputKind::MutableGuard) {
+        if (intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
+            return KisPageWritePlanKind::FreshPayload;
+        return intent.mode == KisPageWriteMode::DiscardContents
+            ? KisPageWritePlanKind::FreshDiscard
+            : KisPageWritePlanKind::FreshCow;
     }
-    if (intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
-        return KisPageWritePlanKind::FreshPayload;
-    return intent.mode == KisPageWriteMode::DiscardContents
-        ? KisPageWritePlanKind::FreshDiscard : KisPageWritePlanKind::FreshCow;
+    return pending && pending->preparedTargetVersion().isValid()
+        ? KisPageWritePlanKind::ReusePending
+        : KisPageWritePlanKind::SemanticOnly;
 }
 
 KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
