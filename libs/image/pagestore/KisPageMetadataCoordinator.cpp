@@ -535,7 +535,7 @@ enum class MetadataOwnedHash : quint8 {
 };
 
 /**
- * Conservative byte admission for shard-owned QHash storage. Qt deliberately
+ * Byte admission for shard-owned flat indexes and QHash storage. Qt deliberately
  * hides node/bucket allocation details, so the contract charges a stable
  * upper bound per power-of-two capacity slot before reserve()/insert(). The
  * charge follows retained capacity and is released only with the shard.
@@ -627,9 +627,9 @@ private:
     {
         switch (kind) {
         case MetadataOwnedHash::ExactVersions:
-            return hashSlotBytes<KisPageVersion, KisVersionSlotId>();
+            return KisShardSlotIndex<KisPageVersion, KisVersionSlotId>::bytesPerCapacitySlot();
         case MetadataOwnedHash::PhysicalSlots:
-            return hashSlotBytes<PhysicalSlot, KisReplicaSlotId>();
+            return KisShardSlotIndex<PhysicalSlot, KisReplicaSlotId>::bytesPerCapacitySlot();
         case MetadataOwnedHash::Pages:
             return hashSlotBytes<KisPageKey, MetadataPage>();
         case MetadataOwnedHash::Activities:

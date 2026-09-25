@@ -25,9 +25,12 @@
 #include "pagestore/KisTiles3PageReplicaProvider.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "pagestore/KisPageStoreDiagnostics_p.h"
+#include "pagestore/KisPageStoreReclamation_p.h"
 #include "pagestore/KisPageWriteCoordinator_p.h"
 
 #include "tiles_test_utils.h"
+#include "kis_image_config.h"
+#include "kis_tile_data_store_test_access.h"
 #include "config-limit-long-tests.h"
 #include "kis_br1_stress_profile.h"
 
@@ -40,6 +43,61 @@ public:
     using KisTiledDataManager::purge;
     using KisTiledDataManager::read;
     using KisTiledDataManager::write;
+};
+
+// Own the configuration and every filler through failure/early-test exits.
+class DefaultBudgetScope
+{
+public:
+    DefaultBudgetScope()
+        : config(false), hard(config.memoryHardLimitPercent()),
+          soft(config.memorySoftLimitPercent()), pool(config.memoryPoolLimitPercent()),
+          swap(config.maxSwapSize())
+    {
+        config.setMemoryHardLimitPercent(100.0 * 8.5 / KisImageConfig::totalRAM());
+        config.setMemorySoftLimitPercent(0);
+        config.setMemoryPoolLimitPercent(0);
+        config.setMaxSwapSize(0);
+        kisDrainPageStoreReclamation();
+        KisTileDataStoreTestAccess::rereadConfig();
+    }
+    ~DefaultBudgetScope()
+    {
+        release();
+        config.setMemoryHardLimitPercent(hard);
+        config.setMemorySoftLimitPercent(soft);
+        config.setMemoryPoolLimitPercent(pool);
+        config.setMaxSwapSize(swap);
+        KisTileDataStoreTestAccess::rereadConfig();
+    }
+    void saturate(int bpp, const quint8 *pixel)
+    {
+        while (auto *tile = KisTileDataStore::instance()->createDefaultTileData(bpp, pixel)) {
+            tile->ref();
+            const bool locked = tile->blockSwapping();
+            Q_ASSERT(locked);
+            Q_UNUSED(locked);
+            fillers.append(tile);
+        }
+    }
+    void release()
+    {
+        for (auto *tile : std::as_const(fillers)) {
+            tile->unblockSwapping();
+            tile->deref();
+        }
+        fillers.clear();
+    }
+    void setBudgetMiB(qreal mib)
+    {
+        config.setMemoryHardLimitPercent(100.0 * mib / KisImageConfig::totalRAM());
+        KisTileDataStoreTestAccess::rereadConfig();
+    }
+private:
+    KisImageConfig config;
+    qreal hard, soft, pool;
+    int swap;
+    QVector<KisTileData *> fillers;
 };
 
 }
@@ -492,6 +550,103 @@ void KisTiledDataManagerTest::testPurgeHistory()
 
     dm.purgeHistory(memento3);
     dm.purgeHistory(memento4);
+}
+
+void KisTiledDataManagerTest::testDefaultBudgetFailure_data()
+{
+    QTest::addColumn<int>("bpp");
+    for (int bpp : {1, 4, 8, 16}) QTest::newRow(qPrintable(QString::number(bpp))) << bpp;
+}
+
+void KisTiledDataManagerTest::testDefaultBudgetFailure()
+{
+    QFETCH(int, bpp);
+    DefaultBudgetScope budget;
+    const QByteArray oldPixel(bpp, char(0x13)), newPixel(bpp, char(0x57));
+    const auto *oldBytes = reinterpret_cast<const quint8 *>(oldPixel.constData());
+    const auto *newBytes = reinterpret_cast<const quint8 *>(newPixel.constData());
+    KisTiledDataManager manager(bpp, oldBytes);
+    QVERIFY(manager.m_pageStoreBackend && manager.m_pageStoreBackend->isOperational());
+    auto agrees = [&](const QByteArray &expected) {
+        KisSurfaceEpochState state;
+        return QByteArray(reinterpret_cast<const char *>(manager.defaultPixel()), bpp) == expected
+            && manager.m_pageStoreBackend->store()->resolveSurfaceState(
+                manager.m_pageStoreBackend->surface(), {}, &state)
+            && state.format.defaultPixel == expected;
+    };
+    auto reads = [&](KisTiledDataManager &source, const QByteArray &expected) {
+        QByteArray result(bpp, char(0xff));
+        source.readBytes(reinterpret_cast<quint8 *>(result.data()), 4096, 4096, 1, 1);
+        return result == expected;
+    };
+    budget.saturate(bpp, oldBytes);
+    manager.setDefaultPixel(newBytes);
+    QVERIFY(agrees(oldPixel));
+    manager.setDefaultPixel(oldBytes); // no-op still works at the hard limit
+    QVERIFY(agrees(oldPixel));
+    {
+        KisTiledDataManager clone(manager); // reuse admitted default backing
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(clone.defaultPixel()), bpp), oldPixel);
+    }
+    budget.release();
+    QVERIFY(reads(manager, oldPixel));
+    auto memento = manager.getMemento();
+    QVERIFY(memento);
+    manager.setDefaultPixel(newBytes);
+    manager.commit();
+    QVERIFY(agrees(newPixel));
+    QVERIFY(reads(manager, newPixel));
+
+    budget.saturate(bpp, oldBytes);
+    manager.rollback(memento);
+    QVERIFY(agrees(newPixel)); // failed undo never moves canonical history
+    budget.release();
+    manager.rollback(memento);
+    QVERIFY(agrees(oldPixel));
+    QVERIFY(reads(manager, oldPixel));
+
+    budget.saturate(bpp, oldBytes);
+    manager.rollforward(memento);
+    QVERIFY(agrees(oldPixel));
+    budget.release();
+    manager.rollforward(memento);
+    QVERIFY(agrees(newPixel));
+    QVERIFY(reads(manager, newPixel));
+    manager.clear();
+    QVERIFY(reads(manager, newPixel));
+    KisTiledDataManager clone(manager);
+    QVERIFY(reads(clone, newPixel));
+}
+
+void KisTiledDataManagerTest::testConstructorBudgetFailure()
+{
+    DefaultBudgetScope budget;
+    const quint8 pixel[4] = {0x12, 0x34, 0x56, 0x78};
+    {
+        KisTiledDataManager existing(4, pixel);
+        budget.saturate(4, pixel);
+        const qint64 full = KisTileDataStore::instance()->memoryMetric();
+        for (int i = 0; i < 3; ++i) {
+            QVERIFY_EXCEPTION_THROWN(KisTiledDataManager(4, pixel), std::bad_alloc);
+            QCOMPARE(KisTileDataStore::instance()->memoryMetric(), full);
+        }
+        KisTiledDataManager clone(existing);
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(clone.defaultPixel()), 4),
+                 QByteArray(reinterpret_cast<const char *>(pixel), 4));
+        QCOMPARE(KisTileDataStore::instance()->memoryMetric(), full);
+        budget.release();
+        KisTiledDataManager retry(4, pixel);
+        KisTiledDataManager retryCopy(retry);
+        quint8 result[4]{};
+        retryCopy.readBytes(result, 0, 0, 1, 1);
+        QVERIFY(!std::memcmp(result, pixel, 4));
+    }
+    budget.setBudgetMiB(0);
+    QVERIFY_EXCEPTION_THROWN(KisTiledDataManager(4, pixel), std::bad_alloc);
+    budget.setBudgetMiB(1.1);
+    const QByteArray largePixel(512, char(0x42)); // a 2 MiB tile cannot fit
+    QVERIFY_EXCEPTION_THROWN(KisTiledDataManager(512,
+        reinterpret_cast<const quint8 *>(largePixel.constData())), std::bad_alloc);
 }
 
 void KisTiledDataManagerTest::testUndoSetDefaultPixel()

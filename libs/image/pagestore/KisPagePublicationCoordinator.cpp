@@ -16,11 +16,6 @@
 namespace
 {
 
-struct PreparedDescriptorChange {
-    KisPageVersion version;
-    KisPageAllocationDescriptor descriptor;
-};
-
 template<typename PreparedPublication>
 bool appendPublicationBackingChanges(
                                      const PreparedPublication &publication,
@@ -122,6 +117,7 @@ public:
     KisImageEpochReferenceModel::PreparedCommit epoch;
     KisImageEpochReferenceModel::PreparedRootReservation restoreEpoch;
     QVector<PreparedDescriptorChange> descriptorChanges;
+    DescriptorMap descriptorNodes;
     KisCompletionTicket completion;
     QVector<KisPageTransitionEffect> publicationRetirements;
     KisBackingClassChangeReservation backingReservation;
@@ -335,9 +331,7 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall()
                                                        &prepared.metadataCleanup)) {
             return false;
         }
-        for (const PreparedDescriptorChange &change : std::as_const(prepared.descriptorChanges)) {
-            coordinator.putDescriptorLocked(change.version, change.descriptor);
-        }
+        coordinator.installDescriptorAdditionsLocked(&prepared.descriptorNodes);
         coordinator.m_statistics.descriptorInstallations += quint64(prepared.descriptorChanges.size());
         return true;
     };
@@ -853,7 +847,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
             publicationTransitions.append(transition);
         }
         const qsizetype descriptorAdditions = descriptorChanges.size();
-        reserveDescriptorAdditionsLocked(descriptorAdditions);
+        auto descriptorNodes = prepareDescriptorAdditionsLocked(descriptorChanges);
         const quint64 descriptorRevision = m_descriptorRevision;
         ownerLock.unlock();
         const quint64 publicationTransitionCount = quint64(publicationTransitions.size());
@@ -920,6 +914,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         preparedCommit.data->epoch = std::move(rootCandidate);
         preparedCommit.data->backingReservation = std::move(backingReservation);
         preparedCommit.data->descriptorChanges = std::move(descriptorChanges);
+        preparedCommit.data->descriptorNodes = std::move(descriptorNodes);
         preparedCommit.data->completion = commitCompletion;
         ++m_statistics.preparedMutationCommits;
         Q_ASSERT(preparedCommit.isValid());
@@ -1088,7 +1083,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         }
 
         const qsizetype descriptorAdditions = restoredDefaultVersions.size();
-        reserveDescriptorAdditionsLocked(descriptorAdditions);
+        auto descriptorNodes = prepareDescriptorAdditionsLocked(restoredDefaultVersions);
         const quint64 descriptorRevision = m_descriptorRevision;
 
         ownerLock.unlock();
@@ -1144,6 +1139,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         preparedCommit.data->restoreEpoch = std::move(rootCandidate);
         preparedCommit.data->backingReservation = std::move(backingReservation);
         preparedCommit.data->descriptorChanges = std::move(restoredDefaultVersions);
+        preparedCommit.data->descriptorNodes = std::move(descriptorNodes);
         preparedCommit.data->completion = completion;
         ++m_statistics.preparedMutationCommits;
         Q_ASSERT(preparedCommit.isValid());
@@ -1398,37 +1394,61 @@ void KisPagePublicationCoordinator::putDescriptorLocked(const KisPageVersion &ve
 {
     auto found = m_descriptors.find(version);
     if (found == m_descriptors.end()) {
-        m_descriptors.insert(version, descriptor);
+        m_descriptors.emplace(version, descriptor);
         ++m_descriptorRevision;
-    } else if (!(found.value() == descriptor)) {
-        found.value() = descriptor;
+    } else if (!(found->second == descriptor)) {
+        found->second = descriptor;
         ++m_descriptorRevision;
     }
 }
 
 void KisPagePublicationCoordinator::removeDescriptorLocked(const KisPageVersion &version)
 {
-    if (m_descriptors.remove(version) != 0)
+    if (m_descriptors.erase(version) != 0)
         ++m_descriptorRevision;
 }
 
 bool KisPagePublicationCoordinator::descriptorLocked(const KisPageVersion &version,
                                                      KisPageAllocationDescriptor *descriptor) const
 {
-    const auto found = m_descriptors.constFind(version);
-    if (found == m_descriptors.constEnd())
+    const auto found = m_descriptors.find(version);
+    if (found == m_descriptors.end())
         return false;
     if (descriptor)
-        *descriptor = found.value();
+        *descriptor = found->second;
     return true;
 }
 
-void KisPagePublicationCoordinator::reserveDescriptorAdditionsLocked(qsizetype additions)
+KisPagePublicationCoordinator::DescriptorMap
+KisPagePublicationCoordinator::prepareDescriptorAdditionsLocked(const QVector<PreparedDescriptorChange> &changes)
 {
-    if (additions <= 0)
-        return;
-    m_descriptors.reserve(m_descriptors.size() + additions);
+    DescriptorMap nodes;
+    if (changes.isEmpty()) return nodes;
+    for (const auto &change : changes) nodes.emplace(change.version, change.descriptor);
+    const size_t required = m_descriptors.size() + nodes.size();
+    // Never shrink a bucket reservation made for an overlapping candidate.
+    // Descriptor revision revalidation covers intervening semantic edits.
+    if (required > m_descriptors.bucket_count() * m_descriptors.max_load_factor())
+        m_descriptors.reserve(required);
     ++m_statistics.descriptorCapacityPreparations;
+    return nodes;
+}
+
+void KisPagePublicationCoordinator::installDescriptorAdditionsLocked(DescriptorMap *prepared)
+{
+    for (auto it = prepared->begin(); it != prepared->end();) {
+        auto current = it++;
+        auto found = m_descriptors.find(current->first);
+        if (found == m_descriptors.end()) {
+            // Node and buckets already exist. C++17 node transfer allocates
+            // neither; no candidate value is destroyed during installation.
+            m_descriptors.insert(prepared->extract(current));
+            ++m_descriptorRevision;
+        } else if (!(found->second == current->second)) {
+            std::swap(found->second, current->second);
+            ++m_descriptorRevision;
+        }
+    }
 }
 
 KisPageStorePublicationStatistics KisPagePublicationCoordinator::statisticsLocked() const

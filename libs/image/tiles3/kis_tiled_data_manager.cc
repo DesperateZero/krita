@@ -11,6 +11,7 @@
 #include <QVector>
 
 #include <utility>
+#include <new>
 
 #include "kis_tile.h"
 #include "kis_tiled_data_manager.h"
@@ -28,6 +29,19 @@
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
 
 namespace {
+
+struct DefaultTileDataDeleter
+{
+    void operator()(KisTileData *tile) const { tile->deref(); }
+};
+using PreparedDefaultTile = std::unique_ptr<KisTileData, DefaultTileDataDeleter>;
+
+PreparedDefaultTile prepareDefaultTile(qint32 pixelSize, const quint8 *pixel)
+{
+    auto *tile = KisTileDataStore::instance()->createDefaultTileData(pixelSize, pixel);
+    if (tile) tile->ref();
+    return PreparedDefaultTile(tile);
+}
 
 class ScopedPageStoreWriteBatch
 {
@@ -77,61 +91,60 @@ private:
 KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
                                          const quint8 *defaultPixel)
 {
-    m_pageStoreBackend = nullptr;
-    /* See comment in destructor for details */
-    m_mementoManager = new KisMementoManager();
-    m_hashTable = new KisTileHashTable(m_mementoManager);
+    // Budget rejection has the same construction contract as allocation
+    // failure: no partially initialized manager may escape to a caller.
+    auto defaultTile = prepareDefaultTile(pixelSize, defaultPixel);
+    if (!defaultTile) throw std::bad_alloc();
 
-    m_pixelSize = pixelSize;
-    m_defaultPixel = new quint8[m_pixelSize];
-    setDefaultPixel(defaultPixel);
+    // Destruction order matters: the table calls back into the memento owner.
+    auto mementoManager = std::make_unique<KisMementoManager>();
+    auto hashTable = std::make_unique<KisTileHashTable>(mementoManager.get());
+    auto pixel = std::make_unique<quint8[]>(pixelSize);
+    memcpy(pixel.get(), defaultPixel, pixelSize);
+    hashTable->setDefaultTileData(defaultTile.get());
+    mementoManager->setDefaultTileData(defaultTile.get());
 
-    m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
+    auto backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
     QString pageStoreError;
-    if (!m_pageStoreBackend->configure(pixelSize, defaultPixel,
-                                       &pageStoreError)) {
-        delete m_pageStoreBackend;
-        m_pageStoreBackend = nullptr;
+    if (!backend->configure(pixelSize, defaultPixel, &pageStoreError)) {
+        backend.reset();
     }
-    m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
+    mementoManager->setPageStoreBridge(backend.get());
+    m_pixelSize = pixelSize;
+    m_defaultPixel = pixel.release();
+    m_pageStoreBackend = backend.release();
+    m_hashTable = hashTable.release();
+    m_mementoManager = mementoManager.release();
 }
 
 KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
     : KisShared()
 {
-    /* See comment in destructor for details */
+    QReadLocker locker(&dm.m_lock);
+    // Cloning shares the admitted default backing; it needs no new payload.
+    PreparedDefaultTile defaultTile(dm.m_hashTable->refAndFetchDefaultTileData());
+    auto mementoManager = std::make_unique<KisMementoManager>();
+    mementoManager->setDefaultTileData(defaultTile.get());
+    auto hashTable = std::make_unique<KisTileHashTable>(*dm.m_hashTable, mementoManager.get());
+    auto pixel = std::make_unique<quint8[]>(dm.m_pixelSize);
+    memcpy(pixel.get(), dm.m_defaultPixel, dm.m_pixelSize);
 
-    /* We do not clone the history of the device, there is no usecase for it */
-    m_mementoManager = new KisMementoManager();
-
-    KisTileData *defaultTileData = dm.m_hashTable->refAndFetchDefaultTileData();
-    m_mementoManager->setDefaultTileData(defaultTileData);
-    defaultTileData->deref();
-
-    m_hashTable = new KisTileHashTable(*dm.m_hashTable, m_mementoManager);
-
-    m_pixelSize = dm.m_pixelSize;
-    m_defaultPixel = new quint8[m_pixelSize];
-    /**
-     * We won't call setDefaultTileData here, as defaultTileDatas
-     * has already been made shared in m_hashTable(dm->m_hashTable)
-    */
-    memcpy(m_defaultPixel, dm.m_defaultPixel, m_pixelSize);
-    m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
+    auto backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
     QString pageStoreError;
     if (!dm.m_pageStoreBackend ||
         !dm.m_pageStoreBackend->isOperational() ||
-        !m_pageStoreBackend->configureClone(
-            *dm.m_pageStoreBackend, &pageStoreError)) {
-        delete m_pageStoreBackend;
-        m_pageStoreBackend = new KisTiledDataManagerPageStoreBackend;
-        if (!m_pageStoreBackend->configure(m_pixelSize, m_defaultPixel,
-                                           &pageStoreError)) {
-            delete m_pageStoreBackend;
-            m_pageStoreBackend = nullptr;
+        !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)) {
+        backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
+        if (!backend->configure(dm.m_pixelSize, pixel.get(), &pageStoreError)) {
+            backend.reset();
         }
     }
-    m_mementoManager->setPageStoreBridge(m_pageStoreBackend);
+    mementoManager->setPageStoreBridge(backend.get());
+    m_pixelSize = dm.m_pixelSize;
+    m_defaultPixel = pixel.release();
+    m_pageStoreBackend = backend.release();
+    m_hashTable = hashTable.release();
+    m_mementoManager = mementoManager.release();
     recalculateExtent();
 }
 
@@ -237,48 +250,37 @@ void KisTiledDataManager::commit()
 
 void KisTiledDataManager::rollback(KisMementoSP memento)
 {
-    commit();
-    QWriteLocker locker(&m_lock);
-    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        if (m_pageStoreBackend->rollback(memento)) {
-            if (memento->oldDefaultPixel() &&
-                std::memcmp(m_defaultPixel, memento->oldDefaultPixel(),
-                            m_pixelSize)) {
-                setDefaultPixelImpl(memento->oldDefaultPixel());
-            }
-            rebuildPageStoreIndex();
-        }
-        return;
-    }
-    m_mementoManager->rollback(m_hashTable, memento);
-    const quint8 *defaultPixel = memento->oldDefaultPixel();
-    if (std::memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
-        setDefaultPixelImpl(defaultPixel);
-    }
-    recalculateExtent();
+    restoreHistory(memento, true);
 }
 
 void KisTiledDataManager::rollforward(KisMementoSP memento)
 {
+    restoreHistory(memento, false);
+}
+
+void KisTiledDataManager::restoreHistory(KisMementoSP memento, bool before)
+{
+    if (!memento) return;
     commit();
     QWriteLocker locker(&m_lock);
+    const quint8 *pixel = before ? memento->oldDefaultPixel() : memento->newDefaultPixel();
+    const bool defaultChanged = pixel && std::memcmp(m_defaultPixel, pixel, m_pixelSize);
+    auto defaultTile = defaultChanged ? prepareDefaultTile(m_pixelSize, pixel) : PreparedDefaultTile{};
+    // Prepare every fallible default resource before moving either history.
+    if (defaultChanged && !defaultTile) return;
+
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        if (m_pageStoreBackend->rollforward(memento)) {
-            if (memento->newDefaultPixel() &&
-                std::memcmp(m_defaultPixel, memento->newDefaultPixel(),
-                            m_pixelSize)) {
-                setDefaultPixelImpl(memento->newDefaultPixel());
-            }
-            rebuildPageStoreIndex();
-        }
-        return;
+        const bool restored = before ? m_pageStoreBackend->rollback(memento)
+                                     : m_pageStoreBackend->rollforward(memento);
+        if (!restored) return;
+        if (defaultChanged) installDefaultPixel(pixel, defaultTile.get());
+        rebuildPageStoreIndex();
+    } else {
+        if (before) m_mementoManager->rollback(m_hashTable, memento);
+        else m_mementoManager->rollforward(m_hashTable, memento);
+        if (defaultChanged) installDefaultPixel(pixel, defaultTile.get());
+        recalculateExtent();
     }
-    m_mementoManager->rollforward(m_hashTable, memento);
-    const quint8 *defaultPixel = memento->newDefaultPixel();
-    if (std::memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) {
-        setDefaultPixelImpl(defaultPixel);
-    }
-    recalculateExtent();
 }
 
 bool KisTiledDataManager::hasCurrentMemento() const
@@ -302,22 +304,21 @@ void KisTiledDataManager::purgeHistory(KisMementoSP oldestMemento)
 void KisTiledDataManager::setDefaultPixel(const quint8 *defaultPixel)
 {
     QWriteLocker locker(&m_lock);
+    if (!std::memcmp(m_defaultPixel, defaultPixel, m_pixelSize)) return;
+    auto defaultTile = prepareDefaultTile(m_pixelSize, defaultPixel);
+    if (!defaultTile) return;
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        const QByteArray pixel(reinterpret_cast<const char *>(defaultPixel),
-                               m_pixelSize);
+        const QByteArray pixel(reinterpret_cast<const char *>(defaultPixel), m_pixelSize);
         if (!m_pageStoreBackend->setDefaultPixel(pixel)) return;
     }
-    setDefaultPixelImpl(defaultPixel);
+    installDefaultPixel(defaultPixel, defaultTile.get());
 }
 
-void KisTiledDataManager::setDefaultPixelImpl(const quint8 *defaultPixel)
+void KisTiledDataManager::installDefaultPixel(const quint8 *defaultPixel, KisTileData *tile)
 {
-    KisTileData *td = KisTileDataStore::instance()->createDefaultTileData(pixelSize(), defaultPixel);
-    if (!td)
-        return;
-    m_hashTable->setDefaultTileData(td);
-    m_mementoManager->setDefaultTileData(td);
-
+    Q_ASSERT(tile);
+    m_hashTable->setDefaultTileData(tile);
+    m_mementoManager->setDefaultTileData(tile);
     memcpy(m_defaultPixel, defaultPixel, pixelSize());
 }
 

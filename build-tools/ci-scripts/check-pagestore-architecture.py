@@ -1286,8 +1286,16 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         ):
             if contract not in index_text:
                 errors.append(f"R2/M3 shard slot index contract is missing: {contract}")
-        if re.search(r"\bm_entries\s*\.\s*insert\s*\(", index_text) is None:
-            errors.append("R2/M3 slot index has no private reserved insertion")
+        for contract in (
+            "std::unique_ptr<Entry[]> m_entries",
+            "std::make_unique<Entry[]>",
+            "m_entries[bucket] = Entry{key, slot}",
+            "bytesPerCapacitySlot",
+        ):
+            if contract not in index_text:
+                errors.append(f"R2/M4 preconstructed slot index contract is missing: {contract}")
+        if re.search(r"QHash\s*<", index_text):
+            errors.append("R2/M4 slot index restored lazy QHash node allocation")
     if metadata_source.is_file():
         metadata_raw = metadata_source.read_text(
             encoding="utf-8", errors="replace"

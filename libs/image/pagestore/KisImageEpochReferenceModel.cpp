@@ -346,6 +346,14 @@ KisPageTreeReclamationStatistics kisPageTreeReclamationStatistics()
 
 bool KisImageEpochRootSnapshot::isValid() const
 {
+    // Fields are private and immutable after the model validates construction.
+    // Rebuilding a temporary surface set here made every prepared install
+    // allocate again, even though no root field could have changed.
+    return m_validated;
+}
+
+bool KisImageEpochRootSnapshot::validate() const
+{
     if (!m_epoch.isValid() || m_commitSequence == 0 || m_graphRevision == 0 || m_defaultPixelRevision == 0
         || m_extentRevision == 0 || m_propertyRevision == 0) {
         return false;
@@ -635,6 +643,7 @@ bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initia
         }
     }
     root.m_pageRoot = buildPageRoot(manifest, 0, manifest.size());
+    root.m_validated = root.validate();
     if (!root.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("initial image epoch root is invalid"));
         return false;
@@ -918,6 +927,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
         root.m_defaultPixelRevision = qMax(root.m_defaultPixelRevision, change.after.defaultPixelRevision);
         root.m_extentRevision = qMax(root.m_extentRevision, change.after.extentRevision);
     }
+    root.m_validated = root.validate();
     if (!root.isValid()) {
         result.error = QStringLiteral("committed image epoch root failed validation");
         return {};
@@ -1032,6 +1042,7 @@ KisImageEpochReferenceModel::prepareRestore(const KisRetainedImageEpochSnapshot 
     // model. Undo/redo publishes a new epoch identity over the same root
     // instead of exporting, sorting, and rebuilding an O(N) manifest.
     restored.m_pageRoot = rootIt->root.m_pageRoot;
+    restored.m_validated = restored.validate();
     if (!restored.isValid()) {
         result.error = QStringLiteral("restored image epoch root failed validation");
         return {};

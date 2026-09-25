@@ -5,20 +5,20 @@ bindings, source identity and the indexed call graph. It does not grant
 behavioral correctness, handoff, zero-copy, allocation-free installation,
 bounded-memory, or deletion eligibility by itself.
 
-The 2026-09-25 baseline review of production revision `095193d11a` reopens M5
-readiness: a full resident budget can split canonical and compatibility default
-pixels or leave a newly constructed manager invalid; reserved QHash insertion
-can still allocate node storage. In the integrated workspace, current findings
-are in design 90 and the conditional M5 repair → M6 → M7 → M8 → BR1-PERF sequence
-is in design 91. Designs 68/69/86 retain their contracts. Historical milestone
-labels are not readiness decisions.
+The current implementation prepares default compatibility backing before canonical
+updates/restores, rejects unconstructible managers with `std::bad_alloc`, prepares
+flat shard-index buckets and descriptor nodes before installation, and validates
+immutable roots once during construction. These repair the M5 baseline review's
+budget-failure and install-allocation counterexamples. Reproducible behavioral
+and allocator evidence, the qualified source identity, and the sole active
+M6 → M7 → M8 → BR1-PERF plan are maintained in workspace design 92. Designs
+47–91 are historical inputs, not competing current milestones or API templates.
 
-The current graph has 1,461 indexed APIs and 13,725 reverse-call edges, with 21
+The current graph has 1,467 indexed APIs and 13,730 reverse-call edges, with 21
 manifest entries, 21 ownership facts, 16 census groups and 19 external intrusion
-files. Reachability review has 1,003 production-boundary, 282 indirect, 133
-test-only and 43 unreached candidates. Candidate classes are not a dead-code
-deletion list. The separate behavioral/allocator evidence remains necessary
-even when this gate passes.
+files. Candidate classifications are review inputs, not deletion permission.
+The source gate cannot replace behavior, actual allocator interposition,
+resource-pressure tests or performance qualification.
 
 - `intrusion-manifest.json` records the current compatibility, duplicate, and
   misplaced ownership surface.  Active entries must name symbols that still
@@ -90,44 +90,8 @@ Store classification and compatibility group lifetime are separate facts.
 The fail-closed Vulkan provider is still deferred to BR3. Do not recreate an
 old split or compatibility protocol to match these historical descriptions.
 
-The following paragraphs preserve the scope of earlier structural milestones.
-Their next-step/completion wording is historical. In particular M4's install
-allocation guarantee has been reopened by the current review, and M5 has not
-been accepted as the M6 entry baseline.
-
-R1 has completed all five ordered extractions. `KisPageDefaultStorage` owns
-the immutable default-read cache and bounded materialization admission;
-`KisPageRetirementQueue` owns completion-qualified detached retirement debt;
-`KisPageHistoryCollector` owns bounded retained-root reachability scans;
-`KisPageReadCoordinator` owns read requests, leases and last-use accounting;
-and `KisPagePublicationCoordinator` owns staged publication state and the
-commit/restore/abort algorithm. All are final, non-`QObject`, by-value
-services. The manifest restructuring status is `r1-complete`.
-
-R2/M1 is also complete. `KisVersionRecord`, `KisReplicaRecord` and
-`KisMetadataOverflowNode` are the compact authoritative schema, use typed
-8-byte generational ids, and satisfy their 128/128/64-byte layout ceilings.
-The coordinator stores these records and reconstructs public/reference
-snapshots at the boundary; `applyOwnerSequence()` continues to project only
-touched records.
-
-R2/M2 has moved authoritative version, replica and overflow records into the
-three shard-owned typed arenas. Stable addresses, slot/block generation,
-quarantine, hard budgets, intrusive empty-block return and complete footprint
-counters are active. The transitional `VersionRecordNode` owner is gone.
-M2B computes slot demand under the shard lock, allocates `PreparedBlock`
-candidates after unlocking, then revalidates page revision before lock-local
-attach. Publication candidates aggregate block growth once per shard, and the
-K1/K16/H metadata-only fixture reports logical bytes, arena bytes, slack and
-candidate/attach counts.
-
-R2/M3 replaces the page-local exact/physical/history/prepared/mutable
-`list/map/hash/set` indexes and the `shared_ptr<VersionRecords>` owner with two
-shard-global `KisShardSlotIndex` values plus intrusive version, history and
-mutable chains. Insertions use explicit capacity tokens; the physical index
-resolves a replica slot back to its owning version, and revision-qualified
-history cursors retain ordered continuation semantics. The public snapshot
-header is no longer stored: `MetadataPage` is a 96-byte compact directory
-record and active writer/handoff/materialization/claim state lives in a sparse
-shard-owned compact activity table whose identities are typed arena slots.
-M3 is closed; M4 prepared-commit and backing handoff remain unauthorized.
+M6–M8 extend the existing owners and shared protocols. Historical sketches do
+not authorize recreating deleted placeholder APIs. Source inventory, call graph,
+ownership, runtime census and lifecycle/failure evidence must agree before a
+compatibility implementation is removed. Same-source correctness and bounded
+resource behavior must accompany every new handoff qualification.

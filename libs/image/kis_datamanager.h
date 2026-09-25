@@ -39,6 +39,9 @@ public:
      * Create a new datamanager where every pixel will take pixelSize bytes and will be initialized
      * by default with defPixel. The value of defPixel is copied, the caller still owns the pointer.
      *
+     * Throws std::bad_alloc if the default backing cannot be admitted within the
+     * process resident budget, just as for an allocation failure.
+     *
      * Note that if pixelSize > size of the defPixel array, we will happily read beyond the
      * defPixel array.
      */

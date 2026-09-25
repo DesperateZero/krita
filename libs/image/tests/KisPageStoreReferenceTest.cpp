@@ -19,6 +19,7 @@
 #include <ctime>
 #include <functional>
 #include <memory>
+#include <random>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -54,6 +55,12 @@
 
 namespace
 {
+
+struct CollidingIndexKey {
+    quint64 value = 0;
+    friend bool operator==(CollidingIndexKey a, CollidingIndexKey b) { return a.value == b.value; }
+    friend size_t qHash(CollidingIndexKey, size_t) { return 127; }
+};
 
 template<typename Callback>
 bool invokeEpochCallback(void *context, KisImageEpochId epoch)
@@ -928,6 +935,7 @@ private Q_SLOTS:
     void metadataArenaGrowthCausalBaseline();
     void metadataSlotArenaGenerationAndRelease();
     void metadataShardSlotIndexReservations();
+    void metadataShardSlotIndexGrowthAndErasure();
     void metadataOwningCapacityIsBudgeted();
     void metadataShardIndexesEnforcePhysicalOwnership();
     void indexedHistoricalDiscard_data()
@@ -2955,6 +2963,63 @@ void KisPageStoreReferenceTest::metadataShardSlotIndexReservations()
     QCOMPARE(stats.outstandingReservations, quint64(0));
     QCOMPARE(stats.highWaterEntries, quint64(2));
     QCOMPARE(stats.reservationBatches, quint64(2));
+}
+
+void KisPageStoreReferenceTest::metadataShardSlotIndexGrowthAndErasure()
+{
+    // Identical hashes force a cluster across the end of the initial array.
+    // Compare every operation with an independent reference, including erasure
+    // from the start/middle and growth while another token is outstanding.
+    const auto exercise = [](auto sampleKey) {
+        using Key = decltype(sampleKey);
+        KisShardSlotIndex<Key, KisVersionSlotId> index;
+        QHash<quint64, KisVersionSlotId> expected;
+        std::mt19937 random(12345);
+        QVERIFY(!index.prepareCapacity(0));
+        QVERIFY(!index.prepareCapacity(std::numeric_limits<qsizetype>::max()));
+        QVERIFY(!index.reserveInsertions(1).isValid());
+        for (int round = 0; round < 160; ++round) {
+            QVERIFY(index.prepareCapacity(index.requiredCapacity(32)));
+            auto held = index.reserveInsertions(16);
+            auto active = index.reserveInsertions(16);
+            QVERIFY(held.isValid() && active.isValid());
+            // Growing for another candidate must preserve both tokens.
+            QVERIFY(index.prepareCapacity(index.requiredCapacity(32)));
+            for (int operation = 0; operation < 16; ++operation) {
+                const quint64 key = random() % 1024;
+                const Key typedKey{key};
+                const KisVersionSlotId slot{quint32(key + 1), quint32(round + 1)};
+                if (random() % 3 == 0) {
+                    QCOMPARE(index.eraseExact(typedKey), bool(expected.remove(key)));
+                } else {
+                    const bool absent = !expected.contains(key);
+                    QCOMPARE(index.insertReserved(&active, typedKey, slot), absent);
+                    if (absent) expected.insert(key, slot);
+                }
+            }
+            index.cancelReservation(&held);
+            index.cancelReservation(&active);
+            QCOMPARE(index.statistics().outstandingReservations, quint64(0));
+            QCOMPARE(index.size(), expected.size());
+            for (quint64 key = 0; key < 1024; ++key) {
+                KisVersionSlotId actual;
+                QCOMPARE(index.findExact(Key{key}, &actual), expected.contains(key));
+                if (expected.contains(key)) QCOMPARE(actual, expected.value(key));
+            }
+        }
+        const auto capacity = index.statistics().capacity;
+        for (auto it = expected.cbegin(); it != expected.cend(); ++it) {
+            QVERIFY(!index.eraseExact(Key{it.key()}, {0xffffffff, 1}));
+            QVERIFY(index.eraseExact(Key{it.key()}, it.value()));
+        }
+        QCOMPARE(index.size(), qsizetype(0));
+        QCOMPARE(index.statistics().capacity, capacity);
+        auto final = index.reserveInsertions(qsizetype(capacity));
+        QVERIFY(final.isValid());
+        index.cancelReservation(&final);
+    };
+    exercise(quint64{});
+    exercise(CollidingIndexKey{});
 }
 
 void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()

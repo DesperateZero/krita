@@ -21,6 +21,7 @@
 #include <QVector>
 
 #include <memory>
+#include <unordered_map>
 
 struct KisPagePublicationCoordinatorSnapshot {
     qsizetype preparedProofs = 0;
@@ -39,6 +40,15 @@ struct KisPagePublicationCoordinatorSnapshot {
  */
 class KisPagePublicationCoordinator final
 {
+    struct DescriptorHash {
+        size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version, seed); }
+        size_t seed = QHashSeed::globalSeed();
+    };
+    using DescriptorMap = std::unordered_map<KisPageVersion, KisPageAllocationDescriptor, DescriptorHash>;
+    struct PreparedDescriptorChange {
+        KisPageVersion version;
+        KisPageAllocationDescriptor descriptor;
+    };
 public:
     struct OverlayChange {
         KisPageKey key;
@@ -156,7 +166,8 @@ public:
     void putDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
     bool descriptorLocked(const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
-    void reserveDescriptorAdditionsLocked(qsizetype additions);
+    DescriptorMap prepareDescriptorAdditionsLocked(const QVector<PreparedDescriptorChange> &changes);
+    void installDescriptorAdditionsLocked(DescriptorMap *prepared);
 
     KisPageStorePublicationStatistics statisticsLocked() const;
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
@@ -218,7 +229,7 @@ private:
     QSet<quint64> m_preparingCommits;
     QHash<quint64, PreparedTransactionState> m_preparedTransactions;
     QHash<quint64, quint64> m_defaultRevisionHighWater;
-    QHash<KisPageVersion, KisPageAllocationDescriptor> m_descriptors;
+    DescriptorMap m_descriptors;
     quint64 m_descriptorRevision = 1;
     KisPageStorePublicationStatistics m_statistics;
     quint64 m_committedTransactions = 0;

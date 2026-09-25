@@ -88,6 +88,7 @@ private:
 protected:
     /*FIXME:*/
 public:
+    // Throws std::bad_alloc if the default backing cannot be admitted.
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel);
     virtual ~KisTiledDataManager();
     KisTiledDataManager(const KisTiledDataManager &dm);
@@ -339,7 +340,8 @@ private:
     }
 
 private:
-    void setDefaultPixelImpl(const quint8 *defPixel);
+    void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
+    void restoreHistory(KisMementoSP memento, bool before);
     void rebuildPageStoreIndex();
     void attachPageStoreTile(KisTileSP &tile, bool oldData, bool nativeReady);
     void refreshPageStoreIndex(const QRect &rect);

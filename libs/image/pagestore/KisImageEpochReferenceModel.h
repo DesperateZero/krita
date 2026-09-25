@@ -59,6 +59,9 @@ public:
                                  QRect *extent) const;
 
 private:
+    bool validate() const;
+    // Issued only after complete construction-time validation by the model.
+    bool m_validated = false;
     KisImageEpochId m_epoch;
     KisImageEpochId m_previousEpoch;
     quint64 m_commitSequence = 0;

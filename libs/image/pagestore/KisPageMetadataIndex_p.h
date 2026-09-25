@@ -7,30 +7,42 @@
 #ifndef KIS_PAGE_METADATA_INDEX_P_H
 #define KIS_PAGE_METADATA_INDEX_P_H
 
-#include <QHash>
+#include <QHashFunctions>
 
 #include <algorithm>
 #include <limits>
 #include <new>
+#include <memory>
+#include <type_traits>
 
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageMetadataReservation_p.h"
 
 /**
- * Shard-local slot index with an explicit insertion-capacity capability.
+ * Shard-local flat slot index. The owner supplies synchronization.
  *
- * The owner supplies synchronization. reserveInsertions() grows the wrapped
- * QHash before authoritative records are edited and accounts capacity against
- * all outstanding tokens. insertReserved() is the only insertion API; this
- * prevents an install path from silently bypassing the reservation protocol.
+ * prepareCapacity() constructs every bucket before any authoritative edit.
+ * Tokens cover concurrent candidates at a maximum 1/2 load. Installation and
+ * backward-shift erasure only copy trivial identities into existing buckets;
+ * neither allocates, rehashes nor leaves tombstones for later insertions.
  */
 template<class Key, class SlotId>
 class KisShardSlotIndex
 {
+    struct Entry {
+        Key key{};
+        SlotId slot{}; // invalid denotes an empty bucket
+    };
+    static_assert(std::is_trivially_copyable_v<Entry>);
+    static_assert(std::is_nothrow_default_constructible_v<Entry>);
+
 public:
     using Reservation = KisPageMetadataReservation<KisShardSlotIndex>;
-
     using Statistics = KisPageMetadataIndexStatistics;
+
+    // Two buckets per admitted entry plus one for the old array during a
+    // doubling prepare. This bounds both retained storage and growth overlap.
+    static constexpr quint64 bytesPerCapacitySlot() { return 3 * sizeof(Entry); }
 
     KisShardSlotIndex() = default;
     KisShardSlotIndex(const KisShardSlotIndex &) = delete;
@@ -39,24 +51,44 @@ public:
     qsizetype requiredCapacity(qsizetype count) const
     {
         const qsizetype maximum = std::numeric_limits<qsizetype>::max();
-        if (count <= 0 || m_outstandingReservations > maximum - m_entries.size()
-            || count > maximum - m_entries.size() - m_outstandingReservations) {
+        if (count <= 0 || m_outstandingReservations > maximum - m_size
+            || count > maximum - m_size - m_outstandingReservations) {
             return 0;
         }
-        return m_entries.size() + m_outstandingReservations + count;
+        return m_size + m_outstandingReservations + count;
     }
 
     bool prepareCapacity(qsizetype required)
     {
         if (required <= 0)
             return false;
+        if (required <= m_capacity) return true;
+        qsizetype capacity = 64;
+        const qsizetype maximum = std::numeric_limits<qsizetype>::max() / 2 / sizeof(Entry);
+        while (capacity <= required) {
+            if (capacity > maximum / 2) {
+                ++m_rejectedReservations;
+                return false;
+            }
+            capacity *= 2;
+        }
+        std::unique_ptr<Entry[]> entries;
         try {
-            m_entries.reserve(required);
+            entries = std::make_unique<Entry[]>(size_t(2 * capacity));
         } catch (const std::bad_alloc &) {
             ++m_rejectedReservations;
             return false;
         }
-        return m_entries.capacity() >= required;
+        const size_t mask = size_t(2 * capacity - 1);
+        for (qsizetype i = 0; i < 2 * m_capacity; ++i) {
+            if (!m_entries[i].slot.isValid()) continue;
+            size_t bucket = hash(m_entries[i].key) & mask;
+            while (entries[bucket].slot.isValid()) bucket = (bucket + 1) & mask;
+            entries[bucket] = m_entries[i];
+        }
+        m_entries.swap(entries);
+        m_capacity = capacity;
+        return true;
     }
 
     Reservation reserveInsertions(qsizetype count)
@@ -68,8 +100,8 @@ public:
             return {};
         }
         // Owning capacity is prepared and budgeted by MetadataShard before a
-        // reservation token can exist. Insertion must not grow this QHash.
-        if (m_entries.capacity() < required) {
+        // reservation token can exist. Installation only consumes constructed buckets.
+        if (m_capacity < required) {
             ++m_rejectedReservations;
             return {};
         }
@@ -80,17 +112,18 @@ public:
 
     bool insertReserved(Reservation *reservation, const Key &key, SlotId slot)
     {
-        if (!reservation || reservation->m_owner != this || reservation->m_remaining <= 0 || !slot.isValid()
-            || m_entries.contains(key)) {
+        if (!reservation || reservation->m_owner != this || reservation->m_remaining <= 0 || !slot.isValid())
             return false;
-        }
-        m_entries.insert(key, slot);
+        const size_t bucket = findBucket(key);
+        if (m_entries[bucket].slot.isValid()) return false;
+        m_entries[bucket] = Entry{key, slot};
+        ++m_size;
         --reservation->m_remaining;
         --m_outstandingReservations;
         if (reservation->m_remaining == 0) {
             reservation->m_owner = nullptr;
         }
-        m_highWaterEntries = std::max(m_highWaterEntries, quint64(m_entries.size()));
+        m_highWaterEntries = std::max(m_highWaterEntries, quint64(m_size));
         return true;
     }
 
@@ -106,33 +139,43 @@ public:
 
     bool findExact(const Key &key, SlotId *slot = nullptr) const
     {
-        const auto found = m_entries.constFind(key);
-        if (found == m_entries.cend())
-            return false;
-        if (slot)
-            *slot = found.value();
+        if (!m_size) return false;
+        const Entry &entry = m_entries[findBucket(key)];
+        if (!entry.slot.isValid()) return false;
+        if (slot) *slot = entry.slot;
         return true;
     }
 
     bool eraseExact(const Key &key, SlotId expected = {})
     {
-        const auto found = m_entries.find(key);
-        if (found == m_entries.end() || (expected.isValid() && !(found.value() == expected))) {
-            return false;
+        if (!m_size) return false;
+        size_t hole = findBucket(key);
+        if (!m_entries[hole].slot.isValid()
+            || (expected.isValid() && !(m_entries[hole].slot == expected))) return false;
+        const size_t mask = size_t(2 * m_capacity - 1);
+        // Move a displaced entry back only if its probe crosses the hole.
+        // Modular distances handle clusters wrapping around the array end.
+        for (size_t next = (hole + 1) & mask; m_entries[next].slot.isValid(); next = (next + 1) & mask) {
+            const size_t home = hash(m_entries[next].key) & mask;
+            if (((next - home) & mask) >= ((hole - home) & mask)) {
+                m_entries[hole] = m_entries[next];
+                hole = next;
+            }
         }
-        m_entries.erase(found);
+        m_entries[hole] = {};
+        --m_size;
         return true;
     }
 
     qsizetype size() const
     {
-        return m_entries.size();
+        return m_size;
     }
 
     Statistics statistics() const
     {
-        return {quint64(m_entries.size()),
-                quint64(m_entries.capacity()),
+        return {quint64(m_size),
+                quint64(m_capacity),
                 quint64(m_outstandingReservations),
                 m_highWaterEntries,
                 m_reservationBatches,
@@ -140,7 +183,25 @@ public:
     }
 
 private:
-    QHash<Key, SlotId> m_entries;
+    size_t hash(const Key &key) const
+    {
+        using ::qHash;
+        return qHash(key, m_seed);
+    }
+
+    size_t findBucket(const Key &key) const
+    {
+        const size_t mask = size_t(2 * m_capacity - 1);
+        size_t bucket = hash(key) & mask;
+        while (m_entries[bucket].slot.isValid() && !(m_entries[bucket].key == key))
+            bucket = (bucket + 1) & mask;
+        return bucket;
+    }
+
+    std::unique_ptr<Entry[]> m_entries;
+    const size_t m_seed = QHashSeed::globalSeed();
+    qsizetype m_capacity = 0;
+    qsizetype m_size = 0;
     qsizetype m_outstandingReservations = 0;
     quint64 m_highWaterEntries = 0;
     quint64 m_reservationBatches = 0;

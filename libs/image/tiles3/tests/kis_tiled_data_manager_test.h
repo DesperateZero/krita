@@ -40,6 +40,9 @@ private Q_SLOTS:
     void testTransactions();
     void testPurgeHistory();
     void testUndoSetDefaultPixel();
+    void testDefaultBudgetFailure_data();
+    void testDefaultBudgetFailure();
+    void testConstructorBudgetFailure();
     void testPageStoreSaveReopenRoundTrip();
     void testPageStoreSparsePurge();
     void testPageStoreVirtualDefaultReadStaysSparse();
