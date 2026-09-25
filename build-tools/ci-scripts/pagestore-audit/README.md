@@ -1,12 +1,24 @@
 # BR1 PageStore architecture audit
 
-This directory is the machine-readable containment, R1 restructuring and
-R2/M3 compact-page/shard-index/intrusive-record boundary for BR1. It does not grant handoff, zero-copy,
-bounded-memory, or deletion eligibility.
+This directory records BR1 production containment, ownership, runtime evidence
+bindings, source identity and the indexed call graph. It does not grant
+behavioral correctness, handoff, zero-copy, allocation-free installation,
+bounded-memory, or deletion eligibility by itself.
 
-Current work follows design 84 (2026-09-23), covering optimizations from design
-52 onward, not just M1–M5. Milestone labels below are historical checkpoints,
-not acceptance of the remaining protocol and budget gaps.
+The 2026-09-25 baseline review of production revision `095193d11a` reopens M5
+readiness: a full resident budget can split canonical and compatibility default
+pixels or leave a newly constructed manager invalid; reserved QHash insertion
+can still allocate node storage. In the integrated workspace, current findings
+are in design 90 and the conditional M5 repair → M6 → M7 → M8 → BR1-PERF sequence
+is in design 91. Designs 68/69/86 retain their contracts. Historical milestone
+labels are not readiness decisions.
+
+The current graph has 1,461 indexed APIs and 13,725 reverse-call edges, with 21
+manifest entries, 21 ownership facts, 16 census groups and 19 external intrusion
+files. Reachability review has 1,003 production-boundary, 282 indirect, 133
+test-only and 43 unreached candidates. Candidate classes are not a dead-code
+deletion list. The separate behavioral/allocator evidence remains necessary
+even when this gate passes.
 
 - `intrusion-manifest.json` records the current compatibility, duplicate, and
   misplaced ownership surface.  Active entries must name symbols that still
@@ -69,16 +81,19 @@ intrusion deletes or lowers the corresponding frozen entry.  A patch that
 increases a count must first update designs 68/69 with the ownership, memory,
 concurrency, and removal consequences.
 
-The legacy tile lease, anonymous transaction, writer-admission, iterator, and
-tile-refresh compatibility routes now have a mutex-protected runtime census.
-Existing store/history/retirement diagnostics are mapped separately rather
-than counted twice. The retired count-authorized physical-exclusive API is
-gone. The graph now binds the move-only `KisCpuWriteBindingReservation::acquire`
-used by fresh native writes and its physical-claim tests. It is not D0: the
-physical-allocation ownership fact remains split until provider handoff. The
-fail-closed Vulkan provider remains explicitly deferred
-to BR3.  With that retain decision frozen, R0 is complete; R1 may begin, but
-metadata replacement and production backing handoff remain outside R1.
+The old mutex-protected compatibility census and retired writer-claim metrics
+are not current production authorities. Runtime metric identifiers are checked
+against production identifiers; that structural check does not prove all
+budget/failure behavior. The 21 ownership facts now distinguish canonical
+writers by responsibility; provider allocation identity, physical pin lifetime,
+Store classification and compatibility group lifetime are separate facts.
+The fail-closed Vulkan provider is still deferred to BR3. Do not recreate an
+old split or compatibility protocol to match these historical descriptions.
+
+The following paragraphs preserve the scope of earlier structural milestones.
+Their next-step/completion wording is historical. In particular M4's install
+allocation guarantee has been reopened by the current review, and M5 has not
+been accepted as the M6 entry baseline.
 
 R1 has completed all five ordered extractions. `KisPageDefaultStorage` owns
 the immutable default-read cache and bounded materialization admission;
