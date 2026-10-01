@@ -313,7 +313,7 @@ struct ReadTerminalFixture
     KisReplicaHandle replica;
     QString error;
 
-    bool init()
+    bool init(KisPageCapturedRelease *capture = nullptr)
     {
         if (!physical.init(4, 1) || !owner.configure(physical.completions, &error)
             || !owner.registerProvider(physical.provider) || !metadata.configure(1, &error)) return false;
@@ -325,11 +325,19 @@ struct ReadTerminalFixture
         initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
         initial.surfaces = {surface}; initial.manifest = {replica.version};
         if (!epochs.initialize(initial, &error)) return false;
+        if (capture) {
+            capture->versions.push_back(replica.version);
+            capture->token = epochs.retainSnapshot(initial.epoch).token;
+            if (!capture->token.isValid()) return false;
+            capture->retained = 1;
+            capture->capturedScope = true;
+        }
         KisReplicaStateSnapshot resident; resident.replica = replica;
         resident.validity = KisReplicaValidity::Valid;
         KisPageVersionStateSnapshot version; version.version = replica.version;
         version.publication = KisPagePublicationState::Published;
         version.authority = replica; version.replicas = {resident};
+        if (capture) version.capturedReadViews = {capture->token};
         KisPageStateSnapshot page; page.key = key(); page.publishedEpoch = {1};
         page.publishedGeneration = replica.version.generation;
         page.publishedDefaultPixelRevision = replica.version.defaultPixelRevision;
@@ -758,6 +766,15 @@ private Q_SLOTS:
     void lastUseManualCompatibility();
     void lastUseAtMetadataCapacity_data();
     void lastUseAtMetadataCapacity();
+    void capturedReleaseKeepsOriginalFacts_data()
+    {
+        QTest::addColumn<int>("exit");
+        QTest::newRow("automatic") << 0;
+        QTest::newRow("cancel-close") << 1;
+        QTest::newRow("stop-and-drain") << 2;
+    }
+    void capturedReleaseKeepsOriginalFacts();
+    void captureStorageRefusalPrecedesProtection();
     void readStorageRefusalPreservesOriginalRequest_data()
     {
         QTest::addColumn<bool>("resolve");
@@ -2001,6 +2018,79 @@ void KisPageStoreCpuMutationTest::readStorageRefusalPreservesOriginalRequest()
     QCOMPARE(f.snapshot().activeLeases, qsizetype(0));
     QCOMPARE(f.activeCalls, qsizetype(0));
     QCOMPARE(f.references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
+{
+    QFETCH(int, exit);
+    ReadTerminalFixture f;
+    auto release = KisPageCapturedRelease::prepare(f.budget);
+    QVERIFY2(f.init(release.get()), qPrintable(f.error));
+    const quint64 storageBytes = sizeof(KisPageCapturedRelease) +
+        release->versions.capacity() * sizeof(KisPageVersion);
+    const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+    void *filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+    const auto free = qScopeGuard([&] { kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1); });
+    { QMutexLocker lock(&f.mutex); f.operational = false; }
+    QVERIFY(!f.read.releaseCapturedView(std::move(release)));
+    QTRY_VERIFY_WITH_TIMEOUT(f.snapshot().lastUsePasses >= 3, 5000);
+    QCOMPARE(f.snapshot().pendingCapturedReleases, qsizetype(1));
+    QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+    KisPageStateSnapshot page; QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    QVERIFY(page.findVersion(f.replica.version)->capturedReadViews.isEmpty());
+    // Metadata protection already left. A retry of ReleaseCapturedVersion
+    // would reject its stale token forever; only snapshot/handoff may continue.
+    QCOMPARE(f.epochs.retainedSnapshotCount(), qsizetype(1));
+    if (exit == 1) {
+        { QMutexLocker lock(&f.mutex); f.read.beginCloseLocked(); }
+        f.read.waitForIdle();
+        { QMutexLocker lock(&f.mutex); f.operational = true; f.read.cancelCloseLocked(); }
+    } else if (exit == 2) {
+        f.read.stopAutomaticWakeups(); f.read.waitForIdle();
+        { QMutexLocker lock(&f.mutex); f.operational = true; }
+        kisDrainPageStoreReclamation();
+        QCOMPARE(f.snapshot().pendingCapturedReleases, qsizetype(1));
+        { QMutexLocker lock(&f.mutex); f.read.retryCapturedReleasesLocked(lock, true); }
+    } else {
+        { QMutexLocker lock(&f.mutex); f.operational = true; }
+        // No new capture, completion, manual release or explicit wake.
+    }
+    QTRY_COMPARE_WITH_TIMEOUT(f.snapshot().pendingCapturedReleases, qsizetype(0), 5000);
+    f.read.waitForIdle();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    QCOMPARE(f.epochs.retainedSnapshotCount(), qsizetype(0));
+    QCOMPARE(f.snapshot().capturedViewReleases, quint64(1));
+    QCOMPARE(f.activeCalls, qsizetype(0));
+    QCOMPARE(f.references.loadAcquire(), 1);
+    QCOMPARE(f.live(), f.limits.metadataArenaBytes - storageBytes);
+}
+
+void KisPageStoreCpuMutationTest::captureStorageRefusalPrecedesProtection()
+{
+    Fixture f;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 128 * 1024;
+    QVERIFY(f.store->configureBackingLimits(limits));
+    QVERIFY2(f.init(), qPrintable(f.error));
+    const auto before = f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    std::vector<KisCapturedReadView> held;
+    for (int i = 0; i < 2048; ++i) {
+        auto view = f.store->captureReadView({}, &f.error);
+        if (!view.isValid()) break;
+        held.push_back(std::move(view));
+    }
+    QVERIFY(!held.empty() && held.size() < 2048);
+    const auto snapshots = f.store->sessionStats().retainedSnapshots;
+    QCOMPARE(snapshots, qsizetype(held.size()));
+    QVERIFY(!f.store->captureReadView({}, &f.error).isValid());
+    QCOMPARE(f.store->sessionStats().retainedSnapshots, snapshots);
+    QVERIFY(!f.store->closeSession());
+    held.pop_back();
+    auto recovered = f.store->captureReadView(); QVERIFY(recovered.isValid());
+    recovered = {}; held.clear();
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->sessionStats().retainedSnapshots, qsizetype(0));
+    QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, before);
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
 }
 
 void KisPageStoreCpuMutationTest::readProtectionBlockCleanup_data()

@@ -2618,9 +2618,15 @@ public:
     {
         if (!key.isValid())
             return false;
-        const auto found = sealedPages.constFind(key);
-        if (found != sealedPages.constEnd()) {
-            *version = found.value();
+        const auto less = [](const KisPageKey &a, const KisPageKey &b) {
+            return std::tie(a.surface.value, a.page.row, a.page.column) <
+                   std::tie(b.surface.value, b.page.row, b.page.column);
+        };
+        const auto &versions = release->versions;
+        const auto found = std::lower_bound(versions.begin(), versions.end(), key,
+            [&](const KisPageVersion &candidate, const KisPageKey &value) { return less(candidate.key, value); });
+        if (found != versions.end() && found->key == key) {
+            *version = *found;
             return true;
         }
         if (!root.resolve(key, version))
@@ -2653,7 +2659,7 @@ public:
     {
         if (!owner)
             return;
-        owner->readCoordinator.releaseCapturedView(retention, sealedPages);
+        owner->readCoordinator.releaseCapturedView(std::move(release));
         KisPageStore::PrivateReleaser::cleanup(owner);
     }
     KisPageStore::Private *owner = nullptr;
@@ -2661,7 +2667,7 @@ public:
     KisImageEpochSnapshotToken retention;
     KisPageVersion exactVersion;
     KisPageTransactionId overlayTransaction;
-    QHash<KisPageKey, KisPageVersion> sealedPages;
+    KisPageCapturedReleasePointer release;
     QSet<KisPageKey> removedPages;
     QHash<quint64, KisSurfaceEpochState> stagedSurfaces;
     mutable QMutex defaultMutex;
@@ -2867,73 +2873,111 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         KisPageStoreDetail::setError(error, QStringLiteral("read selector is invalid"));
         return result;
     }
+    // Bodies and the original release node precede protection. Failure leaves
+    // no root/token obligation. The version capacity is prepared similarly
+    // below, then selection is repeated under the owner gate before claiming.
+    try {
+        result.d = QSharedPointer<KisCapturedReadView::Private>::create();
+        result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
+    } catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("read scope storage is unavailable"));
+        return {};
+    }
     QMutexLocker locker(&d->mutex);
-    if (!d->operational) {
-        KisPageStoreDetail::setError(error, QStringLiteral("PageStore is not operational"));
-        return result;
-    }
     KisImageEpochRootSnapshot root;
-    switch (selector.kind) {
-    case KisPageReadViewKind::CurrentCommittedEpoch:
-        root = d->epochs.captureCommittedRoot();
-        break;
-    case KisPageReadViewKind::CommittedEpoch:
-    case KisPageReadViewKind::ExactVersion:
-        root = d->epochs.retainedRoot(selector.retention, selector.epoch);
-        break;
-    case KisPageReadViewKind::TransactionOverlay:
-    case KisPageReadViewKind::TransactionBaseEpoch: {
-        const auto transaction = d->epochs.transaction(selector.transaction);
-        if (transaction.isActive())
-            root = d->epochs.root(transaction.transaction.baseEpoch);
-        break;
-    }
-    }
+    KisPreparedPageSet delta;
     KisPageVersion exact;
-    if (!root.isValid()
-        || (selector.kind == KisPageReadViewKind::ExactVersion
-            && (!root.resolve(selector.exactVersion.key, &exact) || !(exact == selector.exactVersion)))) {
-        KisPageStoreDetail::setError(error, QStringLiteral("read selector is stale or not owned by this PageStore"));
-        return result;
-    }
-    const auto retained = d->epochs.retainSnapshot(root.epoch());
-    if (!retained.isValid()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("read scope retention could not be allocated"));
-        return result;
-    }
-    result.d = QSharedPointer<KisCapturedReadView::Private>::create();
-    if (selector.kind == KisPageReadViewKind::TransactionOverlay) {
-        // Owner gate makes the whole sealed delta and its default/removal
-        // metadata one visibility cut. Unsealed writer bytes are not exposed.
-        const KisPreparedPageSet delta =
-            d->publicationCoordinator.transactionDeltaLocked(selector.transaction);
-        for (const auto &proof : delta.proofs) {
-            KisPageTransition claim;
-            claim.kind = KisPageTransitionKind::RetainCapturedVersion;
-            claim.version = proof.authority.version;
-            claim.transaction = selector.transaction;
-            claim.readView = retained.token;
-            const auto claimed = d->metadata.applyOwner(proof.authority.version.key, claim);
-            if (!claimed.accepted) {
-                d->readCoordinator.releaseCapturedView(
-                    retained.token, result.d->sealedPages, false, &locker);
-                result.d.clear(); // owner pointer has not been installed yet
-                KisPageStoreDetail::setError(error, claimed.rejectionReason);
-                return result;
-            }
-            result.d->sealedPages.insert(proof.authority.version.key,
-                                         proof.authority.version);
+    for (;;) {
+        if (!d->operational || d->closing) {
+            KisPageStoreDetail::setError(error, QStringLiteral("PageStore is not operational"));
+            return {};
         }
+        root = {};
+        switch (selector.kind) {
+        case KisPageReadViewKind::CurrentCommittedEpoch:
+            root = d->epochs.captureCommittedRoot();
+            break;
+        case KisPageReadViewKind::CommittedEpoch:
+        case KisPageReadViewKind::ExactVersion:
+            root = d->epochs.retainedRoot(selector.retention, selector.epoch);
+            break;
+        case KisPageReadViewKind::TransactionOverlay:
+        case KisPageReadViewKind::TransactionBaseEpoch: {
+            const auto transaction = d->epochs.transaction(selector.transaction);
+            if (transaction.isActive())
+                root = d->epochs.root(transaction.transaction.baseEpoch);
+            break;
+        }
+        }
+        exact = {};
+        if (!root.isValid()
+            || (selector.kind == KisPageReadViewKind::ExactVersion
+                && (!root.resolve(selector.exactVersion.key, &exact) || !(exact == selector.exactVersion)))) {
+            KisPageStoreDetail::setError(error, QStringLiteral("read selector is stale or not owned by this PageStore"));
+            return {};
+        }
+        if (selector.kind != KisPageReadViewKind::TransactionOverlay) break;
+        delta = d->publicationCoordinator.transactionDeltaLocked(selector.transaction);
+        if (result.d->release->versions.capacity() >= size_t(delta.proofs.size())) break;
+        ++d->activeProviderCalls;
+        locker.unlock();
+        try {
+            result.d->release->versions.reserve(size_t(delta.proofs.size()));
+        } catch (const std::bad_alloc &) {
+            locker.relock(); --d->activeProviderCalls;
+            KisPageStoreDetail::setError(error, QStringLiteral("read scope version storage is unavailable"));
+            return {};
+        }
+        locker.relock(); --d->activeProviderCalls;
+    }
+    auto &release = *result.d->release;
+    if (selector.kind == KisPageReadViewKind::TransactionOverlay) {
+        for (const auto &proof : delta.proofs) release.versions.push_back(proof.authority.version);
+        std::sort(release.versions.begin(), release.versions.end(), [](const auto &a, const auto &b) {
+            return std::tie(a.key.surface.value, a.key.page.row, a.key.page.column) <
+                   std::tie(b.key.surface.value, b.key.page.row, b.key.page.column);
+        });
         result.d->overlayTransaction = selector.transaction;
         result.d->removedPages = QSet<KisPageKey>(delta.removedPages.cbegin(), delta.removedPages.cend());
         for (const auto &change : delta.surfaceChanges)
             result.d->stagedSurfaces.insert(change.after.surface.value, change.after);
+    }
+    const auto retained = d->epochs.retainSnapshot(root.epoch());
+    if (!retained.isValid()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("read scope retention could not be allocated"));
+        return {};
+    }
+    release.token = retained.token;
+    QString failure;
+    try {
+        // The prepared immutable delta and all of its claims share one cut.
+        for (const auto &version : release.versions) {
+            KisPageTransition claim;
+            claim.kind = KisPageTransitionKind::RetainCapturedVersion;
+            claim.version = version;
+            claim.transaction = selector.transaction;
+            claim.readView = retained.token;
+            const auto claimed = d->metadata.applyOwner(version.key, claim);
+            if (!claimed.accepted) {
+                failure = claimed.rejectionReason;
+                break;
+            }
+            ++release.retained;
+        }
+    } catch (const std::bad_alloc &) {
+        failure = QStringLiteral("read scope protection storage is unavailable");
+    }
+    if (!failure.isEmpty()) {
+        d->readCoordinator.releaseCapturedView(std::move(result.d->release), &locker);
+        KisPageStoreDetail::setError(error, failure);
+        return {};
     }
     d->lifetimeReferences.ref();
     result.d->owner = d;
     result.d->root = std::move(root);
     result.d->retention = retained.token;
     result.d->exactVersion = exact;
+    release.capturedScope = true;
     d->readCoordinator.noteCapturedViewCreatedLocked();
     KisPageStoreDetail::setError(error, {});
     return result;
@@ -3065,7 +3109,8 @@ bool KisPageStore::closeSession(QString *error)
     // close from polling them (including a retry after operational=false).
     // The public total remains unchanged: this is only the pre-drain gate.
     stats.providerOperations = d->owner.publicationBlockingOperationCount();
-    if (stats.hasOutstandingCapabilities()) {
+    const auto capturedReleases = d->readCoordinator.snapshotLocked().pendingCapturedReleases;
+    if (stats.hasOutstandingCapabilities() || capturedReleases) {
         d->closing = false;
         d->readCoordinator.cancelCloseLocked();
         d->retirementQueue.cancelCloseAndSchedule();
@@ -3077,7 +3122,7 @@ bool KisPageStore::closeSession(QString *error)
                                 "proofs=%7 surfaceChanges=%8 removals=%9 "
                                 "providerCalls=%10 blockingOperations=%11 "
                                 "seals=%12 archives=%13 shutdownReplicas=%14 "
-                                "defaultPreparations=%15")
+                                "defaultPreparations=%15 capturedReleases=%16")
                      .arg(stats.activeTransactions)
                      .arg(stats.retainedSnapshots)
                      .arg(stats.pendingRequests)
@@ -3092,7 +3137,8 @@ bool KisPageStore::closeSession(QString *error)
                      .arg(stats.sealedPreparedProofs)
                      .arg(stats.pendingArchiveOperations)
                      .arg(pendingShutdownReplicas)
-                     .arg(stats.activeDefaultPreparations));
+                     .arg(stats.activeDefaultPreparations)
+                     .arg(capturedReleases));
         return false;
     }
 

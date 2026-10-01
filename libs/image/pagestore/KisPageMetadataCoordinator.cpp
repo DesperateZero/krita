@@ -3410,15 +3410,18 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             result.effects.clear();
             return result;
         }
+        // Prepare the removal witness before installing any authoritative
+        // record. Capture retain/release callers must be able to distinguish
+        // refusal from an accepted token mutation without replaying it.
+        QSet<KisPageVersion> retained;
+        for (const auto &version : std::as_const(next.versions)) {
+            retained.insert(version.version);
+        }
         if (!shard->records.putBatch(&page.value(), next.versions)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             result.effects.clear();
             return result;
-        }
-        QSet<KisPageVersion> retained;
-        for (const auto &version : std::as_const(next.versions)) {
-            retained.insert(version.version);
         }
         quint64 removed = 0;
         for (const auto &version : std::as_const(input.versions)) {

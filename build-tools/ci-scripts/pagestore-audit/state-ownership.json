@@ -404,7 +404,8 @@
         "KisPageReadCoordinator::discoverCpuReadBinding reselects only the caller-retained exact version",
         "the original ActiveReadRecord retains its exact replica/ticket after metadata ReleaseRead; no separate pending-last-use replica table",
         "actual funded request index nodes are prepared outside the owner gate before AcquireRead and exact identity is rechecked by the original transition; original ActiveReadRecord and transferable lease index node precede provider resolveAccess",
-        "original configure admits the read context, task, wake and reusable retry deadline before protection or physical adoption; refused record subscriptions use the same original ready/task/timer path, never a second worker or debt owner"
+        "original configure admits the read context, task, wake and reusable retry deadline before protection or physical adoption; refused record subscriptions use the same original ready/task/timer path, never a second worker or debt owner",
+        "captured-view release node and immutable version capacity are charged and prepared before root/version protection; overlay selection is repeated after cold capacity preparation, and only the actually retained prefix belongs to rollback"
       ],
       "current-writers": [
         "KisPageReadCoordinator"
@@ -430,7 +431,9 @@
         "cancel and release retries link their original request/lease bodies without an ID deque allocation; terminal acknowledgement scans the original identity cut without copied matching/pending arrays; a failed history notification remains in the same original admitted record",
         "the original read task consumes at most 32 original ready/cancel records per pass; nonterminal or refused work rearms its prepaid generation-qualified deadline, including a timer publication during task finishing; cancel/close stop future dispatch before draining",
         "KisPageReadCleanup is a stack terminal scope, not a second read or metadata owner: release/cancel/acknowledge/abort/close transfer detached blocks and original map nodes past the outer store mutex without allocation, retaining activeProviderCalls until physical cleanup; worker idle and lifetime release follow cleanup",
-        "storage rejection before resolve preserves the Pending request; provider bad_alloc restores Pending after reacquiring the owner gate; successful resolve transfers the prepared node without allocation, and rejected registration removes its unpublished request node"
+        "storage rejection before resolve preserves the Pending request; provider bad_alloc restores Pending after reacquiring the owner gate; successful resolve transfers the prepared node without allocation, and rejected registration removes its unpublished request node",
+        "capture destruction and partial-admission rollback transfer the same prepared release node without a copied version map or retry deque allocation; accepted metadata release and snapshot release are remembered separately from unfinished history handoff, so retries do not replay tokens",
+        "captured release remains linked until all original token/key obligations are accepted; original read task/deadline handles refused work, close drains or rearms it, and stop freezes dispatch; after semantic handoff the original lifetime pin covers lock-free physical node disposal without making restore Busy"
       ]
     },
     {

@@ -104,7 +104,7 @@ struct KisPageReadCoordinator::LastUseWakeContext
     bool jobScheduled = false;
     KisPageReclamationDelay retry;
     bool retryScheduled = false;
-    bool cancelPending = false;
+    bool cleanupPending = false;
     int nextRetryDelayMs = 1;
     quint64 dispatchFailures = 0;
 
@@ -122,6 +122,7 @@ struct KisPageReadCoordinator::LastUseWakeContext
 
 KisPageReadCoordinator::~KisPageReadCoordinator()
 {
+    Q_ASSERT(m_capturedReleaseRetries.empty());
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         Q_ASSERT(!m_lastUseWakeContext->jobScheduled);
@@ -148,7 +149,7 @@ void KisPageReadCoordinator::prepareTask()
             QMutexLocker lock(&context->mutex);
             context->jobScheduled = false;
             if (context->accepting && !context->retryScheduled &&
-                (context->head || context->cancelPending))
+                (context->head || context->cleanupPending))
                 context->wake.notify();
             context->idle.wakeAll();
         }
@@ -234,7 +235,7 @@ void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeCon
     if (!context) return;
     QMutexLocker lock(&context->mutex);
     auto *coordinator = context->coordinator;
-    if (!coordinator || !context->accepting || (!context->head && !context->cancelPending)) return;
+    if (!coordinator || !context->accepting || (!context->head && !context->cleanupPending)) return;
     if (context->retryScheduled) {
         if (!context->retry.takeReady()) return;
         context->retryScheduled = false;
@@ -273,6 +274,11 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
             try { retryCancelledRequestsLocked(ownerLock, cleanup); }
             catch (const std::bad_alloc &) { allocationFailed = true; }
             retry = !m_cancelRetries.empty();
+            ++visited;
+        }
+        if (!m_capturedReleaseRetries.empty()) {
+            retryCapturedReleasesLocked(ownerLock);
+            retry = retry || !m_capturedReleaseRetries.empty();
             ++visited;
         }
         const qsizetype passEnd = std::min(maximumPerPass, visited + readyBudget);
@@ -317,13 +323,13 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
             m_maximumLastUsesPerPass = std::max(m_maximumLastUsesPerPass, quint64(visited));
         }
         QMutexLocker notificationLock(&context->mutex);
-        context->cancelPending = !m_cancelRetries.empty();
+        context->cleanupPending = !m_cancelRetries.empty() || !m_capturedReleaseRetries.empty();
     }
     cleanup.finish(); // complete physical cleanup before idle/lifetime publication
     {
         QMutexLocker lock(&context->mutex);
         if (allocationFailed) ++context->dispatchFailures;
-        if (context->accepting && retry && (context->head || context->cancelPending)) {
+        if (context->accepting && retry && (context->head || context->cleanupPending)) {
             if (progressed) context->nextRetryDelayMs = 1;
             context->retryScheduled = context->retry.arm(context->nextRetryDelayMs);
             context->nextRetryDelayMs = std::min(100, context->nextRetryDelayMs * 2);
@@ -356,8 +362,8 @@ void KisPageReadCoordinator::cancelCloseLocked()
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         m_lastUseWakeContext->accepting = true;
-        m_lastUseWakeContext->cancelPending = !m_cancelRetries.empty();
-        if (m_lastUseWakeContext->cancelPending) m_lastUseWakeContext->wake.notify();
+        m_lastUseWakeContext->cleanupPending = !m_cancelRetries.empty() || !m_capturedReleaseRetries.empty();
+        if (m_lastUseWakeContext->cleanupPending) m_lastUseWakeContext->wake.notify();
     }
     const quint64 last = m_activeReads.empty() ? 0 : m_activeReads.rbegin()->first;
     quint64 after = 0;
@@ -389,7 +395,7 @@ void KisPageReadCoordinator::waitForIdle()
     if (!context) return;
     QMutexLocker lock(&context->mutex);
     while (context->jobScheduled ||
-           (context->accepting && !context->retryScheduled && (context->head || context->cancelPending)))
+           (context->accepting && !context->retryScheduled && (context->head || context->cleanupPending)))
         context->idle.wait(&context->mutex);
 }
 
@@ -668,7 +674,7 @@ bool KisPageReadCoordinator::cancelLocked(
     if (!pending.cancelHook.is_linked()) m_cancelRetries.push_back(pending);
     if (m_backgroundReclamation && !m_lastUseClosing && !m_automaticWakeupsStopped) {
         QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
-        m_lastUseWakeContext->cancelPending = true;
+        m_lastUseWakeContext->cleanupPending = true;
         m_lastUseWakeContext->retry.cancel();
         m_lastUseWakeContext->retryScheduled = false;
         m_lastUseWakeContext->wake.notify();
@@ -964,10 +970,21 @@ void KisPageReadCoordinator::noteCapturedViewCreatedLocked()
     ++m_capturedViewsCreated;
 }
 
+void KisPageCapturedReleaseDeleter::operator()(KisPageCapturedRelease *record) const noexcept
+{
+    if (!record) return;
+    std::destroy_at(record);
+    KisMutationStorageAllocator<KisPageCapturedRelease>(budget).deallocate(record, 1);
+}
+
+KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget)
+{
+    auto *record = KisMutationStorageAllocator<KisPageCapturedRelease>(&budget).allocate(1);
+    return {new (record) KisPageCapturedRelease(budget), KisPageCapturedReleaseDeleter{&budget}};
+}
+
 bool KisPageReadCoordinator::releaseCapturedView(
-    KisImageEpochSnapshotToken token,
-    const QHash<KisPageKey, KisPageVersion> &versions,
-    bool capturedScope,
+    KisPageCapturedReleasePointer pending,
     QMutexLocker<QMutex> *heldOwnerLock)
 {
     std::optional<QMutexLocker<QMutex>> acquired;
@@ -976,18 +993,19 @@ bool KisPageReadCoordinator::releaseCapturedView(
         heldOwnerLock = &*acquired;
     }
     auto &lock = *heldOwnerLock;
-    retryCapturedReleasesLocked(lock);
-    PendingCapturedRelease pending{token, {}, capturedScope};
-    for (const auto &version : versions) {
-        pending.versions.append(version);
-    }
-    const auto keys = releaseCapturedVersionsLocked(pending);
-    retireEffectsUnlocked(m_history.collectUnreachableLocked(keys.constData(), keys.size()), lock);
-    if (pending.versions.isEmpty() && releaseSnapshotLocked(token, nullptr, capturedScope, lock))
-        return true;
+    Q_ASSERT(pending && pending->token.isValid());
     m_ownerLifetime.ref();
-    m_capturedReleaseRetries.push_back(std::move(pending));
-    return false;
+    auto *record = pending.release();
+    m_capturedReleaseRetries.push_back(*record);
+    const bool finished = finishCapturedReleaseLocked(*record, lock);
+    if (!finished && m_backgroundReclamation && !m_automaticWakeupsStopped && !m_lastUseClosing) {
+        QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
+        m_lastUseWakeContext->cleanupPending = true;
+        m_lastUseWakeContext->retry.cancel();
+        m_lastUseWakeContext->retryScheduled = false;
+        m_lastUseWakeContext->wake.notify();
+    }
+    return finished;
 }
 
 void KisPageReadCoordinator::retryCapturedReleasesLocked(QMutexLocker<QMutex> &ownerLock,
@@ -996,36 +1014,72 @@ void KisPageReadCoordinator::retryCapturedReleasesLocked(QMutexLocker<QMutex> &o
     const size_t attempts = drain ? m_capturedReleaseRetries.size()
                                   : std::min<size_t>(1, m_capturedReleaseRetries.size());
     for (size_t i = 0; i < attempts && !m_capturedReleaseRetries.empty(); ++i) {
-        PendingCapturedRelease pending = std::move(m_capturedReleaseRetries.front());
-        m_capturedReleaseRetries.pop_front();
-        const auto keys = releaseCapturedVersionsLocked(pending);
-        retireEffectsUnlocked(m_history.collectUnreachableLocked(keys.constData(), keys.size()), ownerLock);
-        if (pending.versions.isEmpty() &&
-            releaseSnapshotLocked(pending.token, nullptr, pending.capturedScope, ownerLock)) {
-            m_releaseLifetime(m_lifetimeContext);
-        } else {
-            m_capturedReleaseRetries.push_back(std::move(pending));
-        }
+        auto &pending = m_capturedReleaseRetries.front();
+        if (pending.processing) return;
+        if (!finishCapturedReleaseLocked(pending, ownerLock))
+            m_capturedReleaseRetries.splice(m_capturedReleaseRetries.end(),
+                m_capturedReleaseRetries, m_capturedReleaseRetries.begin());
     }
 }
 
-QVector<KisPageKey> KisPageReadCoordinator::releaseCapturedVersionsLocked(
-    PendingCapturedRelease &pending)
+bool KisPageReadCoordinator::finishCapturedReleaseLocked(
+    KisPageCapturedRelease &pending, QMutexLocker<QMutex> &lock)
 {
-    QVector<KisPageVersion> failed;
-    QVector<KisPageKey> released;
-    for (const auto &version : std::as_const(pending.versions)) {
-        KisPageTransition release;
-        release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-        release.version = version;
-        release.readView = pending.token;
-        if (m_metadata.applyOwner(version.key, release).accepted)
-            released.append(version.key);
-        else
-            failed.append(version);
+    Q_ASSERT(!pending.processing);
+    pending.processing = true;
+    try {
+        while (pending.next < pending.retained) {
+            const auto &version = pending.versions[pending.next];
+            if (!pending.versionReleased) {
+                KisPageTransition release;
+                release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
+                release.version = version;
+                release.readView = pending.token;
+                if (!m_metadata.applyOwner(version.key, release).accepted) {
+                    pending.processing = false;
+                    return false;
+                }
+                pending.versionReleased = true;
+            }
+            // Keep the exact key until history accepts it. Retrying a refused
+            // handoff must not release the already removed metadata token again.
+            retireEffectsUnlocked(m_history.collectUnreachableLocked(&version.key, 1), lock);
+            ++pending.next;
+            pending.versionReleased = false;
+        }
+        if (!pending.snapshotReleased) {
+            bool becameUnretained = false;
+            if (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained)) {
+                pending.processing = false;
+                return false;
+            }
+            pending.snapshotReleased = true;
+            pending.historyPending = becameUnretained;
+            if (pending.capturedScope) ++m_capturedViewReleases;
+        }
+        if (pending.historyPending) {
+            if (m_backgroundReclamation) {
+                m_history.collectUnreachableLocked(nullptr, 0, true);
+            } else {
+                m_epochs.collectUnretainedRoots();
+                const auto keys = m_history.deferredKeysLocked();
+                retireEffectsUnlocked(m_history.collectUnreachableLocked(keys.constData(), keys.size()), lock);
+            }
+            pending.historyPending = false;
+        }
+    } catch (const std::bad_alloc &) {
+        pending.processing = false;
+        return false; // The original linked record retains every unfinished fact.
     }
-    pending.versions = std::move(failed);
-    return released;
+    m_capturedReleaseRetries.erase(m_capturedReleaseRetries.iterator_to(pending));
+    KisPageCapturedReleasePointer finished(&pending, KisPageCapturedReleaseDeleter{&m_budget});
+    // This record has handed off all semantic work. Its original lifetime pin
+    // covers physical disposal; it must not make a concurrent restore Busy.
+    lock.unlock();
+    finished.reset();
+    lock.relock();
+    m_releaseLifetime(m_lifetimeContext);
+    return true;
 }
 
 bool KisPageReadCoordinator::releaseSnapshot(
@@ -1033,7 +1087,7 @@ bool KisPageReadCoordinator::releaseSnapshot(
     const QVector<KisPageKey> *changedPages)
 {
     QMutexLocker lock(&m_ownerMutex);
-    const bool released = releaseSnapshotLocked(token, changedPages, false, lock);
+    const bool released = releaseSnapshotLocked(token, changedPages, lock);
     if (released)
         retryCapturedReleasesLocked(lock);
     return released;
@@ -1042,7 +1096,6 @@ bool KisPageReadCoordinator::releaseSnapshot(
 bool KisPageReadCoordinator::releaseSnapshotLocked(
     KisImageEpochSnapshotToken token,
     const QVector<KisPageKey> *changedPages,
-    bool capturedScope,
     QMutexLocker<QMutex> &lock)
 {
     bool becameUnretained = false;
@@ -1050,23 +1103,16 @@ bool KisPageReadCoordinator::releaseSnapshotLocked(
         !m_epochs.releaseSnapshot(token, nullptr, &becameUnretained)) {
         return false;
     }
-    if (capturedScope) ++m_capturedViewReleases;
     if (m_backgroundReclamation) {
         if (!becameUnretained) return true;
         m_history.collectUnreachableLocked(
             changedPages ? changedPages->constData() : nullptr, changedPages ? changedPages->size() : 0, true);
         return true;
     }
-    const qsizetype removedRoots = m_epochs.collectUnretainedRoots();
-    if (capturedScope && removedRoots == 0) return true;
+    m_epochs.collectUnretainedRoots();
     const QVector<KisPageTransitionEffect> retirements = changedPages
         ? m_history.collectUnreachableLocked(changedPages->constData(), changedPages->size())
-        : capturedScope
-            ? [&] {
-                const auto keys = m_history.deferredKeysLocked();
-                return m_history.collectUnreachableLocked(keys.constData(), keys.size());
-              }()
-            : m_history.collectUnreachableLocked(nullptr, 0, true);
+        : m_history.collectUnreachableLocked(nullptr, 0, true);
     retireEffectsUnlocked(retirements, lock);
     return true;
 }
@@ -1077,11 +1123,12 @@ KisPageReadCoordinatorSnapshot KisPageReadCoordinator::snapshotLocked() const
         m_pendingLastUses, m_requestsCreated, m_capturedViewsCreated, m_capturedViewReleases};
     result.lastUsePasses = m_lastUsePasses;
     result.maximumLastUsesPerPass = m_maximumLastUsesPerPass;
+    result.pendingCapturedReleases = qsizetype(m_capturedReleaseRetries.size());
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         result.lastUseJobScheduled = m_lastUseWakeContext->jobScheduled ||
             (m_lastUseWakeContext->accepting && !m_lastUseWakeContext->retryScheduled &&
-             (m_lastUseWakeContext->head || m_lastUseWakeContext->cancelPending));
+             (m_lastUseWakeContext->head || m_lastUseWakeContext->cleanupPending));
         result.lastUseDispatchFailures = m_lastUseWakeContext->dispatchFailures;
     }
     return result;

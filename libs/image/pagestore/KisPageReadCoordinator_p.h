@@ -21,13 +21,39 @@
 #include <QSharedPointer>
 #include <QVector>
 
-#include <deque>
 #include <memory>
 #include <map>
 #include <optional>
 #include <boost/intrusive/list.hpp>
 
 class KisPageReadCleanup;
+
+// Prepared before retaining the root or any sealed version. Capture resolution
+// and release use this same immutable version storage; only the retained prefix
+// and completed release facts change under the owner gate.
+struct KisPageCapturedRelease;
+struct KisPageCapturedReleaseDeleter
+{
+    KisBackingBudgetController *budget = nullptr;
+    KRITAIMAGE_EXPORT void operator()(KisPageCapturedRelease *record) const noexcept;
+};
+using KisPageCapturedReleasePointer = std::unique_ptr<KisPageCapturedRelease, KisPageCapturedReleaseDeleter>;
+struct KisPageCapturedRelease
+{
+    explicit KisPageCapturedRelease(KisBackingBudgetController &budget)
+        : versions(KisMutationStorageAllocator<KisPageVersion>(&budget)) {}
+    KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget);
+    KisImageEpochSnapshotToken token;
+    std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> versions;
+    size_t retained = 0;
+    size_t next = 0;
+    bool versionReleased = false;
+    bool snapshotReleased = false;
+    bool historyPending = false;
+    bool capturedScope = false;
+    bool processing = false;
+    boost::intrusive::list_member_hook<> releaseHook;
+};
 
 struct KisPagePendingReadRecord
 {
@@ -60,6 +86,7 @@ struct KisPageReadCoordinatorSnapshot
     quint64 lastUsePasses = 0;
     quint64 maximumLastUsesPerPass = 0;
     quint64 lastUseDispatchFailures = 0;
+    qsizetype pendingCapturedReleases = 0;
 };
 
 class KisPageReadCoordinator final
@@ -137,12 +164,10 @@ public:
                                       KisPageReadCleanup &cleanup);
 
     void noteCapturedViewCreatedLocked();
-    bool releaseCapturedView(
-        KisImageEpochSnapshotToken token,
-        const QHash<KisPageKey, KisPageVersion> &versions,
-        bool capturedScope = true,
+    KRITAIMAGE_EXPORT bool releaseCapturedView(
+        KisPageCapturedReleasePointer pending,
         QMutexLocker<QMutex> *heldOwnerLock = nullptr);
-    void retryCapturedReleasesLocked(QMutexLocker<QMutex> &ownerLock, bool drain = false);
+    KRITAIMAGE_EXPORT void retryCapturedReleasesLocked(QMutexLocker<QMutex> &ownerLock, bool drain = false);
     bool releaseSnapshot(KisImageEpochSnapshotToken token,
                          const QVector<KisPageKey> *changedPages);
 
@@ -192,7 +217,6 @@ private:
                            const KisCompletionTicket &completion = {});
     bool releaseSnapshotLocked(KisImageEpochSnapshotToken token,
                                const QVector<KisPageKey> *changedPages,
-                               bool capturedScope,
                                QMutexLocker<QMutex> &ownerLock);
     bool belongsToPreparedTransactionLocked(
         const KisPageVersion &version,
@@ -216,13 +240,8 @@ private:
     void *m_lifetimeContext;
     void (*m_releaseLifetime)(void *);
 
-    struct PendingCapturedRelease {
-        KisImageEpochSnapshotToken token;
-        QVector<KisPageVersion> versions;
-        bool capturedScope = true;
-    };
-
-    QVector<KisPageKey> releaseCapturedVersionsLocked(PendingCapturedRelease &pending);
+    bool finishCapturedReleaseLocked(KisPageCapturedRelease &pending,
+                                     QMutexLocker<QMutex> &ownerLock);
 
     // Node storage precedes protection/pinning. Active nodes can be installed
     // without allocation even when other requests grow the maps during resolve.
@@ -242,7 +261,9 @@ private:
     boost::intrusive::list<ActiveReadRecord, boost::intrusive::member_hook<
         ActiveReadRecord, boost::intrusive::list_member_hook<>,
         &ActiveReadRecord::releaseHook>> m_releaseRetries;
-    std::deque<PendingCapturedRelease> m_capturedReleaseRetries;
+    boost::intrusive::list<KisPageCapturedRelease, boost::intrusive::member_hook<
+        KisPageCapturedRelease, boost::intrusive::list_member_hook<>,
+        &KisPageCapturedRelease::releaseHook>> m_capturedReleaseRetries;
     qsizetype m_pendingLastUses = 0;
     qsizetype m_pendingHistoryReads = 0;
     std::shared_ptr<LastUseWakeContext> m_lastUseWakeContext;
