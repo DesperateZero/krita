@@ -5,6 +5,7 @@
  */
 
 #include "kis_simple_stroke_strategy.h"
+#include "KisStrokeJobFailureContext.h"
 
 
 /***************************************************************/
@@ -22,6 +23,10 @@ public:
     }
 
     void run(KisStrokeJobData *data) override {
+        KisStrokeJobFailureContext failure(
+            m_parentStroke->m_jobFailureReporting &&
+            m_type == KisSimpleStrokeStrategy::JOB_DOSTROKE &&
+            (!data || data->isCancellable()));
         switch(m_type) {
         case KisSimpleStrokeStrategy::JOB_INIT:
             Q_UNUSED(data);
@@ -47,6 +52,7 @@ public:
         default:
             break;
         }
+        if (failure.failed()) m_parentStroke->reportJobFailure(failure.error());
     }
 
     QString debugId() const override {
@@ -77,7 +83,8 @@ KisSimpleStrokeStrategy::KisSimpleStrokeStrategy(const KisSimpleStrokeStrategy &
     : KisStrokeStrategy(rhs),
       m_jobEnabled(rhs.m_jobEnabled),
       m_jobSequentiality(rhs.m_jobSequentiality),
-      m_jobExclusivity(rhs.m_jobExclusivity)
+      m_jobExclusivity(rhs.m_jobExclusivity),
+      m_jobFailureReporting(rhs.m_jobFailureReporting)
 {
 }
 

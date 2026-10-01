@@ -89,6 +89,7 @@ struct Q_DECL_HIDDEN KisStrokesQueue::Private {
     KisSuspendResumeStrategyPairFactory suspendResumeUpdatesStrokeStrategyFactory;
     std::function<void()> purgeRedoStateCallback;
     std::function<void()> postSyncLod0GUIPlaneRequestForResume;
+    std::function<void(int)> retryWakeupCallback;
     KisSurrogateUndoStore lodNUndoStore;
     LodNUndoStrokesFacade lodNStrokesFacade;
     KisPostExecutionUndoAdapter lodNPostExecutionUndoAdapter;
@@ -368,12 +369,27 @@ void KisStrokesQueue::addMutatedJobs(KisStrokeId id, const QVector<KisStrokeJobD
     stroke->addMutatedJobs(list);
 }
 
+bool KisStrokesQueue::addCheckpointJob(KisStrokeId id, KisStrokeJobData *data)
+{
+    QMutexLocker locker(&m_d->mutex);
+    const auto stroke = id.toStrongRef();
+    // A LoD buddy may retain an already completed stroke. Weak-handle validity
+    // alone must not allow work to be added after it has left the scheduler.
+    if (!stroke || !m_d->strokesQueue.contains(stroke)) {
+        locker.unlock();
+        delete data;
+        return false;
+    }
+    return stroke->addCheckpointJob(data);
+}
+
 void KisStrokesQueue::endStroke(KisStrokeId id)
 {
     QMutexLocker locker(&m_d->mutex);
 
     KisStrokeSP stroke = id.toStrongRef();
     KIS_SAFE_ASSERT_RECOVER_RETURN(stroke);
+    KIS_SAFE_ASSERT_RECOVER_RETURN(!stroke->isEnded());
     stroke->endStroke();
     m_d->openedStrokesCounter--;
 
@@ -383,14 +399,56 @@ void KisStrokesQueue::endStroke(KisStrokeId id)
     }
 }
 
+void KisStrokesQueue::failStroke(KisStrokeId id, const QString &reason)
+{
+    QMutexLocker locker(&m_d->mutex);
+    const auto stroke = id.toStrongRef();
+    KIS_SAFE_ASSERT_RECOVER_RETURN(stroke);
+    if (!stroke->failStroke()) return;
+    qWarning() << "Stroke failed:" << stroke->id() << reason;
+    // LoDN has no reverse buddy pointer. Failure is rare; preserve the one
+    // existing buddy relationship instead of introducing a second registry.
+    // A completed LoDN buddy can still be retained by LoD0. Never enqueue
+    // cleanup on a strategy that has already left the scheduler queue.
+    for (const auto &candidate : std::as_const(m_d->strokesQueue)) {
+        if (candidate == stroke->lodBuddy() || candidate->lodBuddy() == stroke)
+            candidate->failStroke();
+    }
+}
+
+void KisStrokesQueue::retryStrokeCancellation(KisStrokeId id)
+{
+    QMutexLocker locker(&m_d->mutex);
+    const auto stroke = id.toStrongRef();
+    KIS_SAFE_ASSERT_RECOVER_RETURN(stroke);
+    const int delay = stroke->retryCancellation();
+    const auto wakeup = m_d->retryWakeupCallback;
+    locker.unlock();
+    if (delay && wakeup) wakeup(delay);
+}
+
+void KisStrokesQueue::setRetryWakeupCallback(std::function<void(int)> callback)
+{
+    QMutexLocker locker(&m_d->mutex);
+    m_d->retryWakeupCallback = std::move(callback);
+}
+
+int KisStrokesQueue::cancellationRetryDelay() const
+{
+    QMutexLocker locker(&m_d->mutex);
+    return m_d->strokesQueue.isEmpty() ? 0
+        : m_d->strokesQueue.head()->cancellationRetryDelay();
+}
+
 bool KisStrokesQueue::cancelStroke(KisStrokeId id)
 {
     QMutexLocker locker(&m_d->mutex);
 
     KisStrokeSP stroke = id.toStrongRef();
     if(stroke) {
+        const bool wasOpen = !stroke->isEnded();
         stroke->cancelStroke();
-        m_d->openedStrokesCounter--;
+        if (wasOpen) m_d->openedStrokesCounter--;
 
         KisStrokeSP buddy = stroke->lodBuddy();
         if (buddy) {
@@ -804,6 +862,7 @@ bool KisStrokesQueue::checkStrokeState(bool hasStrokeJobsRunning,
      */
     bool hasLodCompatibility = checkLevelOfDetailProperty(runningLevelOfDetail);
     bool hasJobs = stroke->hasJobs();
+    if (hasJobs && stroke->cancellationRetryDelay() > 0) return false;
 
     /**
      * The stroke may be cancelled very fast. In this case it will

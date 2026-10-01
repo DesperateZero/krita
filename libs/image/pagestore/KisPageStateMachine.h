@@ -200,7 +200,12 @@ enum class KisPageTransitionKind : quint8 {
     DetachPreparedVersion,
     // Owner-only replacement of this segment's not-yet-exposed Prepared
     // target, after returning its guards. Keeps the pending generation.
-    ReplacePrivatePreparedBacking
+    ReplacePrivatePreparedBacking,
+    // Logical half of a recoverable backing transfer. source is the existing
+    // independent exact before replica; target retags the old authority's
+    // physical slot for a newer logical version. Production must prepare all
+    // storage and hold the provider's physical claim before installing this.
+    AcquireRecoverableWrite
 };
 
 struct KRITAIMAGE_EXPORT KisPageTransition

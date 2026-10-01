@@ -74,16 +74,19 @@ public:
 
     void setPageStoreBridge(KisTilePageStoreBridge *bridge, bool oldData);
     /**
-     * Marks the currently cached TileData as the exact native CPU view for
-     * this wrapper.  Used for virtual/default reads and after a successful
-     * PageStore refresh so lockForRead() can use the normal tile-local swap
-     * pin without issuing a second generic PageStore request.
+     * Marks an immutable/default TileData protected by the wrapper's COW
+     * reference. Canonical read caches instead carry a provider-issued lease.
     */
     void setPageStoreNativeReadReady();
     bool refreshPageStoreData();
-    // The caller holds an exact canonical read capability over replacement.
+    // The caller passes an exact canonical read capability over replacement.
     // Existing borrowed pointers are not revoked; refresh waits for unlock.
-    void installPageStoreReadCache(KisTileData *replacement);
+    void installPageStoreReadCache(TileLease replacement);
+    // Transfer only dormant storage for refresh; never revoke an active pin.
+    TileLease takeIdleReadCache();
+    // Invalidate current cache selection, preserving every active pointer/pin.
+    // Dormant storage can be reused when the next real reader resolves current.
+    void invalidatePageStoreReadCache();
 
 public:
     void debugPrintInfo();
@@ -149,7 +152,7 @@ private:
     }
 
     inline bool hasPageStoreLeases() const {
-        return bool(m_pageStoreLeases[ReadLease]) ||
+        return (m_pageStoreLeases[ReadLease] && m_pageStoreLeases[ReadLease]->readPinned()) ||
                bool(m_pageStoreLeases[WriteLease]);
     }
 
@@ -172,6 +175,7 @@ private:
     bool ensurePageStoreWriteAccess() const;
 
 private:
+    friend class KisTiledDataManagerPageStoreBackend;
     KisTilePageStoreBridge *resolvePageStoreBridge(KisMementoManager *manager) const;
     void replacePageStoreReadCacheLocked(KisTileData *replacement) const;
     bool releasePageStoreLeasesLocked() const;

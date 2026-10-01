@@ -55,6 +55,9 @@ class KRITAIMAGE_EXPORT KisTiledDataManagerIteratorWriteScope
 public:
     ~KisTiledDataManagerIteratorWriteScope();
     bool finish();
+    // A clear barrier revokes further acquisition, but keeps borrowed raw
+    // storage alive until the iterator releases its original tile locks.
+    bool isActive() const;
 
 private:
     friend class KisTiledDataManagerPageStoreBackend;
@@ -104,7 +107,13 @@ public:
         beginIteratorWriteScope();
     KisPageStoreWriteOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
-        QString *error = nullptr);
+        QString *error = nullptr, const KisMementoSP &historyOwner = {});
+    bool beginStrokeMutation(const KisMementoSP &historyOwner, QString *error = nullptr);
+    // Business endpoints consume native results here; immutable read scopes
+    // remain at the existing data-manager read boundary. Coordinates are local.
+    bool applyStrokePixelOperation(const KisMementoSP &historyOwner, const QVector<QRect> &targetRects,
+        const std::function<bool(KisPixelWriteCursor *)> &operation, QString *error = nullptr);
+    bool checkpointStrokeMutation(const KisMementoSP &historyOwner, QString *error = nullptr);
 
 
 protected:
@@ -116,6 +125,7 @@ protected:
     friend class KisRandomAccessor2;
     friend class KisStressJob;
     friend class KisTiledDataManagerTest;
+    friend class KisTiledDataManagerPageStoreBackend;
 
 public:
     void setDefaultPixel(const quint8 *defPixel);
@@ -137,6 +147,8 @@ public:
         *oldTile = getOldTile(col, row);
     }
 
+    // Read getters can return null when current selection/pin preparation is
+    // denied. Callers must not fall back to an older cached pixel on failure.
     KisTileSP getTile(qint32 col, qint32 row, bool writable);
 
     KisTileSP getReadOnlyTileLazy(qint32 col, qint32 row, bool &existingTile);
@@ -154,6 +166,12 @@ public:
      * Finishes having already started transaction
      */
     void commit();
+    // A rejected commit leaves the current history owned by this manager.
+    // Callers must not register an undo command until this succeeds.
+    bool tryCommit(QString *error = nullptr);
+    // Cancel the current memento. Failure retains the terminal responsibility.
+    // The caller must quiesce writers before switching the compatibility index.
+    bool tryAbort(KisMementoSP memento, QString *error = nullptr);
 
     void rollback(KisMementoSP memento);
     void rollforward(KisMementoSP memento);
@@ -310,6 +328,9 @@ public:
 
 private:
     KisTileHashTable *m_hashTable;
+    // Only the active history holds this compatibility default backing.
+    // It is a physical reference, not a second history or write authority.
+    KisTileData *m_historyDefaultTileData = nullptr;
     KisMementoManager *m_mementoManager;
     KisTiledDataManagerPageStoreBackend *m_pageStoreBackend;
     // One immutable, manager-owned uniform backing lets repeated whole-tile
@@ -341,13 +362,19 @@ private:
 
 private:
     void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
+    void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
     void rebuildPageStoreIndex();
     void attachPageStoreTile(KisTileSP &tile, bool oldData, bool nativeReady);
     void refreshPageStoreIndex(const QRect &rect);
     void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
+    void refreshPageStorePages(const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity);
+    qsizetype pageStoreRefreshCapacity(const QRect &rect) const;
+    void refreshPageStorePage(const KisLogicalPageId &page, bool present);
     bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
     bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
+    KisPageStoreWriteOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,
+                                      bool oldSource, bool rough, QString *error);
 
     bool writeTilesHeader(KisPaintDeviceWriter &store, quint32 numTiles);
     bool processTilesHeader(QIODevice *stream, quint32 &numTiles);

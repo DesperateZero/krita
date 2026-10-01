@@ -11,6 +11,7 @@
 #include <QReadWriteLock>
 #include <QMap>
 #include <QRect>
+#include <memory>
 #include "kritaimage_export.h"
 
 
@@ -27,6 +28,7 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
         bool add(qint32 index);
         bool remove(qint32 index);
         void replace(const QVector<qint32> &indexes);
+        void takePrepared(Data &prepared) noexcept;
         void clear();
         bool isEmpty();
         qint32 min();
@@ -36,11 +38,24 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
         QReadWriteLock m_extentLock;
 
     private:
+        // Storage only. Current counts are copied at installation, under the
+        // original migration gate, rather than frozen during allocation.
+        struct Growth {
+            qint32 capacity = 0;
+            qint32 offset = 0;
+            std::unique_ptr<QAtomicInt[]> buffer;
+            void allocate();
+        };
+        bool covers(qint32 first, qint32 last) const;
+        Growth planGrowth(qint32 first, qint32 last) const;
+        bool canInstall(const Growth &growth, qint32 first, qint32 last) const;
+        void install(Growth &growth, qint32 first, qint32 last) noexcept;
         inline void unsafeAdd(qint32 index);
-        inline void unsafeMigrate(qint32 index);
-        inline void migrate(qint32 index);
+        void prepare(qint32 first, qint32 last);
         inline void updateMin();
         inline void updateMax();
+        friend class KisTiledExtentManager;
+        friend class KisTiledDataManagerTest;
 
     private:
         qint32 m_min;
@@ -55,9 +70,16 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
 public:
     KisTiledExtentManager();
 
+    // Prepare both axes before any tile delta or pixels. This may grow retained
+    // capacity, but never changes counts or the visible extent. Allocation and
+    // old-buffer destruction occur outside the extent/migration gates.
+    bool prepareTileRange(const QRect &tileRange);
     void notifyTileAdded(qint32 col, qint32 row);
     void notifyTileRemoved(qint32 col, qint32 row);
     void replaceTileStats(const QVector<QPoint> &indexes);
+    // Caller excludes mutations; prepared is private and has no readers.
+    // Exchanges already allocated storage, leaving old storage for deferred destruction.
+    void takePrepared(KisTiledExtentManager &prepared) noexcept;
     void clear();
     QRect extent() const;
 

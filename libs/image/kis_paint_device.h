@@ -38,6 +38,7 @@ class KoColorProfile;
 class KisRegion;
 class KisDataManager;
 class KisPixelWriteCursor;
+class KisTransaction;
 class KisPaintDeviceWriter;
 class KisKeyframe;
 class KisRasterKeyframeChannel;
@@ -853,6 +854,52 @@ public:
      */
     bool applyPixelOperation(const QRect &rect,
                              const std::function<bool(KisPixelWriteCursor *)> &operation);
+    // Explicit, synchronously borrowed stroke owner. Its scope must already be
+    // admitted and it must outlive this call. Coordinates retain device/wrap
+    // semantics; a rejected owner never selects a legacy fallback.
+    bool applyPixelOperation(const QRect &rect,
+                             const std::function<bool(KisPixelWriteCursor *)> &operation,
+                             KisTransaction *strokeOwner);
+    // One callback over the union of declared device-coordinate rectangles.
+    // Overlapping targets share page admission; pages outside the union are not claimed.
+    // The same mapping, owner validation and no-replay failure guarantee apply.
+    bool applyPixelOperation(const QVector<QRect> &rects,
+                             const std::function<bool(KisPixelWriteCursor *)> &operation,
+                             KisTransaction *strokeOwner);
+
+    // Captured target/mapping values, not a write capability. Capture at a
+    // quiescent boundary; the scheduler must keep device metadata stable while
+    // a validated operation executes. Retains the original device and manager,
+    // not pixels, a PageStore snapshot, or a mutation owner.
+    class KRITAIMAGE_EXPORT WriteContext {
+    public:
+        WriteContext();
+        WriteContext(const WriteContext &);
+        WriteContext &operator=(const WriteContext &);
+        ~WriteContext();
+        bool matches(KisPaintDevice *target) const;
+    private:
+        friend class KisPaintDevice;
+        KisPaintDeviceSP device;
+        KisDataManagerSP manager;
+        const KoColorSpace *colorSpace = nullptr;
+        QPoint offset;
+        QRect wrapRect;
+        WrapAroundAxis wrapAxis = WRAPAROUND_BOTH;
+        bool wrapped = false;
+        int time = 0;
+        int lod = 0;
+        int frame = -1;
+    };
+    WriteContext captureWriteContext();
+
+    // Partition device-coordinate coverage into jobs with disjoint mapped
+    // storage pages. Each job may have several clips (e.g. around a wrap seam).
+    // This is geometry only: the caller must keep device context stable until
+    // execution and obtain ordinary write admission for every job. patchSize
+    // must be a positive multiple of the storage tile dimensions.
+    bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,
+                             QVector<QVector<QRect>> *jobs);
 
     /**
      * Create an iterator that will "artificially" extend the paint device with the
@@ -910,6 +957,8 @@ Q_SIGNALS:
 
 public:
     friend class PaintDeviceCache;
+    friend class KisTransactionData;
+    void invalidateTransactionCache();
 
     /**
      * Calculates exact bounds of the device. Used internally

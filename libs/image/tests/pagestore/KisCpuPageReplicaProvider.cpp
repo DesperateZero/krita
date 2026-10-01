@@ -44,15 +44,15 @@ struct CpuAllocation
         size_t alignment = alignof(std::max_align_t);
     };
 
-    KisReplicaHandle handle;
     QSharedPointer<KisCpuResidentBinding> binding;
 };
 
 class CpuResidentBinding final : public KisCpuResidentBinding
 {
 public:
-    explicit CpuResidentBinding(const std::shared_ptr<CpuAllocation::AlignedBytes> &bytes)
-        : m_bytes(bytes) {}
+    CpuResidentBinding(const std::shared_ptr<CpuAllocation::AlignedBytes> &bytes,
+                       const KisReplicaHandle &handle)
+        : KisCpuResidentBinding(handle), m_bytes(bytes) {}
 private:
     void *pinStorage(bool, KisCpuResidentReadStatus *status) override
     {
@@ -116,7 +116,6 @@ public:
                          byteSize};
 
         CpuAllocation allocation;
-        allocation.handle = handle;
         auto bytes = std::make_shared<CpuAllocation::AlignedBytes>();
         bytes->alignment = qMax<size_t>(
             size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
@@ -142,7 +141,7 @@ public:
             }
         }
 
-        allocation.binding = QSharedPointer<CpuResidentBinding>::create(bytes);
+        allocation.binding = QSharedPointer<CpuResidentBinding>::create(bytes, handle);
         allocations.insert(handle.allocation.slot, allocation);
         committedBytes += byteSize;
         if (!completions->complete(completion, KisCompletionStatus::Succeeded)) {
@@ -276,12 +275,12 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
     if (retirement.failure)
         return KisReplicaOperation::failed(operation,
             QStringLiteral("CPU retirement %1").arg(QString::fromLatin1(retirement.failure)));
-    if (!retirement.allocation->binding->retire()) {
+    if (!retirement.allocation->binding->retire(replica.allocationIdentity())) {
         d->completions->complete(retirement.completion, KisCompletionStatus::Failed);
         return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
     }
     d->consumeOperation(operation);
-    d->committedBytes -= retirement.allocation->handle.layout.byteSize;
+    d->committedBytes -= replica.layout.byteSize;
     d->allocations.erase(retirement.allocation);
     if (!d->completions->complete(retirement.completion, KisCompletionStatus::Succeeded)) {
         return KisReplicaOperation::failed(operation,

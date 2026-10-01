@@ -1,6 +1,14 @@
 project(kritapigment)
 
 ko_compile_for_all_implementations_no_scalar(__per_arch_factory_objs compositeops/KoOptimizedCompositeOpFactoryPerArch.cpp)
+# AppleClang's universal invocation leaves the last architecture's depfile.
+# XSIMD_UNIVERSAL_BUILD_PASS excludes the other architecture's implementations,
+# so their composite headers may be absent from that depfile. Keep all factory
+# variants dependent on the compositor headers even when that pass is disabled.
+if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    file(GLOB _composite_factory_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/compositeops/*.h")
+    set_property(SOURCE ${__per_arch_factory_objs} APPEND PROPERTY OBJECT_DEPENDS ${_composite_factory_headers})
+endif()
 ko_compile_for_all_implementations(__per_arch_alpha_applicator_factory_objs KoAlphaMaskApplicatorFactoryImpl.cpp)
 ko_compile_for_all_implementations(__per_arch_rgb_scaler_factory_objs KoOptimizedPixelDataScalerU8ToU16FactoryImpl.cpp)
 

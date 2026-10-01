@@ -16,6 +16,11 @@ class KisStrokesQueueTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void testCheckpointCapturesAdmittedJobs_data();
+    void testCheckpointCapturesAdmittedJobs();
+    void testCheckpointCancellation_data();
+    void testCheckpointCancellation();
+    void testCheckpointRejectsRetainedFinishedStroke();
     void testSequentialJobs();
     void testConcurrentSequentialBarrier();
     void testExclusiveStrokes();
@@ -23,6 +28,10 @@ private Q_SLOTS:
     void testStrokesOverlapping();
     void testImmediateCancel();
     void testOpenedStrokeCounter();
+    void testWorkerFailureKeepsInputHandle();
+    void testWorkerFailureLod_data();
+    void testWorkerFailureLod();
+    void testWorkerFailureAfterLodBuddyFinished();
     void testAsyncCancelWhileOpenedStroke();
     void testStrokesLevelOfDetail();
     void testStrokeWithMixedLodJobs();

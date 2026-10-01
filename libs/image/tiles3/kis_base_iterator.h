@@ -51,11 +51,11 @@ protected:
     QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
     std::optional<KisPageStoreReadCursor> m_readCursor;
     inline bool lockTile(KisTileSP &tile) {
-        return m_writable ? tile->lockForWrite() : tile->lockForRead();
+        return tile && (m_writable ? tile->lockForWrite() : tile->lockForRead());
     }
     inline bool lockOldTile(KisTileSP &tile) {
         // Doesn't depend on current access type
-        return tile->lockForRead();
+        return tile && tile->lockForRead();
     }
     inline void unlockTile(KisTileSP &tile) {
         if (!tile) return;
@@ -72,6 +72,11 @@ protected:
 
     template<typename TileInfo>
     void fetchTileDataForCache(TileInfo &info, qint32 column, qint32 row) {
+        if (m_writeScope && !m_writeScope->isActive()) {
+            info.data = nullptr;
+            info.oldData = nullptr;
+            return;
+        }
         if (m_readScope) info.tile = m_dataManager->getTile(column, row, m_writable);
         else m_dataManager->getTilesPair(column, row, m_writable, &info.tile, &info.oldtile);
         if (!lockTile(info.tile)) {
@@ -81,7 +86,14 @@ protected:
             info.oldData = nullptr;
             return;
         }
-        info.data = info.tile->data();
+        info.data = m_writable ? info.tile->tryWriteData() : info.tile->data();
+        if (!info.data) {
+            unlockTile(info.tile);
+            info.tile.clear();
+            info.oldtile.clear(); // no old tile lock has been taken yet
+            info.oldData = nullptr;
+            return;
+        }
         if (m_readScope) {
             if (m_readScope->beforeAliasesWrite()) info.oldData = info.data;
             else {

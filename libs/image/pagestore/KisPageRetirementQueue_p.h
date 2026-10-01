@@ -11,6 +11,8 @@
 #include "KisPageOwnerLedger.h"
 #include "KisPageReplicaProvider.h"
 #include "KisPageStore.h"
+#include "KisPageStoreReclamation_p.h"
+#include "KisPageRetirementRecord_p.h"
 
 #include <QAtomicInt>
 #include <QMutex>
@@ -18,21 +20,11 @@
 #include <QVector>
 #include <QWaitCondition>
 
-#include <deque>
 #include <memory>
 
 class KisBackingBudgetReservation;
-
-struct KisPageRetirementRecord
-{
-    KisReplicaHandle replica;
-    QSharedPointer<KisPageReplicaProvider> provider;
-    KisCompletionTicket lastUse;
-    KisPageOperationId retirementOperation;
-    // Rare provider-result rejection: keep the preallocation reservation
-    // charged until an unregistered physical replica reaches terminal retire.
-    std::shared_ptr<KisBackingBudgetReservation> orphanReservation;
-};
+struct KisPageRetirementWait;
+struct KisPageRetirementWakeContext;
 
 struct KisPageRetirementQueueSnapshot
 {
@@ -46,6 +38,11 @@ struct KisPageRetirementQueueSnapshot
     quint64 peakPendingBytes = 0;
     quint64 retryRequeues = 0;
     quint64 closeDrainedReplicas = 0;
+    qsizetype delayedReplicas = 0;
+    bool retryScheduled = false;
+    quint64 retryWakeups = 0;
+    quint64 maximumReplicasPerRetryWake = 0;
+    int nextRetryDelayMs = 1;
 };
 
 /**
@@ -62,56 +59,83 @@ public:
     static constexpr qsizetype WorkerBatchBudget = 32;
     using ReleaseOwnerLifetime = void (*)(void *context);
 
-    KisPageRetirementQueue(KisPageOwnerLedger &owner,
+    // Existing cold composition boundary exported for integration tests; the
+    // queue remains embedded by value in its PageStore owner.
+    KRITAIMAGE_EXPORT KisPageRetirementQueue(KisPageOwnerLedger &owner,
                            KisPageMetadataCoordinator &metadata,
+                           KisBackingBudgetController &budget,
                            QAtomicInt &ownerLifetimeReferences,
                            void *ownerLifetimeContext,
                            ReleaseOwnerLifetime releaseOwnerLifetime);
-    ~KisPageRetirementQueue();
+    KRITAIMAGE_EXPORT ~KisPageRetirementQueue();
+    KRITAIMAGE_EXPORT void prepareTask();
 
     KisPageRetirementQueue(const KisPageRetirementQueue &) = delete;
     KisPageRetirementQueue &operator=(const KisPageRetirementQueue &) = delete;
     KisPageRetirementQueue(KisPageRetirementQueue &&) = delete;
     KisPageRetirementQueue &operator=(KisPageRetirementQueue &&) = delete;
 
-    void retireOrDefer(const KisReplicaHandle &replica,
+    KRITAIMAGE_EXPORT void retireOrDefer(const KisReplicaHandle &replica,
                        const QSharedPointer<KisPageReplicaProvider> &provider,
                        const KisCompletionTicket &lastUse,
-                       KisBackingBudgetReservation &&orphanReservation);
+                       KisPageBackingPreparation &&backing);
     void retireEffects(const QVector<KisPageTransitionEffect> &effects,
                        bool backgroundReclamation);
-    KisPageStoreRetirementProgress process(qsizetype replicaBudget);
+    KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
-    void beginClose();
+    KRITAIMAGE_EXPORT void stopAutomaticWakeups();
+    KRITAIMAGE_EXPORT void beginClose();
     void cancelCloseAndSchedule();
-    void waitForIdle();
-    QVector<KisPageRetirementRecord> takeForClose();
-    bool retireRecord(KisPageRetirementRecord &record);
-    bool isDrained() const;
+    KRITAIMAGE_EXPORT void waitForIdle();
+    KRITAIMAGE_EXPORT KisPageRetirementRecords takeForClose();
+    KRITAIMAGE_EXPORT bool retireRecord(KisPageRetirementRecord &record);
+    KRITAIMAGE_EXPORT bool isDrained() const;
 
-    KisPageRetirementQueueSnapshot snapshot() const;
+    KRITAIMAGE_EXPORT KisPageRetirementQueueSnapshot snapshot() const;
 
 private:
     bool admitOwnedRetirementDebt(KisPageRetirementRecord &record,
                                   KisBackingBudgetReservation *reservation,
                                   KisBackingBudgetClass currentClass);
-    void defer(KisPageRetirementRecord record);
-    void finishAttemptLocked(KisPageRetirementRecord &record, bool retired);
+    void defer(KisPageRetirementRecordPointer record);
+    void finishAttemptLocked(KisPageRetirementRecords &batch, KisPageRetirementRecords::iterator entry, bool retired);
     void schedulePassLocked();
+    void scheduleRetryLocked();
+    void cancelRetryLocked();
+    void disarmAutomaticWakeupsLocked();
     void updatePeaksLocked();
+    void prepareWait(KisPageRetirementRecord &record);
+    std::shared_ptr<KisPageRetirementWait> prepareWaitState(
+        const std::shared_ptr<KisPageRetirementWakeContext> &context);
+    void enqueuePendingLocked(KisPageRetirementRecords &source, KisPageRetirementRecords::iterator entry);
+    static void disarmLocked(KisPageRetirementRecord &record, bool takeGrant = false);
+    static void dispatchReady(const std::weak_ptr<KisPageRetirementWakeContext> &context,
+                               const std::weak_ptr<KisPageRetirementWait> &wait);
 
     KisPageOwnerLedger &m_owner;
     KisPageMetadataCoordinator &m_metadata;
+    KisBackingBudgetController &m_budget;
     QAtomicInt &m_ownerLifetimeReferences;
     void *m_ownerLifetimeContext = nullptr;
     ReleaseOwnerLifetime m_releaseOwnerLifetime = nullptr;
 
     mutable QMutex m_mutex;
-    std::deque<KisPageRetirementRecord> m_pending;
-    std::deque<KisPageRetirementRecord> m_ready;
+    KisPageRetirementRecords m_pending;
+    KisPageRetirementRecords m_ready;
+    // Same sole record owner, partitioned to bound a no-signal retry wake.
+    KisPageRetirementRecords m_retryPending;
+    KisPageReclamationDelay m_retryTask;
+    std::shared_ptr<KisPageRetirementWait> m_retryWait;
+    int m_nextRetryDelayMs = 1;
+    quint64 m_retryWakeups = 0;
+    quint64 m_maximumReplicasPerRetryWake = 0;
+    std::shared_ptr<KisPageRetirementWakeContext> m_wakeContext;
+    QAtomicInt m_pendingNotifications{0};
     QWaitCondition m_idle;
     bool m_jobScheduled = false;
+    KisPageReclamationJobPointer m_task;
     bool m_closing = false;
+    bool m_automaticWakeupsStopped = false;
     qsizetype m_activeReplicas = 0;
     quint64 m_pendingBytes = 0;
     quint64 m_backgroundPasses = 0;

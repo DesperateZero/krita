@@ -38,6 +38,7 @@
 #include <KisRunnableStrokeJobData.h>
 #include <KisRunnableStrokeJobUtils.h>
 #include <KisRunnableStrokeJobsInterface.h>
+#include <KisStrokeJobFailureContext.h>
 
 #include <QThread>
 #include "kis_image_config.h"
@@ -153,7 +154,9 @@ struct KisBrushOp::UpdateSharedState
 {
     // rendering data
     KisPainter *painter = 0;
+    KisPaintDevice::WriteContext writeContext;
     QList<KisRenderedDab> dabsQueue;
+    int writePatchSize = 128;
 
     // speed metrics
     QVector<QPointF> dabPoints;
@@ -163,8 +166,29 @@ struct KisBrushOp::UpdateSharedState
     QVector<QRect> allDirtyRects;
 };
 
+void KisBrushOp::addDabJobs(const QVector<QRect> &rects, UpdateSharedStateSP state,
+                           QVector<KisRunnableStrokeJobData*> &jobs)
+{
+    QVector<QVector<QRect>> writeJobs;
+    if (!state->painter->device()->partitionWriteRects(rects, state->writePatchSize, &writeJobs)) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Brush write range partition failed"));
+        return;
+    }
+    for (const QVector<QRect> &clips : std::as_const(writeJobs)) {
+        KritaUtils::addJobConcurrent(jobs, [clips, state] {
+            if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+            if (!state->writeContext.matches(state->painter->device().data())) {
+                KisStrokeJobFailureContext::reportFailure(QStringLiteral("Brush target mapping changed after partition"));
+                return;
+            }
+            state->painter->bltFixed(clips, state->dabsQueue);
+        });
+    }
+}
+
 void KisBrushOp::addMirroringJobs(Qt::Orientation direction,
                                   QVector<QRect> &rects,
+                                  QVector<QRect> &writeRects,
                                   UpdateSharedStateSP state,
                                   QVector<KisRunnableStrokeJobData*> &jobs)
 {
@@ -193,13 +217,12 @@ void KisBrushOp::addMirroringJobs(Qt::Orientation direction,
 
     for (QRect &rc : rects) {
         state->painter->mirrorRect(direction, &rc);
-
-        KritaUtils::addJobConcurrent(jobs,
-            [rc, state] () {
-                state->painter->bltFixed(rc, state->dabsQueue);
-            }
-        );
     }
+    for (QRect &rc : writeRects) state->painter->mirrorRect(direction, &rc);
+    // Mirroring changes alignment relative to the device's storage pages.
+    // Repartition the transformed clips; the preceding sequential job keeps
+    // them behind the corresponding dab-pixel transformation jobs.
+    addDabJobs(writeRects, state, jobs);
 
     state->allDirtyRects.append(rects);
 }
@@ -215,6 +238,7 @@ std::pair<int, bool> KisBrushOp::doAsynchronousUpdate(QVector<KisRunnableStrokeJ
         UpdateSharedStateSP state = m_updateSharedState;
 
         state->painter = painter();
+        state->writeContext = state->painter->device()->captureWriteContext();
 
         {
             const qreal dabRenderingTime = m_dabExecutor->averageDabRenderingTime();
@@ -282,9 +306,13 @@ std::pair<int, bool> KisBrushOp::doAsynchronousUpdate(QVector<KisRunnableStrokeJ
             }
         }
 
+        // Keep actual dab coverage for write jobs. The original pixel patches
+        // still determine adaptation and dirty reporting, but their gap areas
+        // must not create empty storage jobs after realignment.
+        QVector<QRect> writeRects = rects;
         // split/merge rects into non-overlapping areas
         rects = KisPaintOpUtils::splitDabsIntoRects(rects,
-                                                    idealNumRects, diameter, spacing);
+                                                    idealNumRects, diameter, spacing, &state->writePatchSize);
 
         state->allDirtyRects = rects;
 
@@ -294,13 +322,7 @@ std::pair<int, bool> KisBrushOp::doAsynchronousUpdate(QVector<KisRunnableStrokeJ
 
         state->dabRenderingTimer.start();
 
-        Q_FOREACH (const QRect &rc, rects) {
-            KritaUtils::addJobConcurrent(jobs,
-                [rc, state] () {
-                    state->painter->bltFixed(rc, state->dabsQueue);
-                }
-            );
-        }
+        addDabJobs(writeRects, state, jobs);
 
         /**
          * After the dab has been rendered once, we should mirror it either one
@@ -309,19 +331,24 @@ std::pair<int, bool> KisBrushOp::doAsynchronousUpdate(QVector<KisRunnableStrokeJ
          * branches, which is done intentionally!
          */
         if (state->painter->hasHorizontalMirroring()) {
-            addMirroringJobs(Qt::Horizontal, rects, state, jobs);
+            addMirroringJobs(Qt::Horizontal, rects, writeRects, state, jobs);
         }
 
         if (state->painter->hasVerticalMirroring()) {
-            addMirroringJobs(Qt::Vertical, rects, state, jobs);
+            addMirroringJobs(Qt::Vertical, rects, writeRects, state, jobs);
         }
 
         if (state->painter->hasHorizontalMirroring() && state->painter->hasVerticalMirroring()) {
-            addMirroringJobs(Qt::Horizontal, rects, state, jobs);
+            addMirroringJobs(Qt::Horizontal, rects, writeRects, state, jobs);
         }
 
         KritaUtils::addJobSequential(jobs,
                 [state, this, someDabsAreStillInQueue] () {
+                    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+                    if (!state->writeContext.matches(state->painter->device().data())) {
+                        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Brush target mapping changed before update completion"));
+                        return;
+                    }
                     Q_FOREACH(const QRect &rc, state->allDirtyRects) {
                         state->painter->addDirtyRect(rc);
                     }

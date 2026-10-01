@@ -28,6 +28,7 @@ struct Q_DECL_HIDDEN KisPainter::Private {
     KisPaintDeviceSP            device;
     KisSelectionSP              selection;
     KisTransaction*             transaction {nullptr};
+    KisTransaction*             strokeMutationOwner {nullptr};
     KoUpdater*                  progressUpdater {nullptr};
 
     QVector<QRect>              dirtyRects;
@@ -80,18 +81,24 @@ struct Q_DECL_HIDDEN KisPainter::Private {
 
     void fillPainterPathImpl(const QPainterPath& path, const QRect &requestedRect);
 
-    void applyDevice(const QRect &applyRect,
+    bool applyDevice(const QRect &applyRect,
                      const KisRenderedDab &dab,
-                     KisRandomAccessorSP dstIt,
+                     KisPixelWriteCursor *dstIt,
                      const KoColorSpace *srcColorSpace,
-                     KoCompositeOp::ParameterInfo &localParamInfo);
+                     const KoCompositeOp *operation,
+                     KoCompositeOp::ParameterInfo &localParamInfo,
+                     bool useDabParameters = true,
+                     const QRect &sourceRect = QRect());
 
-    void applyDeviceWithSelection(const QRect &applyRect,
+    bool applyDeviceWithSelection(const QRect &applyRect,
                                   const KisRenderedDab &dab,
-                                  KisRandomAccessorSP dstIt,
+                                  KisPixelWriteCursor *dstIt,
                                   KisRandomConstAccessorSP maskIt,
                                   const KoColorSpace *srcColorSpace,
-                                  KoCompositeOp::ParameterInfo &localParamInfo);
+                                  const KoCompositeOp *operation,
+                                  KoCompositeOp::ParameterInfo &localParamInfo,
+                                  bool useDabParameters = true,
+                                  const QRect &sourceRect = QRect());
 
     template<class T> QVector<T> calculateMirroredObjects(const T &object);
 

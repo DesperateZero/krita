@@ -14,9 +14,9 @@ and allocator evidence, the qualified source identity, and the sole active
 M6 → M7 → M8 → BR1-PERF plan are maintained in workspace design 92. Designs
 47–91 are historical inputs, not competing current milestones or API templates.
 
-The current graph has 1,467 indexed APIs and 13,730 reverse-call edges, with 21
-manifest entries, 21 ownership facts, 16 census groups and 19 external intrusion
-files. Candidate classifications are review inputs, not deletion permission.
+Current counts come from the generated graph and architecture checker output;
+the frozen execution evidence is linked from workspace design 92. Candidate
+classifications are review inputs, not deletion permission.
 The source gate cannot replace behavior, actual allocator interposition,
 resource-pressure tests or performance qualification.
 
@@ -24,7 +24,7 @@ resource-pressure tests or performance qualification.
   misplaced ownership surface.  Active entries must name symbols that still
   exist; removed entries remain as tombstones for one milestone.
 - `state-ownership.json` records the current and target writer for every state
-  fact required by design 69.  `split` is debt, not an accepted final owner.
+  fact, governed by current design 92. `split` is debt, not an accepted final owner.
 - `runtime-census.json` maps every manifest entry to operation/page/live/peak/
   terminal/fallback evidence.  `static-proven` records an inapplicable runtime
   route whose caller set is proven by the frozen graph; `deferred` remains an
@@ -78,13 +78,13 @@ Before writing a new checkpoint the checker enforces the previous intrusion
 ceilings; refreshing hashes cannot silently raise them.
 Regeneration is not a way to make a violation pass.  A patch that reduces an
 intrusion deletes or lowers the corresponding frozen entry.  A patch that
-increases a count must first update designs 68/69 with the ownership, memory,
+increases a count must first update current design 92 with the ownership, memory,
 concurrency, and removal consequences.
 
 The old mutex-protected compatibility census and retired writer-claim metrics
 are not current production authorities. Runtime metric identifiers are checked
 against production identifiers; that structural check does not prove all
-budget/failure behavior. The 21 ownership facts now distinguish canonical
+budget/failure behavior. The ownership facts distinguish canonical
 writers by responsibility; provider allocation identity, physical pin lifetime,
 Store classification and compatibility group lifetime are separate facts.
 The fail-closed Vulkan provider is still deferred to BR3. Do not recreate an

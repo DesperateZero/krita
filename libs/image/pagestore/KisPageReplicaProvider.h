@@ -404,6 +404,12 @@ public:
     // providers keep the empty default. A change is retained until the owner
     // acknowledges its exact sequence after budget installation.
     virtual QVector<KisReplicaBackingDomainChange> backingDomainChanges() const;
+    // Optional empty-journal hint, sampled independently on every sync. False
+    // means the journal was empty at this observation; it is not a remembered
+    // acknowledgement or permission to skip domain pre-admission. Unsupported
+    // providers return true. Implementations must not wait, allocate or call
+    // an owner; a concurrent later change still uses the normal admission path.
+    virtual bool mayHaveBackingDomainChanges() const noexcept;
     virtual void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                                 quint64 revision);
     // Mutable-domain providers retain weak references only. Fixed-domain

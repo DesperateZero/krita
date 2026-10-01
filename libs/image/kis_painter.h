@@ -39,6 +39,7 @@ class KoCompositeOp;
 class KisUndoAdapter;
 class KisPostExecutionUndoAdapter;
 class KisTransaction;
+class KisPixelWriteCursor;
 class KisPaintInformation;
 class KisPaintOp;
 class KisDistanceInformation;
@@ -155,6 +156,13 @@ public:
 
     /// take transaction out of the reach of KisPainter
     KisTransaction* takeTransaction();
+
+    /**
+     * Bind the existing stroke transaction used by paintop jobs. The painter
+     * does not own this pointer; the stroke strategy keeps it alive until all
+     * jobs have drained and clears the binding before deleting the painter.
+     */
+    void setStrokeMutationOwner(KisTransaction *transaction);
 
     /// Returns the current paint device.
     const KisPaintDeviceSP device() const;
@@ -299,6 +307,11 @@ public:
      * rendered at all.
      */
     void bltFixed(const QRect &rc, const QList<KisRenderedDab> allSrcDevices);
+    // The clips are pairwise disjoint in device coordinates, as returned by
+    // PaintDevice::partitionWriteRects. All clips use one operation, with dab
+    // order retained across the entire job. A bound stroke owner is borrowed
+    // synchronously when present.
+    void bltFixed(const QVector<QRect> &clips, const QList<KisRenderedDab> &allSrcDevices);
 
     /**
      * Convenience method that uses QPoint and QRect.
@@ -889,7 +902,19 @@ private:
         void bitBltImpl(qint32 dstX, qint32 dstY,
                         const KisPaintDeviceSP srcDev,
                         qint32 srcX, qint32 srcY,
-                        qint32 srcWidth, qint32 srcHeight);
+                        qint32 srcWidth, qint32 srcHeight,
+                        KisTransaction *strokeOwner = nullptr);
+
+    void bltFixedImpl(qint32 dstX, qint32 dstY,
+                      const KisFixedPaintDeviceSP srcDev,
+                      qint32 srcX, qint32 srcY,
+                      qint32 srcWidth, qint32 srcHeight,
+                      KisTransaction *strokeOwner);
+    void bltFixedImpl(const QVector<QRect> &clips,
+                      const QList<KisRenderedDab> &allSrcDevices,
+                      KisTransaction *strokeOwner);
+    void renderMirrorMaskImpl(QRect rc, KisFixedPaintDeviceSP dab, KisTransaction *strokeOwner);
+    void renderMirrorMaskImpl(QRect rc, KisPaintDeviceSP dab, KisTransaction *strokeOwner);
 
     inline void compositeOnePixel(quint8 *dst, const KoColor &color);
 
@@ -901,4 +926,3 @@ private:
 
 
 #endif // KIS_PAINTER_H_
-

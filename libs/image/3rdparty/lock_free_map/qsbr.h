@@ -11,110 +11,182 @@
 #ifndef QSBR_H
 #define QSBR_H
 
-#include <kis_lockless_stack.h>
-
-#define CALL_MEMBER(obj, pmf) ((obj).*(pmf))
+#include <QAtomicPointer>
+#include <QAtomicInt>
+#include <cstring>
+#include <memory>
+#include <type_traits>
+#include <utility>
+#include "kis_assert.h"
 
 class QSBR
 {
-private:
-    struct Action {
-        void (*func)(void*);
-        quint64 param[4]; // Size limit found experimentally. Verified by assert below.
-
-        Action() = default;
-
-        Action(void (*f)(void*), void* p, quint64 paramSize) : func(f)
-        {
-            KIS_ASSERT(paramSize <= sizeof(param)); // Verify size limit.
-            memcpy(&param, p, paramSize);
-        }
-
-        void operator()()
-        {
-            func(&param);
-        }
-    };
-
-    QAtomicInt m_rawPointerUsers;
-    KisLocklessStack<Action> m_pendingActions;
-    KisLocklessStack<Action> m_migrationReclaimActions;
-
-    void releasePoolSafely(KisLocklessStack<Action> *pool, bool force = false) {
-        KisLocklessStack<Action> tmp;
-        tmp.mergeFrom(*pool);
-        if (tmp.isEmpty()) return;
-
-        if (force || tmp.size() > 4096) {
-            while (m_rawPointerUsers.loadAcquire());
-
-            Action action;
-            while (tmp.pop(action)) {
-                action();
-            }
-        } else {
-            if (!m_rawPointerUsers.loadAcquire()) {
-                Action action;
-                while (tmp.pop(action)) {
-                    action();
-                }
-            } else {
-                // push elements back to the source
-                pool->mergeFrom(tmp);
-            }
-        }
-    }
-
 public:
+    // The retirement record is the queue node. Preparing it does not publish
+    // a callback; once queued, its target must remain alive until invocation.
+    class Action {
+    public:
+        Action() = default;
+        Action(const Action &) = delete;
+        Action &operator=(const Action &) = delete;
 
-    template <class T>
-    void enqueue(void (T::*pmf)(), T* target, bool migration = false)
-    {
-        struct Closure {
-            void (T::*pmf)();
-            T* target;
-
-            static void thunk(void* param)
-            {
-                Closure* self = (Closure*) param;
-                CALL_MEMBER(*self->target, self->pmf)();
-            }
-        };
-
-        Closure closure = {pmf, target};
-
-        if (migration) {
-            m_migrationReclaimActions.push(Action(Closure::thunk, &closure, sizeof(closure)));
-        } else {
-            m_pendingActions.push(Action(Closure::thunk, &closure, sizeof(closure)));
+        template<class T>
+        void bind(void (T::*method)(), T *target) noexcept
+        {
+            struct Closure {
+                void (T::*method)();
+                T *target;
+                void invoke() const { (target->*method)(); }
+            };
+            const Closure closure{method, target};
+            set(closure);
         }
+
+        template<class T>
+        void bind(void (*function)(T *), T *target) noexcept
+        {
+            struct Closure {
+                void (*function)(T *);
+                T *target;
+                void invoke() const { function(target); }
+            };
+            const Closure closure{function, target};
+            set(closure);
+        }
+
+    private:
+        template<class Closure>
+        void set(const Closure &closure) noexcept
+        {
+            static_assert(sizeof(Closure) <= sizeof(m_parameters));
+            static_assert(std::is_trivially_copyable<Closure>::value);
+            std::memcpy(m_parameters, &closure, sizeof(closure));
+            m_function = [](Action *action) {
+                // Reconstitute a real typed object, rather than interpreting
+                // a byte buffer as a Closure whose lifetime never began.
+                Closure local{};
+                std::memcpy(&local, action->m_parameters, sizeof(local));
+                if (action->m_heapOwned) delete action;
+                local.invoke();
+            };
+        }
+        // An embedded action may destroy its containing target. Copy every
+        // needed field before invoking it and never touch the node afterwards.
+        void invokeAndDispose()
+        {
+            m_function(this);
+        }
+        Action *m_next = nullptr;
+        void (*m_function)(Action *) = nullptr;
+        quint64 m_parameters[4]{};
+        bool m_heapOwned = false;
+        friend class QSBR;
+    };
+    using PreparedAction = std::unique_ptr<Action>;
+
+    static PreparedAction prepare()
+    {
+        auto action = std::make_unique<Action>();
+        action->m_heapOwned = true;
+        return action;
     }
+
+    template<class Method, class T>
+    static PreparedAction prepare(Method method, T *target)
+    {
+        auto action = prepare();
+        action->bind(method, target);
+        return action;
+    }
+
+    void enqueuePrepared(PreparedAction action, bool migration = false) noexcept
+    {
+        Q_ASSERT(action && action->m_function);
+        enqueueNode(action.release(), migration);
+    }
+
+    // No allocation: the containing owner was allocated before publication.
+    // The callback is responsible for retiring that owner. Enqueue once only.
+    void enqueueEmbedded(Action &action, bool migration = false) noexcept
+    {
+        Q_ASSERT(!action.m_heapOwned && action.m_function);
+        enqueueNode(&action, migration);
+    }
+
+    template<class T>
+    void enqueue(void (T::*method)(), T *target, bool migration = false)
+    {
+        enqueuePrepared(prepare(method, target), migration);
+    }
+
+    class RawPointerAccess {
+    public:
+        explicit RawPointerAccess(QSBR &gc) : m_gc(gc) { m_gc.lockRawPointerAccess(); }
+        ~RawPointerAccess() { m_gc.unlockRawPointerAccess(); }
+        RawPointerAccess(const RawPointerAccess &) = delete;
+        RawPointerAccess &operator=(const RawPointerAccess &) = delete;
+    private:
+        QSBR &m_gc;
+    };
 
     void update()
     {
-        releasePoolSafely(&m_pendingActions);
-        releasePoolSafely(&m_migrationReclaimActions);
+        releasePoolSafely(m_pendingActions);
+        releasePoolSafely(m_migrationReclaimActions);
     }
 
     void flush()
     {
-        releasePoolSafely(&m_pendingActions, true);
-        releasePoolSafely(&m_migrationReclaimActions, true);
+        releasePoolSafely(m_pendingActions, true);
+        releasePoolSafely(m_migrationReclaimActions, true);
     }
 
-    void lockRawPointerAccess()
+    void lockRawPointerAccess() { m_rawPointerUsers.ref(); }
+    void unlockRawPointerAccess() { m_rawPointerUsers.deref(); }
+    bool sanityRawPointerAccessLocked() const { return m_rawPointerUsers.loadAcquire(); }
+
+private:
+    static void prepend(QAtomicPointer<Action> &pool, Action *first, Action *last) noexcept
     {
-        m_rawPointerUsers.ref();
+        Action *head;
+        do {
+            head = pool.loadAcquire();
+            last->m_next = head;
+        } while (!pool.testAndSetOrdered(head, first));
     }
 
-    void unlockRawPointerAccess()
+    void enqueueNode(Action *action, bool migration) noexcept
     {
-        m_rawPointerUsers.deref();
+        // Publication transfers the complete record. No separate stack node,
+        // closure allocation, destruction or callback belongs to this step.
+        prepend(migration ? m_migrationReclaimActions : m_pendingActions, action, action);
     }
 
-    bool sanityRawPointerAccessLocked() const {
-        return m_rawPointerUsers.loadAcquire();
+    void releasePoolSafely(QAtomicPointer<Action> &pool, bool force = false)
+    {
+        Action *first = pool.fetchAndStoreOrdered(nullptr);
+        if (!first) return;
+        Action *last = first;
+        size_t count = 1;
+        while (last->m_next) { last = last->m_next; ++count; }
+        if (force || count > 4096) {
+            while (m_rawPointerUsers.loadAcquire()) {}
+        } else if (m_rawPointerUsers.loadAcquire()) {
+            prepend(pool, first, last);
+            return;
+        }
+        // The detached chain has one consumer. Producers only compare the
+        // head pointer; they never dereference nodes already removed here.
+        while (first) {
+            Action *next = first->m_next;
+            first->invokeAndDispose();
+            first = next;
+        }
     }
+
+    QAtomicInt m_rawPointerUsers{0};
+    QAtomicPointer<Action> m_pendingActions{nullptr};
+    QAtomicPointer<Action> m_migrationReclaimActions{nullptr};
 };
 
 #endif // QSBR_H

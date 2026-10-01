@@ -16,6 +16,11 @@ class KisSimpleStrokeStrategyTest : public QObject
 private Q_SLOTS:
     void testFinish();
     void testCancel();
+    void testFailureCleanupProgress_data();
+    void testFailureCleanupProgress();
+    void testJobFailureReporting_data();
+    void testJobFailureReporting();
+    void testFailureContextIsolation();
 };
 
 #endif /* __KIS_SIMPLE_STROKE_STRATEGY_TEST_H */

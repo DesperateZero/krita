@@ -14,10 +14,30 @@ class KisTransactionTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void testStrokeMappingContext_data();
+    void testStrokeMappingContext();
+    void testOrdinaryTransactionMove();
 
+    void testStrokeMutationOwner_data();
+    void testStrokeMutationOwner();
+    void testStrokeMutationDestruction();
+    void testStrokeMutationFailure();
+    void testStrokeMutationContext_data();
+    void testStrokeMutationContext();
     void testUndo();
     void testRedo();
     void testDeviceMove();
+    void testRejectedCommitIsRetryable_data();
+    void testRejectedCommitIsRetryable();
+    void testPainterRetainsRejectedTransaction();
+    void testDirectAbort_data();
+    void testDirectAbort();
+    void testAbortWithLiveWriter();
+    void testAbortRejectedBegin();
+    void testAbortInterstrokeData_data();
+    void testAbortInterstrokeData();
+    void testAbortWithUnswitchedFrame();
+    void testAbortSelectionCache();
 
     void testUndoWithUnswitchedFrames();
 
@@ -29,4 +49,3 @@ private Q_SLOTS:
 };
 
 #endif
-

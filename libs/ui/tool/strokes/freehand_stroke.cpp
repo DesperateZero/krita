@@ -280,6 +280,8 @@ void FreehandStrokeStrategy::tryDoUpdate(bool forceEnd)
 
 void FreehandStrokeStrategy::issueSetDirtySignals()
 {
+    if (!checkpointStrokeMutationBeforeDirtyPublish()) return;
+
     QVector<QRect> dirtyRects;
 
     for (int i = 0; i < numMaskedPainters(); i++) {

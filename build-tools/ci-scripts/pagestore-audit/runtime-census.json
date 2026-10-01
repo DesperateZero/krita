@@ -56,7 +56,7 @@
           "KisPageMutationStatistics.generationsReserved"
         ],
         "peak": [
-          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+          "KisPageMutationStatistics.maximumPinnedPagesPerExecution"
         ],
         "terminal": [
           "KisPageMutationStatistics.pagesSealed",
@@ -142,7 +142,7 @@
           "KisPageMutationStatistics.pagesCancelled"
         ],
         "peak": [
-          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+          "KisPageMutationStatistics.maximumPinnedPagesPerExecution"
         ],
         "terminal": [
           "KisPageMutationStatistics.pagesSealed",
@@ -502,7 +502,7 @@
           "KisPageMutationStatistics.generationsReserved"
         ],
         "peak": [
-          "KisPageMutationStatistics.maximumPinnedPagesPerSegment"
+          "KisPageMutationStatistics.maximumPinnedPagesPerExecution"
         ],
         "terminal": [
           "KisPageMutationStatistics.writablePinsReleased"

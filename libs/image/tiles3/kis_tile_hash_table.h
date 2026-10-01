@@ -9,6 +9,7 @@
 #define KIS_TILEHASHTABLE_H_
 
 #include "kis_tile.h"
+#include <memory>
 
 
 
@@ -61,6 +62,32 @@ public:
      *                was created
      */
     TileTypeSP getTileLazy(qint32 col, qint32 row, bool& newTile);
+
+    class PreparedTile {
+    public:
+        PreparedTile() = default;
+        PreparedTile(PreparedTile &&) = default;
+        PreparedTile &operator=(PreparedTile &&) = default;
+        PreparedTile(const PreparedTile &) = delete;
+        PreparedTile &operator=(const PreparedTile &) = delete;
+        explicit operator bool() const { return m_tile && bool(m_identity) && !m_consumed; }
+        qint32 col() const { return m_tile->col(); }
+        qint32 row() const { return m_tile->row(); }
+    private:
+        friend class KisTileHashTableTraits<T>;
+        bool m_consumed = false;
+        TileTypeSP m_tile;
+        // A cold, immutable storage identity; it retains no old table or tile
+        // index. Even address reuse cannot attach this candidate to a new table.
+        std::shared_ptr<const char> m_identity;
+    };
+    PreparedTile prepareMissingTile(qint32 col, qint32 row);
+    TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
+    TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row)
+    {
+        return getExistingTile(col, row);
+    }
+
 
     /**
      * Returns a tile in position (col,row). If no tile exists,
@@ -116,6 +143,7 @@ private:
     KisMementoManager *m_mementoManager;
 
     mutable QReadWriteLock m_lock;
+    std::shared_ptr<const char> m_preparationIdentity;
 };
 
 #include "kis_tile_hash_table_p.h"

@@ -159,6 +159,15 @@ public:
     // source pixel pin for this entire call; do not acquire a nested pin.
     KisTileData *duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit);
 
+    // Short native backing transfer. The provider's sole storage reference
+    // retains td; this is physical exclusion, not logical write permission.
+    // On success holds iterator-read + tile-write until finishBackingHandoff.
+    // All fallible work must precede it; never hold across user pixel work.
+    bool tryClaimBackingHandoff(KisTileData *td);
+    // writable converts to the ordinary tile read pin before releasing the
+    // iterator barrier, so neither swap nor preclone can enter the conversion.
+    void finishBackingHandoff(KisTileData *td, bool writable) noexcept;
+
     void freeTileData(KisTileData *td);
 
     /**
@@ -217,6 +226,8 @@ private:
     void releaseResidentMemoryReservation(qint32 pixelSize) noexcept;
 
     inline void registerTileDataImp(KisTileData *td);
+    void registerTileDataInCell(KisTileData *td, int index,
+                               ConcurrentMap<int, KisTileData*>::Mutator &cell);
     inline void unregisterTileDataImp(KisTileData *td);
     void freeRegisteredTiles();
 

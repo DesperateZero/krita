@@ -77,14 +77,19 @@ const char *KisPageStoreDiagnosticRecorder::phaseName(KisPageStoreDiagnosticPhas
         "commit_input_owner_wait", "read_bytes_capture", "read_bytes_page", "read_bytes_release", "read_planar_page",
         "read_planar_capture", "read_planar_release", "write_writable_pin", "write_pending_materialize",
         "mutation_alias_prepare", "mutation_source_initialize", "fill_page", "copy_source_page", "mutation_index_refresh",
+        "mutation_presence_preflight", "mutation_presence_prepare", "mutation_presence_prepared", "mutation_presence_resolve", "mutation_presence_resolved",
+        "mutation_adapter_prepare", "mutation_adapter_prepared", "mutation_adapter_install", "mutation_adapter_installed",
         "copy_prepare", "copy_finish",
         "mutation_seal_owner_wait", "mutation_seal_inputs", "mutation_seal_private_publish",
-        "mutation_seal_proof_prepare", "mutation_seal_metadata_prepare", "mutation_seal_publish_owner_wait",
-        "mutation_seal_install", "mutation_seal_cleanup",
+        "mutation_seal_proof_prepare", "mutation_seal_storage_prepare", "mutation_seal_metadata_prepare", "mutation_seal_publish_owner_wait",
+        "mutation_seal_surface_prepare", "mutation_seal_install", "mutation_seal_cleanup",
         "painter_source_resolve",
-        "pixel_operation_range_prepare", "pixel_operation_range_wait", "pixel_operation_body", "pixel_operation_finish",
+        "pixel_operation_range_prepare", "pixel_operation_range_wait", "pixel_operation_range_reserved", "pixel_operation_body", "pixel_operation_finish",
+        "pixel_operation_preflight", "pixel_operation_storage_prepare", "pixel_operation_changed_export", "pixel_operation_changed_deliver", "pixel_operation_cleanup",
         "packed_write_capture", "packed_write_compare", "packed_write_prepare", "packed_write_copy", "packed_write_release",
-        "mutation_payload_copy"
+        "mutation_payload_copy",
+        "recoverable_prepare", "recoverable_prepared", "recoverable_install",
+        "recoverable_installed", "recoverable_cleanup"
     };
     static_assert(sizeof(names) / sizeof(names[0]) ==
                   size_t(KisPageStoreDiagnosticPhase::Count));

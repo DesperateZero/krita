@@ -23,6 +23,7 @@ class KisBackingBudgetController;
 class KisPageReplicaProvider;
 class KisPagePublicationCoordinator;
 class KisPageReadCoordinator;
+class KisPageMetadataReadCleanup;
 class KisPageRetirementQueue;
 class KisPageStore;
 
@@ -33,6 +34,13 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
     quint64 localVersionInputs = 0;
     quint64 localVersionInstalls = 0;
     quint64 localVersionRemovals = 0;
+    // Direct owner cleanup reuses/removes existing overflow slots. These
+    // transitions count in localTransitionSequences, but project/install no
+    // version snapshots. Visits include validation and unlink passes.
+    quint64 readProtectionTransitions = 0;
+    quint64 readProtectionNodeVisits = 0;
+    quint64 readProtectionSlotReuses = 0;
+    quint64 readProtectionSlotReleases = 0;
     quint64 mutationBaseVersionInputs = 0;
     // Reclamation-thread subsets of the local totals; never add them twice.
     quint64 backgroundLocalTransitionSequences = 0;
@@ -219,6 +227,10 @@ private:
                               const KisPageVersion &sealed,
                               KisPageStateSnapshot *snapshot) const;
     bool versionSnapshot(const KisPageVersion &version, KisPageStateSnapshot *snapshot) const;
+    // Cold exact query for original read-release records. Completion may clear
+    // multiple leases carrying the same ticket; this never grants write access.
+    bool queryLastUsePending(const KisReplicaHandle &replica,
+                             const KisCompletionTicket &completion, bool *pending) const;
     // Admission guard only: exact target lookup plus mutable count and
     // Retiring witnesses. No whole-page version projection escapes the shard.
     bool canAddTransientVersion(const KisPageVersion &target, quint32 limit) const;
@@ -236,7 +248,12 @@ private:
     // caller must rescan after semantic changes can insert before the cursor;
     // this is enumeration, NOT root reachability or retirement authorization.
     HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after, qsizetype budget) const;
-    KisPageTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition);
+    KisPageTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
+                                      KisPageMetadataReadCleanup *cleanup = nullptr);
+    KisPageTransitionResult acknowledgeLastUse(const KisPageVersion &version,
+                                               const KisReplicaHandle &replica,
+                                               const KisVerifiedCompletion &completion,
+                                               KisPageMetadataReadCleanup *cleanup);
     KisPageTransitionResult applyOwnerSequence(const KisPageKey &key, const QVector<KisPageTransition> &transitions);
     // Directory invalidation, not a read-side counter. PageStore samples it
     // under its registration gate around a whole-directory default/restore
@@ -244,7 +261,10 @@ private:
     quint64 pageRegistrationCount() const;
     QSharedPointer<KisCpuReadBindingLink> installCpuReadBinding(const KisReplicaHandle &replica,
                                                                 const QSharedPointer<KisPageReplicaProvider> &provider);
-    void removeCpuReadBinding(const KisReplicaHandle &replica);
+    // A stale reader may only evict its own candidate. Retirement omits
+    // expected to invalidate every cached selection of this exact replica.
+    void removeCpuReadBinding(const KisReplicaHandle &replica,
+                              const KisCpuReadBindingLink *expected = nullptr);
     QSharedPointer<KisCpuReadBindingLink> cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
     friend class KisCapturedReadView;
@@ -320,12 +340,13 @@ private:
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
                                            const QVector<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
+    enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
                                                const QVector<KisPageTransition> &transitions,
                                                bool restoration,
                                                QString *error,
-                                               bool mutation = false) const;
+                                               PreparationKind kind = PreparationKind::Publication) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.
@@ -338,6 +359,19 @@ private:
                          const KisPageTransaction &transaction,
                          QString *error = nullptr,
                          DeferredPublicationCleanup *deferredCleanup = nullptr);
+    // Logical half only. The write coordinator must independently retain the
+    // exact before, prepare provider retag/descriptor/budget/terminal storage,
+    // and acquire physical claims before installation. Rejection consumes the
+    // candidate without changing either version. Success installs the already
+    // prepared writer, so no fallible PrepareWrite remains after retag;
+    // no bytes may be exposed until provider retag has also been consumed.
+    PreparedPublication prepareRecoverableWrite(const KisPageTransaction &transaction,
+                                                const KisPageTransition &transition,
+                                                QString *error = nullptr) const;
+    bool installRecoverableWrite(PreparedPublication &&prepared,
+                                 const KisPageTransaction &transaction,
+                                 QString *error = nullptr,
+                                 DeferredPublicationCleanup *deferredCleanup = nullptr);
     bool installPublication(PreparedPublication &&prepared,
                             const KisPageTransaction &transaction,
                             KisImageEpochId epoch,
@@ -349,7 +383,7 @@ private:
                                 KisImageEpochId epoch,
                                 QVector<KisPageTransitionEffect> *effects,
                                 QString *error,
-                                bool mutation,
+                                PreparationKind kind,
                                 DeferredPublicationCleanup *deferredCleanup);
 
     friend class KisPageStore;
@@ -358,8 +392,12 @@ private:
     friend class KisPageOwnerLedger;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
+    friend class KisPageStoreResidentReadTest;
     KisPageTransitionResult applyProjectedSequence(const KisPageKey &key,
                                                    const QVector<KisPageTransition> &transitions);
+    KisPageTransitionResult applyReadProtection(const KisPageKey &key,
+                                               const KisPageTransition &transition,
+                                               KisPageMetadataReadCleanup *cleanup = nullptr);
     bool projectVersionPair(const KisPageVersion &base, const KisPageVersion &sealed,
                             KisPageStateSnapshot *snapshot, bool countMutationInput) const;
     class Private;

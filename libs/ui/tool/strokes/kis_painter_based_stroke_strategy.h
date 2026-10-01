@@ -100,6 +100,9 @@ protected:
     bool supportsTimedMergeId() const;
     void setSupportsTimedMergeId(bool value);
 
+    void setUsesPersistentStrokeMutation(bool value);
+    bool checkpointStrokeMutationBeforeDirtyPublish();
+
 protected:
     KisPainterBasedStrokeStrategy(const KisPainterBasedStrokeStrategy &rhs, int levelOfDetail);
 
@@ -134,6 +137,8 @@ private:
     bool m_supportsMaskingBrush {false};
     bool m_supportsIndirectPainting {false};
     bool m_supportsContinuedInterstrokeData {false};
+    bool m_usePersistentStrokeMutation {false};
+    bool m_persistentStrokeMutationActive {false};
 
     KisIndirectPaintingSupport::FinalMergeSuspenderSP m_finalMergeSuspender;
 

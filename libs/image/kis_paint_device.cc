@@ -6,9 +6,13 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <algorithm>
 #include "kis_paint_device.h"
+#include "KisStrokeJobFailureContext.h"
+#include "kis_transaction.h"
 
 #include <QRect>
+#include <QRegion>
 #include <QImage>
 #include <QList>
 #include <QHash>
@@ -1127,22 +1131,24 @@ void KisPaintDevice::makeCloneFrom(KisPaintDeviceSP src, const QRect &rect)
 {
     prepareClone(src);
 
-    // we guarantee that *this is totally empty, so copy pixels that
-    // are areally present on the source image only
-    const QRect optimizedRect = rect & src->extent();
-
-    fastBitBlt(src, optimizedRect);
+    // Native copy clips against the same immutable views used for pixels.
+    // Clipping here through working extent can discard a newly published page.
+    // Wrapped strategies keep their existing domain clipping until migrated.
+    const bool wrapped = src->supportsWraproundMode() && src->defaultBounds()->wrapAroundMode();
+    const QRect copyRect = wrapped ? rect & src->extent() : rect;
+    fastBitBlt(src, copyRect);
 }
 
 void KisPaintDevice::makeCloneFromRough(KisPaintDeviceSP src, const QRect &minimalRect)
 {
     prepareClone(src);
 
-    // we guarantee that *this is totally empty, so copy pixels that
-    // are areally present on the source image only
-    const QRect optimizedRect = minimalRect & src->extent();
-
-    fastBitBltRough(src, optimizedRect);
+    // Native copy clips against the same immutable views used for pixels.
+    // Clipping here through working extent can discard a newly published page.
+    // Wrapped strategies keep their existing domain clipping until migrated.
+    const bool wrapped = src->supportsWraproundMode() && src->defaultBounds()->wrapAroundMode();
+    const QRect copyRect = wrapped ? minimalRect & src->extent() : minimalRect;
+    fastBitBltRough(src, copyRect);
 }
 
 void KisPaintDevice::setDirty()
@@ -1150,6 +1156,11 @@ void KisPaintDevice::setDirty()
     m_d->cache()->invalidate();
     if (m_d->parent.isValid())
         m_d->parent->setDirty();
+}
+
+void KisPaintDevice::invalidateTransactionCache()
+{
+    m_d->cache()->invalidate();
 }
 
 void KisPaintDevice::setDirty(const QRect & rc)
@@ -1873,12 +1884,75 @@ KisRandomConstAccessorSP KisPaintDevice::createRandomConstAccessorNG() const
 bool KisPaintDevice::applyPixelOperation(
     const QRect &rect, const std::function<bool(KisPixelWriteCursor *)> &operation)
 {
-    if (rect.isEmpty()) return true;
+    return applyPixelOperation(rect, operation, nullptr);
+}
+
+bool KisPaintDevice::applyPixelOperation(
+    const QRect &rect, const std::function<bool(KisPixelWriteCursor *)> &operation,
+    KisTransaction *strokeOwner)
+{
+    if (rect.isEmpty() && !strokeOwner) return !KisStrokeJobFailureContext::currentJobHasFailed();
+    return applyPixelOperation(QVector<QRect>{rect}, operation, strokeOwner);
+}
+
+bool KisPaintDevice::applyPixelOperation(
+    const QVector<QRect> &rects, const std::function<bool(KisPixelWriteCursor *)> &operation,
+    KisTransaction *strokeOwner)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return false;
+    const bool empty = std::all_of(rects.cbegin(), rects.cend(), [](const QRect &r) { return r.isEmpty(); });
+    if (empty && !strokeOwner) return true;
     if (!operation) return false;
     m_d->cache()->invalidate();
-    const bool result = m_d->currentStrategy()->applyPixelOperation(rect, operation);
+    const bool result = m_d->currentStrategy()->applyPixelOperation(rects, operation, strokeOwner);
     m_d->cache()->invalidate();
     return result;
+}
+
+KisPaintDevice::WriteContext::WriteContext() = default;
+KisPaintDevice::WriteContext::WriteContext(const WriteContext &) = default;
+KisPaintDevice::WriteContext &KisPaintDevice::WriteContext::operator=(const WriteContext &) = default;
+KisPaintDevice::WriteContext::~WriteContext() = default;
+
+KisPaintDevice::WriteContext KisPaintDevice::captureWriteContext()
+{
+    WriteContext context;
+    context.device = this;
+    context.manager = dataManager();
+    context.colorSpace = colorSpace();
+    context.offset = QPoint(x(), y());
+    const auto bounds = defaultBounds();
+    context.time = bounds->currentTime();
+    context.lod = bounds->currentLevelOfDetail();
+    context.frame = framesInterface() ? framesInterface()->currentFrameId() : -1;
+    context.wrapped = supportsWraproundMode() && bounds->wrapAroundMode();
+    if (context.wrapped) {
+        context.wrapRect = bounds->imageBorderRect();
+        context.wrapAxis = bounds->wrapAroundModeAxis();
+    }
+    return context;
+}
+
+bool KisPaintDevice::WriteContext::matches(KisPaintDevice *target) const
+{
+    if (!target || target != device.data()) return false;
+    const auto bounds = target->defaultBounds();
+    const bool currentWrapped = target->supportsWraproundMode() && bounds->wrapAroundMode();
+    // Reject a changed time/LoD before resolving currentData(), which may
+    // lazily create an unrelated LoD manager.
+    return bounds->currentTime() == time && bounds->currentLevelOfDetail() == lod &&
+        (target->framesInterface() ? target->framesInterface()->currentFrameId() : -1) == frame &&
+        currentWrapped == wrapped && (!wrapped ||
+            (bounds->imageBorderRect() == wrapRect && bounds->wrapAroundModeAxis() == wrapAxis)) &&
+        QPoint(target->x(), target->y()) == offset &&
+        target->dataManager() == manager && target->colorSpace() == colorSpace;
+}
+
+bool KisPaintDevice::partitionWriteRects(const QVector<QRect> &rects, int patchSize,
+                                        QVector<QVector<QRect>> *jobs)
+{
+    if (!jobs || patchSize <= 0 || patchSize % KisTileData::WIDTH || patchSize % KisTileData::HEIGHT) return false;
+    return m_d->currentStrategy()->partitionWriteRects(rects, patchSize, jobs);
 }
 
 KisRandomSubAccessorSP KisPaintDevice::createRandomSubAccessor() const

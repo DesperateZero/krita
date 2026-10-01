@@ -196,6 +196,10 @@ QVector<QRect> splitAndFilterDabRect(const QRect &totalRect, const QVector<QRect
 KRITAIMAGE_EXPORT
 QVector<QRect> splitDabsIntoRects(const QVector<QRect> &dabRects, int idealNumRects, int diameter, qreal spacing);
 
+KRITAIMAGE_EXPORT
+QVector<QRect> splitDabsIntoRects(const QVector<QRect> &dabRects, int idealNumRects, int diameter,
+                                 qreal spacing, int *patchSize);
+
 }
 
 #endif /* __KIS_PAINTOP_UTILS_H */

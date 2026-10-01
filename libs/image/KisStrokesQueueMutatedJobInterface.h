@@ -18,7 +18,12 @@ public:
     virtual ~KisStrokesQueueMutatedJobInterface();
 
     virtual void addMutatedJobs(KisStrokeId strokeId, const QVector<KisStrokeJobData*> list) = 0;
+    // Consumes data on both acceptance and rejection. Unlike a mutated child,
+    // the checkpoint follows all work already queued for this stroke.
+    virtual bool addCheckpointJob(KisStrokeId strokeId, KisStrokeJobData *data) = 0;
     virtual KisLodPreferences lodPreferences() const = 0;
+    virtual void failStroke(KisStrokeId strokeId, const QString &reason) = 0;
+    virtual void retryStrokeCancellation(KisStrokeId strokeId) = 0;
 };
 
 #endif // KISSTROKESQUEUEMUTATEDJOBINTERFACE_H

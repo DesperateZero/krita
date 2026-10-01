@@ -21,7 +21,9 @@
 #include <QVector>
 
 #include <memory>
+#include <atomic>
 #include <unordered_map>
+#include <unordered_set>
 
 struct KisPagePublicationCoordinatorSnapshot {
     qsizetype preparedProofs = 0;
@@ -30,16 +32,24 @@ struct KisPagePublicationCoordinatorSnapshot {
     quint64 committedTransactions = 0;
 };
 
+class KisPageReadCleanup;
+
 /**
  * Owner-gated transaction publication state.
  *
- * R1 deliberately keeps the existing publication algorithm and lock order,
- * while moving its side maps behind one by-value service.  Later metadata
- * milestones replace these maps with KisPreparedMutationCommit; callers must
- * therefore reach them only through this coordinator.
+ * The original transaction delta is the only queryable overlay. Prepared
+ * overlay/commit aggregates carry actual installation storage, not another
+ * selection authority. All callers reach that delta through this service.
  */
 class KisPagePublicationCoordinator final
 {
+    friend class KisPageWriteCoordinator;
+    struct PageHash {
+        size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
+        size_t seed = QHashSeed::globalSeed();
+    };
+    using ProofMap = std::unordered_map<KisPageKey, KisPreparedPageProof, PageHash>;
+    using RemovalSet = std::unordered_set<KisPageKey, PageHash>;
     struct DescriptorHash {
         size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version, seed); }
         size_t seed = QHashSeed::globalSeed();
@@ -69,10 +79,13 @@ public:
         bool isValid() const;
         qsizetype metadataChangeCount() const;
         bool prepare(QString *error);
+        // Caller keeps the owner gate from this last preparation through
+        // tryInstallLocked, so sibling page/extent changes cannot be lost.
+        bool prepareSurfaceLocked(QString *error);
         bool tryInstallLocked(
-            QVector<KisPageTransitionEffect> *retirementEffects,
             KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
             QString *error);
+        void collectRetirementsLocked(QVector<KisPageTransitionEffect> *retirementEffects);
 
     private:
         class Data;
@@ -83,13 +96,16 @@ public:
 
     using TransactionHasMutationActivity = bool (*)(void *context, KisPageTransactionId transaction);
     using PageWriteClaimed = bool (*)(void *context, const KisPageKey &key);
+    using BeginMutationPreparation = bool (*)(void *context, KisPageTransactionId transaction,
+                                              QMutexLocker<QMutex> &ownerLock, QString *error);
     using MutationPreparation = void (*)(void *context, KisPageTransactionId transaction);
     using DisposeMetadataCleanup = void (*)(void *context,
                                             KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup);
     using RestoreIsIdle = bool (*)(void *context);
     using PrepareAbort = bool (*)(void *context,
                                   KisPageTransactionId transaction,
-                                  QVector<KisPageTransitionEffect> *retirementEffects);
+                                  QVector<KisPageTransitionEffect> *retirementEffects,
+                                  KisPageReadCleanup &cleanup);
 
     KisPagePublicationCoordinator(KisImageEpochReferenceModel &epochs,
                                   KisPageMetadataCoordinator &metadata,
@@ -103,7 +119,7 @@ public:
                                   void *ownerContext,
                                   TransactionHasMutationActivity transactionHasMutationActivity,
                                   PageWriteClaimed pageWriteClaimed,
-                                  MutationPreparation beginMutationPreparation,
+                                  BeginMutationPreparation beginMutationPreparation,
                                   MutationPreparation endMutationPreparation,
                                   DisposeMetadataCleanup disposeMetadataCleanup,
                                   RestoreIsIdle restoreIsIdle,
@@ -119,6 +135,7 @@ public:
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
     bool importDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
+    bool configureDerivedExtentLocked(KisSurfaceId surface);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
                                     const KisSurfaceEpochState &after,
@@ -141,16 +158,18 @@ public:
                                            const KisPreparedPageSet &preparedPages,
                                            KisRetainedImageEpochSnapshot *retainedAfter,
                                            const KisPageStore *diagnosticOwner,
-                                           QMutexLocker<QMutex> &ownerLock);
+                                           QMutexLocker<QMutex> &ownerLock,
+                                           QWriteLocker *publicationLock = nullptr);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                          const QVector<KisPageKey> *changedPages,
                                                          const KisPageStore *diagnosticOwner,
                                                          QMutexLocker<QMutex> &ownerLock);
-    bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock);
+    bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,
+                     KisPageReadCleanup &cleanup);
 
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
-    const QHash<KisPageKey, KisPreparedPageProof> *findProofsLocked(KisPageTransactionId transaction) const;
+    KisPreparedPageProof findPreparedProofLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;
     bool stagesRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
     KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
@@ -158,10 +177,6 @@ public:
         QVector<OverlayChange> changes,
         QString *error);
     bool revokePreparedProofLocked(const KisPreparedPageProof &proof);
-    void installPreparedProofLocked(const KisPreparedPageProof &proof);
-
-
-    void setRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key, bool removed);
 
     void putDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
@@ -174,15 +189,23 @@ public:
 
 private:
     struct PreparedTransactionState {
-        QHash<KisPageKey, KisPreparedPageProof> proofs;
+        ProofMap proofs;
         QVector<KisSurfaceEpochChange> surfaceChanges;
-        QSet<KisPageKey> removals;
+        RemovalSet removals;
+        // Storage only: overlapping candidates must reserve enough buckets
+        // for every constructed node. Cancellation may run outside the owner
+        // gate; it only gives capacity back, never edits the visible delta.
+        std::atomic<size_t> proofInsertions{0};
+        std::atomic<size_t> removalInsertions{0};
 
         bool isEmpty() const
         {
-            return proofs.isEmpty() && surfaceChanges.isEmpty() && removals.isEmpty();
+            return proofs.empty() && surfaceChanges.isEmpty() && removals.empty()
+                && !proofInsertions.load() && !removalInsertions.load();
         }
     };
+    std::shared_ptr<PreparedTransactionState> preparedStateLocked(KisPageTransactionId transaction);
+    const ProofMap *findProofsLocked(KisPageTransactionId transaction) const;
 
     /**
      * One-shot publication aggregate. Metadata and epoch candidates keep
@@ -220,14 +243,16 @@ private:
     void *m_ownerContext = nullptr;
     TransactionHasMutationActivity m_transactionHasMutationActivity = nullptr;
     PageWriteClaimed m_pageWriteClaimed = nullptr;
-    MutationPreparation m_beginMutationPreparation = nullptr;
+    BeginMutationPreparation m_beginMutationPreparation = nullptr;
     MutationPreparation m_endMutationPreparation = nullptr;
     DisposeMetadataCleanup m_disposeMetadataCleanup = nullptr;
     RestoreIsIdle m_restoreIsIdle = nullptr;
     PrepareAbort m_prepareAbort = nullptr;
 
     QSet<quint64> m_preparingCommits;
-    QHash<quint64, PreparedTransactionState> m_preparedTransactions;
+    QHash<quint64, std::shared_ptr<PreparedTransactionState>> m_preparedTransactions;
+    // Immutable Tiles3 surface policy, not a second extent or page registry.
+    KisSurfaceId m_derivedExtentSurface;
     QHash<quint64, quint64> m_defaultRevisionHighWater;
     DescriptorMap m_descriptors;
     quint64 m_descriptorRevision = 1;

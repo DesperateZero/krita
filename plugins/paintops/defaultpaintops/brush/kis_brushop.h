@@ -52,8 +52,12 @@ protected:
     struct UpdateSharedState;
     typedef QSharedPointer<UpdateSharedState> UpdateSharedStateSP;
 
+    void addDabJobs(const QVector<QRect> &rects, UpdateSharedStateSP state,
+                    QVector<KisRunnableStrokeJobData*> &jobs);
+
     void addMirroringJobs(Qt::Orientation direction,
                           QVector<QRect> &rects,
+                          QVector<QRect> &writeRects,
                           UpdateSharedStateSP state,
                           QVector<KisRunnableStrokeJobData*> &jobs);
 

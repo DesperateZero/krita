@@ -29,11 +29,11 @@
         "KisTiledDataManagerPageStoreBackend::writableTransaction"
       ],
       "current-writers": [
-        "KisTiledDataManagerPageStoreBackend::Private anonymous transaction group"
+        "KisTiledDataManagerPageStoreBackend compatibility group through its existing WriteBatch::Private client and live-capability control block"
       ],
       "fact": "legacy anonymous transaction client, failure and raw-lease barrier lifetime",
       "id": "BR1-OWN-COMPAT-TRANSACTION-GROUP",
-      "lock-or-claim": "backend transaction mutex plus compatibility lease registry gate",
+      "lock-or-claim": "backend transaction mutex and registry gate; batch-local leaseMutex orders clear revocation and late unlock, without a second page write set",
       "read-only-observers": [
         "tile lock bridge",
         "writable iterator and operation scopes"
@@ -43,14 +43,25 @@
       "terminal-paths": [
         "finishOwnedTransaction last client",
         "abortOwnedTransaction last client",
-        "cancelAnonymousLeasesForBarrier"
+        "cancelAnonymousLeasesForBarrier preflights same-thread iterator ownership before revocation",
+        "WriteBatch::Private::cancelForBarrier cancels the native mutation and removes only its matching thread slot",
+        "late iterator clients finish without removing or publishing a newer batch",
+        "Completed managed WriteBatch leaves the original thread/client registry during finish; its backend pointer is cleared. Only original sealed admission/storage remains until synchronous adapter delivery drops that same batch. Escaped legacy clients or leases reject this delivery path."
       ]
     },
     {
       "creation-paths": [
         "KisPageStore::acquireWrite",
         "KisPageMutationSession::beginWriteImpl",
-        "KisTiledDataManagerPageStoreBackend::reserveWritablePage"
+        "KisTiledDataManagerPageStoreBackend::reserveWritablePage",
+        "generic request node precedes the common write plan; the original active-write control block and transferable index node precede provider resolveAccess, without adding a second writer authority",
+        "native mutation entries and cold resources use stable budgeted recyclable slots; the sole key index and guards validate slot incarnations; original ClaimSet releases successfully cancelled entries before slot erasure, retaining only unfinished debt; detached blocks and final set storage free outside the store gate while original activity keeps the budget owner alive",
+        "original claim/activity tables use actual constructed buckets: growth allocation/hash runs outside the owner gate, revision and whole-request validation precede allocation-free admission; managed/native/generic callers share this protocol; scope/range/control-block storage is charged before activation",
+        "KisPageMutationSession::borrowExecution prepares charged range/control storage, validates original slots under the structure gate, and binds original stable entry/cold-page references; linked execution lifetime excludes erase/reuse; claimRange revalidates the declared keys through the original write set before installing additional original claims",
+        "KisTransactionData explicitly opts its existing memento into one backend history mutation during quiescent initialization; each declared cursor operation borrows that original session without creating a new transaction or pending-page map",
+        "KisPainter multi-dab jobs use the bounded pixel cursor through the original PaintDevice coordinate adapter; an explicit synchronously borrowed KisTransaction selects its original history session, while the default operation keeps its original terminal guarantee. Immutable dabs and a captured selection are inputs, not writer authorities",
+        "Multi-dab declares the union of actual clipped dab rectangles through the original device wrap/offset adapter; manager-local page geometry is coalesced before compatibility lookup and the original admission/execution owns the distinct targets. Temporary geometry grants no writer authority and does not claim bounding-box gaps.",
+        "The default brush partitions ordinary and mirrored jobs through the PaintDevice cursor coordinate mapping into disjoint mapped storage patches. A job retains ordered dabs across all its source-coordinate clips; the temporary patch index has no write authority, and original operation admission and mirror phase barriers remain responsible for execution."
       ],
       "current-writers": [
         "KisPageWriteAdmission through KisPageWriteCoordinator"
@@ -68,7 +79,18 @@
         "seal",
         "cancel",
         "publishHostWrite",
-        "closeSession"
+        "closeSession",
+        "generic resolve storage rejection restores the original Pending request; preparation exceptions restore the owner gate before releasing admission or cancelling the original private writer",
+        "finishWrite consumes access once; rejected cancellation retains the original active-write record for transaction abort, and close continues to reject live requests, leases or terminal debt",
+        "native storage rejection leaves the original write set and claims available for cancellation; block, directory and index allocation charges return to the original controller only after memory is freed",
+        "claim tokens never wrap; failed preparation preserves previous claims/activity; original scope intrusive orphan links retain rejected cancellation without allocating a replacement owner; scope and control-block memory frees before original budget-owner lifetime release",
+        "KisPageMutationExecution owns only its execution footprint and retains the original session; finish returns a guard-free borrow without sealing, abandonment/cancel records original-scope failure, and an aliasing writable guard keeps the range linked until its final unpin",
+        "resident borrow access and guard return use only the execution-local gate and original binding pin; lifecycle failure is the original atomic scope state, counters fold once at borrow return, and structural growth never invalidates linked entries; no per-access shared diagnostic counter or second page authority",
+        "checkpointForRead refuses live execution or structure-gate contention; successful full segment sealing releases original page claims/storage and folds local counters without ending original session activity; the complete overlay is captured before the same scope can lend again",
+        "The original history owner validates memento and device/frame/time/LoD context; checkpoint freezes and invalidates old compatibility caches; Closing rejects new borrows while accepted work finishes, seal/commit retries or cancel/abort terminate the original scope; destruction of an unfinished opted-in transaction cancels",
+        "Multi-dab destination and mask pointer failures stop before the composite kernel, return native failure through the original execution and report through the existing stroke job error bridge; the caller retains transaction lifetime and orders page-overlapping jobs. Composite lookup is operation-local, never a parallel write to the painter cache",
+        "Managed cursor/packed adapter delivery seals and ends original transaction activity while retaining the same ClaimSet and sole write set in the inactive original session; its existing completed WriteBatch keeps those claims and charged storage until the manager gate and index refresh have ended. No new writer or allocation is introduced. Persistent history instead transfers its original active execution to manager refresh, finishes it before success, and rejects checkpoint until that borrow returns. Failure follows the original cancellation terminal.",
+        "Native cursor/packed original admission now covers missing-wrapper/key preparation before pixels and manager installation. Clear and history commit/abort reject outstanding original native claims; restore checks them both before preparation and after reacquiring the owner gate. Cold candidates retain table/map storage identity, not a writer ledger. Warm pages prepare no key record. Canonical/adapter joint publication, other semantic routes and complete budget accounting remain separate obligations."
       ]
     },
     {
@@ -96,31 +118,34 @@
     {
       "creation-paths": [
         "KisTiles3PageReplicaProvider::prepareWrite",
-        "test-only KisCpuPageReplicaProvider::prepareWrite"
+        "test-only KisCpuPageReplicaProvider::prepareWrite",
+        "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before"
       ],
       "current-writers": [
-        "replica provider allocation records"
+        "provider-owned stable KisCpuResidentBinding; allocation index stores only a binding reference and stable slot key"
       ],
       "fact": "physical allocation identity and payload lifetime",
       "id": "BR1-OWN-PHYSICAL-ALLOCATION",
-      "lock-or-claim": "provider mutex plus resident binding mutex and TileData exclusive claim",
+      "lock-or-claim": "binding gate plus TileDataStore iterator-read/tile-write barriers; provider admission claim count excludes new owner registration without blocking ordinary provider access; multiple registered owners conservatively disable handoff",
       "read-only-observers": [
-        "KisCpuResidentBinding capability and generation gate",
+        "provider allocation index",
         "KisPageOwnerLedger",
         "KisPageMetadataCoordinator"
       ],
       "status": "canonical",
-      "target-authoritative-owner": "provider-private allocation owner gate",
+      "target-authoritative-owner": "provider-owned KisCpuResidentBinding handle under its local gate",
       "terminal-paths": [
         "provider retire",
         "provider close",
-        "future backing handoff commit or cancel"
+        "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
+        "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates"
       ]
     },
     {
       "creation-paths": [
         "KisCpuResidentBinding::acquireRead",
-        "KisCpuWriteBindingReservation::acquire"
+        "KisCpuWriteBindingReservation::acquire",
+        "generic CPU/tiles3 lease index insertion precedes binding acquireAccess under the original provider gate; failure or rejected pin erases only that prepared record"
       ],
       "current-writers": [
         "KisCpuResidentBinding"
@@ -137,13 +162,15 @@
       "terminal-paths": [
         "read guard release",
         "write guard release",
-        "binding revoke"
+        "binding revoke",
+        "read binding gate uses RAII across fallible storage preparation; failed pin creation does not retain the gate or a generic provider lease record"
       ]
     },
     {
       "creation-paths": [
         "KisPageStore::captureCommittedEpoch",
-        "KisPageStore::captureTransactionOverlay"
+        "KisPageStore::captureTransactionOverlay",
+        "KisPageMutationSession::checkpointForRead shares KisPageStore::captureReadViewImpl after full original-overlay sealing; retained exact visibility stays in the original epoch/metadata/read owners, never a second scope snapshot table"
       ],
       "current-writers": [
         "KisImageEpochReferenceModel"
@@ -175,7 +202,8 @@
       "lock-or-claim": "owner ledger mutex and provider epoch token",
       "read-only-observers": [
         "KisCompletionRegistry",
-        "KisPageStore retirement paths"
+        "KisPageStore retirement paths",
+        "retirement watchProviderOperation subscribes through the original ledger ticket; a pending operation is never re-dispatched"
       ],
       "status": "canonical",
       "target-authoritative-owner": "KisPageOwnerLedger",
@@ -183,6 +211,32 @@
         "releaseTerminalProviderOperation",
         "provider unregister",
         "closeSession drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "registerSource and allocatePending retain the original registry/source/domain/value identity",
+        "watchTerminal cold-prepares the actual funded inline callback, subscriber node, signal/state control blocks and readiness record outside the registry gate; revalidation attaches prepared nodes to the winning original ticket",
+        "each new subscriber/record uses its live capture accounting owner; an existing signal accepts a prepared node without allocating from its departed first payer"
+      ],
+      "current-writers": [
+        "KisCompletionRegistry::Private"
+      ],
+      "fact": "completion terminal coverage and cancellable cold notification storage",
+      "id": "BR1-OWN-COMPLETION",
+      "lock-or-claim": "registry mutex owns ticket status and signal identity; registration/cleanup take registry then signal gate; cancellation drops the signal gate before requesting cleanup through a weak reference to the same Private",
+      "read-only-observers": [
+        "KisPageOwnerLedger",
+        "provider retirement verification",
+        "sourceStatistics"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisCompletionRegistry::Private",
+      "terminal-paths": [
+        "complete records terminal status, unlinks the original intrusive readiness record and frees it before notifying outside the registry gate",
+        "last subscription reset rechecks exact signal identity and current emptiness before erasing its original entry; ticket status stays Pending",
+        "last readiness record removal frees its actual node/state/capture outside the registry gate; weak subscriber control storage stays charged until final weak reset",
+        "facade destruction releases its original Private; a cancellation can temporarily retain only that original state, while dormant subscriptions hold weak references"
       ]
     },
     {
@@ -212,14 +266,19 @@
     {
       "creation-paths": [
         "KisPageRetirementQueue::retireEffects",
-        "KisPageRetirementQueue::retireOrDefer"
+        "KisPageRetirementQueue::retireOrDefer",
+        "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
+        "unadmitted owned records request actual budget reservation grants through their original ledger; unowned orphans retain only their original reservation",
+        "cold configuration admits one reusable queue pass task; each real wait/retry state admits its own inline notification task before registration; repeated in-flight notifications coalesce on the original wait identity",
+        "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node, without a second map allocation; retry identities are still newly prepared",
+        "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait"
       ],
       "current-writers": [
         "KisPageRetirementQueue"
       ],
-      "fact": "retirement debt",
+      "fact": "retirement debt and its cancellable readiness/deadline incarnation",
       "id": "BR1-OWN-RETIREMENT",
-      "lock-or-claim": "store owner mutex and completion-qualified provider operation",
+      "lock-or-claim": "queue mutex protects sole pending/retry/ready record partitions; provider and ledger calls run outside queue/store gates; notification gate closes admission before idle wait and acquires only nonzero owner lifetime references before dispatch",
       "read-only-observers": [
         "sessionStats",
         "closeSession"
@@ -229,20 +288,30 @@
       "terminal-paths": [
         "retired",
         "provider failure retained for retry",
-        "close drain report"
+        "close drain report",
+        "last pin/completion dispatches a bounded ready pass; notification does not authorize physical retirement",
+        "disarm on process/close invalidates late wait identities; dormant subscriptions and deadlines do not retain the owner",
+        "one cancelable deadline per queue moves at most 32 no-signal records per wake; a lazy deadline monitor dispatches to the original worker without holding it asleep",
+        "close cancels the deadline and takes all record partitions; refused close resumes admission and revalidation",
+        "facade destruction closes automatic admission without waiting; already active capabilities retain Private but recurring work cannot sustain owner lifetime",
+        "original backing/orphan admission must succeed before a delayed provider call; successful retirement releases the orphan reservation before releasing the worker owner lease",
+        "budget grant is taken once, exact physical/class state is revalidated by the ledger, and unused/stale/cancelled grants are returned; close and facade stop cancel dormant budget waiters",
+        "prepared enqueue performs no allocation or budget admission; active notification self/root pins end after the callback, pending-notification idle and root release remain ordered; dormant task storage stays charged until the real wait/cache deallocation; recurring pass node lifetime stays with its original queue",
+        "pending/retry/ready/pass and close/failed-close containers own and splice the same intrusive record; failed provider attempts preserve its address and charge, physical terminal success does not refund the real node before actual deallocation; original root activity protects all live reservation fields"
       ]
     },
     {
       "creation-paths": [
         "epoch root retention change",
-        "published version supersession"
+        "published version supersession",
+        "cold configuration admits the original collector reusable task with its inline capture; original owner-gated scheduled flag and per-enqueue root pin exclude duplicate enqueue"
       ],
       "current-writers": [
         "KisImageEpochReferenceModel roots plus KisPageHistoryCollector cursor"
       ],
       "fact": "history reachability",
       "id": "BR1-OWN-HISTORY",
-      "lock-or-claim": "epoch root retention plus incremental metadata scan cursor",
+      "lock-or-claim": "epoch gate maintains protected links in original root records and at most 16 value cursors; changed-key publication invalidates only affected scans; owner-gated collector shares 32 root visits per pass and rechecks exact metadata before detach",
       "read-only-observers": [
         "KisPageMetadataCoordinator",
         "KisPageStoreMementoManager"
@@ -251,8 +320,11 @@
       "target-authoritative-owner": "KisImageEpochReferenceModel with KisPageHistoryCollector cursor",
       "terminal-paths": [
         "retained root release",
-        "historical discard transition",
-        "close drain"
+        "historical discard transition after complete current-incarnation root enumeration",
+        "final protection removal adjusts next/end cursors before unlink; cursor cancellation releases no root protection",
+        "collector bounds each candidate bitmap to 32 exact versions including default revision; close/destruction ends all outstanding cursors",
+        "close drain",
+        "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation"
       ]
     },
     {
@@ -328,14 +400,18 @@
     {
       "creation-paths": [
         "KisPageReadCoordinator::registerRequestLocked",
-        "KisPageStore::captureReadView"
+        "KisPageStore::captureReadView",
+        "KisPageReadCoordinator::discoverCpuReadBinding reselects only the caller-retained exact version",
+        "the original ActiveReadRecord retains its exact replica/ticket after metadata ReleaseRead; no separate pending-last-use replica table",
+        "request index nodes are allocated before AcquireRead; original ActiveReadRecord and transferable lease index node are prepared before provider resolveAccess, with no new owner table",
+        "cold last-use context preparation admits one original reusable inline task outside the store gate; notification consumes this stored node, never allocating a dispatch task under pressure"
       ],
       "current-writers": [
         "KisPageReadCoordinator"
       ],
       "fact": "read request, lease, last-use and captured-view lifecycle",
       "id": "BR1-OWN-READ-COORDINATION",
-      "lock-or-claim": "store owner mutex plus exact version/lease identity",
+      "lock-or-claim": "store owner mutex plus exact version/lease identity; cold native cache selection uses existing metadata shard gates and expected link identity, while physical pin validates allocation identity under the binding gate; last-use notification gate protects only intrusive ready links and dispatch admission; producers enqueue prepared wakes without entering the owner, and bounded worker passes reacquire the original owner gate",
       "read-only-observers": [
         "KisPageStore facade",
         "KisPagePublicationCoordinator abort preflight"
@@ -345,7 +421,15 @@
       "terminal-paths": [
         "read request cancellation",
         "read lease release and last-use acknowledgement",
-        "captured view and retained snapshot release"
+        "captured view and retained snapshot release",
+        "stale native link conditionally evicted on identity mismatch or retirement; bounded retry never substitutes current root or evicts a newer cache object",
+        "terminal completion wakes the original read-release record; at most 32 records per worker pass acknowledge metadata and reschedule original history/retirement owners",
+        "one ticket covering multiple leases is resolved from exact metadata protection, not a duplicate acknowledgement authority; explicit acknowledgement stays available",
+        "close cancels subscriptions and freezes dispatch before waiting; terminal records are polled in original close, and refused close rearms pending notifications",
+        "facade stop closes notification admission without waiting; dormant notifications hold no owner lifetime reference, and worker admission only increments a nonzero lifetime count",
+        "cold notification preparation or dispatch failure retains original metadata/record debt for explicit acknowledgement or close; full metadata budget/fault recovery remains open",
+        "KisPageReadCleanup is a stack terminal scope, not a second read or metadata owner: release/cancel/acknowledge/abort/close transfer detached blocks past the outer store mutex, retaining the original activeProviderCalls count until physical cleanup; worker idle and lifetime release follow cleanup, and close finishes its own scope before the capability gate",
+        "storage rejection before resolve preserves the Pending request; provider bad_alloc restores Pending after reacquiring the owner gate; successful resolve transfers the prepared node without allocation, and rejected registration removes its unpublished request node"
       ]
     },
     {
@@ -360,11 +444,12 @@
       ],
       "fact": "prepared publication delta and publication orchestration",
       "id": "BR1-OWN-PREPARED-PUBLICATION",
-      "lock-or-claim": "store owner mutex plus transaction commit-preparation claim; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
+      "lock-or-claim": "store owner mutex plus original transaction mutation/commit-preparation claims; KisPreparedOverlayUpdate owns real missing nodes, concurrent bucket reservations and deferred old nodes; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
       "read-only-observers": [
         "KisCapturedReadView",
         "KisPageMutationSession",
-        "KisPageStore session statistics"
+        "KisPageStore session statistics",
+        "KisPageStore::resolvePagePresence classifies a declared batch against the original selector under one owner gate; no retained root, read capability or pending-byte authority is created"
       ],
       "status": "canonical",
       "target-authoritative-owner": "KisPreparedMutationCommit installed by KisPagePublicationCoordinator",
@@ -372,7 +457,8 @@
         "Prepared -> Installed commit installation",
         "Prepared -> Cancelled conflict or metadata rejection",
         "transaction abort",
-        "move-from -> Empty"
+        "move-from -> Empty",
+        "Overlay candidates retain the original PreparedTransactionState, never a second delta. Install consumes nodes and capacity; cancellation only releases capacity and replacement proofs. Ledger revocation/history collection and extracted-node disposal follow installation; necessary cleanup admission and outer joint publication remain open."
       ]
     },
     {
@@ -427,7 +513,8 @@
         "prepared slot reservation consumption or cancellation",
         "empty block intrusive return batch",
         "arena close and drain",
-        "coordinator destruction after owner quiescence"
+        "coordinator destruction after owner quiescence",
+        "single read-protection terminal transitions detach empty blocks into the caller-owned KisPageMetadataReadCleanup, retaining the original budget authority and charge until payload destruction; another metadata owner cannot append to that value"
       ]
     },
     {
@@ -454,7 +541,8 @@
       "terminal-paths": [
         "eraseExact during version or replica retirement",
         "prepared reservation consumption on install or cancellation on conflict",
-        "coordinator destruction after owner quiescence"
+        "coordinator destruction after owner quiescence",
+        "single read-protection terminal transitions detach empty blocks into the caller-owned KisPageMetadataReadCleanup, retaining the original budget authority and charge until payload destruction; another metadata owner cannot append to that value"
       ]
     },
     {
@@ -469,7 +557,9 @@
       "lock-or-claim": "binding mutex plus allocation generation",
       "read-only-observers": [
         "KisCapturedReadView",
-        "provider access and transfer operations"
+        "provider access and transfer operations",
+        "provider-issued Tiles3TileReadCache expected identity; each read repins under the same binding gate",
+        "cold retirement readiness subscription; final pin/writer release dispatches revalidation, not retirement permission"
       ],
       "status": "canonical",
       "target-authoritative-owner": "stable physical KisCpuResidentBinding generation tag",
@@ -481,15 +571,16 @@
     },
     {
       "creation-paths": [
-        "tile read cache installation",
-        "tile write capability installation"
+        "provider issues an expected-identity candidate from an active native/generic read or standalone writer; KisTile reuses its fixed ReadLease storage",
+        "tile write capability installation",
+        "cold clear barrier retains a legacy backing reference and a nonblocking resident pin before releasing its native guard"
       ],
       "current-writers": [
         "KisTile PageStore compatibility cache and intent flags"
       ],
-      "fact": "legacy tile capability cache validity and nested lock intent",
+      "fact": "legacy tile capability cache validity, nested lock intent and detached raw-pointer storage lifetime",
       "id": "BR1-OWN-TILE-CAPABILITY-CACHE",
-      "lock-or-claim": "tile lock plus fixed read/write capability slots",
+      "lock-or-claim": "tile lock and fixed read/write slots; canonical warm reads validate expected identity and repin at the provider binding gate; dormant candidates hold no root or RAM pin",
       "read-only-observers": [
         "legacy tile data access",
         "iterators and accessors"
@@ -499,7 +590,96 @@
       "terminal-paths": [
         "last nested read or write unlock",
         "cache refresh invalidation",
-        "tile destruction"
+        "tile destruction",
+        "barrier-cancelled lease finish releases its extra reference and resident pin without publishing",
+        "detach/dead disconnects the backend bridge while active loans survive until original unlock",
+        "retired binding rejects repin; the existing wrapper COW reference preserves immutable detached bytes, not a new current selection",
+        "successful changed-page refresh queries canonical metadata presence and invalidates the existing read-ready flag; active readers retain their exact bytes until unlock, and the next actual reader resolves current; compatibility failure rollback retains exact-view cache restoration for raw consumers"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisPageOwnerLedger::registerBacking",
+        "KisPageOwnerLedger::prepareBackingChanges",
+        "KisPageOwnerLedger::prepareBackingHandoff",
+        "reserveBacking prepares the actual charged retirement node before a fresh provider call; the same node enters the original backing record only after registration succeeds; direct initial adoption prepares its complete node footprint outside the store gate before any partial registration"
+      ],
+      "current-writers": [
+        "KisPageOwnerLedger"
+      ],
+      "fact": "exact backing registration, physical-once budget classification and funded handoff retirement headroom",
+      "id": "BR1-OWN-BACKING-CLASSIFICATION",
+      "lock-or-claim": "ledger mutex; existing prepared class claim freezes source and target identity plus physical domain; handoff installation reuses one index node",
+      "read-only-observers": [
+        "KisPageOwnerLedger::backingClass",
+        "KisPageRetirementQueue",
+        "KisPagePublicationCoordinator"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageOwnerLedger backing and physical indexes; provider remains the physical identity authority",
+      "terminal-paths": [
+        "KisPageOwnerLedger::commitBackingHandoff retains headroom on the existing backing record; domain admission moves its reserved class bytes with the same physical payload",
+        "ordinary metadata retirement pre-admission consumes the retained headroom once per physical charge; cancelled preparation preserves it, publication releases it; the shared native/generic write-plan consumer installs this reservation before exposing retagged bytes",
+        "KisPageOwnerLedger::commitBackingChanges",
+        "KisBackingHandoffReservation::release",
+        "KisPageOwnerLedger::releaseRetiredBacking",
+        "takeRetirementRecord transfers the exact backing record node once to its original queue or close list; handoff extract/reinsert retains that same node across allocation generation changes; direct release frees unused terminal storage outside the ledger gate"
+      ]
+    },
+    {
+      "creation-paths": [
+        "reserve/reserveChange prepare real slot storage and counters",
+        "waitForChange prepares an empty slot plus exact per-class/domain/aggregate/durable demand and FIFO identity; no waiting payload pin",
+        "wait context intrusive references and the fixed 32-entry allocator-backed request array are prepared outside the budget gate; only installation assigns the original controller owner",
+        "prepareReservationSlot charges actual slot-array bytes through one embedded cold reservation and the existing parent token; allocation occurs outside accounting gates, then original demand is revalidated",
+        "retained mutation allocator creates one charged accounting-lifetime owner per original controller; actual wake/task and allocate_shared read/retirement control storage reuse it; cold read record/index/context preparation runs outside the original store owner gate and revalidates before install",
+        "waitForChange cold admission includes actual prepared task size; the context pins itself only while queued/running, and a coalesced event during execution is replayed after its original completion gate without creating a task",
+        "W3 preflight includes actual waiter and wake capture sizes and runs before preparing an accounting cache for a permanently impossible request; dispatch copies only retained inline callback ownership, not another function allocation",
+        "physical backing admission jointly prepares payload/debt reservation and actual terminal storage; cold refusal precedes provider allocation and releases unconsumed quotas; this does not add another payload permission or budget authority"
+      ],
+      "current-writers": [
+        "KisBackingBudgetController"
+      ],
+      "fact": "backing capacity reservations and bounded cancellable admission requests",
+      "id": "BR1-OWN-BACKING-ADMISSION",
+      "lock-or-claim": "budget mutex owns usage, reservation slots and at most 32 queued/granted requests; cancellation/worker/destruction take lifetime context gate before budget mutex; producer mutations only notify a cold-prepared monitor node",
+      "read-only-observers": [
+        "KisBackingBudgetController::usage",
+        "KisBackingBudgetWaiter::isValid",
+        "KisPageStore::backingUsage"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisBackingBudgetController; the executor only schedules notifications and never owns budget decisions",
+      "terminal-paths": [
+        "grant reserves actual capacity in the original slot before callback; overlapping later requests cannot bypass an earlier waiting demand",
+        "take transfers that reservation once; consumer still proves physical/class eligibility",
+        "cancel returns empty or granted slot and wakes eligible successors; inactive reservation slots carry their own next-free links, with no separately allocated free-index vector",
+        "commit/release retain zero-allocation producer behavior; background dispatch consumes ready callbacks after both budget/lifetime gates unlock",
+        "controller destruction clears owner under the lifetime gate, cancels wake captures, and frees requests plus their charged array before detaching the small inert context; shared-budget child unregistration waits for the last actual retained allocation and accounting owner; dormant handles retain no PageStore",
+        "failed or losing prepared contexts reset their owning wake before dropping the final external reference, preventing a candidate callback cycle",
+        "growth preserves cookies and charges old plus new arrays concurrently; old storage is freed outside gates before charge release; controller destruction frees the retained slot array before shared-child unregistration; a live root keeps its own array charged",
+        "controller stop fences new retained allocations; detach preserves the original shared parent and child registration while inert handles, monitor callbacks or weak control blocks retain real storage; physical deallocation precedes charge release, and the last accounting owner deallocation precedes child unregister; ordinary raw allocations still require the original controller lifetime"
+      ]
+    },
+    {
+      "creation-paths": [
+        "KisStrokeStrategy::addCheckpointJob through KisStrokesQueue::addCheckpointJob and KisStroke::addCheckpointJob"
+      ],
+      "current-writers": [
+        "KisStroke through the original KisStrokesQueue admission mutex"
+      ],
+      "fact": "stroke checkpoint ordering relative to admitted input, recursively mutated children and queued finish",
+      "id": "BR1-OWN-STROKE-CUT",
+      "lock-or-claim": "original strokes queue mutex; existing sequential or barrier dispatch; queued-finish pointer only indexes the original queue and clears at removal",
+      "read-only-observers": [
+        "checkpoint callback; no PageStore pixel permission or retained view is granted by queue position"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisStroke original jobs queue",
+      "terminal-paths": [
+        "existing worker dispatch after earlier jobs and necessary mutated descendants finish",
+        "original cancellation/failure removes an unstarted cancellable checkpoint while preserving required children",
+        "rejection consumes data for invalid contract, cancelled stroke, dispatched finish or a retained stroke no longer in the queue"
       ]
     }
   ],

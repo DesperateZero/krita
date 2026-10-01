@@ -87,6 +87,11 @@ public:
 
     // interface for KisStrokeStrategy only!
     void addMutatedJobs(KisStrokeId id, const QVector<KisStrokeJobData*> list) final override;
+    bool addCheckpointJob(KisStrokeId id, KisStrokeJobData *data) final override;
+    void failStroke(KisStrokeId id, const QString &reason) final override;
+    void retryStrokeCancellation(KisStrokeId id) final override;
+    void setRetryWakeupCallback(std::function<void(int)> callback);
+    int cancellationRetryDelay() const;
 
 private:
     bool processOneJob(KisUpdaterContext &updaterContext,

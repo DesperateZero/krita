@@ -19,14 +19,17 @@
 #include "KisPageStoreTypes.h"
 
 class KisPageStoreMementoManager;
+class KisBackingBudgetController;
 class KisCpuReadGuard;
 class KisCpuResidentBinding;
 class KisCpuDefaultReadBuffer;
 class KisCpuWriteGuard;
+class KisCapturedReadView;
 class KisTiles3PageReplicaProvider;
 class KisTiledDataManagerPageStoreBackend;
 class KisTiledDataManagerPageStoreWriteBatch;
 class KisPageStoreWriteReservation;
+class QWriteLocker;
 struct KisPageMetadataMetrics;
 struct KisPageBackingLimits;
 struct KisPageBackingUsage;
@@ -42,7 +45,9 @@ struct KRITAIMAGE_EXPORT KisPageMutationStatistics {
     quint64 writablePinsAcquired = 0;
     quint64 writablePinsReleased = 0;
     quint64 pendingWriteMaterializations = 0;
-    quint64 maximumPinnedPagesPerSegment = 0;
+    // Exact high-water within one execution (or a direct serial session).
+    // Concurrent executions are not summed into a purported segment peak.
+    quint64 maximumPinnedPagesPerExecution = 0;
     // Canonical operation scopes may be semantic-only, without a CPU provider.
     // sessionsCreated above counts only scopes whose first pixel operation
     // selected a native CPU provider.
@@ -100,7 +105,48 @@ struct KRITAIMAGE_EXPORT KisPageStorePublicationStatistics {
     qsizetype activeCommitPreparations = 0;
 };
 
-/** Owner-issued, thread-confined unpublished canonical mutation segment.
+/** One execution's declared write range in the original mutation session.
+ * A borrow is confined to the worker that acquired it; another worker obtains
+ * a new borrow from the same session. Disjoint ranges may execute together.
+ * finish() returns execution only, never seals the segment. Abandonment poisons
+ * the original segment; guards keep the range and cancellation owner alive.
+ * This capability does not grant operation rollback, scheduler ordering, a
+ * read footprint, or commit-only permission.
+ */
+class KRITAIMAGE_EXPORT KisPageMutationExecution
+{
+public:
+    KisPageMutationExecution() = default;
+    ~KisPageMutationExecution();
+    KisPageMutationExecution(KisPageMutationExecution &&) noexcept = default;
+    KisPageMutationExecution &operator=(KisPageMutationExecution &&) noexcept;
+    KisPageMutationExecution(const KisPageMutationExecution &) = delete;
+    KisPageMutationExecution &operator=(const KisPageMutationExecution &) = delete;
+    bool isActive() const;
+    bool finish(QString *error = nullptr);
+    KisCpuWriteGuard beginWrite(const KisPageKey &, QString *error = nullptr);
+    KisCpuWriteGuard beginWrite(const KisPageKey &, KisPageWriteMode, QString *error = nullptr);
+    bool overwritePage(const KisPageKey &, const KisCpuPagePayload &, QString *error = nullptr);
+private:
+    enum class PreparationResult : quint8 { Unsupported, Failed, Ready };
+    // Prepare ordinary mutable backing for the complete borrowed range before
+    // a caller can expose pixels. Semantic removal/alias entries keep their
+    // existing path because preparing them would itself change pending bytes.
+    PreparationResult prepareWrites(QString *error);
+    void abandon();
+    class Private;
+    std::shared_ptr<Private> d;
+    friend class KisPageMutationSession;
+    friend class KisTiledDataManagerPageStoreBackend;
+    // Adapter-only result export into unique storage prepared before pixels.
+    // A null output queries the count; -1 rejects an unavailable execution or
+    // insufficient/shared output. No new page keys or permissions are stored.
+    qsizetype finishPreparedWrites(QVector<KisLogicalPageId> *changed,
+                                   QString *error = nullptr);
+    friend class KisCpuWriteGuard;
+};
+
+/** Owner-issued unpublished canonical mutation segment.
  * Joins an existing transaction; seal prepares its pages, not the epoch root.
  * The first write prepares independent backing (preserve COW or default/discard
  * initialization). A virtual default does not allocate a source. Repeated accesses reuse
@@ -124,6 +170,11 @@ public:
     KisPageMutationSession(const KisPageMutationSession &) = delete;
     KisPageMutationSession &operator=(const KisPageMutationSession &) = delete;
     bool isActive() const;
+    // Explicit write-only footprint. Shared input must already be immutable;
+    // scheduler/read dependencies remain the caller's responsibility. Conflict
+    // and storage rejection occur before execution and preserve older work.
+    KisPageMutationExecution borrowExecution(KisSurfaceId,
+        const QSet<KisLogicalPageId> &pages, QString *error = nullptr);
     // Private semantic absence. No pixel allocation, generation or overlay
     // publication occurs here. Repeated removal coalesces; a subsequent write
     // starts from the current surface default, reusing any pending backing.
@@ -148,6 +199,14 @@ public:
     // Outstanding guards reject seal/cancel; destroying the session with a
     // guard alive defers cancellation until that guard has relinquished data.
     bool seal(QString *error = nullptr);
+    // Freeze every change in this session into the original transaction and
+    // capture its complete sealed overlay. Outstanding executions/guards
+    // reject without waiting or poisoning the session. On success the same
+    // session remains open, with no page writer/pin carried across the cut.
+    // The caller must first establish the scheduler's complete job cut; this
+    // method cannot admit/drain queued jobs, coordinate other sessions/stores,
+    // or provide operation rollback across a checkpoint.
+    KisCapturedReadView checkpointForRead(QString *error = nullptr);
     bool cancel();
 
 private:
@@ -155,21 +214,29 @@ private:
     // Only the bridge can hand off terminal sealing; no active guard or new
     // write access is permitted at this boundary.
     bool sealForLegacyUnlock(QString *error = nullptr);
-    bool sealImpl(QString *error, bool legacyFinalUnlock);
+    // Seal the original segment but retain its original admission/write set
+    // until this session is destroyed after adapter delivery. No writable
+    // access survives seal, and the transaction activity still ends normally.
+    bool sealForAdapterDelivery(QString *error = nullptr);
+    bool sealImpl(QString *error, bool legacyFinalUnlock, KisCapturedReadView *checkpoint = nullptr,
+                  bool retainAdmission = false);
     // Adapter reservations claim their targets before capture or pixel
     // exposure; adopting them does not create pending generations.
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,
                            QString *error);
     bool reserveLegacyMutationPage(const KisPageKey &key, QString *error);
     KisCpuWriteGuard
-    beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error);
+    beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error,
+                   const std::shared_ptr<KisPageMutationExecution::Private> &execution = {},
+                   bool preparationOnly = false);
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     class Private;
-    QSharedPointer<Private> d;
+    std::shared_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuWriteGuard;
+    friend class KisPageMutationExecution;
 };
 
 class KRITAIMAGE_EXPORT KisCpuWriteGuard
@@ -202,8 +269,11 @@ public:
 private:
     void reset();
     bool providerBacking(KisReplicaHandle *) const;
-    QSharedPointer<KisPageMutationSession::Private> m_scope;
+    std::shared_ptr<KisPageMutationSession::Private> m_scope;
+    KisPageMutationExecution::Private *m_execution = nullptr; // kept by aliasing m_scope
+    // Borrow: immutable range position. Direct session: original slot handle.
     quint32 m_entry = std::numeric_limits<quint32>::max();
+    quint64 m_entryIncarnation = 0;
     void *m_data = nullptr;
     quint32 m_rowStride = 0;
     quint64 m_byteSize = 0;
@@ -219,12 +289,16 @@ struct KRITAIMAGE_EXPORT KisPageStoreReadScopeStatistics {
     quint64 maximumHistoryPagesPerPass = 0;
     // Worker enumeration, not total root-lookup/provider/GC time. One worker
     // pass selects <=16 keys and <=32 historical versions per key. Replica
-    // lists and reachability refreshes have separate, non-constant costs.
+    // lists and root-tree resolution have separate costs. Protected-root
+    // enumeration across the entire pass is additionally capped at 32.
     quint64 maximumHistoryVersionsPerPass = 0;
     quint64 historyReachabilityRefreshes = 0;
-    // Sum of distinct admitted roots probed by the above worker refreshes.
+    // Sum of protected-root visits across candidate-group refreshes; a root
+    // may be visited again for another group or after invalidation.
     // Not retired registry size, tokens, tree-node visits, or time/total GC work.
     quint64 historyReachabilityRootsVisited = 0;
+    quint64 maximumHistoryRootsPerPass = 0;
+    quint64 historyReachabilityRestarts = 0;
 };
 
 /**
@@ -378,6 +452,15 @@ public:
                           const KisPageAllocationDescriptor &descriptor,
                           const KisReplicaHandle &authority,
                           QString *error = nullptr);
+    // Import already initialized exact replicas with the initial manifest.
+    // The caller supplies the same canonical bytes for each handle, as for
+    // authority adoption. This never creates/copies a recovery replica while
+    // selecting a write. Validation and budget adoption are all-or-nothing.
+    bool adoptInitialPage(const KisPageVersion &version,
+                          const KisPageAllocationDescriptor &descriptor,
+                          const KisReplicaHandle &authority,
+                          const QVector<KisReplicaHandle> &readyAlternates,
+                          QString *error = nullptr);
     bool adoptInitialPageBytes(const KisPageVersion &version,
                                const KisPageAllocationDescriptor &descriptor,
                                const QByteArray &canonicalBytes,
@@ -386,6 +469,11 @@ public:
     bool resolveSurfaceState(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     /** Resolves identity only; it neither materializes bytes nor grants access. */
     bool resolvePageVersion(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
+    // Ephemeral classification of a declared batch at one metadata boundary.
+    // No retained view, pixels, read protection or access permission. Output is
+    // replaced only on complete success; unsealed mutation bytes are excluded.
+    bool resolvePagePresence(KisSurfaceId, const QVector<KisLogicalPageId> &,
+                             const KisPageReadView &, QVector<quint8> *present) const;
     bool pageDescriptor(const KisPageVersion &version, KisPageAllocationDescriptor *descriptor) const;
 
     // Captures current/retained/transaction-base roots once. TransactionOverlay
@@ -484,7 +572,27 @@ public:
     bool releaseSnapshot(KisImageEpochSnapshotToken token);
 
 private:
+    // Resolve a raw-read selection without capturing/freezing the overlay.
+    // Default bytes and their version are selected under the same owner gate.
+    bool resolveTileReadIdentity(const KisPageKey &, const KisPageReadView &,
+                                 KisPageVersion *, KisSurfaceEpochState *) const;
+    // Tiles3 derives this surface's bounds from the same published page delta.
+    // Generic stores keep their caller-supplied surface metadata contract.
+    bool configureDerivedPageExtent(KisSurfaceId surface);
+    bool configureSharedNonPayloadBudget(
+        const QSharedPointer<KisBackingBudgetController> &budget,
+        QString *error);
+    // The backend has already hidden its anonymous selector under this lock.
+    // Release it after successful root installation, before deferred cleanup.
+    KisImageEpochCommitTicket commitAndReleasePublicationLock(
+        const KisPageTransaction &transaction, const KisPreparedPageSet &preparedPages,
+        QWriteLocker &publicationLock);
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
+    // Adapter-only scratch prepared before pixels. On failure scratch may
+    // contain a partial classification and must not be consumed. This grants
+    // no view/pin and never classifies unsealed pending bytes.
+    bool resolvePagePresenceInto(KisSurfaceId, const QVector<KisLogicalPageId> &,
+                                 const KisPageReadView &, quint8 *scratch, qsizetype capacity) const;
     // Adapter-only: prepare the complete range in the store's sole admission
     // before a transaction/session or captured input is exposed. The owned
     // write set and claims move intact into the resulting mutation session.
@@ -513,6 +621,7 @@ private:
     KisRetainedImageEpochSnapshot captureRetainedEpochRoot();
     bool releaseSnapshotDelta(KisImageEpochSnapshotToken token, const QVector<KisPageKey> &changedPages);
     class Private;
+    static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {
         static void cleanup(Private *);
     };

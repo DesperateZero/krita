@@ -69,6 +69,21 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     FillPage,
     CopySourcePage,
     MutationIndexRefresh,
+    // Adapter scratch only: prepare precedes native pixels; resolve consumes
+    // it at the original publication/metadata boundary. These entry markers
+    // hold no PageStore gate; the caller may still hold its DataManager lock.
+    MutationPresencePreflight,
+    MutationPresencePrepare,
+    MutationPresencePrepared,
+    MutationPresenceResolve,
+    MutationPresenceResolved,
+    // Original execution/claims held, no PageStore or manager gate at entry.
+    // Preparation may allocate missing compatibility resources. Installation
+    // holds the manager gate; observers may record/signal only, never re-enter.
+    MutationAdapterPrepare,
+    MutationAdapterPrepared,
+    MutationAdapterInstall,
+    MutationAdapterInstalled,
     CopyPrepare,
     CopyFinish,
     MutationSealOwnerWait,
@@ -78,8 +93,12 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     // observers must never re-enter the same mutation.
     MutationSealPrivatePublish,
     MutationSealProofPrepare,
+    // Owner held; only record/signal. Missing overlay nodes and buckets are
+    // prepared here, before metadata or the visible transaction delta changes.
+    MutationSealStoragePrepare,
     MutationSealMetadataPrepare,
     MutationSealPublishOwnerWait,
+    MutationSealSurfacePrepare,
     MutationSealInstall,
     MutationSealCleanup,
     // Unfiltered product recorder only: source/destination/mask have different
@@ -89,8 +108,20 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     // Backend registry mutex held on entry; observer may signal test latches
     // only, never call back into the owner/backend. wait releases that mutex.
     PixelOperationRangeWait,
+    // Managed range acquired, before any transaction/session creation.
+    // Entry holds no owner/backend/manager gate; original claims remain live.
+    PixelOperationRangeReserved,
     PixelOperationBody,
     PixelOperationFinish,
+    PixelOperationPreflight,
+    // Output storage precedes range admission; the original execution prepares
+    // its touched bitmap when borrowing. Export precedes execution finish and
+    // publication; Deliver swaps existing output. These observer boundaries
+    // hold no owner gate. Cleanup includes the caller's previous output.
+    PixelOperationStoragePrepare,
+    PixelOperationChangedExport,
+    PixelOperationChangedDeliver,
+    PixelOperationCleanup,
     // Packed native body only. Entries hold no PageStore/backend registry
     // gate or DataManager operation lock. Target range claims remain live.
     // Compare includes exact read resolution/pin; Prepare includes COW/pin.
@@ -102,6 +133,18 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     // Copy only into already acquired pending/fallback storage. Direct fresh
     // payload initialization is inside WriteProviderPrepare (allocator + copy).
     MutationPayloadCopy,
+    // RecoverablePrepare/Prepared/Cleanup enter without the owner gate.
+    // The mutation mutex (native) or generic page admission remains held:
+    // observers may run independent readers/providers, never the same writer.
+    RecoverablePrepare,
+    RecoverablePrepared,
+    // Install/Installed hold the owner gate. Observers may only record the
+    // interval or signal latches, never call the owner or mutate a candidate.
+    // Install starts before physical claim; Installed ends after the joint
+    // metadata/retag/ledger/descriptor install, before pixel exposure.
+    RecoverableInstall,
+    RecoverableInstalled,
+    RecoverableCleanup,
     Count
 };
 

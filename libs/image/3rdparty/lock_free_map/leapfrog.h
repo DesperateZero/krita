@@ -13,7 +13,11 @@
 
 #include "map_traits.h"
 #include "simple_job_coordinator.h"
+#include "qsbr.h"
 #include "kis_assert.h"
+#include <limits>
+#include <memory>
+#include <new>
 
 #define SANITY_CHECK
 
@@ -59,13 +63,25 @@ struct Leapfrog {
 
         static Table* create(quint64 tableSize)
         {
+            if (!isPowerOf2(tableSize) || tableSize < 4 ||
+                (tableSize >> 2) > (std::numeric_limits<size_t>::max() - sizeof(Table)) / sizeof(CellGroup)) {
+                throw std::bad_alloc();
+            }
 #ifdef SANITY_CHECK
             KIS_ASSERT_RECOVER_NOOP(isPowerOf2(tableSize));
             KIS_ASSERT_RECOVER_NOOP(tableSize >= 4);
 #endif // SANITY_CHECK
             quint64 numGroups = tableSize >> 2;
             Table* table = (Table*) std::malloc(sizeof(Table) + sizeof(CellGroup) * numGroups);
-            new (table) Table(tableSize - 1);
+            if (!table) throw std::bad_alloc();
+            try {
+                new (table) Table(tableSize - 1);
+            } catch (...) {
+                // SimpleJobCoordinator's wait condition owns real storage.
+                // Constructor rejection must also release the raw table block.
+                std::free(table);
+                throw;
+            }
 
             for (quint64 i = 0; i < numGroups; i++) {
                 CellGroup* group = table->getCellGroups() + i;
@@ -111,21 +127,34 @@ struct Leapfrog {
         Atomic<bool> m_overflowed;
         Atomic<qint64> m_unitsRemaining;
         quint64 m_numSources {0};
+        QSBR::Action m_reclaim;
+        Atomic<quint32> m_completionState{0}; // 0: available/retry, 1: finisher, 2: transferred
+        bool m_ownsSources{true};
 
         TableMigration(Map& map) : m_map(map)
         {
+            m_reclaim.bind(&TableMigration::destroy, this);
         }
 
         static TableMigration* create(Map& map, quint64 numSources)
         {
+            if (!numSources || numSources >
+                (std::numeric_limits<size_t>::max() - sizeof(TableMigration)) / sizeof(Source)) {
+                throw std::bad_alloc();
+            }
             TableMigration* migration =
                 (TableMigration*) std::malloc(sizeof(TableMigration) + sizeof(TableMigration::Source) * numSources);
+            if (!migration) throw std::bad_alloc();
             new (migration) TableMigration(map);
 
             migration->m_workerStatus.storeNonatomic(0);
             migration->m_overflowed.storeNonatomic(false);
             migration->m_unitsRemaining.storeNonatomic(0);
             migration->m_numSources = numSources;
+            for (quint64 i = 0; i < numSources; ++i) {
+                migration->getSources()[i].table = nullptr;
+                migration->getSources()[i].sourceIndex.storeNonatomic(0);
+            }
             // Caller is responsible for filling in sources & destination
             return migration;
         }
@@ -138,11 +167,31 @@ struct Leapfrog {
         {
             // Destroy all source tables.
             for (quint64 i = 0; i < m_numSources; i++)
-                if (getSources()[i].table)
+                if (m_ownsSources && getSources()[i].table)
                     getSources()[i].table->destroy();
             // Delete the migration object itself.
             this->TableMigration::~TableMigration();
             std::free(this);
+        }
+
+        // Candidate, or a quiescent map's unfinished migration. A published
+        // root owns its destination instead; ordinary retirement uses destroy.
+        void discardUnpublished()
+        {
+            if (m_destination) m_destination->destroy();
+            destroy();
+        }
+
+        struct CandidateDeleter {
+            void operator()(TableMigration *migration) const { migration->discardUnpublished(); }
+        };
+        using Candidate = std::unique_ptr<TableMigration, CandidateDeleter>;
+
+        static Candidate prepare(Map &map, quint64 numSources, quint64 size)
+        {
+            Candidate migration(create(map, numSources));
+            migration->m_destination = Table::create(size);
+            return migration;
         }
 
         Source* getSources() const
@@ -151,6 +200,7 @@ struct Leapfrog {
         }
 
         bool migrateRange(Table* srcTable, quint64 startIdx);
+        void finishMigration();
         virtual void run() override;
     };
 
@@ -306,25 +356,16 @@ struct Leapfrog {
 
     static void beginTableMigrationToSize(Map& map, Table* table, quint64 nextTableSize)
     {
-        // Create new migration by DCLI.
-        SimpleJobCoordinator::Job* job = table->jobCoordinator.loadConsume();
-        if (job) {
-            // new migration already exists
-        } else {
+        if (table->jobCoordinator.loadConsume()) return;
+        // Actual destination and job storage are complete before taking the
+        // publication mutex. A losing candidate owns no source table.
+        auto candidate = TableMigration::prepare(map, 1, nextTableSize);
+        {
             QMutexLocker guard(&table->mutex);
-            job = table->jobCoordinator.loadConsume(); // Non-atomic would be sufficient, but that's OK.
-
-            if (job) {
-                // new migration already exists (double-checked)
-            } else {
-                // Create new migration.
-                TableMigration* migration = TableMigration::create(map, 1);
-                migration->m_unitsRemaining.storeNonatomic(table->getNumMigrationUnits());
-                migration->getSources()[0].table = table;
-                migration->getSources()[0].sourceIndex.storeNonatomic(0);
-                migration->m_destination = Table::create(nextTableSize);
-                // Publish the new migration.
-                table->jobCoordinator.storeRelease(migration);
+            if (!table->jobCoordinator.loadConsume()) {
+                candidate->m_unitsRemaining.storeNonatomic(table->getNumMigrationUnits());
+                candidate->getSources()[0].table = table;
+                table->jobCoordinator.storeRelease(candidate.release());
             }
         }
     }
@@ -382,10 +423,12 @@ bool Leapfrog<Map>::TableMigration::migrateRange(Table* srcTable, quint64 startI
                 // Otherwise, somebody just claimed the cell. Read srcHash again...
             } else {
                 // Check for deleted/uninitialized value.
-                srcValue = srcCell->value.load(Relaxed);
+                // Carry initialization of the published payload (including
+                // a prepared-key record) through destination publication.
+                srcValue = srcCell->value.load(Acquire);
                 if (srcValue == Value(ValueTraits::NullValue)) {
                     // Try to put a Redirect marker.
-                    if (srcCell->value.compareExchangeStrong(srcValue, Value(ValueTraits::Redirect), Relaxed)) {
+                    if (srcCell->value.compareExchangeStrong(srcValue, Value(ValueTraits::Redirect), AcquireRelease)) {
                         break; // Redirect has been placed. Break inner loop, continue outer loop.
                     }
 
@@ -428,7 +471,7 @@ bool Leapfrog<Map>::TableMigration::migrateRange(Table* srcTable, quint64 startI
                     // Copy srcValue to the destination.
                     dstCell->value.store(srcValue, Relaxed);
                     // Try to place a Redirect marker in srcValue.
-                    Value doubleCheckedSrcValue = srcCell->value.compareExchange(srcValue, Value(ValueTraits::Redirect), Relaxed);
+                    Value doubleCheckedSrcValue = srcCell->value.compareExchange(srcValue, Value(ValueTraits::Redirect), AcquireRelease);
 #ifdef SANITY_CHECK
                     KIS_ASSERT_RECOVER_NOOP(doubleCheckedSrcValue != Value(ValueTraits::Redirect)); // Only one thread can redirect a cell at a time.
 #endif // SANITY_CHECK
@@ -463,13 +506,15 @@ void Leapfrog<Map>::TableMigration::run()
 
 
     // Conditionally increment the shared # of workers.
-    quint64 probeStatus = m_workerStatus.load(Relaxed);
+    quint64 probeStatus = m_workerStatus.load(Acquire);
     do {
         if (probeStatus & 1) {
-            // End flag is already set, so do nothing.
+            // Finishing can be retried after a rejected successor allocation.
+            // Acquire loads/CAS failures observe completed source transfers.
+            if (probeStatus == 1) finishMigration();
             return;
         }
-    } while (!m_workerStatus.compareExchangeWeak(probeStatus, probeStatus + 2, Relaxed, Relaxed));
+    } while (!m_workerStatus.compareExchangeWeak(probeStatus, probeStatus + 2, Acquire, Acquire));
     // # of workers has been incremented, and the end flag is clear.
 #ifdef SANITY_CHECK
     KIS_ASSERT_RECOVER_NOOP((probeStatus & 1) == 0);
@@ -532,47 +577,48 @@ endMigration:
 #ifdef SANITY_CHECK
     KIS_ASSERT_RECOVER_NOOP(probeStatus == 3);
 #endif // SANITY_CHECK
-    bool overflowed = m_overflowed.loadNonatomic(); // No racing writes at this point
-    if (!overflowed) {
-        // The migration succeeded. This is the most likely outcome. Publish the new subtree.
-        m_map.publishTableMigration(this);
-        // End the jobCoodinator.
-        getSources()[0].table->jobCoordinator.end();
-    } else {
-        // The migration failed due to the overflow of the destination table.
-        Table* origTable = getSources()[0].table;
-        QMutexLocker guard(&origTable->mutex);
-        SimpleJobCoordinator::Job* checkedJob = origTable->jobCoordinator.loadConsume();
+    finishMigration();
+}
 
-        if (checkedJob != this) {
-            // a new TableMigration was already started
+template <class Map>
+void Leapfrog<Map>::TableMigration::finishMigration()
+{
+    quint32 expected = 0;
+    if (!m_completionState.compareExchangeStrong(expected, 1, AcquireRelease)) return;
+    // Sources and destination remain readable while a finisher prepares the
+    // successor. Source pointers are immutable even after ownership transfer.
+    Table *origTable = getSources()[0].table;
+    try {
+        if (!m_overflowed.loadNonatomic()) {
+            m_map.publishTableMigration(this);
+            origTable->jobCoordinator.end();
         } else {
-            TableMigration* migration = TableMigration::create(m_map, m_numSources + 1);
-            // Double the destination table size.
-            migration->m_destination = Table::create((m_destination->sizeMask + 1) * 2);
-            // Transfer source tables to the new migration.
-            for (quint64 i = 0; i < m_numSources; i++) {
-                migration->getSources()[i].table = getSources()[i].table;
-                getSources()[i].table = NULL;
-                migration->getSources()[i].sourceIndex.storeNonatomic(0);
-            }
-
-            migration->getSources()[m_numSources].table = m_destination;
-            migration->getSources()[m_numSources].sourceIndex.storeNonatomic(0);
-            // Calculate total number of migration units to move.
+            const quint64 oldSize = m_destination->sizeMask + 1;
+            if (oldSize > std::numeric_limits<quint64>::max() / 2 ||
+                m_numSources == std::numeric_limits<quint64>::max()) throw std::bad_alloc();
+            auto candidate = prepare(m_map, m_numSources + 1, oldSize * 2);
             quint64 unitsRemaining = 0;
-            for (quint64 s = 0; s < migration->m_numSources; s++) {
-                unitsRemaining += migration->getSources()[s].table->getNumMigrationUnits();
+            for (quint64 i = 0; i < m_numSources; ++i) {
+                candidate->getSources()[i].table = getSources()[i].table;
+                unitsRemaining += getSources()[i].table->getNumMigrationUnits();
             }
-
-            migration->m_unitsRemaining.storeNonatomic(unitsRemaining);
-            // Publish the new migration.
-            origTable->jobCoordinator.storeRelease(migration);
+            candidate->getSources()[m_numSources].table = m_destination;
+            unitsRemaining += m_destination->getNumMigrationUnits();
+            candidate->m_unitsRemaining.storeNonatomic(unitsRemaining);
+            // No operation below can reject. Readers of this retiring job may
+            // still inspect its immutable source pointers under QSBR.
+            m_ownsSources = false;
+            origTable->jobCoordinator.storeRelease(candidate.release());
         }
+        m_completionState.store(2, Release);
+        m_map.getGC().enqueueEmbedded(m_reclaim, true);
+    } catch (...) {
+        // Keep the original sources and partial destination intact. Waiters
+        // must observe a retry even though the coordinator's job is unchanged.
+        m_completionState.store(0, Release);
+        origTable->jobCoordinator.notifyRetry();
+        throw;
     }
-
-    // We're done with this TableMigration. Queue it for GC.
-    m_map.getGC().enqueue(&TableMigration::destroy, this, true);
 }
 
 #endif // LEAPFROG_H

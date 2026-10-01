@@ -70,8 +70,12 @@ public:
     }
 
     void saveNewDefaultPixel(const quint8* pixel, quint32 pixelSize) {
-        m_newDefaultPixel = new quint8[pixelSize];
-        memcpy(m_newDefaultPixel, pixel, pixelSize);
+        // Commit may be rejected and retried. Prepare the replacement before
+        // releasing the last attempted value (also safe if pixel aliases it).
+        quint8 *replacement = new quint8[pixelSize];
+        memcpy(replacement, pixel, pixelSize);
+        delete[] m_newDefaultPixel;
+        m_newDefaultPixel = replacement;
     }
 
     const quint8* oldDefaultPixel() const {

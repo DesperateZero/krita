@@ -21,6 +21,9 @@
 #include <QReadWriteLock>
 #include "kis_lazy_wait_condition.h"
 #include <mutex>
+#include <atomic>
+#include <QTimer>
+#include <QThread>
 
 //#define DEBUG_BALANCING
 
@@ -40,7 +43,25 @@ struct Q_DECL_HIDDEN KisUpdateScheduler::Private {
         : q(_q)
         , updaterContext(KisImageConfig(true).maxNumberOfThreads(), q)
         , projectionUpdateListener(p)
-    {}
+    {
+        strokesQueue.setRetryWakeupCallback([this](int delay) {
+            scheduleCancellationRetry(delay);
+        });
+    }
+
+    void scheduleCancellationRetry(int delay)
+    {
+        // Coalesce wakeups even while the GUI is blocked in waitForDone.
+        // The queue retains the cleanup owner; the timer retains no stroke.
+        if (retryWakeupPending.exchange(true)) return;
+        QTimer::singleShot(delay, Qt::PreciseTimer, q, [this] {
+            retryWakeupPending.store(false);
+            q->processQueues();
+            // A coalesced wakeup may precede the current head's deadline.
+            const int remaining = strokesQueue.cancellationRetryDelay();
+            if (remaining > 0) scheduleCancellationRetry(remaining);
+        });
+    }
 
     KisUpdateScheduler *q;
 
@@ -51,6 +72,7 @@ struct Q_DECL_HIDDEN KisUpdateScheduler::Private {
     qreal defaultBalancingRatio = 1.0; // desired strokes-queue-size / updates-queue-size
     KisProjectionUpdateListener *projectionUpdateListener;
     KisQueuesProgressUpdater *progressUpdater = 0;
+    std::atomic<bool> retryWakeupPending{false};
 
     QAtomicInt updatesLockCounter;
     QReadWriteLock updatesStartLock;
@@ -335,6 +357,8 @@ void KisUpdateScheduler::waitForDone()
     do {
         processQueues();
         m_d->updaterContext.waitForDone();
+        const int retryDelay = m_d->strokesQueue.cancellationRetryDelay();
+        if (retryDelay > 0) QThread::msleep(qMin(retryDelay, 10));
     } while(!m_d->updatesQueue.isEmpty() || !m_d->strokesQueue.isEmpty());
 }
 
@@ -362,6 +386,8 @@ void KisUpdateScheduler::barrierLock()
         processQueues();
         m_d->processingBlocked = true;
         m_d->updaterContext.waitForDone();
+        const int retryDelay = m_d->strokesQueue.cancellationRetryDelay();
+        if (retryDelay > 0) QThread::msleep(qMin(retryDelay, 10));
     } while(!m_d->updatesQueue.isEmpty() || !m_d->strokesQueue.isEmpty());
 }
 

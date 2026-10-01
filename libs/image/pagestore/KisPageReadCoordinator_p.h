@@ -7,7 +7,10 @@
 #ifndef KIS_PAGE_READ_COORDINATOR_P_H
 #define KIS_PAGE_READ_COORDINATOR_P_H
 
+#include "KisMutationStorage_p.h"
+
 #include "KisPageHistoryCollector_p.h"
+#include "KisPageMetadataCoordinator_p.h"
 #include "KisPageOwnerLedger.h"
 #include "KisPageRetirementQueue_p.h"
 
@@ -20,6 +23,31 @@
 
 #include <deque>
 #include <memory>
+#include <map>
+#include <optional>
+
+class KisPageReadCoordinator;
+
+// Construct before the outer store lock. Detached blocks are destroyed after
+// that lock unwinds; an owner activity count protects the unlocked interval.
+// Background passes finish this scope before publishing their idle state.
+class KisPageReadCleanup
+{
+public:
+    explicit KisPageReadCleanup(KisPageReadCoordinator &owner) : m_owner(owner) {}
+    ~KisPageReadCleanup();
+    KisPageReadCleanup(const KisPageReadCleanup &) = delete;
+    KisPageReadCleanup &operator=(const KisPageReadCleanup &) = delete;
+    void finishUnlocked(QMutexLocker<QMutex> &ownerLock);
+
+private:
+    void retainLocked();
+    void finish();
+    KisPageReadCoordinator &m_owner;
+    KisPageMetadataReadCleanup m_storage;
+    bool m_active = false;
+    friend class KisPageReadCoordinator;
+};
 
 struct KisPagePendingReadRecord
 {
@@ -30,12 +58,6 @@ struct KisPagePendingReadRecord
     KisPageOperationId accessOperation;
     KisPageLeaseId reservedLease;
     KisCompletionTicket readiness;
-};
-
-struct KisPagePendingLastUseRecord
-{
-    KisReplicaHandle replica;
-    KisCompletionTicket completion;
 };
 
 struct KisPageLastUseAcknowledgeResult
@@ -53,6 +75,10 @@ struct KisPageReadCoordinatorSnapshot
     quint64 requestsCreated = 0;
     quint64 capturedViewsCreated = 0;
     quint64 capturedViewReleases = 0;
+    bool lastUseJobScheduled = false;
+    quint64 lastUsePasses = 0;
+    quint64 maximumLastUsesPerPass = 0;
+    quint64 lastUseDispatchFailures = 0;
 };
 
 class KisPageReadCoordinator final
@@ -61,6 +87,7 @@ public:
     KisPageReadCoordinator(KisPageMetadataCoordinator &metadata,
                            KisImageEpochReferenceModel &epochs,
                            KisPageOwnerLedger &owner,
+                           KisBackingBudgetController &budget,
                            KisPageHistoryCollector &history,
                            KisPageRetirementQueue &retirementQueue,
                            QSharedPointer<KisCompletionRegistry> &completions,
@@ -71,12 +98,20 @@ public:
                            QAtomicInt &ownerLifetime,
                            void *lifetimeContext,
                            void (*releaseLifetime)(void *));
-    ~KisPageReadCoordinator() = default;
+    ~KisPageReadCoordinator();
 
     KisPageReadCoordinator(const KisPageReadCoordinator &) = delete;
     KisPageReadCoordinator &operator=(const KisPageReadCoordinator &) = delete;
     KisPageReadCoordinator(KisPageReadCoordinator &&) = delete;
     KisPageReadCoordinator &operator=(KisPageReadCoordinator &&) = delete;
+
+    // Cold native selection only. The caller retains this exact version/root
+    // across discovery and pinning; never substitute the current version.
+    // A stale candidate is conditionally evicted, preserving a newer cache.
+    static Q_NEVER_INLINE KRITAIMAGE_EXPORT QSharedPointer<KisCpuReadBindingLink> discoverCpuReadBinding(
+        KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
+        const KisPageVersion &version,
+        const QSharedPointer<KisCpuReadBindingLink> &stale = {});
 
     KisReadRequest registerRequestLocked(
         const KisPageVersion &version,
@@ -86,22 +121,33 @@ public:
         KisPageTransactionId transaction = {});
     KisReadLease resolveLocked(const KisReadRequest &request,
                                const KisCompletionTicket &completion,
-                               QMutexLocker<QMutex> &ownerLock);
-    bool cancelLocked(const KisReadRequest &request, QMutexLocker<QMutex> &ownerLock);
-    void retryCancelledRequestsLocked(QMutexLocker<QMutex> &ownerLock, bool drain = false);
+                               QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
+    bool cancelLocked(const KisReadRequest &request, QMutexLocker<QMutex> &ownerLock,
+                      KisPageReadCleanup &cleanup);
+    void retryCancelledRequestsLocked(QMutexLocker<QMutex> &ownerLock,
+                                     KisPageReadCleanup &cleanup, bool drain = false);
     KisPageKey releaseLocked(
         KisReadLease lease,
         const KisCompletionTicket &consumerLastUse,
-        QMutexLocker<QMutex> &ownerLock);
+        QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
     QVector<KisPageKey> retryReleasedReadsLocked(
+        KisPageReadCleanup &cleanup,
         const KisCompletionTicket &observed = {}, bool *acknowledged = nullptr,
         bool drain = false);
     KisPageLastUseAcknowledgeResult acknowledgeLastUseLocked(
-        const KisVerifiedCompletion &completion);
+        const KisVerifiedCompletion &completion, KisPageReadCleanup &cleanup);
+    // The original read-release records own pending last uses. Notifications
+    // only schedule exact records on the existing reclamation executor.
+    void beginCloseLocked();
+    void cancelCloseLocked();
+    void stopAutomaticWakeups();
+    void waitForIdle();
+    QVector<KisPageKey> acknowledgeCompletedLastUsesLocked(KisPageReadCleanup &cleanup);
 
     bool protectsPreparedTransactionLocked(
         KisPageTransactionId transaction) const;
-    bool cancelPreparedRequestsLocked(KisPageTransactionId transaction);
+    bool cancelPreparedRequestsLocked(KisPageTransactionId transaction,
+                                      KisPageReadCleanup &cleanup);
 
     void noteCapturedViewCreatedLocked();
     bool releaseCapturedView(
@@ -120,19 +166,38 @@ private:
     {
         ActiveReadRecord(
             const QSharedPointer<KisPageReplicaProvider> &providerValue,
-            KisReplicaAccess &&accessValue);
+            const KisReplicaHandle &replicaValue);
         ~ActiveReadRecord();
 
         QSharedPointer<KisPageReplicaProvider> provider;
         KisReplicaHandle replica;
-        KisReplicaAccess access;
+        // Prepared before resolveAccess; engage only when the provider returns.
+        std::optional<KisReplicaAccess> access;
         KisCompletionTicket releaseLastUse;
+        quint64 leaseId = 0;
+        bool metadataReleased = false; // owner mutex; this record now owns last-use debt
+        KisPageReadinessSubscription lastUseSubscription;
+        // Intrusive ready queue under LastUseWakeContext::mutex. The original
+        // lease map remains the owner; no second replica/completion ledger.
+        std::shared_ptr<ActiveReadRecord> nextReady;
+        bool readyQueued = false;
     };
 
-    bool finishReleasedReadLocked(quint64 leaseId, KisPageKey *key,
+    struct LastUseWakeContext;
+    void armLastUseLocked(const std::shared_ptr<ActiveReadRecord> &record);
+    static void notifyLastUse(const std::weak_ptr<LastUseWakeContext> &context,
+                             const std::weak_ptr<ActiveReadRecord> &record);
+    static void dispatchLastUses(const std::weak_ptr<LastUseWakeContext> &context);
+    bool prepareLastUseContextLocked();
+    void processLastUses(const std::shared_ptr<LastUseWakeContext> &context);
+    bool acknowledgeRecordLocked(const std::shared_ptr<ActiveReadRecord> &record,
+                                 const KisVerifiedCompletion &completion,
+                                 KisPageReadCleanup &cleanup);
+
+    bool finishReleasedReadLocked(quint64 leaseId, KisPageKey *key, KisPageReadCleanup &cleanup,
                                   bool *lastUseAcknowledged = nullptr);
     bool releaseReadLocked(const KisReplicaHandle &replica,
-                           KisPageLeaseId lease,
+                           KisPageLeaseId lease, KisPageReadCleanup &cleanup,
                            const KisCompletionTicket &completion = {});
     bool releaseSnapshotLocked(KisImageEpochSnapshotToken token,
                                const QVector<KisPageKey> *changedPages,
@@ -144,9 +209,11 @@ private:
     void retireEffectsUnlocked(QVector<KisPageTransitionEffect> effects,
                                QMutexLocker<QMutex> &ownerLock);
 
+    friend class KisPageReadCleanup;
     KisPageMetadataCoordinator &m_metadata;
     KisImageEpochReferenceModel &m_epochs;
     KisPageOwnerLedger &m_owner;
+    KisBackingBudgetController &m_budget;
     KisPageHistoryCollector &m_history;
     KisPageRetirementQueue &m_retirementQueue;
     QSharedPointer<KisCompletionRegistry> &m_completions;
@@ -166,12 +233,23 @@ private:
 
     QVector<KisPageKey> releaseCapturedVersionsLocked(PendingCapturedRelease &pending);
 
-    QHash<quint64, KisPagePendingReadRecord> m_requests;
+    // Node storage precedes protection/pinning. Active nodes can be installed
+    // without allocation even when other requests grow the maps during resolve.
+    std::map<quint64, KisPagePendingReadRecord> m_requests;
     std::deque<quint64> m_cancelRetries;
-    QHash<quint64, std::shared_ptr<ActiveReadRecord>> m_activeReads;
+    using ActiveReadAllocator = KisMutationStorageAllocator<
+        std::pair<const quint64, std::shared_ptr<ActiveReadRecord>>>;
+    using ActiveReadMap = std::map<quint64, std::shared_ptr<ActiveReadRecord>,
+                                  std::less<quint64>, ActiveReadAllocator>;
+    ActiveReadMap m_activeReads;
     std::deque<quint64> m_releaseRetries;
     std::deque<PendingCapturedRelease> m_capturedReleaseRetries;
-    QVector<KisPagePendingLastUseRecord> m_pendingLastUses;
+    qsizetype m_pendingLastUses = 0;
+    std::shared_ptr<LastUseWakeContext> m_lastUseWakeContext;
+    bool m_automaticWakeupsStopped = false;
+    bool m_lastUseClosing = false;
+    quint64 m_lastUsePasses = 0;
+    quint64 m_maximumLastUsesPerPass = 0;
     quint64 m_requestsCreated = 0;
     quint64 m_capturedViewsCreated = 0;
     quint64 m_capturedViewReleases = 0;

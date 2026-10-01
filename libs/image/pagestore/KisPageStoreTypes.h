@@ -1046,7 +1046,9 @@ struct KRITAIMAGE_EXPORT KisSurfaceEpochChange
             before.defaultPixelRevision != after.defaultPixelRevision;
         if (before.format.defaultPixel != after.format.defaultPixel && !defaultChanged)
             return false;
-        const bool extentChanged = before.contentExtent != after.contentExtent;
+        const bool extentChanged = before.extentRevision != after.extentRevision;
+        if (before.contentExtent != after.contentExtent && !extentChanged)
+            return false;
         return (defaultChanged || extentChanged) &&
                (defaultChanged
                     ? after.defaultPixelRevision > before.defaultPixelRevision
@@ -1217,12 +1219,21 @@ struct KRITAIMAGE_EXPORT KisPageStoreSessionStats
     // or byte/RSS accounting. Completed sweep caches are destroyed off owner.
     quint64 cachedHistoryReachableVersions = 0;
     qsizetype scheduledReclamationJobs = 0;
+    quint64 lastUseAcknowledgePasses = 0;
+    quint64 maximumLastUsesPerPass = 0;
+    quint64 lastUseDispatchFailures = 0;
     quint64 backgroundRetirementPasses = 0;
     quint64 maximumReplicasPerRetirementPass = 0;
     qsizetype peakRetiredReplicas = 0;
     quint64 peakRetiredBytes = 0;
     quint64 retirementRetryRequeues = 0;
     quint64 retirementCloseDrainedReplicas = 0;
+    // Future maintenance is distinct from an immediate reclamation job.
+    qsizetype delayedRetiredReplicas = 0;
+    qsizetype scheduledRetirementRetries = 0;
+    quint64 retirementRetryWakeups = 0;
+    quint64 maximumReplicasPerRetirementRetryWake = 0;
+    int nextRetirementRetryDelayMs = 1;
     qsizetype cachedDefaultReadBuffers = 0;
     quint64 cachedDefaultReadBytes = 0;
     quint64 liveDefaultReadBytes = 0;

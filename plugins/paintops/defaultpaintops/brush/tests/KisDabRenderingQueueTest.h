@@ -13,6 +13,12 @@ class KisDabRenderingQueueTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void testBrushQueuedContext_data();
+    void testBrushQueuedContext();
+    void testSharpnessLine_data();
+    void testSharpnessLine();
+    void testBrushPagePartition_data();
+    void testBrushPagePartition();
     void testCachedDabs();
     void testPostprocessedDabs();
     void testRunningJobs();

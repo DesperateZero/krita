@@ -24,6 +24,30 @@ struct AlphaDarkenCompositor128 {
         channels_type alpha;
     };
 
+    template<typename _impl>
+    static ALWAYS_INLINE auto calculateAlpha(
+        const typename KoStreamedMath<_impl>::float_v &srcAlpha,
+        const typename KoStreamedMath<_impl>::float_v &maskAlpha,
+        const typename KoStreamedMath<_impl>::float_v &dstAlpha,
+        const ParamsWrapper &params)
+    {
+        using float_v = typename KoStreamedMath<_impl>::float_v;
+        const float_v opacity(params.opacity);
+        const float_v fullFlowAlpha = [&]() {
+            if (params.averageOpacity > params.opacity) {
+                const float_v average(params.averageOpacity);
+                const float_v inverseAverage(1.0f / params.averageOpacity);
+                return xsimd::select(average > dstAlpha,
+                    xsimd::fma(average - srcAlpha, dstAlpha * inverseAverage, srcAlpha), dstAlpha);
+            }
+            return xsimd::select(opacity > dstAlpha,
+                xsimd::fma(opacity - dstAlpha, maskAlpha, dstAlpha), dstAlpha);
+        }();
+        if (params.flow == 1.0f) return fullFlowAlpha;
+        const float_v zeroFlowAlpha = ParamsWrapper::calculateZeroFlowAlpha(srcAlpha, dstAlpha);
+        return xsimd::fma(fullFlowAlpha - zeroFlowAlpha, float_v(params.flow), zeroFlowAlpha);
+    }
+
     /**
      * This is a vector equivalent of compositeOnePixelScalar(). It is considered
      * to process float_v::size pixels in a single pass.
@@ -99,34 +123,7 @@ struct AlphaDarkenCompositor128 {
             dst_c3 = src_c3;
         }
 
-        const float_v fullFlowAlpha = [&]() {
-            if (oparams.averageOpacity > opacity) {
-                const float_v average_opacity_vec(oparams.averageOpacity);
-                const float_m fullFlowAlpha_mask = average_opacity_vec > dst_alpha;
-                return xsimd::select(fullFlowAlpha_mask,
-                                (average_opacity_vec - src_alpha)
-                                        * (dst_alpha / average_opacity_vec)
-                                    + src_alpha,
-                                dst_alpha);
-            } else {
-                const float_m fullFlowAlpha_mask = opacity_vec > dst_alpha;
-                return xsimd::select(
-                    fullFlowAlpha_mask,
-                    (opacity_vec - dst_alpha) * msk_norm_alpha + dst_alpha,
-                    dst_alpha);
-            }
-        }();
-
-        dst_alpha = [&]() {
-            if (oparams.flow == 1.0) {
-                return fullFlowAlpha;
-            }
-            else {
-                const float_v zeroFlowAlpha = ParamsWrapper::calculateZeroFlowAlpha(src_alpha, dst_alpha);
-                const float_v flow_norm_vec(oparams.flow);
-                return (fullFlowAlpha - zeroFlowAlpha) * flow_norm_vec + zeroFlowAlpha;
-            }
-        }();
+        dst_alpha = calculateAlpha<_impl>(src_alpha, msk_norm_alpha, dst_alpha, oparams);
 
         dataWrapper.write(dst, dst_c1, dst_c2, dst_c3, dst_alpha);
     }
@@ -147,8 +144,11 @@ struct AlphaDarkenCompositor128 {
         PixelWrapper<channels_type, _impl>::normalizeAlpha(dstAlphaNorm);
 
         const float uint8Rec1 = 1.0f / 255.0f;
-        float mskAlphaNorm = haveMask ? float(*mask) * uint8Rec1 * src[alpha_pos] : src[alpha_pos];
+        float mskAlphaNorm = src[alpha_pos];
         PixelWrapper<channels_type, _impl>::normalizeAlpha(mskAlphaNorm);
+        // Match the vector path: normalize the source before applying the
+        // mask. Reassociation changes U16 rounding at scalar span boundaries.
+        if (haveMask) mskAlphaNorm = float(*mask) * uint8Rec1 * mskAlphaNorm;
 
         Q_UNUSED(opacity);
         opacity = oparams.opacity;
@@ -165,25 +165,12 @@ struct AlphaDarkenCompositor128 {
             *d = *s;
         }
 
-        const float flow = oparams.flow;
-        const float averageOpacity = oparams.averageOpacity;
-
-        const float fullFlowAlpha = [&]() {
-            if (averageOpacity > opacity) {
-                return averageOpacity > dstAlphaNorm ? lerp(srcAlphaNorm, averageOpacity, dstAlphaNorm / averageOpacity) : dstAlphaNorm;
-            } else {
-                return opacity > dstAlphaNorm ? lerp(dstAlphaNorm, opacity, mskAlphaNorm) : dstAlphaNorm;
-            }
-        }();
-
-        dstAlphaNorm = [&]() {
-            if (flow == 1.0f) {
-                return fullFlowAlpha;
-            } else {
-                const float zeroFlowAlpha = ParamsWrapper::calculateZeroFlowAlpha(srcAlphaNorm, dstAlphaNorm);
-                return lerp(zeroFlowAlpha, fullFlowAlpha, flow);
-            }
-        }();
+        // Use the selected ISA's alpha arithmetic for a scalar edge as well.
+        // In particular, scalar contraction and vector fused operations must
+        // not choose different U16 rounding at a tile or mask span boundary.
+        using float_v = typename KoStreamedMath<_impl>::float_v;
+        dstAlphaNorm = calculateAlpha<_impl>(float_v(srcAlphaNorm), float_v(mskAlphaNorm),
+                                            float_v(dstAlphaNorm), oparams).get(0);
 
         PixelWrapper<channels_type, _impl>::denormalizeAlpha(dstAlphaNorm);
         dst[alpha_pos] = PixelWrapper<channels_type, _impl>::roundFloatToUint(dstAlphaNorm);

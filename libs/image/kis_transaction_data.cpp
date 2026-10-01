@@ -17,6 +17,8 @@
 #include "kis_raster_keyframe_channel.h"
 #include "kis_image_config.h"
 #include <boost/optional.hpp>
+#include <cstring>
+#include <atomic>
 
 //#define DEBUG_TRANSACTIONS
 
@@ -40,7 +42,11 @@ public:
     KisPaintDeviceSP device;
     KisMementoSP memento;
     bool firstRedo;
-    bool transactionFinished;
+    enum class State { Active, Cancelling, Committed, Aborted };
+    std::atomic<State> state{State::Active};
+    bool persistentMutation = false;
+    KisPaintDevice::WriteContext strokeWriteContext;
+    int transactionLod = 0;
     QPoint oldOffset;
     QPoint newOffset;
 
@@ -58,6 +64,8 @@ public:
 
     QScopedPointer<OptionalInterstrokeInfo> interstrokeInfo;
     bool suppressUpdates = false;
+    QRect cancelDirty;
+    bool interstrokeEndClosed = false;
 
     void possiblySwitchCurrentTime();
     KisDataManagerSP dataManager();
@@ -94,9 +102,19 @@ void KisTransactionData::init(KisPaintDeviceSP device)
     m_d->oldOffset = QPoint(device->x(), device->y());
     m_d->oldDefaultPixel = device->defaultPixel();
     m_d->firstRedo = true;
-    m_d->transactionFinished = false;
+    m_d->state = Private::State::Active;
 
     m_d->transactionTime = device->defaultBounds()->currentTime();
+    m_d->transactionLod = device->defaultBounds()->currentLevelOfDetail();
+
+    m_d->transactionFrameId = device->framesInterface() ? device->framesInterface()->currentFrameId() : -1;
+    m_d->savedDataManager = m_d->transactionFrameId >= 0 ?
+        m_d->device->framesInterface()->frameDataManager(m_d->transactionFrameId) :
+        m_d->device->dataManager();
+    m_d->memento = m_d->savedDataManager->getMemento();
+    // Do not start auxiliary transactions when the main device rejected us.
+    // An existing interstroke transaction may belong to the active owner.
+    if (!m_d->memento) return;
 
     if (m_d->interstrokeInfo) {
         m_d->interstrokeInfo->beginTransactionCommand.reset(m_d->interstrokeInfo->factory->createBeginTransactionCommand(m_d->device));
@@ -105,17 +123,22 @@ void KisTransactionData::init(KisPaintDeviceSP device)
         }
     }
 
-    m_d->transactionFrameId = device->framesInterface() ? device->framesInterface()->currentFrameId() : -1;
-    m_d->savedDataManager = m_d->transactionFrameId >= 0 ?
-        m_d->device->framesInterface()->frameDataManager(m_d->transactionFrameId) :
-        m_d->device->dataManager();
-    m_d->memento = m_d->savedDataManager->getMemento();
 }
 
 KisTransactionData::~KisTransactionData()
 {
-    Q_ASSERT(m_d->memento);
-    m_d->savedDataManager->purgeHistory(m_d->memento);
+    if (m_d->memento && m_d->state != Private::State::Aborted) {
+        // A rejected cancellation must never silently turn into a commit.
+        if (m_d->state == Private::State::Cancelling ||
+            (m_d->persistentMutation && m_d->state == Private::State::Active)) {
+            QString error;
+            if (!tryAbortTransaction(&error)) {
+                qWarning() << "Transaction destroyed before cancellation completed:" << error;
+            }
+        } else {
+            m_d->savedDataManager->purgeHistory(m_d->memento);
+        }
+    }
 
     delete m_d;
 }
@@ -131,14 +154,98 @@ void KisTransactionData::Private::moveDevice(const QPoint newOffset)
 
 void KisTransactionData::endTransaction()
 {
-    if(!m_d->transactionFinished) {
+    QString error;
+    if (!tryEndTransaction(&error)) {
+        qWarning() << "Transaction completion failed:" << error;
+    }
+}
+
+bool KisTransactionData::isTransactionFinished() const
+{
+    return m_d->state == Private::State::Committed;
+}
+
+bool KisTransactionData::hasMemento() const
+{
+    return bool(m_d->memento);
+}
+
+bool KisTransactionData::strokeMutationTargetIsCurrent(KisPaintDeviceSP target, QString *error) const
+{
+    if (m_d->state != Private::State::Active || !m_d->memento || target != m_d->device ||
+        target->defaultBounds()->currentTime() != m_d->transactionTime ||
+        target->defaultBounds()->currentLevelOfDetail() != m_d->transactionLod ||
+        (target->framesInterface() ? target->framesInterface()->currentFrameId() : -1) != m_d->transactionFrameId ||
+        target->dataManager() != m_d->savedDataManager ||
+        (m_d->persistentMutation && !m_d->strokeWriteContext.matches(target.data()))) {
+        if (error) *error = QStringLiteral("Stroke mutation target or transaction context changed");
+        return false;
+    }
+    return true;
+}
+
+bool KisTransactionData::beginStrokeMutation(QString *error)
+{
+    if (!strokeMutationTargetIsCurrent(m_d->device, error)) return false;
+    // Capture only at initial admission, never rebind an existing stroke to a
+    // changed mapping. Ordinary transactions may still move the device.
+    const auto context = m_d->device->captureWriteContext();
+    if (!m_d->savedDataManager->beginStrokeMutation(m_d->memento, error)) return false;
+    if (!m_d->persistentMutation) m_d->strokeWriteContext = context;
+    m_d->persistentMutation = true;
+    return true;
+}
+
+bool KisTransactionData::applyStrokePixelOperation(KisPaintDeviceSP target, const QVector<QRect> &rects,
+    const std::function<bool(KisPixelWriteCursor *)> &operation, QString *error)
+{
+    if (!m_d->persistentMutation) {
+        if (error) *error = QStringLiteral("Stroke mutation was not admitted");
+        return false;
+    }
+    if (!strokeMutationTargetIsCurrent(target, error)) return false;
+    target->invalidateTransactionCache();
+    const bool succeeded = m_d->savedDataManager->applyStrokePixelOperation(m_d->memento, rects, operation, error);
+    target->invalidateTransactionCache();
+    return succeeded;
+}
+
+bool KisTransactionData::checkpointStrokeMutation(QString *error)
+{
+    if (!m_d->persistentMutation) {
+        if (error) *error = QStringLiteral("Stroke mutation was not admitted");
+        return false;
+    }
+    if (!strokeMutationTargetIsCurrent(m_d->device, error)) return false;
+    if (!m_d->savedDataManager->checkpointStrokeMutation(m_d->memento, error)) return false;
+    m_d->device->invalidateTransactionCache();
+    return true;
+}
+
+bool KisTransactionData::tryEndTransaction(QString *error)
+{
+    if (error) error->clear();
+    if (m_d->state == Private::State::Cancelling || m_d->state == Private::State::Aborted) {
+        if (error) *error = QStringLiteral("A cancelled transaction cannot be committed");
+        return false;
+    }
+    if (!m_d->memento) {
+        if (error) *error = QStringLiteral("Transaction has no memento");
+        return false;
+    }
+    if (m_d->state == Private::State::Active) {
         // make sure the time didn't change during the transaction
-        KIS_ASSERT_RECOVER_RETURN(
-            m_d->transactionTime == m_d->device->defaultBounds()->currentTime());
+        if (m_d->transactionTime != m_d->device->defaultBounds()->currentTime()) {
+            if (error) *error = QStringLiteral("Transaction time changed before completion");
+            return false;
+        }
+
+        if (m_d->persistentMutation && !strokeMutationTargetIsCurrent(m_d->device, error)) return false;
+        const bool committed = m_d->savedDataManager->tryCommit(error);
+        if (m_d->persistentMutation) m_d->device->invalidateTransactionCache();
+        if (!committed) return false;
 
         DEBUG_ACTION("Transaction ended");
-        m_d->transactionFinished = true;
-        m_d->savedDataManager->commit();
         m_d->newOffset = QPoint(m_d->device->x(), m_d->device->y());
         m_d->defaultPixelChanged = m_d->oldDefaultPixel != m_d->device->defaultPixel();
 
@@ -149,7 +256,74 @@ void KisTransactionData::endTransaction()
             }
             m_d->interstrokeInfo->factory.reset();
         }
+        m_d->state = Private::State::Committed;
     }
+    return true;
+}
+
+bool KisTransactionData::tryAbortTransaction(QString *error)
+{
+    if (error) error->clear();
+    if (m_d->state == Private::State::Aborted) return true;
+    if (m_d->state == Private::State::Committed) {
+        if (error) *error = QStringLiteral("Only an uncommitted transaction can be aborted");
+        return false;
+    }
+    if (m_d->state == Private::State::Active) {
+        if (m_d->memento) {
+            m_d->newOffset = m_d->transactionFrameId >= 0
+                ? m_d->device->framesInterface()->frameOffset(m_d->transactionFrameId)
+                : QPoint(m_d->device->x(), m_d->device->y());
+            m_d->cancelDirty = m_d->savedDataManager->extent().translated(m_d->newOffset);
+            m_d->defaultPixelChanged = std::memcmp(m_d->savedDataManager->defaultPixel(),
+                m_d->oldDefaultPixel.data(), m_d->oldDefaultPixel.colorSpace()->pixelSize()) != 0;
+        }
+        m_d->state = Private::State::Cancelling;
+    }
+
+    // Existing wrapper factories can own auxiliary transactions. Close their
+    // command once before cancelling the main pixels; keep it for a retry.
+    // This is the legacy wrapper contract, not a main-device commit/undo.
+    if (m_d->memento && m_d->interstrokeInfo && !m_d->interstrokeEndClosed) {
+        if (!m_d->interstrokeInfo->endTransactionCommand) {
+            m_d->interstrokeInfo->endTransactionCommand.reset(
+                m_d->interstrokeInfo->factory->createEndTransactionCommand());
+        }
+        if (m_d->interstrokeInfo->endTransactionCommand)
+            m_d->interstrokeInfo->endTransactionCommand->redo();
+        m_d->interstrokeEndClosed = true;
+        m_d->interstrokeInfo->factory.reset();
+    }
+    // If admission failed, only unwind our constructor's auxiliary commands.
+    // In particular, do not abort another transaction already using this device.
+    if (m_d->memento && !m_d->savedDataManager->tryAbort(m_d->memento, error)) return false;
+
+    if (m_d->interstrokeInfo && m_d->interstrokeInfo->endTransactionCommand)
+        m_d->interstrokeInfo->endTransactionCommand->undo();
+    if (m_d->memento && m_d->newOffset != m_d->oldOffset) m_d->moveDevice(m_d->oldOffset);
+    if (m_d->interstrokeInfo && m_d->interstrokeInfo->beginTransactionCommand)
+        m_d->interstrokeInfo->beginTransactionCommand->undo();
+    restoreSelectionOutlineCache(true);
+    doFlattenUndoRedo(true);
+    if (m_d->memento) m_d->possiblySwitchCurrentTime();
+    m_d->state = Private::State::Aborted;
+
+    if (!m_d->memento) {
+        possiblyNotifySelectionChanged();
+        return true;
+    }
+
+    if (m_d->transactionFrameId >= 0)
+        m_d->device->framesInterface()->invalidateFrameCache(m_d->transactionFrameId);
+    else
+        m_d->device->invalidateTransactionCache();
+    if (!m_d->suppressUpdates) {
+        m_d->cancelDirty |= m_d->savedDataManager->extent().translated(m_d->oldOffset);
+        if (m_d->defaultPixelChanged) m_d->cancelDirty |= m_d->device->defaultBounds()->bounds();
+        m_d->device->setDirty(m_d->cancelDirty);
+    }
+    possiblyNotifySelectionChanged();
+    return true;
 }
 
 void KisTransactionData::startUpdates()

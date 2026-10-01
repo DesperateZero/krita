@@ -31,10 +31,13 @@
 #include <QWaitCondition>
 
 #include <algorithm>
+#include <atomic>
+#include <tuple>
 #include <cstddef>
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory>
 #include <new>
 #include <optional>
@@ -93,25 +96,25 @@ struct PendingWriteRequestRecord : WriteClosureRecord {
 
 struct ActiveWriteRecord {
     ActiveWriteRecord(const QSharedPointer<KisPageReplicaProvider> &providerValue,
-                      KisReplicaAccess &&accessValue,
-                      WriteClosureRecord &&requestValue)
+                      WriteClosureRecord requestValue)
         : provider(providerValue)
-        , access(std::move(accessValue))
         , request(std::move(requestValue))
     {
     }
 
     ~ActiveWriteRecord()
     {
-        if (provider && access.isValid()) {
-            provider->releaseAccess(std::move(access), {});
+        if (provider && access && access->isValid()) {
+            provider->releaseAccess(std::move(*access), {});
         }
     }
 
     QSharedPointer<KisPageReplicaProvider> provider;
-    KisReplicaAccess access;
+    std::optional<KisReplicaAccess> access;
     WriteClosureRecord request;
 };
+
+using ActiveWriteMap = std::map<quint64, std::shared_ptr<ActiveWriteRecord>>;
 
 struct PendingArchiveRecord {
     bool busy = false;
@@ -237,10 +240,10 @@ class KisPageStore::Private
 {
 public:
     Private()
-        : writeAdmission(mutex, writeAdmissionChanged)
+        : writeAdmission(mutex, writeAdmissionChanged, &backingBudget, &operational)
         , writeCoordinator(metadata, epochs, backingBudget, owner)
         , defaultStorage(backingBudget)
-        , retirementQueue(owner, metadata, lifetimeReferences, this, &Private::releaseRetirementLifetime)
+        , retirementQueue(owner, metadata, backingBudget, lifetimeReferences, this, &Private::releaseRetirementLifetime)
         , historyCollector(metadata,
                            epochs,
                            retirementQueue,
@@ -272,6 +275,7 @@ public:
         , readCoordinator(metadata,
                           epochs,
                           owner,
+                          backingBudget,
                           historyCollector,
                           retirementQueue,
                           completions,
@@ -283,6 +287,10 @@ public:
                           this,
                           &Private::releaseRetirementLifetime)
     {
+        // Prepare the one process worker before this root can be released.
+        // configure() admits its terminal/recurring nodes before any physical
+        // state; the last reference never allocates a task or a thread.
+        kisEnqueuePageStoreReclamation(nullptr);
         owner.attachBackingBudget(backingBudget);
         metadata.attachBackingBudget(backingBudget);
         metadata.attachRetirementDebtOwner(&owner,
@@ -331,10 +339,13 @@ public:
         return static_cast<KisPageStore::Private *>(context)->writeAdmission.pageClaimedLocked(key);
     }
 
-    static void beginPublicationMutationPreparation(void *context, KisPageTransactionId transaction)
+    static bool beginPublicationMutationPreparation(void *context, KisPageTransactionId transaction,
+                                                    QMutexLocker<QMutex> &lock, QString *error)
     {
         auto *owner = static_cast<KisPageStore::Private *>(context);
-        owner->writeCoordinator.beginPreparationActivity(transaction);
+        ++owner->activeProviderCalls;
+        const auto preparation = qScopeGuard([&] { --owner->activeProviderCalls; });
+        return owner->writeCoordinator.beginPreparationActivity(transaction, lock, error);
     }
 
     static void endPublicationMutationPreparation(void *context, KisPageTransactionId transaction)
@@ -355,27 +366,28 @@ public:
         const KisPageStoreSessionStats stats = owner->stats();
         return stats.activeTransactions == 0 && stats.pendingRequests == 0 && stats.activeWriteLeases == 0
             && stats.preparedPageProofs == 0 && stats.preparedSurfaceChanges == 0 && stats.stagedPageRemovals == 0
-            && stats.activeProviderCalls == 0
+            && stats.activeProviderCalls == 0 && stats.activeCpuWritePages == 0
             && owner->owner.publicationBlockingOperationCount() == 0 && stats.sealedPreparedProofs == 0;
     }
 
     static bool preparePublicationAbort(void *context,
                                         KisPageTransactionId transaction,
-                                        QVector<KisPageTransitionEffect> *retirementEffects)
+                                        QVector<KisPageTransitionEffect> *retirementEffects,
+                                        KisPageReadCleanup &cleanup)
     {
         auto *owner = static_cast<KisPageStore::Private *>(context);
         if (!retirementEffects || owner->writeCoordinator.transactionHasSessionOrPreparation(transaction)) {
             return false;
         }
         for (auto it = owner->activeWrites.begin(); it != owner->activeWrites.end();) {
-            const auto active = it.value();
+            const auto active = it->second;
             if (!(active->request.transaction == transaction)) {
                 ++it;
                 continue;
             }
             // Consumed leases retain admission after a failed detach. Abort
             // retries them; an exposed or currently releasing lease blocks it.
-            if (active->access.isValid()) return false;
+            if (active->access && active->access->isValid()) return false;
             const auto result = owner->cancelWriteLocked(active->request);
             if (!result.accepted) return false;
             *retirementEffects += result.effects;
@@ -383,21 +395,21 @@ public:
             it = owner->activeWrites.erase(it);
         }
         if (owner->readCoordinator.protectsPreparedTransactionLocked(transaction)
-            || !owner->readCoordinator.cancelPreparedRequestsLocked(transaction)) {
+            || !owner->readCoordinator.cancelPreparedRequestsLocked(transaction, cleanup)) {
             return false;
         }
         for (auto it = owner->writeRequests.begin(); it != owner->writeRequests.end();) {
-            if (!(it->transaction == transaction)) {
+            if (!(it->second.transaction == transaction)) {
                 ++it;
                 continue;
             }
-            if (it->state != PendingWriteRequestRecord::State::Pending)
+            if (it->second.state != PendingWriteRequestRecord::State::Pending)
                 return false;
-            const auto result = owner->cancelWriteLocked(it.value());
+            const auto result = owner->cancelWriteLocked(it->second);
             if (!result.accepted)
                 return false;
             *retirementEffects += result.effects;
-            owner->releaseGenericWrite(it->transaction, it->version.key);
+            owner->releaseGenericWrite(it->second.transaction, it->second.version.key);
             it = owner->writeRequests.erase(it);
         }
         return true;
@@ -440,13 +452,22 @@ public:
         result.activeRetirementReplicas = retirementSnapshot.activeReplicas;
         result.pendingRetiredBytes = retirementSnapshot.pendingBytes;
         result.scheduledReclamationJobs =
-            qsizetype(retirementSnapshot.jobScheduled) + qsizetype(historySnapshot.jobScheduled);
+            qsizetype(retirementSnapshot.jobScheduled) + qsizetype(historySnapshot.jobScheduled) +
+            qsizetype(readSnapshot.lastUseJobScheduled);
+        result.lastUseAcknowledgePasses = readSnapshot.lastUsePasses;
+        result.maximumLastUsesPerPass = readSnapshot.maximumLastUsesPerPass;
+        result.lastUseDispatchFailures = readSnapshot.lastUseDispatchFailures;
         result.backgroundRetirementPasses = retirementSnapshot.backgroundPasses;
         result.maximumReplicasPerRetirementPass = retirementSnapshot.maximumReplicasPerPass;
         result.peakRetiredReplicas = retirementSnapshot.peakPendingReplicas;
         result.peakRetiredBytes = retirementSnapshot.peakPendingBytes;
         result.retirementRetryRequeues = retirementSnapshot.retryRequeues;
         result.retirementCloseDrainedReplicas = retirementSnapshot.closeDrainedReplicas;
+        result.delayedRetiredReplicas = retirementSnapshot.delayedReplicas;
+        result.scheduledRetirementRetries = qsizetype(retirementSnapshot.retryScheduled);
+        result.retirementRetryWakeups = retirementSnapshot.retryWakeups;
+        result.maximumReplicasPerRetirementRetryWake = retirementSnapshot.maximumReplicasPerRetryWake;
+        result.nextRetirementRetryDelayMs = retirementSnapshot.nextRetryDelayMs;
         result.pendingHistoricalPages = historySnapshot.pendingPages;
         result.deferredHistoricalPages = historySnapshot.deferredPages;
         result.activeHistoryScans = historySnapshot.activeScans;
@@ -490,7 +511,7 @@ public:
 
     void retireRejectedReplicaLocked(const KisReplicaHandle &replica,
                                      const QSharedPointer<KisPageReplicaProvider> &provider,
-                                     KisBackingBudgetReservation &&backing,
+                                     KisPageBackingPreparation &&backing,
                                      QMutexLocker<QMutex> &lock)
     {
         ++activeProviderCalls;
@@ -554,8 +575,18 @@ public:
         }
         KisBackingBudgetClass backingClass = currentVersion == version
             ? KisBackingBudgetClass::Current : KisBackingBudgetClass::RetainedHistory;
-        auto backing = writeCoordinator.reserveBacking(descriptor, access.domain, backingClass, error);
-        if (!backing.isValid()) return false;
+        KisPageBackingPreparation backing;
+        ++activeProviderCalls;
+        {
+            locker->unlock();
+            const auto done = qScopeGuard([&] { locker->relock(); --activeProviderCalls; });
+            backing = writeCoordinator.reserveBacking(descriptor, access.domain, backingClass, error);
+        }
+        const auto discardBacking = qScopeGuard([&] {
+            if (!backing.retirement) return;
+            locker->unlock(); backing.retirement.reset(); locker->relock();
+        });
+        if (!backing.reservation.isValid()) return false;
 
         defaultStorage.beginPreparationLocked(version.key);
         ++activeProviderCalls;
@@ -567,7 +598,7 @@ public:
         defaultStorage.finishPreparationLocked(version.key);
         const bool ours = ownsPreparedReplica(allocation.replica, version, *provider);
         const bool backingOwned = ours && owner.registerBacking(
-            allocation.replica, backing, backingClass, error);
+            allocation.replica, backing.reservation, backingClass, error, &backing.retirement);
 
         auto retireRejected = [&]() {
             if (!ours)
@@ -647,6 +678,35 @@ public:
         return true;
     }
 
+    // Allocator copies retain the original controller through the final
+    // control-block deallocation, including capabilities outliving the facade.
+    struct MutationLifetime {
+        explicit MutationLifetime(Private *value) : owner(value) { owner->lifetimeReferences.ref(); }
+        MutationLifetime(const MutationLifetime &other) : MutationLifetime(other.owner) {}
+        MutationLifetime &operator=(const MutationLifetime &other)
+        {
+            if (owner != other.owner) {
+                other.owner->lifetimeReferences.ref();
+                auto *previous = std::exchange(owner, other.owner);
+                KisPageStore::PrivateReleaser::cleanup(previous);
+            }
+            return *this;
+        }
+        ~MutationLifetime() { KisPageStore::PrivateReleaser::cleanup(owner); }
+        Private *owner;
+    };
+    template<class T> struct MutationAllocator : KisMutationStorageAllocator<T> {
+        explicit MutationAllocator(Private *owner)
+            : KisMutationStorageAllocator<T>(&owner->backingBudget), lifetime(owner) {}
+        template<class U> MutationAllocator(const MutationAllocator<U> &other)
+            : KisMutationStorageAllocator<T>(other.budget), lifetime(other.lifetime) {}
+        template<class U> bool operator==(const MutationAllocator<U> &other) const noexcept
+        { return lifetime.owner == other.lifetime.owner; }
+        template<class U> bool operator!=(const MutationAllocator<U> &other) const noexcept
+        { return !(*this == other); }
+        MutationLifetime lifetime;
+    };
+
     mutable QMutex mutex;
     QWaitCondition writeAdmissionChanged;
     QSharedPointer<DeferredMetadataCleanupStatistics> metadataCleanupStatistics =
@@ -657,6 +717,7 @@ public:
         writeCoordinator.endGenericActivity(id);
     }
     QAtomicInt lifetimeReferences{1};
+    KisPageReclamationJobPointer terminalCleanup;
     bool backingLimitsConfigured = false;
     bool operational = false;
     bool closing = false;
@@ -682,10 +743,10 @@ public:
     KisPageReadCoordinator readCoordinator;
     QSharedPointer<KisExactGenerationArchive> exactArchive;
     QHash<quint64, PendingArchiveRecord> pendingArchives;
-    QVector<KisPageRetirementRecord> pendingShutdownReplicas;
-    QHash<quint64, PendingWriteRequestRecord> writeRequests;
-    QHash<quint64, std::shared_ptr<ActiveWriteRecord>> activeWrites;
-    std::vector<KisPageMutationSession::Private *> orphanedMutations;
+    KisPageRetirementRecords pendingShutdownReplicas;
+    std::map<quint64, PendingWriteRequestRecord> writeRequests;
+    ActiveWriteMap activeWrites;
+    KisPageMutationSession::Private *orphanedMutations = nullptr;
     // Transaction lifetime claims and per-page write claims, not request or
     // access-lease maps. The issued scope owns unpublished native records.
     KisPageMutationStatistics mutationStats;
@@ -696,6 +757,7 @@ public:
 class KisPageMutationSession::Private
 {
 public:
+    explicit Private(KisBackingBudgetController *budget) : writes(budget), coldPages(budget) {}
     struct Page {
         KisReplicaHandle source;
         KisReplicaHandle target;
@@ -707,7 +769,8 @@ public:
     static_assert(sizeof(Page) <= 688);
     struct ColdPageSet {
         std::optional<Page> inlinePage;
-        std::vector<std::optional<Page>> overflow;
+        KisMutationStorage<Page, 2> overflow;
+        explicit ColdPageSet(KisBackingBudgetController *budget = nullptr) : overflow(budget) {}
 
         Page *at(KisMutationWriteSet::EntryIndex index)
         {
@@ -715,8 +778,7 @@ public:
                 return nullptr;
             if (index == 0)
                 return inlinePage ? &*inlinePage : nullptr;
-            return size_t(index - 1) < overflow.size() && overflow[size_t(index - 1)]
-                ? &*overflow[size_t(index - 1)] : nullptr;
+            return overflow.at(size_t(index - 1));
         }
         const Page *at(KisMutationWriteSet::EntryIndex index) const
         {
@@ -728,89 +790,133 @@ public:
                 inlinePage.emplace();
                 return 0;
             }
-            overflow.emplace_back(std::in_place);
-            return quint32(overflow.size());
+            const auto slot = overflow.prepareSlot();
+            auto *page = overflow.emplacePrepared(slot);
+            Q_ASSERT(page);
+            return slot.index + 1;
         }
         void erase(KisMutationWriteSet::EntryIndex index)
         {
             if (index == 0)
                 inlinePage.reset();
-            else if (index != KisMutationWriteSet::InvalidEntry && size_t(index - 1) < overflow.size())
-                overflow[size_t(index - 1)].reset();
+            else if (index != KisMutationWriteSet::InvalidEntry)
+                overflow.erase(size_t(index - 1));
         }
     };
-    ~Private()
+    ~Private() { Q_ASSERT(state == State::Detached); }
+    static void destroy(Private *scope) noexcept
     {
-        Q_ASSERT(state == State::Detached);
+        auto *owner = scope->owner;
+        KisMutationStorageAllocator<Private> allocator(&owner->backingBudget);
+        scope->~Private();
+        allocator.deallocate(scope, 1);
         KisPageStore::PrivateReleaser::cleanup(owner);
+    }
+    static void retainOrphanLocked(Private *scope) noexcept
+    {
+        Q_ASSERT(!scope->nextOrphan);
+        scope->nextOrphan = scope->owner->orphanedMutations;
+        scope->owner->orphanedMutations = scope;
     }
     static void releaseOrRetain(Private *scope)
     {
         if (!scope->cancelLocked()) {
             QMutexLocker lock(&scope->owner->mutex);
-            scope->owner->orphanedMutations.push_back(scope);
+            retainOrphanLocked(scope);
             return;
         }
-        delete scope;
+        destroy(scope);
     }
     static void retryOrphans(KisPageStore::Private *owner, KisPageTransactionId transaction = {})
     {
-        std::vector<Private *> pending;
+        // Reuse each original scope's terminal link. Neither detaching a pass
+        // nor retaining rejected cancellation needs a new allocation.
+        Private *pending = nullptr;
+        Private **tail = &pending;
         {
             QMutexLocker lock(&owner->mutex);
-            auto &orphans = owner->orphanedMutations;
-            for (auto it = orphans.begin(); it != orphans.end();) {
-                if (transaction.isValid() && !((*it)->transaction.id == transaction)) {
-                    ++it;
+            for (auto **link = &owner->orphanedMutations; *link;) {
+                Private *scope = *link;
+                if (transaction.isValid() && !(scope->transaction.id == transaction)) {
+                    link = &scope->nextOrphan;
                     continue;
                 }
-                pending.push_back(*it);
-                it = orphans.erase(it);
+                *link = scope->nextOrphan;
+                scope->nextOrphan = nullptr;
+                *tail = scope;
+                tail = &scope->nextOrphan;
             }
         }
-        for (Private *scope : pending) {
+        while (pending) {
+            Private *scope = pending;
+            pending = std::exchange(scope->nextOrphan, nullptr);
             QMutexLocker scopeLock(&scope->mutex);
             const bool released = scope->cancelLocked();
             scopeLock.unlock();
             if (released) {
-                delete scope;
+                destroy(scope);
             } else {
                 QMutexLocker lock(&owner->mutex);
-                owner->orphanedMutations.push_back(scope);
+                retainOrphanLocked(scope);
             }
         }
     }
-    void detachLocked()
+    void detachLocked(QMutexLocker<QMutex> &lock)
     {
-        admission.releaseLocked();
-        owner->writeCoordinator.endSessionActivity(transaction.id);
-        writes = KisMutationWriteSet{};
-        owner->mutationStats.guardsReleased += guardsReleased;
-        owner->mutationStats.writablePinsAcquired += pinsAcquired;
-        owner->mutationStats.writablePinsReleased += pinsReleased;
-        owner->mutationStats.pendingWriteMaterializations += materializations;
-        owner->mutationStats.pendingDefaultResetBytes += defaultResetBytes;
-        owner->mutationStats.pendingPayloadCopyBytes += payloadCopyBytes;
-        owner->mutationStats.maximumPinnedPagesPerSegment =
-            qMax(owner->mutationStats.maximumPinnedPagesPerSegment, maximumPins);
-        Q_ASSERT(activePins == 0 && pinsAcquired == pinsReleased);
-        state = State::Detached;
+        finishSegmentLocked(lock, true);
+    }
+    void finishSegmentLocked(QMutexLocker<QMutex> &lock, bool terminal, bool retainAdmission = false)
+    {
+        Q_ASSERT(!retainAdmission || terminal);
+        KisMutationWriteSet abandonedWrites;
+        if (!retainAdmission) {
+            admission.releaseLocked();
+            abandonedWrites = std::move(writes);
+        }
+        // Adapter delivery retains these same entries and their ClaimSet,
+        // never a copied range or a second permission. The sealed scope is
+        // inactive; its destructor releases admission before entry storage,
+        // while the original scope allocation still keeps owner alive.
+        // Storage carries the original controller. Keep the session activity
+        // and owner alive until its actual free/charge return is complete.
+        ++owner->activeProviderCalls;
+        lock.unlock();
+        abandonedWrites = KisMutationWriteSet{};
+        if (!terminal) {
+            writes = KisMutationWriteSet(&owner->backingBudget);
+            coldPages = ColdPageSet(&owner->backingBudget);
+        }
+        lock.relock();
+        --owner->activeProviderCalls;
+        if (terminal) owner->writeCoordinator.endSessionActivity(transaction.id);
+        owner->mutationStats.guardsReleased += counters.guardsReleased;
+        owner->mutationStats.writablePinsAcquired += counters.pinsAcquired;
+        owner->mutationStats.writablePinsReleased += counters.pinsReleased;
+        owner->mutationStats.pendingWriteMaterializations += counters.materializations;
+        owner->mutationStats.pendingDefaultResetBytes += counters.defaultResetBytes;
+        owner->mutationStats.pendingPayloadCopyBytes += counters.payloadCopyBytes;
+        owner->mutationStats.maximumPinnedPagesPerExecution =
+            qMax(owner->mutationStats.maximumPinnedPagesPerExecution, counters.maximumPins);
+        Q_ASSERT(counters.activePins == 0 && counters.pinsAcquired == counters.pinsReleased);
+        counters = {};
+        if (terminal) state = State::Detached;
     }
     KisPageTransition writeTransition(KisMutationWriteSet::EntryIndex index, const Page &page) const
     {
-        const auto *entry = writes.at(index);
+        auto *entry = writes.at(index);
         Q_ASSERT(entry && entry->key() == page.target.version.key);
         return owner->writeCoordinator.writeTransition(*entry, transaction.id, page.source, page.target);
     }
     bool cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page,
                           QVector<KisPageTransitionEffect> &effects)
     {
-        const auto *entry = writes.at(index);
+        auto *entry = writes.at(index);
         Q_ASSERT(entry && !entry->isExposed());
         page.writable.reset();
         const auto result = owner->writeCoordinator.cancelPrivateWrite(writeTransition(index, page));
         if (!result.accepted)
             return false;
+        owner->writeCoordinator.recordCancelled(*entry);
         if (page.proof.isValid())
             owner->owner.revokePreparedPage(page.proof);
         effects += result.effects;
@@ -819,12 +925,28 @@ public:
             ++owner->mutationStats.pagesCancelled;
         return true;
     }
+    void releaseStorageLocked(QMutexLocker<QMutex> &lock,
+                              QSharedPointer<const KisPageReplicaSource> source = {})
+    {
+        auto hot = writes.takeReleasedBlocks();
+        auto cold = coldPages.overflow.takeReleasedBlocks();
+        if (hot.isEmpty() && cold.isEmpty() && !source)
+            return;
+        ++owner->activeProviderCalls;
+        lock.unlock();
+        source.clear();
+        cold.reset();
+        hot.reset();
+        lock.relock();
+        --owner->activeProviderCalls;
+    }
     bool cancelLocked(QMutexLocker<QMutex> *heldOwnerLock = nullptr)
     {
         if (state == State::Detached || !owner)
             return true;
-        for (qsizetype i = 0; i < writes.size(); ++i)
-            if (writes.at(KisMutationWriteSet::EntryIndex(i))->isExposed())
+        if (executions) return false;
+        for (auto slot = writes.firstEntry(); slot.isValid(); slot = writes.nextEntry(slot))
+            if (writes.at(slot)->isExposed())
                 return false;
         std::optional<QMutexLocker<QMutex>> acquired;
         if (!heldOwnerLock) {
@@ -833,32 +955,44 @@ public:
         }
         auto &lock = *heldOwnerLock;
         QVector<KisPageTransitionEffect> effects;
-        const auto retire = qScopeGuard([&] { owner->retireEffectsLocked(effects, lock); });
-        quint64 cancelledRemovals = 0;
-        for (qsizetype i = 0; i < writes.size(); ++i) {
-            const auto index = KisMutationWriteSet::EntryIndex(i);
-            cancelledRemovals += writes.at(index)->isRemoval();
-            if (Page *page = pageAtEntry(index)) {
-                if (!cancelPageLocked(index, *page, effects)) {
+        const auto retire = qScopeGuard([&] {
+            releaseStorageLocked(lock);
+            owner->retireEffectsLocked(effects, lock);
+        });
+        for (auto slot = writes.firstEntry(); slot.isValid();) {
+            const auto next = writes.nextEntry(slot);
+            auto *entry = writes.at(slot);
+            if (Page *page = pageAtEntry(slot.index)) {
+                if (!cancelPageLocked(slot.index, *page, effects)) {
                     state = State::Failed;
                     return false;
                 }
-                erasePageAtEntry(index);
             }
+            // Also discard an admitted cold slot whose target preparation
+            // failed. Such a slot is not returned by pageAtEntry().
+            erasePageAtEntry(slot.index);
+            const bool removal = entry->isRemoval();
+            auto source = entry->initializationSource();
+            entry->setInitializationSource({});
+            // A rejected initial claim can leave an IntentOnly entry. Never
+            // remove the other writer's claim when clearing that intent.
+            owner->writeAdmission.releaseOneLocked(admission, slot);
+            const bool erased = writes.erase(slot);
+            Q_ASSERT(erased);
+            owner->mutationStats.removalsCancelled += removal;
+            releaseStorageLocked(lock, std::move(source));
+            slot = next;
         }
-        owner->mutationStats.removalsCancelled += cancelledRemovals;
         ColdPageSet abandonedPages;
         std::swap(coldPages, abandonedPages);
-        // Keep the transaction claim while physical cleanup is outside owner.
         ++owner->activeProviderCalls;
         lock.unlock();
-        abandonedPages = {};
-        clearSources();
+        abandonedPages = ColdPageSet{};
         owner->retirementQueue.retireEffects(effects, owner->backgroundReclamation);
         effects.clear();
         lock.relock();
         --owner->activeProviderCalls;
-        detachLocked();
+        detachLocked(lock);
         return true;
     }
     QMutex mutex;
@@ -869,13 +1003,15 @@ public:
     KisMutationWriteSet writes;
     ColdPageSet coldPages;
     KisPageWriteAdmission::ClaimSet admission;
-    Page *ensurePage(KisMutationPageEntry &entry)
+    Page *ensurePage(KisMutationPageEntry &entry) try
     {
         if (auto *page = coldPages.at(entry.coldPage()))
             return page;
         const auto slot = coldPages.create();
         entry.setColdPage(slot);
         return coldPages.at(slot);
+    } catch (const std::bad_alloc &) {
+        return nullptr;
     }
     Page *pageAtEntry(KisMutationWriteSet::EntryIndex index)
     {
@@ -896,19 +1032,32 @@ public:
     }
     void clearSources()
     {
-        for (qsizetype i = 0; i < writes.size(); ++i)
-            writes.at(KisMutationWriteSet::EntryIndex(i))->setInitializationSource({});
+        for (auto slot = writes.firstEntry(); slot.isValid(); slot = writes.nextEntry(slot))
+            writes.at(slot)->setInitializationSource({});
     }
-    bool claimEntryLocked(
-        const KisPageWriteIntent &intent,
-        KisPageWriteAdmission::ClaimOrigin origin =
-            KisPageWriteAdmission::ClaimOrigin::NativeSession)
+    bool claimEntryLocked(const KisPageWriteIntent &intent, QMutexLocker<QMutex> &lock,
+                          KisPageWriteAdmission::ClaimOrigin origin,
+                          QString *error = nullptr) try
     {
-        KisMutationPageEntry &entry = writes.getOrCreate(intent);
-        if (!admission.isValid())
-            admission = owner->writeAdmission.beginClaimSet(writes);
-        return owner->writeAdmission.claimOne(admission, writes.findIndex(entry.key()),
-                                              nullptr, origin);
+        ++owner->activeProviderCalls;
+        const auto preparation = qScopeGuard([&] {
+            if (!lock.isLocked()) lock.relock();
+            --owner->activeProviderCalls;
+        });
+        // The caller holds this session's mutex, so the sole write set cannot
+        // change while its actual storage is prepared outside the store gate.
+        if (!writes.find(intent.key)) {
+            lock.unlock();
+            writes.getOrCreate(intent);
+            lock.relock();
+        }
+        if (!admission.isValid()) admission = owner->writeAdmission.beginClaimSet(writes);
+        return owner->writeAdmission.claimOne(admission, writes.handleAt(writes.findIndex(intent.key)),
+                                              lock, error, origin);
+    } catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("mutation entry/admission storage is unavailable"));
+        state = State::Failed;
+        return false;
     }
     bool selectCpuProviderLocked(QString *error)
     {
@@ -933,7 +1082,7 @@ public:
                        bool removal, QString *error)
     {
         QMutexLocker scopeLock(&mutex);
-        if (state != State::Active || thread != QThread::currentThreadId() || !key.isValid()
+        if (state != State::Active || executions || thread != QThread::currentThreadId() || !key.isValid()
             || (!removal && !source)) {
             KisPageStoreDetail::setError(error, removal ? QStringLiteral("mutation is unavailable or used from another thread")
                                     : QStringLiteral("alias mutation/input is unavailable"));
@@ -965,10 +1114,8 @@ public:
         KisPageWriteIntent intent;
         intent.key = key;
         intent.inputKind = KisPageWriteInputKind::Semantic;
-        if (!claimEntryLocked(intent)) {
+        if (!claimEntryLocked(intent, lock, KisPageWriteAdmission::ClaimOrigin::NativeSession, error)) {
             state = State::Failed;
-            KisPageStoreDetail::setError(error, removal ? QStringLiteral("removal page is claimed by another writer")
-                                    : QStringLiteral("alias page is claimed by another writer"));
             return false;
         }
         entryIndex = writes.findIndex(key);
@@ -1030,11 +1177,23 @@ public:
             ? KisPageTransitionKind::ReplacePrivatePreparedBacking
             : KisPageTransitionKind::AdoptPreparedWrite;
         auto *resources = ensurePage(*entry);
-        auto backing = owner->writeCoordinator.reserveBacking(descriptor,
-                                             KisPageAccessDomain::CpuRam,
-                                             KisBackingBudgetClass::ActivePending, error,
-                                             adoption.version);
-        if (!backing.isValid()) return false;
+        if (!resources) {
+            KisPageStoreDetail::setError(error, QStringLiteral("mutation cold storage is unavailable"));
+            return false;
+        }
+        KisPageBackingPreparation backing;
+        ++owner->activeProviderCalls;
+        {
+            lock.unlock();
+            const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
+            backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
+                KisBackingBudgetClass::ActivePending, error, adoption.version);
+        }
+        const auto discardBacking = qScopeGuard([&] {
+            if (!backing.retirement) return;
+            lock.unlock(); backing.retirement.reset(); lock.relock();
+        });
+        if (!backing.reservation.isValid()) return false;
         ++owner->activeProviderCalls;
         lock.unlock();
         KisReplicaOperation allocation;
@@ -1054,7 +1213,7 @@ public:
         const bool ours = ownsPreparedReplica(allocation.replica, adoption.version, *producer)
             && !reusesPendingSlot; // a rejected reused slot is still owned by the old private target
         const bool backingOwned = ours && owner->owner.registerBacking(
-            allocation.replica, backing, KisBackingBudgetClass::ActivePending, error);
+            allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
         const auto reject = [&] {
             if (!ours)
                 return;
@@ -1089,18 +1248,33 @@ public:
         }
         return true;
     }
+    KisPageMutationExecution::Private *executions = nullptr;
+    Private *nextOrphan = nullptr;
     enum class State : quint8 { Active, Failed, Detached };
     Qt::HANDLE thread = QThread::currentThreadId();
-    State state = State::Detached;
-    quint64 guardsReleased = 0;
-    quint64 pinsAcquired = 0;
-    quint64 pinsReleased = 0;
-    quint64 activePins = 0;
-    quint64 maximumPins = 0;
-    quint64 materializations = 0;
-    quint64 defaultResetBytes = 0;
-    quint64 payloadCopyBytes = 0;
-    void *pinWritable(KisCpuWriteBindingReservation &writable)
+    std::atomic<State> state{State::Detached};
+    struct Counters {
+        quint64 guardsReleased = 0;
+        quint64 pinsAcquired = 0;
+        quint64 pinsReleased = 0;
+        quint64 activePins = 0;
+        quint64 maximumPins = 0;
+        quint64 materializations = 0;
+        quint64 defaultResetBytes = 0;
+        quint64 payloadCopyBytes = 0;
+        void merge(const Counters &other)
+        {
+            Q_ASSERT(other.activePins == 0 && other.pinsAcquired == other.pinsReleased);
+            guardsReleased += other.guardsReleased;
+            pinsAcquired += other.pinsAcquired;
+            pinsReleased += other.pinsReleased;
+            maximumPins = qMax(maximumPins, other.maximumPins);
+            materializations += other.materializations;
+            defaultResetBytes += other.defaultResetBytes;
+            payloadCopyBytes += other.payloadCopyBytes;
+        }
+    } counters;
+    void *pinWritable(KisCpuWriteBindingReservation &writable, Counters &local)
     {
         KisPageStoreDiagnosticTimer phase(diagnosticOwner, KisPageStoreDiagnosticPhase::WriteWritablePin, 1);
         KisCpuResidentReadStatus status;
@@ -1110,12 +1284,342 @@ public:
             // write, COW or request. No owner gate is held. Current tiles3
             // storage uses its synchronous swap control path here.
             phase.next(KisPageStoreDiagnosticPhase::WritePendingMaterialize, 1);
-            ++materializations;
+            ++local.materializations;
             data = writable.materialize();
         }
         return data;
     }
 };
+
+class KisPageMutationExecution::Private
+{
+public:
+    // Binding an original stable slot under the structure gate validates its
+    // incarnation once. This linked borrow then excludes erase/reuse until
+    // its last guard returns. No second key/pending authority or pixel pointer.
+    struct BoundEntry {
+        KisMutationPageEntry *entry = nullptr;
+        KisPageMutationSession::Private::Page *page = nullptr;
+    };
+    static_assert(sizeof(BoundEntry) <= 16);
+    Private(const std::shared_ptr<KisPageMutationSession::Private> &owner, size_t size)
+        : scope(owner), overflow(KisMutationStorageAllocator<BoundEntry>(&owner->owner->backingBudget)), count(size),
+          touchedOverflow(KisMutationStorageAllocator<quint64>(&owner->owner->backingBudget))
+    {
+        if (count > 1) overflow.resize(count);
+        if (count > 64) touchedOverflow.resize(2 * ((count + 63) / 64));
+    }
+    ~Private()
+    {
+        if (!linked) return;
+        QMutexLocker lock(&scope->mutex);
+        Q_ASSERT(counters.activePins == 0);
+        if (!finished) scope->state = KisPageMutationSession::Private::State::Failed;
+        scope->counters.merge(counters);
+        if (previous) previous->next = next;
+        else scope->executions = next;
+        if (next) next->previous = previous;
+        // Storage and original control block free after leaving the gate.
+        // scope is declared first and released last.
+    }
+    static auto order(const KisPageKey &key)
+    { return std::make_tuple(key.surface.value, key.page.column, key.page.row); }
+    static bool less(const BoundEntry &a, const BoundEntry &b)
+    { return order(a.entry->key()) < order(b.entry->key()); }
+    BoundEntry *entries() { return count == 1 ? &inlineEntry : overflow.data(); }
+    quint64 *touched() { return count <= 64 ? &inlineTouched : touchedOverflow.data(); }
+    quint64 *prepared()
+    {
+        return count <= 64 ? &inlinePrepared : touchedOverflow.data() + (count + 63) / 64;
+    }
+    void markPrepared(size_t index) noexcept
+    { prepared()[index / 64] |= quint64(1) << (index % 64); }
+    void markTouched(size_t index) noexcept
+    {
+        const quint64 mask = quint64(1) << (index % 64);
+        prepared()[index / 64] &= ~mask;
+        auto &word = touched()[index / 64];
+        if (!(word & mask)) { word |= mask; ++touchedCount; }
+    }
+    BoundEntry *find(const KisPageKey &key)
+    {
+        auto *first = entries();
+        auto *found = std::lower_bound(first, first + count, key,
+            [](const BoundEntry &entry, const KisPageKey &key) { return order(entry.entry->key()) < order(key); });
+        return found != first + count && found->entry->key() == key ? found : nullptr;
+    }
+    std::shared_ptr<KisPageMutationSession::Private> scope;
+    QMutex mutex; // one execution, independent of structural growth/cold work
+    BoundEntry inlineEntry;
+    std::vector<BoundEntry, KisMutationStorageAllocator<BoundEntry>> overflow;
+    size_t count = 0;
+    // One bit per original BoundEntry, not a duplicate page-key index. The
+    // execution's original control block/controller also own this storage.
+    quint64 inlineTouched = 0;
+    // Temporary ownership only: pages prepared for this execution but never
+    // exposed by its callback are cancelled before result export.
+    quint64 inlinePrepared = 0;
+    std::vector<quint64, KisMutationStorageAllocator<quint64>> touchedOverflow;
+    qsizetype touchedCount = 0;
+    Qt::HANDLE thread = QThread::currentThreadId();
+    Private *previous = nullptr;
+    Private *next = nullptr;
+    KisPageMutationSession::Private::Counters counters;
+    bool linked = false;
+    bool finished = false;
+};
+
+KisPageMutationExecution KisPageMutationSession::borrowExecution(
+    KisSurfaceId surface, const QSet<KisLogicalPageId> &pages, QString *error) try
+{
+    KisPageMutationExecution result;
+    if (!d || !surface.isValid() || pages.isEmpty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("execution range is absent"));
+        return result;
+    }
+    // Actual record, control block and range storage precede any authority.
+    auto candidate = std::allocate_shared<KisPageMutationExecution::Private>(
+        KisPageStore::Private::MutationAllocator<KisPageMutationExecution::Private>(d->owner), d, size_t(pages.size()));
+    // Only original entry/cold-page bindings survive admission. Rollback uses
+    // a transient charged bitmap, not another persistent PageKey/slot index.
+    quint64 inlineCreated = 0;
+    std::vector<quint64, KisMutationStorageAllocator<quint64>> createdOverflow{
+        KisMutationStorageAllocator<quint64>(&d->owner->backingBudget)};
+    if (pages.size() > 64) createdOverflow.resize((size_t(pages.size()) + 63) / 64);
+    auto *created = pages.size() <= 64 ? &inlineCreated : createdOverflow.data();
+    QMutexLocker scopeLock(&d->mutex);
+    if (d->state != Private::State::Active || (!d->executions && d->counters.activePins)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("mutation cannot lend execution"));
+        return result;
+    }
+    auto *range = candidate->entries();
+    for (auto *active = d->executions; active; active = active->next)
+        for (const auto &page : pages)
+            if (active->find({surface, page})) {
+                KisPageStoreDetail::setError(error, QStringLiteral("execution range overlaps an outstanding borrow"));
+                return result;
+            }
+    bool accepted = false;
+    const auto rollback = qScopeGuard([&] {
+        if (accepted) return;
+        for (size_t i = 0; i < candidate->count; ++i)
+            if ((created[i / 64] & (quint64(1) << (i % 64))) && range[i].entry) {
+                const bool erased = d->writes.erase(d->writes.handleAt(d->writes.findIndex(range[i].entry->key())));
+                Q_ASSERT(erased);
+            }
+        d->writes.takeReleasedBlocks().reset();
+    });
+    // Only structure/cold preparation uses this gate. Bound entries stay at
+    // their original addresses across unrelated directory/index growth.
+    size_t i = 0;
+    for (const auto &page : pages) {
+        KisPageWriteIntent intent; intent.key = {surface, page};
+        const bool newEntry = !d->writes.find(intent.key);
+        auto &entry = d->writes.getOrCreate(intent);
+        const auto slot = d->writes.handleAt(d->writes.findIndex(intent.key));
+        Q_ASSERT(d->writes.at(slot) == &entry);
+        range[i] = {&entry, d->pageAtEntry(slot.index)};
+        if (newEntry) created[i / 64] |= quint64(1) << (i % 64);
+        ++i;
+    }
+    QMutexLocker ownerLock(&d->owner->mutex);
+    KisSurfaceEpochState surfaceState;
+    if (!d->owner->operational
+        || !d->owner->publicationCoordinator.resolveSurfaceLocked(surface,
+            KisPageReadView::transactionOverlay(d->transaction.id), &surfaceState)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("execution surface is unavailable"));
+        return result;
+    }
+    ++d->owner->activeProviderCalls;
+    const auto preparation = qScopeGuard([&] { --d->owner->activeProviderCalls; });
+    if (!d->admission.isValid()) d->admission = d->owner->writeAdmission.beginClaimSet(d->writes);
+    if (!d->owner->writeAdmission.claimRange(d->admission, surface, pages, ownerLock, error))
+        return result;
+    std::sort(range, range + candidate->count, &KisPageMutationExecution::Private::less);
+    candidate->next = d->executions;
+    if (candidate->next) candidate->next->previous = candidate.get();
+    d->executions = candidate.get();
+    candidate->linked = true;
+    accepted = true;
+    result.d = std::move(candidate);
+    KisPageStoreDetail::setError(error, {});
+    return result;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("execution range storage is unavailable"));
+    return {};
+}
+
+KisPageMutationExecution::~KisPageMutationExecution() { abandon(); }
+KisPageMutationExecution &KisPageMutationExecution::operator=(KisPageMutationExecution &&other) noexcept
+{
+    if (this != &other) { abandon(); d = std::move(other.d); }
+    return *this;
+}
+void KisPageMutationExecution::abandon()
+{
+    if (d) {
+        { QMutexLocker lock(&d->mutex);
+          if (!d->finished) d->scope->state = KisPageMutationSession::Private::State::Failed; }
+        d.reset();
+    }
+}
+bool KisPageMutationExecution::isActive() const
+{
+    if (!d) return false;
+    QMutexLocker lock(&d->mutex);
+    return !d->finished && d->scope->state == KisPageMutationSession::Private::State::Active;
+}
+qsizetype KisPageMutationExecution::finishPreparedWrites(
+    QVector<KisLogicalPageId> *changed, QString *error)
+{
+    if (!d) return -1;
+    QMutexLocker executionLock(&d->mutex);
+    if (d->finished || d->thread != QThread::currentThreadId() || d->counters.activePins ||
+        d->scope->state != KisPageMutationSession::Private::State::Active) return -1;
+
+    bool hasUntouchedPreparation = false;
+    const size_t wordCount = (d->count + 63) / 64;
+    for (size_t i = 0; i < wordCount; ++i)
+        hasUntouchedPreparation |= d->prepared()[i] != 0;
+    if (hasUntouchedPreparation) {
+        QVector<KisPageTransitionEffect> retirements;
+        QMutexLocker scopeLock(&d->scope->mutex);
+        auto *scope = d->scope.get();
+        auto *owner = scope->owner;
+        QMutexLocker ownerLock(&owner->mutex);
+        for (size_t i = 0; i < d->count; ++i) {
+            const quint64 mask = quint64(1) << (i % 64);
+            if (!(d->prepared()[i / 64] & mask))
+                continue;
+            d->prepared()[i / 64] &= ~mask;
+            auto &bound = d->entries()[i];
+            const auto index = scope->writes.findIndex(bound.entry->key());
+            auto *page = scope->pageAtEntry(index);
+            if (!page)
+                continue;
+            if (!scope->cancelPageLocked(index, *page, retirements)) {
+                scope->state = KisPageMutationSession::Private::State::Failed;
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("operation write preparation could not be rolled back"));
+                return -1;
+            }
+            scope->erasePageAtEntry(index);
+            bound.page = nullptr;
+        }
+        scope->releaseStorageLocked(ownerLock);
+        owner->retireEffectsLocked(retirements, ownerLock);
+    }
+
+    if (changed) {
+        if (!changed->isEmpty() || !changed->isDetached() ||
+            changed->capacity() < qsizetype(d->count)) return -1;
+        for (size_t i = 0; i < d->count; ++i)
+            if (d->touched()[i / 64] & (quint64(1) << (i % 64)))
+                changed->append(d->entries()[i].entry->key().page);
+    }
+    KisPageStoreDetail::setError(error, {});
+    return d->touchedCount;
+}
+
+KisPageMutationExecution::PreparationResult
+KisPageMutationExecution::prepareWrites(QString *error)
+{
+    if (!d) {
+        KisPageStoreDetail::setError(error, QStringLiteral("execution range is unavailable"));
+        return PreparationResult::Failed;
+    }
+
+    {
+        QMutexLocker executionLock(&d->mutex);
+        QMutexLocker scopeLock(&d->scope->mutex);
+        if (d->finished || d->thread != QThread::currentThreadId()
+            || d->counters.activePins
+            || d->scope->state != KisPageMutationSession::Private::State::Active) {
+            KisPageStoreDetail::setError(error, QStringLiteral("execution range cannot be prepared"));
+            return PreparationResult::Failed;
+        }
+        for (size_t i = 0; i < d->count; ++i) {
+            const auto *entry = d->entries()[i].entry;
+            if (!entry || entry->isRemoval() || entry->initializationSource()) {
+                KisPageStoreDetail::setError(error, {});
+                return PreparationResult::Unsupported;
+            }
+        }
+    }
+
+    KisPageMutationSession session;
+    session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
+    bool prepared = true;
+    for (size_t i = 0; i < d->count; ++i) {
+        KisPageKey key;
+        {
+            QMutexLocker lock(&d->mutex);
+            if (d->finished || d->thread != QThread::currentThreadId()
+                || d->scope->state != KisPageMutationSession::Private::State::Active) {
+                KisPageStoreDetail::setError(error, QStringLiteral("execution range changed during preparation"));
+                prepared = false;
+                break;
+            }
+            const auto &bound = d->entries()[i];
+            key = bound.entry->key();
+            if (!bound.page)
+                d->markPrepared(i);
+        }
+        auto guard = session.beginWriteImpl(key, KisPageWriteMode::PreserveContents,
+                                            nullptr, error, d, true);
+        if (!guard.isValid()) {
+            prepared = false;
+            break;
+        }
+        guard = {};
+    }
+
+    if (prepared) {
+        KisPageStoreDetail::setError(error, {});
+        return PreparationResult::Ready;
+    }
+
+    const QString failure = error ? *error : QString{};
+    QString rollbackError;
+    if (finishPreparedWrites(nullptr, &rollbackError) < 0) {
+        KisPageStoreDetail::setError(error, rollbackError);
+    } else {
+        KisPageStoreDetail::setError(error, failure);
+    }
+    return PreparationResult::Failed;
+}
+
+bool KisPageMutationExecution::finish(QString *error)
+{
+    if (!d) return false;
+    bool succeeded;
+    {
+        QMutexLocker lock(&d->mutex);
+        if (d->thread != QThread::currentThreadId() || d->counters.activePins) {
+            KisPageStoreDetail::setError(error, QStringLiteral("execution still has guards or belongs to another worker"));
+            return false;
+        }
+        succeeded = d->scope->state == KisPageMutationSession::Private::State::Active;
+        d->finished = true;
+    }
+    d.reset();
+    KisPageStoreDetail::setError(error, succeeded ? QString{} : QStringLiteral("execution's mutation failed"));
+    return succeeded;
+}
+KisCpuWriteGuard KisPageMutationExecution::beginWrite(const KisPageKey &key, QString *error)
+{ return beginWrite(key, KisPageWriteMode::PreserveContents, error); }
+KisCpuWriteGuard KisPageMutationExecution::beginWrite(const KisPageKey &key, KisPageWriteMode mode, QString *error)
+{
+    KisPageMutationSession session;
+    if (d) session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
+    return session.beginWriteImpl(key, mode, nullptr, error, d);
+}
+bool KisPageMutationExecution::overwritePage(const KisPageKey &key, const KisCpuPagePayload &payload, QString *error)
+{
+    KisPageMutationSession session;
+    if (d) session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
+    return session.beginWriteImpl(key, KisPageWriteMode::DiscardContents, &payload, error, d).isValid();
+}
 
 KisPageMutationSession::~KisPageMutationSession() = default;
 bool KisPageMutationSession::isActive() const
@@ -1136,7 +1640,9 @@ KisCpuWriteGuard &KisCpuWriteGuard::operator=(KisCpuWriteGuard &&other) noexcept
     if (this != &other) {
         reset();
         m_scope = std::move(other.m_scope);
+        m_execution = std::exchange(other.m_execution, nullptr);
         m_entry = std::exchange(other.m_entry, KisMutationWriteSet::InvalidEntry);
+        m_entryIncarnation = std::exchange(other.m_entryIncarnation, 0);
         m_data = std::exchange(other.m_data, nullptr);
         m_rowStride = std::exchange(other.m_rowStride, 0);
         m_byteSize = std::exchange(other.m_byteSize, 0);
@@ -1146,35 +1652,40 @@ KisCpuWriteGuard &KisCpuWriteGuard::operator=(KisCpuWriteGuard &&other) noexcept
 void KisCpuWriteGuard::reset()
 {
     if (m_scope && m_data) {
-        QMutexLocker lock(&m_scope->mutex);
-        auto *entry = m_scope->writes.at(m_entry);
+        QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+        auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
+        auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
         Q_ASSERT(entry && entry->isExposed());
-        auto *page = m_scope->pageAtEntry(m_entry);
+        auto *page = bound ? bound->page : entry && entry->isExposed() ? m_scope->pageAtEntry(m_entry) : nullptr;
         Q_ASSERT(page);
         if (page) {
             // Drop only pixel residency, not the unpublished writer token.
             // The next guard must re-pin; no parked Page retains a pointer.
             page->writable.unpin();
             m_scope->owner->writeCoordinator.recordExposure(*entry, false);
-            ++m_scope->guardsReleased;
-            ++m_scope->pinsReleased;
-            Q_ASSERT(m_scope->activePins);
-            --m_scope->activePins;
+            auto &counters = m_execution ? m_execution->counters : m_scope->counters;
+            ++counters.guardsReleased;
+            ++counters.pinsReleased;
+            Q_ASSERT(counters.activePins);
+            --counters.activePins;
         }
     }
     m_data = nullptr;
     m_entry = KisMutationWriteSet::InvalidEntry;
+    m_entryIncarnation = 0;
     m_rowStride = 0;
     m_byteSize = 0;
-    m_scope.clear();
+    m_execution = nullptr;
+    m_scope.reset();
 }
 
 KisPageVersion KisCpuWriteGuard::version() const
 {
     if (!m_scope || !m_data)
         return {};
-    QMutexLocker lock(&m_scope->mutex);
-    const auto *entry = m_scope->writes.at(m_entry);
+    QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+    const auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
+    const auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
     return entry ? entry->preparedTargetVersion() : KisPageVersion{};
 }
 
@@ -1184,9 +1695,10 @@ bool KisCpuWriteGuard::providerBacking(KisReplicaHandle *replica) const
         *replica = {};
     if (!m_scope || !m_data || !replica)
         return false;
-    QMutexLocker lock(&m_scope->mutex);
-    const auto *entry = m_scope->writes.at(m_entry);
-    const auto *page = entry ? m_scope->pageAtEntry(m_entry) : nullptr;
+    QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+    const auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
+    const auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
+    const auto *page = bound ? bound->page : entry ? m_scope->pageAtEntry(m_entry) : nullptr;
     if (!page || !entry->isExposed() || !page->target.isValid()
         || !page->writable.isValid())
         return false;
@@ -1194,34 +1706,67 @@ bool KisCpuWriteGuard::providerBacking(KisReplicaHandle *replica) const
     return true;
 }
 
-KisPageMutationSession KisPageStore::beginMutation(const KisPageTransaction &transaction, QString *error)
+KisPageMutationSession KisPageStore::beginMutation(const KisPageTransaction &transaction, QString *error) try
 {
     KisPageMutationSession result;
+    std::shared_ptr<KisPageMutationSession::Private> candidate;
     QMutexLocker lock(&d->mutex);
-    const auto state = d->epochs.transaction(transaction.id);
-    if (!d->operational || !transaction.isValid() || d->publicationCoordinator.isPreparingCommitLocked(transaction.id)
-        || !(state.transaction == transaction)
-        || !state.isActive()) {
+    const auto available = [&] {
+        const auto state = d->epochs.transaction(transaction.id);
+        return d->operational && transaction.isValid()
+            && !d->publicationCoordinator.isPreparingCommitLocked(transaction.id)
+            && state.transaction == transaction && state.isActive();
+    };
+    if (!available()) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation transaction is unavailable"));
         return result;
     }
-    result.d = QSharedPointer<KisPageMutationSession::Private>(
-        new KisPageMutationSession::Private,
-        &KisPageMutationSession::Private::releaseOrRetain);
-    result.d->owner = d.data();
-    result.d->diagnosticOwner = this;
-    result.d->transaction = transaction;
-    result.d->state = KisPageMutationSession::Private::State::Active;
-    d->lifetimeReferences.ref();
-    d->writeCoordinator.beginSessionActivity(transaction.id);
+    ++d->activeProviderCalls;
+    const auto preparation = qScopeGuard([&] {
+        if (lock.isLocked()) lock.unlock();
+        candidate.reset(); // inert or rejected candidate, before active publication
+        lock.relock();
+        --d->activeProviderCalls;
+    });
+    lock.unlock();
+    using Scope = KisPageMutationSession::Private;
+    KisMutationStorageAllocator<Scope> allocator(&d->backingBudget);
+    Scope *scope = allocator.allocate(1);
+    try {
+        new (scope) Scope(&d->backingBudget);
+    } catch (...) {
+        allocator.deallocate(scope, 1);
+        throw;
+    }
+    scope->owner = d.data();
+    d->lifetimeReferences.ref(); // the original scope also survives orphan retention
+    candidate = std::shared_ptr<Scope>(scope, &Scope::releaseOrRetain, Private::MutationAllocator<Scope>(d.data()));
+    lock.relock();
+    if (!available()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("mutation transaction changed during preparation"));
+        return result;
+    }
+    if (!d->writeCoordinator.beginSessionActivity(transaction.id, lock, error)) return result;
+    if (!available()) {
+        d->writeCoordinator.endSessionActivity(transaction.id);
+        KisPageStoreDetail::setError(error, QStringLiteral("mutation transaction changed during admission"));
+        return result;
+    }
+    candidate->diagnosticOwner = this;
+    candidate->transaction = transaction;
+    candidate->state = Scope::State::Active;
+    result.d = std::move(candidate);
     ++d->mutationStats.operationSessionsCreated;
     KisPageStoreDetail::setError(error, {});
     return result;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("mutation scope storage is unavailable"));
+    return {};
 }
 
 std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
     KisSurfaceId surface, const QSet<KisLogicalPageId> &targets,
-    bool legacyIntent, bool *borrowed, QString *error)
+    bool legacyIntent, bool *borrowed, QString *error) try
 {
     if (borrowed)
         *borrowed = false;
@@ -1229,7 +1774,10 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
         KisPageStoreDetail::setError(error, QStringLiteral("managed mutation range is invalid"));
         return {};
     }
-    auto range = std::make_unique<KisPageStoreWriteReservation>();
+    auto range = std::unique_ptr<KisPageStoreWriteReservation>(
+        new (&d->backingBudget, d.data(),
+             +[](void *owner) { static_cast<Private *>(owner)->lifetimeReferences.ref(); },
+             &Private::releaseRetirementLifetime) KisPageStoreWriteReservation(&d->backingBudget));
     range->writes.reserveKnownTargetCount(targets.size());
     for (const KisLogicalPageId &page : targets) {
         const KisPageKey key{surface, page};
@@ -1243,6 +1791,8 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
         range->writes.getOrCreate(intent);
     }
     QMutexLocker lock(&d->mutex);
+    ++d->activeProviderCalls;
+    const auto preparation = qScopeGuard([&] { --d->activeProviderCalls; });
     while (d->operational) {
         bool mustWait = false;
         bool legacyBorrowed = legacyIntent;
@@ -1275,10 +1825,13 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
         return {};
     }
     range->admission = d->writeAdmission.beginClaimSet(range->writes);
-    if (!d->writeAdmission.claimAll(range->admission, error,
+    if (!d->writeAdmission.claimAll(range->admission, lock, error,
                                     KisPageWriteAdmission::ClaimOrigin::ManagedRange))
         return {};
     return range;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("managed mutation storage is unavailable"));
+    return {};
 }
 
 bool KisPageMutationSession::adoptReservation(
@@ -1289,7 +1842,7 @@ bool KisPageMutationSession::adoptReservation(
         return false;
     }
     QMutexLocker scopeLock(&d->mutex);
-    if (d->state != Private::State::Active || d->thread != QThread::currentThreadId() || d->writes.size() != 0
+    if (d->state != Private::State::Active || d->executions || d->thread != QThread::currentThreadId() || d->writes.size() != 0
         || d->admission.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation is not a fresh operation scope"));
         return false;
@@ -1314,7 +1867,7 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
         return false;
     }
     QMutexLocker scopeLock(&d->mutex);
-    if (d->state != Private::State::Active || d->thread != QThread::currentThreadId()) {
+    if (d->state != Private::State::Active || d->executions || d->thread != QThread::currentThreadId()) {
         KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation is unavailable"));
         return false;
     }
@@ -1324,19 +1877,22 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
         KisPageStoreDetail::setError(error, held ? QString{} : QStringLiteral("legacy mutation lost its page claim"));
         return held;
     }
-    while (d->owner->operational) {
+    if (d->owner->operational) {
         const auto conflict = d->owner->writeAdmission.conflictLocked(
             key, QThread::currentThreadId());
-        if (conflict == KisPageWriteAdmission::Conflict::None)
-            break;
-        if (conflict == KisPageWriteAdmission::Conflict::ManagedSameThread
-            || conflict == KisPageWriteAdmission::Conflict::LegacySameThread
-            || conflict == KisPageWriteAdmission::Conflict::WriterSameThread) {
-            KisPageStoreDetail::setError(error, QStringLiteral(
-                "legacy mutation cannot reenter its page"));
+        if (conflict != KisPageWriteAdmission::Conflict::None) {
+            // Legacy acquisition can hold the tile swap barrier and the
+            // manager gate. The current writer needs those gates to deliver
+            // its index/cache changes before dropping this same claim. Never
+            // wait here or expose cached bytes as writable on rejection.
+            const bool sameThread = conflict == KisPageWriteAdmission::Conflict::ManagedSameThread
+                || conflict == KisPageWriteAdmission::Conflict::LegacySameThread
+                || conflict == KisPageWriteAdmission::Conflict::WriterSameThread;
+            KisPageStoreDetail::setError(error, sameThread
+                ? QStringLiteral("legacy mutation cannot reenter its page")
+                : QStringLiteral("legacy mutation conflicts with an active page writer"));
             return false;
         }
-        d->owner->writeAdmissionChanged.wait(&d->owner->mutex);
     }
     if (!d->owner->operational) {
         KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation store is unavailable"));
@@ -1346,8 +1902,7 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
     intent.key = key;
     intent.inputKind = KisPageWriteInputKind::Semantic;
     const bool claimed = d->claimEntryLocked(
-        intent, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter);
-    KisPageStoreDetail::setError(error, claimed ? QString{} : QStringLiteral("legacy mutation page claim failed"));
+        intent, ownerLock, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, error);
     return claimed;
 }
 
@@ -1390,7 +1945,9 @@ bool KisPageMutationSession::overwritePage(const KisPageKey &key, const KisCpuPa
 KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                                                         KisPageWriteMode mode,
                                                         const KisCpuPagePayload *payload,
-                                                        QString *error)
+                                                        QString *error,
+                                                        const std::shared_ptr<KisPageMutationExecution::Private> &execution,
+                                                        bool preparationOnly)
 {
     KisCpuWriteGuard result;
     if (!d) {
@@ -1398,15 +1955,27 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         return result;
     }
     KisPageStoreDiagnosticTimer diagnostic(d->diagnosticOwner, KisPageStoreDiagnosticPhase::WriteAcquire, 1);
-    QMutexLocker scopeLock(&d->mutex);
-    if (d->state != Private::State::Active || d->thread != QThread::currentThreadId() || !key.isValid()
+    std::optional<QMutexLocker<QMutex>> executionLock;
+    if (execution) executionLock.emplace(&execution->mutex);
+    auto *bound = execution ? execution->find(key) : nullptr;
+    const bool permitted = !execution || (execution->scope == d && execution->linked
+        && !execution->finished && execution->thread == QThread::currentThreadId() && bound);
+    if (!permitted || !key.isValid()
         || (mode != KisPageWriteMode::PreserveContents && mode != KisPageWriteMode::DiscardContents)) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is unavailable or used from another thread"));
         return result;
     }
-    auto entryIndex = d->writes.findIndex(key);
-    auto *entry = d->writes.at(entryIndex);
-    auto *page = d->pageAtEntry(entryIndex);
+    std::optional<QMutexLocker<QMutex>> scopeLock;
+    if (!bound || !bound->page) scopeLock.emplace(&d->mutex);
+    if (d->state != Private::State::Active
+        || (!execution && (d->executions || d->thread != QThread::currentThreadId()))) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is unavailable or used from another thread"));
+        return result;
+    }
+    auto entryIndex = scopeLock ? d->writes.findIndex(key) : KisMutationWriteSet::InvalidEntry;
+    auto *entry = bound ? bound->entry : d->writes.at(entryIndex);
+    auto *page = bound ? bound->page : d->pageAtEntry(entryIndex);
+    auto &counters = execution ? execution->counters : d->counters;
     if (entry && entry->isExposed()) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation page already has a writable guard"));
         return result;
@@ -1430,7 +1999,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     if (initialization
         && (!(initialization->provider() == d->provider->providerId())
             || !(initialization->providerEpoch() == d->provider->providerEpoch()))) {
-        d->state = Private::State::Failed;
+        if (!preparationOnly)
+            d->state = Private::State::Failed;
         KisPageStoreDetail::setError(error, QStringLiteral("alias writable provider does not match its input"));
         return result;
     }
@@ -1438,7 +2008,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         auto *owner = d->owner;
         QMutexLocker lock(&owner->mutex);
         auto fail = [&](const QString &message) {
-            d->state = Private::State::Failed;
+            if (!preparationOnly)
+                d->state = Private::State::Failed;
             KisPageStoreDetail::setError(error, message);
         };
         if (!entry && owner->writeAdmission.pageClaimedLocked(key)) {
@@ -1450,8 +2021,9 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         intent.mode = mode;
         if (payload)
             intent.flags = quint8(KisPageWriteIntentFlag::InputBytesReady);
-        if (!d->claimEntryLocked(intent)) {
-            fail(QStringLiteral("page is claimed by another writer"));
+        QString claimError;
+        if (!d->claimEntryLocked(intent, lock, KisPageWriteAdmission::ClaimOrigin::NativeSession, &claimError)) {
+            fail(claimError);
             return result;
         }
         entryIndex = d->writes.findIndex(key);
@@ -1460,10 +2032,11 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         if (entry->isRemoval())
             intent.flags |= quint8(KisPageWriteIntentFlag::SemanticRemoval);
         KisPageTransition acquire;
+        KisReplicaHandle recoverableBefore;
         KisPageAllocationDescriptor descriptor;
         QString failure;
         if (!owner->writeCoordinator.prepareWriteBaseLocked(d->transaction, intent, owner->publicationCoordinator,
-                                                            &acquire, &descriptor, &failure)) {
+                                                            &acquire, &descriptor, &failure, nullptr, &recoverableBefore)) {
             fail(failure);
             return result;
         }
@@ -1483,82 +2056,109 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         const bool directPayload = payload && d->provider->capabilities().synchronousCpuPayload;
         intent.mode = acquire.writeMode;
         intent.flags = directPayload ? quint8(KisPageWriteIntentFlag::InputBytesReady) : 0;
-        auto backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
-                                             KisBackingBudgetClass::ActivePending, &failure,
-                                             target);
-        if (!backing.isValid()) {
-            fail(failure);
+        if (initialization) intent.flags |= quint8(KisPageWriteIntentFlag::SourceInitialization);
+        auto *resources = d->ensurePage(*entry);
+        if (!resources) {
+            fail(QStringLiteral("mutation cold storage is unavailable"));
             return result;
         }
-        auto *resources = d->ensurePage(*entry);
-        ++owner->activeProviderCalls;
-        lock.unlock();
-        KisReplicaOperation allocation;
-        {
-            KisPageStoreDiagnosticTimer prepare(d->diagnosticOwner,
-                                                KisPageStoreDiagnosticPhase::WriteProviderPrepare,
-                                                1);
-            allocation = owner->writeCoordinator.prepareFreshReplica(intent, *d->provider,
-                acquire, descriptor,
-                {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
-                KisPagePriority::Interactive, payload, initialization);
-        }
-        const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, target, *d->provider, source);
-        const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
-            allocation.replica, backing, KisBackingBudgetClass::ActivePending, &failure);
-        const auto binding = backingOwned ? d->provider->cpuResidentBinding(allocation.replica)
-                                           : QSharedPointer<KisCpuResidentBinding>{};
-        auto writable = KisCpuWriteBindingReservation::acquire(binding);
-        data = d->pinWritable(writable);
-        lock.relock();
-        --owner->activeProviderCalls;
-        auto rejectAllocation = [&] {
+        // Storage must precede retag, but an uninstalled slot is not a page
+        // requiring CancelWrite. Keep failed Fresh preparation cancellable.
+        auto discardUnprepared = qScopeGuard([&] { d->erasePageAtEntry(entryIndex); });
+        KisCpuWriteBindingReservation writable;
+        const auto plan = owner->writeCoordinator.prepareWritePlanLocked(
+            d->transaction, intent, d->provider,
+            {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
+            owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic);
+        if (plan != KisPageWritePlanKind::RecoverableHandoff) {
+            KisPageBackingPreparation backing;
+            ++owner->activeProviderCalls;
+            {
+                lock.unlock();
+                const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
+                backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
+                    KisBackingBudgetClass::ActivePending, &failure, target);
+            }
+            const auto discardBacking = qScopeGuard([&] {
+                if (!backing.retirement) return;
+                lock.unlock(); backing.retirement.reset(); lock.relock();
+            });
+            if (!backing.reservation.isValid()) {
+                fail(failure);
+                return result;
+            }
             ++owner->activeProviderCalls;
             lock.unlock();
-            writable.reset();
-            if (ownsNewTarget)
-                owner->retirementQueue.retireOrDefer(allocation.replica, d->provider, {}, std::move(backing));
+            KisReplicaOperation allocation;
+            {
+                KisPageStoreDiagnosticTimer prepare(d->diagnosticOwner,
+                                                    KisPageStoreDiagnosticPhase::WriteProviderPrepare,
+                                                    1);
+                allocation = owner->writeCoordinator.prepareFreshReplica(intent, *d->provider,
+                    acquire, descriptor,
+                    {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
+                    KisPagePriority::Interactive, payload, initialization);
+            }
+            const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, target, *d->provider, source);
+            const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
+                allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, &failure, &backing.retirement);
+            const auto binding = backingOwned ? d->provider->cpuResidentBinding(allocation.replica)
+                                               : QSharedPointer<KisCpuResidentBinding>{};
+            writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
+            data = d->pinWritable(writable, counters);
             lock.relock();
             --owner->activeProviderCalls;
-        };
-        if (!backingOwned || !allocation.isValid() || allocation.status != KisPageRequestStatus::Ready
-            || allocation.replica.domain != KisPageAccessDomain::CpuRam
-            || !allocation.replica.layout.matches(descriptor) || !binding
-            || !data || !owner->owner.consumeTerminalProviderOperation(operation, allocation, &failure).succeeded()) {
-            rejectAllocation();
-            fail(QStringLiteral("CPU mutation native allocation/access failed: ") + failure);
-            return result;
-        }
-        acquire.target = allocation.replica;
-        const auto prepared = owner->writeCoordinator.preparePrivateWrite(acquire, true);
-        if (!prepared.accepted) {
-            rejectAllocation();
-            fail(prepared.rejectionReason);
-            return result;
+            auto rejectAllocation = [&] {
+                ++owner->activeProviderCalls;
+                lock.unlock();
+                writable.reset();
+                if (ownsNewTarget)
+                    owner->retirementQueue.retireOrDefer(allocation.replica, d->provider, {}, std::move(backing));
+                lock.relock();
+                --owner->activeProviderCalls;
+            };
+            if (!backingOwned || !allocation.isValid() || allocation.status != KisPageRequestStatus::Ready
+                || allocation.replica.domain != KisPageAccessDomain::CpuRam
+                || !allocation.replica.layout.matches(descriptor) || !binding
+                || !data || !owner->owner.consumeTerminalProviderOperation(operation, allocation, &failure).succeeded()) {
+                rejectAllocation();
+                fail(QStringLiteral("CPU mutation native allocation/access failed: ") + failure);
+                return result;
+            }
+            acquire.target = allocation.replica;
+            const auto prepared = owner->writeCoordinator.preparePrivateWrite(acquire, true);
+            if (!prepared.accepted) {
+                rejectAllocation();
+                fail(prepared.rejectionReason);
+                return result;
+            }
+            owner->publicationCoordinator.putDescriptorLocked(target, descriptor);
+            payloadInitialized = directPayload;
         }
         page = resources;
         page->source = acquire.source;
         page->target = acquire.target;
         page->descriptor = descriptor;
         page->writable = std::move(writable);
-        owner->publicationCoordinator.putDescriptorLocked(target, descriptor);
         owner->writeCoordinator.recordPrepared(*entry, intent, acquire);
+        discardUnprepared.dismiss();
         ++owner->mutationStats.generationsReserved;
-        payloadInitialized = directPayload;
         if (initialization) {
             entry->setInitializationSource({});
             initialization.clear();
         }
     }
     if (payload && !payload->isValidFor(page->descriptor)) {
-        d->state = Private::State::Failed;
+        if (!preparationOnly)
+            d->state = Private::State::Failed;
         KisPageStoreDetail::setError(error, QStringLiteral("complete CPU payload layout is invalid"));
         return result;
     }
     if (!data)
-        data = d->pinWritable(page->writable);
+        data = d->pinWritable(page->writable, counters);
     if (!data) {
-        d->state = Private::State::Failed;
+        if (!preparationOnly)
+            d->state = Private::State::Failed;
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation pending backing cannot be pinned"));
         return result;
     }
@@ -1570,7 +2170,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                                                      page->target.layout.rowStride,
                                                      page->target.layout.byteSize)) {
             page->writable.unpin();
-            d->state = Private::State::Failed;
+            if (!preparationOnly)
+                d->state = Private::State::Failed;
             KisPageStoreDetail::setError(error, QStringLiteral("alias pending initialization failed"));
             return result;
         }
@@ -1585,7 +2186,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                 std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target.layout.rowStride,
                             static_cast<const quint8 *>(payload->data) + row * payload->rowStride,
                             size_t(rowBytes));
-            d->payloadCopyBytes += rowBytes * rows;
+            counters.payloadCopyBytes += rowBytes * rows;
         }
         // Full input supersedes a staged semantic default, without a redundant fill.
         page->resetPixel.clear();
@@ -1598,19 +2199,24 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             for (int x = rect.left(); x <= rect.right(); ++x)
                 std::memcpy(row + quint64(x) * pixel.size(), pixel.constData(), size_t(pixel.size()));
         }
-        d->defaultResetBytes += quint64(rect.width()) * rect.height() * pixel.size();
+        counters.defaultResetBytes += quint64(rect.width()) * rect.height() * pixel.size();
         page->resetPixel.clear();
     }
     Q_ASSERT(entry);
     entry->setRemoval(false);
     d->owner->writeCoordinator.recordExposure(*entry, true);
-    ++d->pinsAcquired;
-    d->maximumPins = qMax(d->maximumPins, ++d->activePins);
-    result.m_scope = d;
-    result.m_entry = entryIndex;
+    ++counters.pinsAcquired;
+    counters.maximumPins = qMax(counters.maximumPins, ++counters.activePins);
+    if (bound) bound->page = page;
+    result.m_scope = execution ? std::shared_ptr<Private>(execution, d.get()) : d;
+    result.m_execution = execution.get();
+    result.m_entry = bound ? quint32(bound - execution->entries()) : entryIndex;
+    result.m_entryIncarnation = bound ? 0 : d->writes.handleAt(entryIndex).incarnation;
     result.m_data = data;
     result.m_rowStride = page->target.layout.rowStride;
     result.m_byteSize = page->target.layout.byteSize;
+    if (execution && !preparationOnly)
+        execution->markTouched(size_t(bound - execution->entries()));
     KisPageStoreDetail::setError(error, {});
     return result;
 }
@@ -1620,6 +2226,10 @@ bool KisPageMutationSession::cancel()
     if (!d)
         return true;
     QMutexLocker lock(&d->mutex);
+    if (d->executions) {
+        d->state = Private::State::Failed; // irrevocable cancellation intent
+        return false;
+    }
     return d->cancelLocked();
 }
 
@@ -1633,25 +2243,48 @@ bool KisPageMutationSession::sealForLegacyUnlock(QString *error)
     return sealImpl(error, true);
 }
 
-bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
+bool KisPageMutationSession::sealForAdapterDelivery(QString *error)
+{
+    return sealImpl(error, false, nullptr, true);
+}
+
+KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
+{
+    KisCapturedReadView result;
+    // Like borrowExecution, a quiescent checkpoint is not tied to the worker
+    // that originally created the business-owned session.
+    sealImpl(error, true, &result);
+    return result;
+}
+
+bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, KisCapturedReadView *checkpoint,
+                                    bool retainAdmission)
 {
     if (!d) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is absent"));
         return false;
     }
-    QMutexLocker scopeLock(&d->mutex);
+    std::unique_lock<QMutex> scopeLock(d->mutex, std::defer_lock);
+    if (checkpoint) {
+        if (!scopeLock.try_lock()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("checkpoint requires a quiescent mutation"));
+            return false;
+        }
+    } else {
+        scopeLock.lock();
+    }
     // One canonical segment seal, not one generic lease publish. Work items
     // count distinct claimed semantic/pixel keys, including removal and alias.
     KisPageStoreDiagnosticTimer diagnostic(d->diagnosticOwner,
                                            KisPageStoreDiagnosticPhase::WritePublishHost,
                                            quint64(d->writes.size()));
-    if (d->state == Private::State::Detached ||
+    if (d->state == Private::State::Detached || d->executions ||
         (!legacyFinalUnlock && d->thread != QThread::currentThreadId())) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation cannot seal"));
         return false;
     }
-    for (qsizetype i = 0; i < d->writes.size(); ++i) {
-        if (d->writes.at(KisMutationWriteSet::EntryIndex(i))->isExposed()) {
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+        if (d->writes.at(slot.index)->isExposed()) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation still has a writable guard"));
             return false;
         }
@@ -1669,14 +2302,15 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     phase.next(Phase::MutationSealInputs, pageWork);
     QVector<KisPageTransitionEffect> retirements;
     const auto retire = [&] {
+        d->releaseStorageLocked(lock);
         owner->retireEffectsLocked(retirements, lock);
         retirements.clear();
     };
     // A final semantic removal discards only this segment's unsealed target.
     // Previously sealed history remains untouched until the batch install.
     qsizetype privatePageCount = 0;
-    for (qsizetype i = 0; i < d->writes.size(); ++i) {
-        const auto index = KisMutationWriteSet::EntryIndex(i);
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+        const auto index = slot.index;
         auto *page = d->pageAtEntry(index);
         if (!page)
             continue;
@@ -1692,6 +2326,10 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         }
         d->erasePageAtEntry(index);
     }
+    // Return detached cold capacity before admitting alias replacements.
+    // Otherwise the next prepare would pay for both the dead blocks and their
+    // replacements, despite these discarded targets no longer being usable.
+    d->releaseStorageLocked(lock);
     ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealPrivatePublish, quint64(privatePageCount));
@@ -1709,8 +2347,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
                           .arg(QString::fromLatin1(stage));
         }
     };
-    for (qsizetype i = 0; i < d->writes.size(); ++i) {
-        const auto index = KisMutationWriteSet::EntryIndex(i);
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+        const auto index = slot.index;
         auto *page = d->pageAtEntry(index);
         if (!page)
             continue;
@@ -1732,8 +2370,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     validateClaims("after private publication");
     qsizetype sealedPageCount = privatePageCount;
     if (success)
-        for (qsizetype i = 0; i < d->writes.size(); ++i) {
-            const auto index = KisMutationWriteSet::EntryIndex(i);
+        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+            const auto index = slot.index;
             const auto *entry = d->writes.at(index);
             const auto source = entry->initializationSource();
             const bool hadPage = d->pageAtEntry(index) != nullptr;
@@ -1754,8 +2392,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         failure = QStringLiteral("ready host completion is unavailable for proof preparation");
     }
     if (success)
-        for (qsizetype i = 0; i < d->writes.size(); ++i) {
-            auto *page = d->pageAtEntry(KisMutationWriteSet::EntryIndex(i));
+        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+            auto *page = d->pageAtEntry(slot.index);
             if (!page)
                 continue;
             if (!owner->owner.sealPreparedPage(owner->metadata,
@@ -1772,8 +2410,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     // No guards remain and these targets are still private. Drop physical
     // writer reservations before making proofs visible to new readers.
     if (success)
-        for (qsizetype i = 0; i < d->writes.size(); ++i)
-            if (auto *page = d->pageAtEntry(KisMutationWriteSet::EntryIndex(i)))
+        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
+            if (auto *page = d->pageAtEntry(slot.index))
                 page->writable.reset();
 
     phase.next(Phase::MutationSealOwnerWait, pageWork);
@@ -1786,8 +2424,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     quint64 sealedRemovals = 0;
     quint64 sealedSources = 0;
     if (success) {
-        for (qsizetype i = 0; i < d->writes.size(); ++i) {
-            const auto index = KisMutationWriteSet::EntryIndex(i);
+        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+            const auto index = slot.index;
             auto *entry = d->writes.at(index);
             auto *page = d->pageAtEntry(index);
             if (entry->isRemoval()) {
@@ -1803,6 +2441,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         }
     }
     const bool hasOverlay = success && !overlayChanges.isEmpty();
+    phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChanges.size()));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
               d->transaction, std::move(overlayChanges), &failure)
@@ -1815,9 +2454,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     if (success && hasOverlay) {
         // The aggregate now owns every new sealed proof. A failed prepare or
         // install revokes them together while the former overlay stays live.
-        for (qsizetype i = 0; i < d->writes.size(); ++i) {
+        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
             if (auto *page = d->pageAtEntry(
-                    KisMutationWriteSet::EntryIndex(i))) {
+                    slot.index)) {
                 page->proof = {};
             }
         }
@@ -1834,10 +2473,12 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
+    phase.next(Phase::MutationSealSurfacePrepare, pageWork);
+    if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure)) success = false;
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims("before overlay installation");
     if (success && hasOverlay && !overlay.tryInstallLocked(
-            &retirements, &metadataCleanup, &failure)) {
+            &metadataCleanup, &failure)) {
         success = false;
         if (failure.isEmpty())
             failure = QStringLiteral("overlay installation was rejected");
@@ -1854,6 +2495,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
         lock.unlock();
         phase.next(Phase::MutationSealCleanup, pageWork);
         disposeDeferredMetadataCleanup(std::move(metadataCleanup), owner->metadataCleanupStatistics);
+        overlay = {};
         lock.relock();
         retire();
         d->cancelLocked(&lock);
@@ -1872,13 +2514,31 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock)
     lock.unlock();
     phase.next(Phase::MutationSealCleanup, pageWork);
     disposeDeferredMetadataCleanup(std::move(metadataCleanup), owner->metadataCleanupStatistics);
-    sealedPages = {};
+    lock.relock();
+    overlay.collectRetirementsLocked(&retirements);
+    lock.unlock();
+    overlay = {};
+    sealedPages = Private::ColdPageSet{};
     d->clearSources();
     owner->retirementQueue.retireEffects(retirements, owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
     --owner->activeProviderCalls;
-    d->detachLocked();
+    d->finishSegmentLocked(lock, !checkpoint, retainAdmission);
+    if (checkpoint) {
+        // scopeLock excludes the next borrow through capture. The original
+        // activity still excludes transaction commit/abort during this gap;
+        // capture itself fixes the whole sealed overlay under the owner gate.
+        lock.unlock();
+        *checkpoint = KisPageStore::captureReadViewImpl(owner,
+            KisPageReadView::transactionOverlay(d->transaction.id), error);
+        lock.relock();
+        if (!checkpoint->isValid()) {
+            d->state = Private::State::Failed;
+            d->cancelLocked(&lock);
+            return false;
+        }
+    }
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -1906,6 +2566,19 @@ bool KisPageStore::configureBackingLimits(const KisPageBackingLimits &limits,
     if (!d->backingBudget.configureLimits(limits, error)) return false;
     d->backingLimitsConfigured = true;
     return true;
+}
+
+bool KisPageStore::configureSharedNonPayloadBudget(
+    const QSharedPointer<KisBackingBudgetController> &budget,
+    QString *error)
+{
+    QMutexLocker lock(&d->mutex);
+    if (d->operational || d->closing || d->closed || d->backingLimitsConfigured) {
+        KisPageStoreDetail::setError(
+            error, QStringLiteral("shared backing budget must be frozen before initialization"));
+        return false;
+    }
+    return d->backingBudget.configureSharedNonPayloadBudget(budget, error);
 }
 
 KisPageStorePublicationStatistics KisPageStore::publicationStatistics() const
@@ -1960,18 +2633,6 @@ public:
         }
         return true;
     }
-    // Keep the large cold handle and ledger/provider discovery out of the
-    // warm guard's stack/initialization path. This is not a safety bypass:
-    // installation still revalidates under the metadata shard gate.
-    Q_NEVER_INLINE QSharedPointer<KisCpuReadBindingLink> discoverCpuReadBinding(const KisPageVersion &version) const
-    {
-        const auto replica = owner->metadata.cpuReadReplica(version);
-        if (!replica.isValid())
-            return {};
-        const auto provider = owner->owner.provider(replica.provider, replica.providerEpoch);
-        return owner->metadata.installCpuReadBinding(replica, provider);
-    }
-
     QSharedPointer<const KisCpuDefaultReadBuffer> defaultReadBuffer(const KisPageVersion &version) const
     {
         QMutexLocker lock(&defaultMutex);
@@ -2077,19 +2738,33 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
         guard.m_byteSize = guard.m_defaultBuffer->byteSize;
         return guard;
     }
-    if (status)
-        *status = version.defaultPixelRevision ? KisCpuResidentReadStatus::VirtualDefault
-                                               : KisCpuResidentReadStatus::BindingUnavailable;
+    auto observed = version.defaultPixelRevision ? KisCpuResidentReadStatus::VirtualDefault
+                                                 : KisCpuResidentReadStatus::BindingUnavailable;
     auto link = d->owner->metadata.cpuReadBinding(version);
-    // The captured root remains protected across this cold miss/recheck.
+    // The captured root and its exact version remain protected across every
+    // cold miss/recheck. No provider lookup or large handle on the warm path.
     if (!link)
-        link = d->discoverCpuReadBinding(version);
-    if (!link || !(link->replica.version == version))
-        return guard;
-    auto binding = link->resolve(status);
-    if (!binding)
-        return guard;
-    const void *data = binding->acquireRead(true, status, waitForLocalGate);
+        link = KisPageReadCoordinator::discoverCpuReadBinding(d->owner->metadata, d->owner->owner, version);
+    QSharedPointer<KisCpuResidentBinding> binding;
+    const void *data = nullptr;
+    constexpr int maximumAttempts = 3; // initial pin plus two immediate rediscoveries
+    for (int attempt = 0; link && attempt < maximumAttempts; ++attempt) {
+        if (!(link->replica.version == version)) {
+            observed = KisCpuResidentReadStatus::InvalidIdentity;
+            break;
+        }
+        binding = link->resolve(&observed);
+        if (binding)
+            data = binding->acquireRead(link->replica.allocationIdentity(), true, &observed, waitForLocalGate);
+        if (data || (observed != KisCpuResidentReadStatus::InvalidIdentity
+                     && observed != KisCpuResidentReadStatus::Retired)
+            || attempt + 1 == maximumAttempts)
+            break;
+        link = KisPageReadCoordinator::discoverCpuReadBinding(
+            d->owner->metadata, d->owner->owner, version, link);
+        if (!link) observed = KisCpuResidentReadStatus::BindingUnavailable;
+    }
+    if (status) *status = observed;
     if (!data)
         return guard;
     guard.m_scope = d;
@@ -2159,21 +2834,31 @@ KisPageStore::KisPageStore()
 {
 }
 
-KisPageStore::~KisPageStore() = default;
+KisPageStore::~KisPageStore()
+{
+    // Outstanding capabilities keep Private alive, but recurring maintenance
+    // must not sustain it after the facade is gone. Stop admission without
+    // waiting on providers or invalidating the capabilities' original bytes.
+    d->readCoordinator.stopAutomaticWakeups();
+    d->retirementQueue.stopAutomaticWakeups();
+}
 
 void KisPageStore::PrivateReleaser::cleanup(Private *owner)
 {
     if (owner && !owner->lifetimeReferences.deref()) {
-        if (!owner->backgroundReclamation || kisOnPageStoreReclamationThread())
+        if (!owner->terminalCleanup || !owner->backgroundReclamation || kisOnPageStoreReclamationThread())
             delete owner;
         else
-            kisSchedulePageStoreReclamation([owner] {
-                delete owner;
-            });
+            kisEnqueuePageStoreReclamation(owner->terminalCleanup.release());
     }
 }
 
 KisCapturedReadView KisPageStore::captureReadView(const KisPageReadView &selector, QString *error)
+{
+    return captureReadViewImpl(d.data(), selector, error);
+}
+
+KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageReadView &selector, QString *error)
 {
     KisCapturedReadView result;
     const KisPageKey probe = selector.kind == KisPageReadViewKind::ExactVersion ? selector.exactVersion.key
@@ -2245,7 +2930,7 @@ KisCapturedReadView KisPageStore::captureReadView(const KisPageReadView &selecto
             result.d->stagedSurfaces.insert(change.after.surface.value, change.after);
     }
     d->lifetimeReferences.ref();
-    result.d->owner = d.data();
+    result.d->owner = d;
     result.d->root = std::move(root);
     result.d->retention = retained.token;
     result.d->exactVersion = exact;
@@ -2286,7 +2971,9 @@ KisPageStoreReadScopeStatistics KisPageStore::readScopeStatistics() const
             history.maximumPagesPerPass,
             history.maximumVersionsPerPass,
             history.reachabilityRefreshes,
-            history.reachabilityRootsVisited};
+            history.reachabilityRootsVisited,
+            history.maximumRootsPerPass,
+            history.reachabilityRestarts};
 }
 
 KisPageStoreRetirementProgress KisPageStore::processRetirements(qsizetype replicaBudget)
@@ -2306,6 +2993,7 @@ bool KisPageStore::waitForRetirementIdle()
 {
     if (kisOnPageStoreReclamationThread())
         return false;
+    d->readCoordinator.waitForIdle();
     {
         QMutexLocker lock(&d->mutex);
         d->historyCollector.waitForIdleLocked();
@@ -2327,6 +3015,7 @@ bool KisPageStore::closeSession(QString *error)
         return false;
     }
     KisPageMutationSession::Private::retryOrphans(d.data());
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
     if (!d->completions) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore session was not configured"));
@@ -2345,8 +3034,10 @@ bool KisPageStore::closeSession(QString *error)
     // owns real ledger operations while retiring. Wait outside the owner gate
     // so provider callbacks cannot deadlock trying to inspect the store.
     d->closing = true;
+    d->readCoordinator.beginCloseLocked();
     d->retirementQueue.beginClose();
     locker.unlock();
+    d->readCoordinator.waitForIdle();
     d->retirementQueue.waitForIdle();
     {
         const auto statistics = d->metadataCleanupStatistics;
@@ -2358,10 +3049,12 @@ bool KisPageStore::closeSession(QString *error)
     locker.relock();
     d->historyCollector.waitForIdleLocked();
     d->epochs.collectFinishedTransactions();
-    d->readCoordinator.retryCancelledRequestsLocked(locker, true);
+    d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup, true);
     d->readCoordinator.retryCapturedReleasesLocked(locker, true);
-    const auto releasedReadKeys = d->readCoordinator.retryReleasedReadsLocked({}, nullptr, true);
+    auto releasedReadKeys = d->readCoordinator.retryReleasedReadsLocked(cleanup, {}, nullptr, true);
+    releasedReadKeys += d->readCoordinator.acknowledgeCompletedLastUsesLocked(cleanup);
     d->retireEffectsLocked(d->historyCollector.collectUnreachableLocked(releasedReadKeys), locker);
+    cleanup.finishUnlocked(locker);
     KisPageStoreSessionStats stats = d->stats();
     const qsizetype pendingShutdownReplicas = stats.pendingShutdownReplicas;
     stats.pendingShutdownReplicas = 0;
@@ -2375,6 +3068,7 @@ bool KisPageStore::closeSession(QString *error)
     stats.providerOperations = d->owner.publicationBlockingOperationCount();
     if (stats.hasOutstandingCapabilities()) {
         d->closing = false;
+        d->readCoordinator.cancelCloseLocked();
         d->retirementQueue.cancelCloseAndSchedule();
         d->historyCollector.scheduleLocked();
         KisPageStoreDetail::setError(error,
@@ -2403,8 +3097,8 @@ bool KisPageStore::closeSession(QString *error)
         return false;
     }
 
-    QVector<KisPageRetirementRecord> liveShutdownReplicas;
-    if (d->pendingShutdownReplicas.isEmpty() && d->operational) {
+    KisPageRetirementRecords liveShutdownReplicas;
+    if (d->pendingShutdownReplicas.empty() && d->operational) {
         d->epochs.collectUnretainedRoots();
         QSet<KisReplicaAllocationIdentity> seenReplicas;
         for (const KisReplicaHandle &replica : d->metadata.shutdownReplicaHandles()) {
@@ -2413,44 +3107,52 @@ bool KisPageStore::closeSession(QString *error)
             if (seenReplicas.contains(identity)) continue;
             seenReplicas.insert(identity);
             const auto provider = d->owner.provider(replica.provider, replica.providerEpoch);
-            liveShutdownReplicas.append({replica, provider, {}, {}, {}});
+            auto record = d->owner.takeRetirementRecord(replica);
+            Q_ASSERT(record);
+            if (!record) continue;
+            record->provider = provider;
+            liveShutdownReplicas.push_back(*record.release());
         }
     }
 
-    QVector<KisPageRetirementRecord> shutdownReplicas =
+    KisPageRetirementRecords shutdownReplicas =
         std::move(d->pendingShutdownReplicas);
     // Drain already Debt-admitted records before current live replicas. With
     // a finite one-page Debt budget, trying current replicas first can reject
     // all of them even though retiring the queued debt immediately frees the
     // capacity required for a sequential shutdown.
-    shutdownReplicas += d->retirementQueue.takeForClose();
-    shutdownReplicas += std::move(liveShutdownReplicas);
+    auto queuedShutdown = d->retirementQueue.takeForClose();
+    shutdownReplicas.splice(shutdownReplicas.end(), queuedShutdown);
+    shutdownReplicas.splice(shutdownReplicas.end(), liveShutdownReplicas);
     d->closing = true;
     d->operational = false;
     d->writeAdmissionChanged.wakeAll();
-    d->activeProviderCalls += shutdownReplicas.size();
+    const qsizetype shutdownCount = qsizetype(shutdownReplicas.size());
+    d->activeProviderCalls += shutdownCount;
     locker.unlock();
     QStringList retirementFailures;
-    QVector<KisPageRetirementRecord> failedReplicas;
-    for (KisPageRetirementRecord &shutdown : shutdownReplicas) {
+    KisPageRetirementRecords failedReplicas;
+    for (auto it = shutdownReplicas.begin(); it != shutdownReplicas.end();) {
+        const auto entry = it++;
+        auto &shutdown = *entry;
         if (!shutdown.provider) {
             retirementFailures.append(QStringLiteral("replica %1:%2 lost its provider during shutdown")
                                           .arg(shutdown.replica.provider.value)
                                           .arg(shutdown.replica.allocation.slot));
-            failedReplicas.append(std::move(shutdown));
+            failedReplicas.splice(failedReplicas.end(), shutdownReplicas, entry);
             continue;
         }
         if (!d->retirementQueue.retireRecord(shutdown)) {
             retirementFailures.append(QStringLiteral("replica %1:%2 retirement failed")
                                           .arg(shutdown.replica.provider.value)
                                           .arg(shutdown.replica.allocation.slot));
-            failedReplicas.append(std::move(shutdown));
+            failedReplicas.splice(failedReplicas.end(), shutdownReplicas, entry);
         } else {
             d->metadata.removeCpuReadBinding(shutdown.replica);
         }
     }
     locker.relock();
-    d->activeProviderCalls -= shutdownReplicas.size();
+    d->activeProviderCalls -= shutdownCount;
     d->pendingShutdownReplicas = std::move(failedReplicas);
     d->closing = false;
     if (!retirementFailures.isEmpty()) {
@@ -2485,10 +3187,31 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
         }
     }
     QMutexLocker locker(&d->mutex);
-    if (d->completions) {
+    if (d->completions || d->activeProviderCalls) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore is already configured"));
         return false;
     }
+    // A root with physical state must already own its terminal and recurring
+    // task storage. Prepare outside the owner gate, before initialization can
+    // adopt any backing; concurrent configuration cannot enter this interval.
+    ++d->activeProviderCalls;
+    locker.unlock();
+    try {
+        if (!d->terminalCleanup) {
+            d->terminalCleanup = kisPreparePageStoreReclamation(
+                [owner = d.data()] { delete owner; }, &d->backingBudget);
+            d->terminalCleanup->reusable = false;
+        }
+        d->retirementQueue.prepareTask();
+        d->historyCollector.prepareTask(d->backingBudget);
+    } catch (const std::bad_alloc &) {
+        locker.relock();
+        --d->activeProviderCalls;
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore reclamation budget storage was refused"));
+        return false;
+    }
+    locker.relock();
+    --d->activeProviderCalls;
     QString failure;
     if (!d->owner.configure(completions, &failure) || !d->metadata.configure(metadataShardCount, &failure)
         || !d->epochs.initialize(initialEpoch, &failure)) {
@@ -2512,6 +3235,13 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     }
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+
+bool KisPageStore::configureDerivedPageExtent(KisSurfaceId surface)
+{
+    QMutexLocker locker(&d->mutex);
+    return d->completions && !d->operational && !d->closed && !d->closing
+        && d->publicationCoordinator.configureDerivedExtentLocked(surface);
 }
 
 bool KisPageStore::registerReplicaProvider(const QSharedPointer<KisPageReplicaProvider> &provider)
@@ -2550,6 +3280,15 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
                                     const KisReplicaHandle &authority,
                                     QString *error)
 {
+    return adoptInitialPage(version, descriptor, authority, QVector<KisReplicaHandle>{}, error);
+}
+
+bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
+                                    const KisPageAllocationDescriptor &descriptor,
+                                    const KisReplicaHandle &authority,
+                                    const QVector<KisReplicaHandle> &readyAlternates,
+                                    QString *error)
+{
     QMutexLocker locker(&d->mutex);
     if (!d->completions || d->operational || d->closed || !version.isValid() || version.isDefaultPixel()
         || !descriptor.isValid() || !authority.isValid() || !(authority.version == version)
@@ -2563,37 +3302,101 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
         KisPageStoreDetail::setError(error, QStringLiteral("initial page is absent from the configured epoch manifest"));
         return false;
     }
-    const QSharedPointer<KisPageReplicaProvider> provider =
-        d->owner.provider(authority.provider, authority.providerEpoch);
-    if (!provider) {
-        KisPageStoreDetail::setError(error, QStringLiteral("initial page authority failed provider validation"));
-        return false;
+    QVector<KisReplicaHandle> replicas{authority};
+    QVector<QSharedPointer<KisPageReplicaProvider>> providers;
+    for (const auto &replica : readyAlternates) {
+        if (!replica.isValid() || !(replica.version == version) || !replica.layout.matches(descriptor)
+            || std::any_of(replicas.cbegin(), replicas.cend(), [&](const auto &existing) {
+                return existing.physicalSlotIdentity() == replica.physicalSlotIdentity();
+            })) {
+            KisPageStoreDetail::setError(error, QStringLiteral("initial exact replica is invalid or duplicated"));
+            return false;
+        }
+        replicas.append(replica);
+    }
+    for (const auto &replica : std::as_const(replicas)) {
+        auto provider = d->owner.provider(replica.provider, replica.providerEpoch);
+        if (!provider) {
+            KisPageStoreDetail::setError(error, QStringLiteral("initial replica provider is unavailable"));
+            return false;
+        }
+        providers.append(std::move(provider));
     }
     ++d->activeProviderCalls;
     locker.unlock();
-    const bool authorityValid = provider->validate(authority, descriptor);
+    bool valid = true;
+    for (qsizetype i = 0; i < replicas.size(); ++i)
+        valid = providers[i]->validate(replicas[i], descriptor) && valid;
     locker.relock();
     --d->activeProviderCalls;
     KisPageStateSnapshot existingPage;
-    if (!authorityValid || d->operational || d->closed || d->metadata.versionSnapshot(version, &existingPage)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("initial page authority failed provider validation"));
+    if (!valid || d->operational || d->closed || d->metadata.versionSnapshot(version, &existingPage)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("initial page replicas failed provider validation"));
         return false;
     }
-    const bool registeredHere =
-        d->owner.backingClass(authority) == KisBackingBudgetClass::Count;
-    if (registeredHere) {
-        auto backing = d->writeCoordinator.reserveBacking(descriptor, authority.domain,
-                                         KisBackingBudgetClass::Current, error);
-        if (!backing.isValid()
-            || !d->owner.registerBacking(authority, backing,
-                                          KisBackingBudgetClass::Current, error))
+    using TerminalNodes = std::vector<KisPageRetirementRecordPointer,
+        KisMutationStorageAllocator<KisPageRetirementRecordPointer>>;
+    TerminalNodes terminals{KisMutationStorageAllocator<KisPageRetirementRecordPointer>(&d->backingBudget)};
+    const auto discardTerminals = qScopeGuard([&] {
+        locker.unlock();
+        TerminalNodes{terminals.get_allocator()}.swap(terminals);
+        locker.relock();
+    });
+    // Prepare the whole terminal-node footprint before the first registration.
+    // Dropping the store gate between partial registrations would let another
+    // initial adoption publish a page that rollback then incorrectly removed.
+    ++d->activeProviderCalls;
+    {
+        locker.unlock();
+        const auto done = qScopeGuard([&] { locker.relock(); --d->activeProviderCalls; });
+        try {
+            terminals.resize(size_t(replicas.size()));
+            for (qsizetype i = 0; i < replicas.size(); ++i)
+                if (d->owner.backingClass(replicas[i]) == KisBackingBudgetClass::Count)
+                    terminals[size_t(i)] = kisPreparePageRetirementRecord(&d->backingBudget);
+        } catch (const std::bad_alloc &) {
+            KisPageStoreDetail::setError(error, QStringLiteral("initial backing retirement storage budget was refused"));
             return false;
+        }
+    }
+    if (d->operational || d->closed || d->metadata.versionSnapshot(version, &existingPage)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("initial page changed during retirement storage preparation"));
+        return false;
+    }
+    QVector<KisReplicaHandle> registered;
+    auto undoRegistration = qScopeGuard([&] {
+        // Keep partial registration invisible to another initial adoption.
+        // Reuse the admitted array for node disposal after rollback completes.
+        for (const auto &replica : registered) {
+            const auto found = std::find(replicas.cbegin(), replicas.cend(), replica);
+            Q_ASSERT(found != replicas.cend());
+            auto &terminal = terminals[size_t(found - replicas.cbegin())];
+            Q_ASSERT(!terminal);
+            terminal = d->owner.takeRetirementRecord(replica);
+            d->owner.releaseRetiredBacking(replica);
+        }
+    });
+    for (qsizetype i = 0; i < replicas.size(); ++i) {
+        const auto &replica = replicas[i];
+        if (d->owner.backingClass(replica) != KisBackingBudgetClass::Count) continue;
+        auto backing = d->writeCoordinator.reserveBacking(descriptor, replica.domain,
+            KisBackingBudgetClass::Current, error, {}, &terminals[size_t(i)]);
+        const auto discardBacking = qScopeGuard([&] {
+            if (!backing.retirement) return;
+            Q_ASSERT(!terminals[size_t(i)]);
+            terminals[size_t(i)] = std::move(backing.retirement);
+        });
+        if (!backing.reservation.isValid()
+            || !d->owner.registerBacking(replica, backing.reservation, KisBackingBudgetClass::Current, error, &backing.retirement))
+            return false;
+        registered.append(replica);
     }
 
     KisPageVersionStateSnapshot versionState;
     versionState.version = version;
     versionState.publication = KisPagePublicationState::Published;
-    versionState.replicas.append({authority, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    for (const auto &replica : std::as_const(replicas))
+        versionState.replicas.append({replica, KisReplicaValidity::Valid, {}, {}, 0, {}});
     versionState.authority = authority;
 
     KisPageStateSnapshot page;
@@ -2605,10 +3408,10 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
     page.versions.append(versionState);
     QString failure;
     if (!d->metadata.registerPage(page, &failure)) {
-        if (registeredHere) d->owner.releaseRetiredBacking(authority);
         KisPageStoreDetail::setError(error, failure);
         return false;
     }
+    undoRegistration.dismiss();
     d->publicationCoordinator.putDescriptorLocked(version, descriptor);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -2624,7 +3427,7 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
     KisPageOperationId allocationOperation;
     KisPageOperationId accessOperation;
     KisPageLeaseId lease;
-    KisBackingBudgetReservation backing;
+    KisPageBackingPreparation backing;
     {
         QMutexLocker locker(&d->mutex);
         if (!d->completions || d->operational || d->closed || !version.isValid() || version.isDefaultPixel()
@@ -2640,9 +3443,14 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
             KisPageStoreDetail::setError(error, QStringLiteral("initial CPU page provider or identity is unavailable"));
             return false;
         }
-        backing = d->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
-                                    KisBackingBudgetClass::Current, error);
-        if (!backing.isValid()) return false;
+        ++d->activeProviderCalls;
+        {
+            locker.unlock();
+            const auto done = qScopeGuard([&] { locker.relock(); --d->activeProviderCalls; });
+            backing = d->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
+                KisBackingBudgetClass::Current, error);
+        }
+        if (!backing.reservation.isValid()) return false;
         ++d->activeProviderCalls;
     }
 
@@ -2655,7 +3463,7 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
     QString failure;
     const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, version, *provider);
     const bool backingOwned = ownsNewTarget && d->owner.registerBacking(
-        allocation.replica, backing, KisBackingBudgetClass::Current, &failure);
+        allocation.replica, backing.reservation, KisBackingBudgetClass::Current, &failure, &backing.retirement);
     const KisVerifiedCompletion allocated = allocation.isValid()
         ? d->owner.consumeTerminalProviderOperation(allocationOperation, allocation, &failure)
         : KisVerifiedCompletion();
@@ -2734,6 +3542,54 @@ bool KisPageStore::resolvePageVersion(const KisPageKey &key, const KisPageReadVi
     return d->publicationCoordinator.resolveVersionLocked(key, view, version);
 }
 
+bool KisPageStore::resolveTileReadIdentity(const KisPageKey &key, const KisPageReadView &view,
+                                         KisPageVersion *version, KisSurfaceEpochState *state) const
+{
+    QMutexLocker locker(&d->mutex);
+    return d->operational && !d->closing && !d->closed &&
+        d->publicationCoordinator.resolveVersionLocked(key, view, version) &&
+        (!version->isDefaultPixel() || d->publicationCoordinator.resolveSurfaceLocked(key.surface, view, state));
+}
+
+bool KisPageStore::resolvePagePresence(KisSurfaceId surface,
+                                       const QVector<KisLogicalPageId> &pages,
+                                       const KisPageReadView &view,
+                                       QVector<quint8> *present) const
+{
+    if (!present || !surface.isValid()) return false;
+    // Actual output storage precedes the owner gate, including Qt detachment.
+    // A rejected selector leaves the caller's previous classification intact.
+    QVector<quint8> candidate;
+    try {
+        candidate.reserve(pages.size());
+        if (candidate.capacity() < pages.size()) return false;
+        candidate.resize(pages.size());
+    } catch (const std::bad_alloc &) {
+        return false;
+    }
+    if (!resolvePagePresenceInto(surface, pages, view, candidate.data(), candidate.size())) return false;
+    // The output's previous storage also dies outside the owner gate.
+    present->swap(candidate);
+    return true;
+}
+
+bool KisPageStore::resolvePagePresenceInto(KisSurfaceId surface,
+                                          const QVector<KisLogicalPageId> &pages,
+                                          const KisPageReadView &view,
+                                          quint8 *scratch, qsizetype capacity) const
+{
+    if (!surface.isValid() || capacity < pages.size() || (!scratch && !pages.isEmpty())) return false;
+    QMutexLocker lock(&d->mutex);
+    KisSurfaceEpochState state;
+    if (!d->publicationCoordinator.resolveSurfaceLocked(surface, view, &state)) return false;
+    for (qsizetype i = 0; i < pages.size(); ++i) {
+        KisPageVersion version;
+        if (!d->publicationCoordinator.resolveVersionLocked({surface, pages[i]}, view, &version)) return false;
+        scratch[i] = !version.isDefaultPixel();
+    }
+    return true;
+}
+
 bool KisPageStore::pageDescriptor(const KisPageVersion &version, KisPageAllocationDescriptor *descriptor) const
 {
     QMutexLocker locker(&d->mutex);
@@ -2758,8 +3614,9 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
 {
     KisReadRequest request;
     request.access = access;
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    d->readCoordinator.retryCancelledRequestsLocked(locker);
+    d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup);
     if (!d->operational || !view.isValidFor(key) || !access.isValid()
         || (captured && (!captured->d || captured->d->owner != d.data()))) {
         request.error = QStringLiteral("PageStore read request is invalid or unavailable");
@@ -2898,11 +3755,19 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         if (!error.isNull()) request.error = error;
         return request;
     };
-    d->writeCoordinator.beginPreparationActivity(transaction.id);
+    {
+        ++d->activeProviderCalls;
+        const auto preparing = qScopeGuard([&] { --d->activeProviderCalls; });
+        if (!d->writeCoordinator.beginPreparationActivity(transaction.id, locker, &request.error)) return fail();
+    }
     const auto preparationClaim = qScopeGuard([&] {
         d->writeCoordinator.endPreparationActivity(transaction.id);
     });
-    const bool claimed = d->writeAdmission.claimDirectLocked(key, transaction.id.value);
+    const auto currentTransaction = d->epochs.transaction(transaction.id);
+    if (!d->operational || !(currentTransaction.transaction == transaction) || !currentTransaction.isActive()
+        || d->publicationCoordinator.isPreparingCommitLocked(transaction.id))
+        return fail(QStringLiteral("write transaction changed during admission"));
+    const bool claimed = d->writeAdmission.claimDirectLocked(key, transaction.id.value, locker, &request.error);
     if (!claimed) {
         request.error = QStringLiteral("page is claimed by another writer");
         return request;
@@ -2915,9 +3780,10 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     writeIntent.mode = mode;
     writeIntent.flags |= quint8(KisPageWriteIntentFlag::AsyncLease);
     KisPageTransition transition;
+    KisReplicaHandle recoverableBefore;
     KisPageAllocationDescriptor descriptor;
     if (!d->writeCoordinator.prepareWriteBaseLocked(transaction, writeIntent, d->publicationCoordinator,
-                                                    &transition, &descriptor, &request.error)) {
+                                                    &transition, &descriptor, &request.error, nullptr, &recoverableBefore)) {
         return fail();
     }
     const auto baseVersion = transition.baseVersion;
@@ -2949,19 +3815,75 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     if (!requestId.isValid() || !accessOperation.isValid()) {
         return fail(QStringLiteral("PageStore write identity allocation failed"));
     }
-    auto backing = d->writeCoordinator.reserveBacking(descriptor, access.domain,
-                                     KisBackingBudgetClass::ActivePending,
-                                     &request.error, writeVersion);
-    if (!backing.isValid()) {
+    try {
+        // Prepare the actual terminal-owner node before either write plan can
+        // acquire a private writer. Bucket capacity alone is not node storage.
+        const auto inserted = d->writeRequests.emplace(requestId.value, pending);
+        Q_ASSERT(inserted.second);
+    } catch (const std::bad_alloc &) {
         return fail();
     }
-    d->writeRequests.insert(requestId.value, pending);
-    d->writeCoordinator.beginGenericActivity(transaction.id);
+    if (!d->writeCoordinator.beginGenericActivity(transaction.id)) {
+        d->writeRequests.erase(requestId.value);
+        return fail(QStringLiteral("generic write activity is unavailable or exhausted"));
+    }
     pageClaim.dismiss(); // full request/lease lifetime now owns the page claim
     auto writeClaim = qScopeGuard([&] {
         d->releaseGenericWrite(transaction.id, key);
     });
     ++d->writeRequestsCreated;
+
+    KisCpuWriteBindingReservation writable;
+    KisPageWritePlanKind plan;
+    try {
+        plan = d->writeCoordinator.prepareWritePlanLocked(
+            transaction, writeIntent, provider, access, descriptor,
+            d->publicationCoordinator, transition, recoverableBefore, locker, writable, diagnostic);
+    } catch (const std::bad_alloc &) {
+        // The common plan restores this gate and destroys prepared candidates
+        // outside it. All fallible preparation precedes physical handoff.
+        d->writeRequests.erase(requestId.value);
+        return fail();
+    }
+    if (plan == KisPageWritePlanKind::RecoverableHandoff) {
+        // The preallocated request is the sole generic terminal owner. The
+        // logical writer/admission survive releasing the short native pin;
+        // resolve() acquires the ordinary generic provider access later.
+        auto &prepared = d->writeRequests.find(requestId.value)->second;
+        prepared.source = transition.source;
+        prepared.replica = transition.target;
+        prepared.readiness = d->readyHostCompletion;
+        prepared.state = PendingWriteRequestRecord::State::Pending;
+        request.status = KisPageRequestStatus::Ready;
+        request.id = requestId;
+        request.transaction = transaction.id;
+        request.baseVersion = baseVersion;
+        request.writeVersion = writeVersion;
+        request.writer = writer;
+        request.readiness = prepared.readiness;
+        Q_ASSERT(request.isValid());
+        writeClaim.dismiss();
+        locker.unlock();
+        writable.reset();
+        locker.relock();
+        return request;
+    }
+    KisPageBackingPreparation backing;
+    ++d->activeProviderCalls;
+    {
+        locker.unlock();
+        const auto done = qScopeGuard([&] { locker.relock(); --d->activeProviderCalls; });
+        backing = d->writeCoordinator.reserveBacking(descriptor, access.domain,
+            KisBackingBudgetClass::ActivePending, &request.error, writeVersion);
+    }
+    const auto discardBacking = qScopeGuard([&] {
+        if (!backing.retirement) return;
+        locker.unlock(); backing.retirement.reset(); locker.relock();
+    });
+    if (!backing.reservation.isValid()) {
+        d->writeRequests.erase(requestId.value);
+        return fail();
+    }
 
     bool nativeWriteCopy = false;
 
@@ -2970,28 +3892,32 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     // metadata transition below revalidates writer/generation ownership.
     locker.unlock();
     KisReplicaOperation allocation;
-    {
+    try {
         KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::WriteProviderPrepare, 1);
         allocation = d->writeCoordinator.prepareFreshReplica(writeIntent, *provider,
             transition, descriptor, access, priority, nullptr, {}, &nativeWriteCopy);
+    } catch (const std::bad_alloc &) {
+        locker.relock();
+        d->writeRequests.erase(requestId.value);
+        return fail();
     }
     locker.relock();
 
     QString failure;
     const bool ownedReplica = ownsPreparedReplica(allocation.replica, writeVersion, *provider, pending.source);
     const bool backingOwned = ownedReplica
-        && d->owner.registerBacking(allocation.replica, backing,
-                                    KisBackingBudgetClass::ActivePending, &failure);
+        && d->owner.registerBacking(allocation.replica, backing.reservation,
+                                    KisBackingBudgetClass::ActivePending, &failure, &backing.retirement);
 
     const auto rejectAllocation = [&](const QString &message, bool removeRequest = true) {
         if (ownedReplica)
             d->retireRejectedReplicaLocked(allocation.replica, provider, std::move(backing), locker);
-        if (removeRequest) d->writeRequests.remove(requestId.value);
+        if (removeRequest) d->writeRequests.erase(requestId.value);
         request.status = KisPageRequestStatus::Failed;
         request.error = message;
     };
     auto pendingIt = d->writeRequests.find(requestId.value);
-    if (pendingIt == d->writeRequests.end() || pendingIt->state != PendingWriteRequestRecord::State::Preparing) {
+    if (pendingIt == d->writeRequests.end() || pendingIt->second.state != PendingWriteRequestRecord::State::Preparing) {
         rejectAllocation(QStringLiteral("write allocation reservation was lost"), false);
         return request;
     }
@@ -3007,7 +3933,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         rejectAllocation(failure.isEmpty() ? QStringLiteral("write allocation completion failed") : failure);
         return request;
     }
-    pendingIt->replica = allocation.replica;
+    pendingIt->second.replica = allocation.replica;
     transition.target = allocation.replica;
     KisPageTransitionResult stateResult = d->writeCoordinator.preparePrivateWrite(transition, false);
     if (!stateResult.accepted) {
@@ -3016,17 +3942,17 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     }
 
     d->publicationCoordinator.putDescriptorLocked(writeVersion, descriptor);
-    pendingIt->source = transition.source;
-    pendingIt->readiness = allocation.completion;
+    pendingIt->second.source = transition.source;
+    pendingIt->second.readiness = allocation.completion;
     const auto rejectPrepared = [&](const QString &message) {
-        const auto cancelled = d->cancelWriteLocked(d->writeRequests.value(requestId.value));
+        const auto cancelled = d->cancelWriteLocked(d->writeRequests.find(requestId.value)->second);
         if (cancelled.accepted) {
-            d->writeRequests.remove(requestId.value);
+            d->writeRequests.erase(requestId.value);
             d->retireEffectsLocked(cancelled.effects, locker);
         } else {
             // No request capability was returned, so transaction abort owns
             // the retry. Do not release its only page/admission record.
-            d->writeRequests[requestId.value].state = PendingWriteRequestRecord::State::Pending;
+            d->writeRequests.find(requestId.value)->second.state = PendingWriteRequestRecord::State::Pending;
             writeClaim.dismiss();
         }
         request.status = KisPageRequestStatus::Failed;
@@ -3034,22 +3960,26 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     };
     locker.unlock();
     KisCompletionTicket initializationReadiness;
-    {
+    try {
         KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::WriteProviderTransfer, 1);
         initializationReadiness = d->writeCoordinator.initializeFreshReplica(
             writeIntent, nativeWriteCopy, pending.source, allocation.replica,
             descriptor, provider, priority, allocation.completion, &failure);
+    } catch (const std::bad_alloc &) {
+        // A private writer already exists. Use its original cancellation
+        // record; a rejected detach must remain owned by transaction abort.
+        failure = QStringLiteral("write initialization storage allocation failed");
     }
     locker.relock();
     pendingIt = d->writeRequests.find(requestId.value);
-    if (pendingIt == d->writeRequests.end() || pendingIt->state != PendingWriteRequestRecord::State::Preparing) {
+    if (pendingIt == d->writeRequests.end() || pendingIt->second.state != PendingWriteRequestRecord::State::Preparing) {
         return fail(QStringLiteral("write initialization reservation was lost"));
     }
     if (!initializationReadiness.isValid()) {
         rejectPrepared(failure.isEmpty() ? QStringLiteral("write generation initialization failed") : failure);
         return request;
     }
-    pendingIt->readiness = initializationReadiness;
+    pendingIt->second.readiness = initializationReadiness;
 
     transition.kind = KisPageTransitionKind::PrepareWrite;
     stateResult = d->metadata.applyOwner(key, transition);
@@ -3064,12 +3994,12 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     request.baseVersion = baseVersion;
     request.writeVersion = writeVersion;
     request.writer = writer;
-    request.readiness = pendingIt->readiness;
+    request.readiness = pendingIt->second.readiness;
     if (!request.isValid()) {
         rejectPrepared(QStringLiteral("PageStore write request construction failed"));
         return request;
     }
-    pendingIt->state = PendingWriteRequestRecord::State::Pending;
+    pendingIt->second.state = PendingWriteRequestRecord::State::Pending;
     writeClaim.dismiss(); // request -> lease -> publish/cancel owns the count
     return request;
 }
@@ -3077,8 +4007,9 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
 
 KisReadLease KisPageStore::resolve(const KisReadRequest &request, const KisCompletionTicket &completion)
 {
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    return d->readCoordinator.resolveLocked(request, completion, locker);
+    return d->readCoordinator.resolveLocked(request, completion, locker, cleanup);
 }
 
 KisWriteLease KisPageStore::resolve(const KisWriteRequest &request, const KisCompletionTicket &completion)
@@ -3087,38 +4018,71 @@ KisWriteLease KisPageStore::resolve(const KisWriteRequest &request, const KisCom
     QMutexLocker locker(&d->mutex);
     auto requestIt = d->writeRequests.find(request.id.value);
     if (!d->operational || !request.isValid() || requestIt == d->writeRequests.end()
-        || requestIt->state != PendingWriteRequestRecord::State::Pending
-        || !(requestIt->version == request.writeVersion)
-        || !(requestIt->readiness == completion) || !d->completions->verifyTerminal(completion).succeeded()) {
+        || requestIt->second.state != PendingWriteRequestRecord::State::Pending
+        || !(requestIt->second.transaction == request.transaction)
+        || !(requestIt->second.baseVersion == request.baseVersion)
+        || !(requestIt->second.version == request.writeVersion)
+        || !(requestIt->second.writer == request.writer)
+        || !(requestIt->second.access == request.access) || requestIt->second.writeMode != request.mode
+        || !(requestIt->second.readiness == request.readiness)
+        || !(requestIt->second.readiness == completion) || !d->completions->verifyTerminal(completion).succeeded()) {
         return {};
     }
     const QSharedPointer<KisPageReplicaProvider> provider =
-        d->owner.provider(requestIt->replica.provider, requestIt->replica.providerEpoch);
+        d->owner.provider(requestIt->second.replica.provider, requestIt->second.replica.providerEpoch);
     if (!provider)
         return {};
 
     const KisPageLeaseId leaseId = d->owner.nextLeaseId();
     if (!leaseId.isValid())
         return {};
-    requestIt->state = PendingWriteRequestRecord::State::Resolving;
-    PendingWriteRequestRecord pending = requestIt.value();
+    const PendingWriteRequestRecord pending = requestIt->second;
+    std::shared_ptr<ActiveWriteRecord> active;
+    ActiveWriteMap::node_type preparedNode;
+    try {
+        active = std::make_shared<ActiveWriteRecord>(provider, pending);
+        ActiveWriteMap prepared;
+        prepared.emplace(leaseId.value, active);
+        preparedNode = prepared.extract(prepared.begin());
+    } catch (const std::bad_alloc &) {
+        // The original Pending request still owns the writer and admission.
+        return {};
+    }
+    requestIt->second.state = PendingWriteRequestRecord::State::Resolving;
     locker.unlock();
-    KisReplicaAccess access = provider->resolveAccess(leaseId,
-                                                      pending.accessOperation,
-                                                      pending.replica,
-                                                      pending.access,
-                                                      KisPageAccessMode::Write);
+    try {
+        active->access.emplace(provider->resolveAccess(leaseId,
+            pending.accessOperation, pending.replica, pending.access, KisPageAccessMode::Write));
+    } catch (const std::bad_alloc &) {
+        locker.relock();
+        requestIt = d->writeRequests.find(request.id.value);
+        if (requestIt != d->writeRequests.end()
+            && requestIt->second.state == PendingWriteRequestRecord::State::Resolving)
+            requestIt->second.state = PendingWriteRequestRecord::State::Pending;
+        return {};
+    }
     locker.relock();
+    auto &access = *active->access;
     requestIt = d->writeRequests.find(request.id.value);
-    if (requestIt == d->writeRequests.end() || requestIt->state != PendingWriteRequestRecord::State::Resolving) {
+    if (requestIt == d->writeRequests.end() || requestIt->second.state != PendingWriteRequestRecord::State::Resolving) {
         if (access.isValid()) {
             locker.unlock();
             provider->releaseAccess(std::move(access), {});
+            locker.relock();
         }
         return {};
     }
-    if (!access.isValid(pending.access)) {
-        requestIt->state = PendingWriteRequestRecord::State::Pending;
+    if (!access.isValid(pending.access) || access.mode != KisPageAccessMode::Write
+        || !(access.lease == leaseId) || !(access.operation == pending.accessOperation)
+        || !(access.replica == pending.replica)) {
+        if (access.isValid()) {
+            locker.unlock();
+            provider->releaseAccess(std::move(access), {});
+            locker.relock();
+            requestIt = d->writeRequests.find(request.id.value);
+            if (requestIt == d->writeRequests.end()) return {};
+        }
+        requestIt->second.state = PendingWriteRequestRecord::State::Pending;
         return {};
     }
 
@@ -3132,18 +4096,20 @@ KisWriteLease KisPageStore::resolve(const KisWriteRequest &request, const KisCom
     lease.m_cpuData = access.cpuWriteData;
     lease.m_gpuAccess = access.gpuAccess;
     lease.m_layout = pending.replica.layout;
-    const std::shared_ptr<ActiveWriteRecord> active =
-        std::make_shared<ActiveWriteRecord>(provider, std::move(access), std::move(pending));
     lease.m_lifetime = active;
-    d->activeWrites.insert(leaseId.value, active);
+    // Resolving excludes another consumer; the unique ID and prepared node
+    // make installation independent of index growth while the gate was open.
+    const auto installed = d->activeWrites.insert(std::move(preparedNode));
+    Q_ASSERT(installed.inserted);
     d->writeRequests.erase(requestIt);
     return lease;
 }
 
 bool KisPageStore::cancel(const KisReadRequest &request)
 {
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    return d->readCoordinator.cancelLocked(request, locker);
+    return d->readCoordinator.cancelLocked(request, locker, cleanup);
 }
 
 bool KisPageStore::cancel(const KisWriteRequest &request)
@@ -3151,17 +4117,17 @@ bool KisPageStore::cancel(const KisWriteRequest &request)
     QMutexLocker locker(&d->mutex);
     auto requestIt = d->writeRequests.find(request.id.value);
     if (!d->operational || !request.isValid() || requestIt == d->writeRequests.end()
-        || requestIt->state != PendingWriteRequestRecord::State::Pending
-        || !(requestIt->transaction == request.transaction)
-        || !(requestIt->baseVersion == request.baseVersion) || !(requestIt->version == request.writeVersion)
-        || !(requestIt->writer == request.writer) || !(requestIt->readiness == request.readiness)
-        || !(requestIt->access == request.access) || requestIt->writeMode != request.mode) {
+        || requestIt->second.state != PendingWriteRequestRecord::State::Pending
+        || !(requestIt->second.transaction == request.transaction)
+        || !(requestIt->second.baseVersion == request.baseVersion) || !(requestIt->second.version == request.writeVersion)
+        || !(requestIt->second.writer == request.writer) || !(requestIt->second.readiness == request.readiness)
+        || !(requestIt->second.access == request.access) || requestIt->second.writeMode != request.mode) {
         return false;
     }
-    const auto result = d->cancelWriteLocked(requestIt.value());
+    const auto result = d->cancelWriteLocked(requestIt->second);
     if (!result.accepted)
         return false;
-    d->releaseGenericWrite(requestIt->transaction, requestIt->version.key);
+    d->releaseGenericWrite(requestIt->second.transaction, requestIt->second.version.key);
     d->writeRequests.erase(requestIt);
     d->retireEffectsLocked(result.effects, locker);
     return true;
@@ -3169,9 +4135,10 @@ bool KisPageStore::cancel(const KisWriteRequest &request)
 
 void KisPageStore::release(KisReadLease lease, const KisCompletionTicket &consumerLastUse)
 {
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    auto keys = d->readCoordinator.retryReleasedReadsLocked();
-    const auto released = d->readCoordinator.releaseLocked(std::move(lease), consumerLastUse, locker);
+    auto keys = d->readCoordinator.retryReleasedReadsLocked(cleanup);
+    const auto released = d->readCoordinator.releaseLocked(std::move(lease), consumerLastUse, locker, cleanup);
     if (released.isValid()) keys.append(released);
     if (keys.isEmpty()) return;
     const auto retirements = d->historyCollector.collectUnreachableLocked(keys);
@@ -3182,11 +4149,12 @@ bool KisPageStore::acknowledgeLastUse(const KisVerifiedCompletion &completion)
 {
     if (!completion.isValid())
         return false;
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
     bool retriedAcknowledge = false;
-    auto releasedKeys = d->readCoordinator.retryReleasedReadsLocked(completion.ticket(),
+    auto releasedKeys = d->readCoordinator.retryReleasedReadsLocked(cleanup, completion.ticket(),
                                                                     &retriedAcknowledge);
-    const auto acknowledged = d->readCoordinator.acknowledgeLastUseLocked(completion);
+    const auto acknowledged = d->readCoordinator.acknowledgeLastUseLocked(completion, cleanup);
     releasedKeys += acknowledged.releasedKeys;
     const auto retirements = d->historyCollector.collectUnreachableLocked(releasedKeys);
     d->retireEffectsLocked(retirements, locker);
@@ -3386,15 +4354,17 @@ KisCompletionTicket KisPageStore::publish(KisWriteLease lease, const KisCompleti
 KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisCompletionTicket &completion)
 {
     QMutexLocker lock(&d->mutex);
-    const auto active = d->activeWrites.value(lease.m_leaseId.value);
+    const auto it = d->activeWrites.find(lease.m_leaseId.value);
+    const auto active = it == d->activeWrites.end() ? nullptr : it->second;
     if (!lease.isValid() || !active || lease.m_lifetime.get() != active.get())
         return {};
-    d->writeCoordinator.beginPreparationActivity(active->request.transaction);
+    if (!d->writeCoordinator.beginPreparationActivity(active->request.transaction, lock))
+        return {};
     const auto preparationClaim = qScopeGuard([&] {
         d->writeCoordinator.endPreparationActivity(active->request.transaction);
     });
     lock.unlock();
-    active->provider->releaseAccess(std::move(active->access), completion);
+    active->provider->releaseAccess(std::move(*active->access), completion);
     lock.relock();
 
     const auto &request = active->request;
@@ -3434,13 +4404,16 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         lock.relock();
     }
     if (success) {
-        success = overlay.tryInstallLocked(
-            &retirements, &metadataCleanup, nullptr);
+        success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryInstallLocked(
+            &metadataCleanup, nullptr);
+        if (success)
+            overlay.collectRetirementsLocked(&retirements);
     }
     const auto disposeCleanup = qScopeGuard([&] {
         lock.unlock();
         disposeDeferredMetadataCleanup(
             std::move(metadataCleanup), d->metadataCleanupStatistics);
+        overlay = {};
         lock.relock();
     });
     if (!success) {
@@ -3450,7 +4423,7 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
             return {}; // consumed lease remains abort-retryable in activeWrites
         retirements = cancelled.effects;
     }
-    d->activeWrites.remove(lease.m_leaseId.value);
+    d->activeWrites.erase(lease.m_leaseId.value);
     d->retireEffectsLocked(retirements, lock);
     d->releaseGenericWrite(request.transaction, request.version.key);
     return success ? completion : KisCompletionTicket{};
@@ -3552,6 +4525,17 @@ KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transac
     QMutexLocker locker(&d->mutex);
     return d->publicationCoordinator.commitLocked(transaction, preparedPages, retainedAfter, this, locker);
 }
+KisImageEpochCommitTicket KisPageStore::commitAndReleasePublicationLock(
+    const KisPageTransaction &transaction, const KisPreparedPageSet &preparedPages,
+    QWriteLocker &publicationLock)
+{
+    if (transaction.id.isValid())
+        KisPageMutationSession::Private::retryOrphans(d.data(), transaction.id);
+    QMutexLocker locker(&d->mutex);
+    return d->publicationCoordinator.commitLocked(transaction, preparedPages, nullptr, this, locker,
+                                                  &publicationLock);
+}
+
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained)
 {
     QMutexLocker locker(&d->mutex);
@@ -3568,8 +4552,9 @@ bool KisPageStore::abort(const KisPageTransaction &transaction)
 {
     if (transaction.id.isValid())
         KisPageMutationSession::Private::retryOrphans(d.data(), transaction.id);
+    KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.abortLocked(transaction, locker);
+    return d->publicationCoordinator.abortLocked(transaction, locker, cleanup);
 }
 KisImageEpochSnapshot KisPageStore::captureCommittedEpoch() const
 {

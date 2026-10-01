@@ -11,6 +11,7 @@
 #include <QGlobalStatic>
 #include <limits>
 #include <utility>
+#include <memory>
 
 #include <QScopeGuard>
 
@@ -128,25 +129,34 @@ void KisTileDataStore::tryForceUpdateMemoryStatisticsWhileIdle()
 
 inline void KisTileDataStore::registerTileDataImp(KisTileData *td)
 {
-    int index = m_counter.fetchAndAddOrdered(1);
+    const int index = m_counter.fetchAndAddOrdered(1);
+    QSBR::RawPointerAccess access(m_tileDataMap.getGC());
+    auto cell = m_tileDataMap.insertOrFind(index);
+    registerTileDataInCell(td, index, cell);
+}
+
+void KisTileDataStore::registerTileDataInCell(
+    KisTileData *td, int index, ConcurrentMap<int, KisTileData*>::Mutator &cell)
+{
     td->m_tileNumber = index;
-
-    // make sure that access to the hash table is guarded by GC block
-    // (it avoids removal of the referenced cells caused by concurrent
-    // migrations)
-    m_tileDataMap.getGC().lockRawPointerAccess();
-    m_tileDataMap.assign(index, td);
-    m_tileDataMap.getGC().unlockRawPointerAccess();
-    m_tileDataMap.getGC().update();
-
+    bool installed = false;
+    const auto restoreNumber = qScopeGuard([&] { if (!installed) td->m_tileNumber = -1; });
+    // A concurrent migration can still require preparation for ordinary
+    // registration. A rejection occurs before the new value is published.
+    KisTileData *old = cell.exchangeValue(td);
+    KIS_ASSERT(!old); // Registration indices are unique.
+    installed = true;
     m_numTiles.ref();
     m_memoryMetric += td->pixelSize();
 }
 
 void KisTileDataStore::registerTileData(KisTileData *td)
 {
-    QReadLocker lock(&m_iteratorLock);
-    registerTileDataImp(td);
+    {
+        QReadLocker lock(&m_iteratorLock);
+        registerTileDataImp(td);
+    }
+    m_tileDataMap.getGC().update();
 }
 
 inline void KisTileDataStore::unregisterTileDataImp(KisTileData *td)
@@ -154,7 +164,7 @@ inline void KisTileDataStore::unregisterTileDataImp(KisTileData *td)
     // make sure that access to the hash table is guarded by GC block
     // (it avoids removal of the referenced cells caused by concurrent
     // migrations)
-    m_tileDataMap.getGC().lockRawPointerAccess();
+    QSBR::RawPointerAccess access(m_tileDataMap.getGC());
 
     if (m_clockIndex == td->m_tileNumber) {
         do {
@@ -163,19 +173,20 @@ inline void KisTileDataStore::unregisterTileDataImp(KisTileData *td)
     }
 
     int index = td->m_tileNumber;
-    td->m_tileNumber = -1;
     m_tileDataMap.erase(index);
+    td->m_tileNumber = -1;
     m_numTiles.deref();
     m_memoryMetric -= td->pixelSize();
 
-    m_tileDataMap.getGC().unlockRawPointerAccess();
-    m_tileDataMap.getGC().update();
 }
 
 void KisTileDataStore::unregisterTileData(KisTileData *td)
 {
-    QReadLocker lock(&m_iteratorLock);
-    unregisterTileDataImp(td);
+    {
+        QReadLocker lock(&m_iteratorLock);
+        unregisterTileDataImp(td);
+    }
+    m_tileDataMap.getGC().update();
 }
 
 bool KisTileDataStore::reserveResidentMemory(qint32 pixelSize)
@@ -233,9 +244,9 @@ KisTileData *KisTileDataStore::allocTileData(qint32 pixelSize, const quint8 *def
     const auto releaseReservation = qScopeGuard([&] {
         releaseResidentMemoryReservation(pixelSize);
     });
-    KisTileData *td = new KisTileData(pixelSize, defPixel, this);
-    registerTileData(td);
-    return td;
+    auto td = std::make_unique<KisTileData>(pixelSize, defPixel, this);
+    registerTileData(td.get());
+    return td.release();
 }
 
 KisTileData *KisTileDataStore::createTileDataFromRows(
@@ -254,9 +265,9 @@ KisTileData *KisTileDataStore::createTileDataFromRows(
     const auto releaseReservation = qScopeGuard([&] {
         releaseResidentMemoryReservation(pixelSize);
     });
-    KisTileData *td = new KisTileData(pixelSize, source, sourceStride, this);
-    registerTileData(td);
-    return td;
+    auto td = std::unique_ptr<KisTileData>(new KisTileData(pixelSize, source, sourceStride, this));
+    registerTileData(td.get());
+    return td.release();
 }
 
 KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs)
@@ -282,14 +293,15 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *preclon
         if (precloneHit) *precloneHit = false;
         if (!rhs->blockSwapping())
             return nullptr;
+        const auto releaseSwap = qScopeGuard([&] { rhs->unblockSwapping(); });
         td = new KisTileData(*rhs);
-        rhs->unblockSwapping();
         DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
         DEBUG_COUNT_PRECLONE_MISS(rhs);
     }
 
-    registerTileData(td);
-    return td;
+    std::unique_ptr<KisTileData> candidate(td);
+    registerTileData(candidate.get());
+    return candidate.release();
 }
 
 KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit)
@@ -311,8 +323,39 @@ KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *p
         DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
         DEBUG_COUNT_PRECLONE_MISS(rhs);
     }
-    registerTileData(td);
-    return td;
+    std::unique_ptr<KisTileData> candidate(td);
+    registerTileData(candidate.get());
+    return candidate.release();
+}
+
+bool KisTileDataStore::tryClaimBackingHandoff(KisTileData *td)
+{
+    if (!td || td->m_store != this || !m_iteratorLock.tryLockForRead()) return false;
+    if (!td->m_swapLock.tryLockForWrite()) {
+        m_iteratorLock.unlock();
+        return false;
+    }
+    // The binding owns one ref. Extra lifetime holders (including aliases,
+    // legacy caches and immutable sources) conservatively exclude transfer.
+    // Ref count is not permission: both physical barriers are already held.
+    if (!td->m_data || td->m_refCount.loadAcquire() != 1 || td->m_usersCount.loadAcquire() != 0 ||
+        td->m_mementoFlag || td->m_clonesStack.size()) {
+        td->m_swapLock.unlock();
+        m_iteratorLock.unlock();
+        return false;
+    }
+    return true;
+}
+
+void KisTileDataStore::finishBackingHandoff(KisTileData *td, bool writable) noexcept
+{
+    Q_ASSERT(td && td->m_store == this && td->m_data);
+    td->m_swapLock.unlock();
+    // Qt has no atomic write-to-read downgrade. The iterator barrier still
+    // excludes the swapper/pooler here; no external lifetime holder existed
+    // at claim. Binding consumers remain excluded until this pin is ready.
+    if (writable) td->m_swapLock.lockForRead();
+    m_iteratorLock.unlock();
 }
 
 void KisTileDataStore::freeTileData(KisTileData *td)
@@ -332,6 +375,7 @@ void KisTileDataStore::freeTileData(KisTileData *td)
 
     td->m_swapLock.unlock();
     m_iteratorLock.unlock();
+    m_tileDataMap.getGC().update();
 
     {
         QMutexLocker locker(&m_residencyObserverLock);
@@ -500,7 +544,7 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
          * The order of this heavy locking is very important.
          * Change it only in case, you really know what you are doing.
          */
-        m_iteratorLock.lockForWrite();
+        QWriteLocker iteratorLocker(&m_iteratorLock);
 
         /**
          * If someone has managed to load the td from swap, then, most
@@ -520,21 +564,31 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
         bool attemptedLoad = false;
         quint64 revision = 0;
         if (!td->data()) {
-            td->m_swapLock.lockForWrite();
+            QWriteLocker swapLocker(&td->m_swapLock);
             if (!validateResidencyChangeLocked(td, prepared)) {
                 stale = true;
-            } else {
+            } else try {
+                // Prepare the real map cell while both original gates exclude
+                // registration/migration. Loading may consume the swap record;
+                // no map allocation may follow that physical transition.
+                const int index = m_counter.fetchAndAddOrdered(1);
+                QSBR::RawPointerAccess access(m_tileDataMap.getGC());
+                auto cell = m_tileDataMap.insertOrFind(index);
                 attemptedLoad = true;
                 loaded = m_swappedStore.swapInTileData(td);
                 if (loaded) {
-                    registerTileDataImp(td);
+                    registerTileDataInCell(td, index, cell);
                     revision = recordResidencyChangeLocked(td, true);
                 }
+            } catch (const std::bad_alloc &) {
+                // Preserve the bool admission contract. Preparation precedes
+                // swap-in; both locks and the reservation unwind on rejection.
+                return false;
             }
-            td->m_swapLock.unlock();
         }
 
-        m_iteratorLock.unlock();
+        iteratorLocker.unlock();
+        m_tileDataMap.getGC().update();
 
         if (loaded)
             commitResidencyChange(prepared, revision);
@@ -583,6 +637,7 @@ bool KisTileDataStore::trySwapTileData(KisTileData *td)
         }
         td->m_swapLock.unlock();
         m_iteratorLock.unlock();
+        m_tileDataMap.getGC().update();
 
         if (result) {
             commitResidencyChange(prepared, revision);

@@ -12,6 +12,8 @@
  */
 
 #include "kis_painter.h"
+#include "KisRenderedDab.h"
+#include "kis_datamanager.h"
 #include <stdlib.h>
 #include <string.h>
 #include <cfloat>
@@ -23,6 +25,7 @@
 
 #include <QImage>
 #include <QRect>
+#include <QScopeGuard>
 #include <QString>
 #include <kundo2command.h>
 
@@ -35,6 +38,7 @@
 #include "kis_paint_device.h"
 #include "kis_fixed_paint_device.h"
 #include "kis_transaction.h"
+#include "KisStrokeJobFailureContext.h"
 #include "kis_vec.h"
 #include "kis_iterator_ng.h"
 #include "kis_random_accessor_ng.h"
@@ -332,7 +336,11 @@ void KisPainter::revertTransaction()
     Q_ASSERT_X(d->transaction, "KisPainter::revertTransaction()",
                "No transaction is in progress");
 
-    d->transaction->revert();
+    QString error;
+    if (!d->transaction->tryRevert(&error)) {
+        qWarning() << "Painter transaction cancellation failed:" << error;
+        return;
+    }
     delete d->transaction;
     d->transaction = 0;
 }
@@ -342,7 +350,11 @@ void KisPainter::endTransaction(KisUndoAdapter *undoAdapter)
     Q_ASSERT_X(d->transaction, "KisPainter::endTransaction()",
                "No transaction is in progress");
 
-    d->transaction->commit(undoAdapter);
+    QString error;
+    if (!d->transaction->tryCommit(undoAdapter, &error)) {
+        qWarning() << "Painter transaction completion failed:" << error;
+        return;
+    }
     delete d->transaction;
     d->transaction = 0;
 }
@@ -352,7 +364,11 @@ void KisPainter::endTransaction(KisPostExecutionUndoAdapter *undoAdapter)
     Q_ASSERT_X(d->transaction, "KisPainter::endTransaction()",
                "No transaction is in progress");
 
-    d->transaction->commit(undoAdapter);
+    QString error;
+    if (!d->transaction->tryCommit(undoAdapter, &error)) {
+        qWarning() << "Painter transaction completion failed:" << error;
+        return;
+    }
     delete d->transaction;
     d->transaction = 0;
 }
@@ -394,6 +410,11 @@ KisTransaction* KisPainter::takeTransaction()
     KisTransaction *temp = d->transaction;
     d->transaction = 0;
     return temp;
+}
+
+void KisPainter::setStrokeMutationOwner(KisTransaction *transaction)
+{
+    d->strokeMutationOwner = transaction;
 }
 
 
@@ -514,6 +535,7 @@ void KisPainter::bitBltWithFixedSelection(qint32 dstX, qint32 dstY,
                                           qint32 srcX, qint32 srcY,
                                           qint32 srcWidth, qint32 srcHeight)
 {
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     // TODO: get selX and selY working as intended
 
     /* This check for nonsense ought to be a Q_ASSERT. However, when paintops are just
@@ -555,25 +577,31 @@ void KisPainter::bitBltWithFixedSelection(qint32 dstX, qint32 dstY,
     /* Create an intermediate byte array to hold information before it is written
     to the current paint device (d->device) */
     quint8* dstBytes = 0;
+    const auto freeDestination = qScopeGuard([&] { delete[] dstBytes; });
     try {
         dstBytes = new quint8[srcWidth * srcHeight * d->device->pixelSize()];
     } catch (const std::bad_alloc&) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter temporary buffer allocation failed"));
         warnKrita << "KisPainter::bitBltWithFixedSelection std::bad_alloc for " << srcWidth << " * " << srcHeight << " * " << d->device->pixelSize() << "dst bytes";
         return;
     }
 
     d->device->readBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
     // Copy the relevant bytes of raw data from srcDev
     quint8* srcBytes = 0;
+    const auto freeSource = qScopeGuard([&] { delete[] srcBytes; });
     try {
         srcBytes = new quint8[srcWidth * srcHeight * srcDev->pixelSize()];
     } catch (const std::bad_alloc&) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter temporary buffer allocation failed"));
         warnKrita << "KisPainter::bitBltWithFixedSelection std::bad_alloc for " << srcWidth << " * " << srcHeight << " * " << d->device->pixelSize() << "src bytes";
         return;
     }
 
     srcDev->readBytes(srcBytes, srcX, srcY, srcWidth, srcHeight);
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
     const QRect selBounds = selection->bounds();
     const quint8 *selRowStart = selection->data() +
@@ -600,14 +628,17 @@ void KisPainter::bitBltWithFixedSelection(qint32 dstX, qint32 dstY,
         to merge in the next block*/
         quint32 totalBytes = srcWidth * srcHeight * selection->pixelSize();
         quint8* mergedSelectionBytes = 0;
+        const auto freeSelection = qScopeGuard([&] { delete[] mergedSelectionBytes; });
         try {
             mergedSelectionBytes = new quint8[ totalBytes ];
         } catch (const std::bad_alloc&) {
+            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter temporary buffer allocation failed"));
             warnKrita << "KisPainter::bitBltWithFixedSelection std::bad_alloc for " << srcWidth << " * " << srcHeight << " * " << d->device->pixelSize() << "total bytes";
             return;
         }
 
         d->selection->projection()->readBytes(mergedSelectionBytes, dstX, dstY, srcWidth, srcHeight);
+        if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
         KoCompositeOp::ParameterInfo multiplyParamInfo;
         multiplyParamInfo.opacity = 1.0f;
@@ -634,13 +665,11 @@ void KisPainter::bitBltWithFixedSelection(qint32 dstX, qint32 dstY,
         d->paramInfo.rows          = srcHeight;
         d->paramInfo.cols          = srcWidth;
         d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
-        delete[] mergedSelectionBytes;
+
     }
 
     d->device->writeBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
-
-    delete[] dstBytes;
-    delete[] srcBytes;
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
     addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
 }
@@ -658,18 +687,25 @@ template <bool useOldSrcData>
 void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
                             const KisPaintDeviceSP srcDev,
                             qint32 srcX, qint32 srcY,
-                            qint32 srcWidth, qint32 srcHeight)
+                            qint32 srcWidth, qint32 srcHeight, KisTransaction *strokeOwner)
 {
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     /* This check for nonsense ought to be a Q_ASSERT. However, when paintops are just
     initializing they perform some dummy passes with those parameters, and it must not crash */
     if (srcWidth == 0 || srcHeight == 0) return;
     if (srcDev.isNull()) return;
     if (d->device.isNull()) return;
+    if (strokeOwner && srcDev->dataManager() == d->device->dataManager()) {
+        // An external current reader cannot see uncheckpointed target pending.
+        // Self/source-dependent operations need their own explicit read intent.
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Stroke bitBlt requires an independent source"));
+        return;
+    }
 
     QRect srcRect = QRect(srcX, srcY, srcWidth, srcHeight);
 
     if (d->compositeOpId == COMPOSITE_COPY) {
-        if(!d->selection && d->isOpacityUnit &&
+        if(!strokeOwner && !d->selection && d->isOpacityUnit &&
            srcX == dstX && srcY == dstY &&
            d->device->fastBitBltPossible(srcDev) &&
            (!srcDev->defaultBounds()->wrapAroundMode() ||
@@ -681,7 +717,7 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
                 d->device->fastBitBlt(srcDev, srcRect);
             }
 
-            addDirtyRect(srcRect);
+            if (!KisStrokeJobFailureContext::currentJobHasFailed()) addDirtyRect(srcRect);
             return;
         }
     }
@@ -700,19 +736,19 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
     qint32 srcY_ = srcY;
     qint32 rowsRemaining = srcHeight;
 
-    const KoCompositeOp *compositeOp = d->compositeOp(srcDev->colorSpace());
+    const KoCompositeOp *compositeOp = d->colorSpace->compositeOp(d->compositeOpId, srcDev->colorSpace());
+    KoCompositeOp::ParameterInfo localParamInfo = d->paramInfo;
 
     // Read below
     KisRandomConstAccessorSP srcIt = srcDev->createRandomConstAccessorNG();
+    KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : nullptr;
     const bool painted = d->device->applyPixelOperation(QRect(dstX, dstY, srcWidth, srcHeight),
         [&](KisPixelWriteCursor *dstIt) {
 
         /* Here be a huge block of verbose code that does roughly the same than
         the other bit blit operations. This one is longer than the rest in an effort to
         optimize speed and memory use */
-        if (d->selection) {
-            KisPaintDeviceSP selectionProjection(d->selection->projection());
-            KisRandomConstAccessorSP maskIt = selectionProjection->createRandomConstAccessorNG();
+        if (maskIt) {
 
             while (rowsRemaining > 0) {
 
@@ -746,18 +782,18 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
                     qint32 maskRowStride = maskIt->rowStride(dstX_, dstY_);
                     maskIt->moveTo(dstX_, dstY_);
 
-                    d->paramInfo.dstRowStart   = dstIt->rawData();
-                    d->paramInfo.dstRowStride  = dstRowStride;
+                    localParamInfo.dstRowStart   = dstIt->rawData();
+                    localParamInfo.dstRowStride  = dstRowStride;
                     // Read the captured current/before view through the const
                     // contract. Never downcast a reader into a mutable accessor.
-                    d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
-                    d->paramInfo.srcRowStride  = srcRowStride;
-                    d->paramInfo.maskRowStart  = maskIt->rawDataConst();
-                    d->paramInfo.maskRowStride = maskRowStride;
-                    d->paramInfo.rows          = rows;
-                    d->paramInfo.cols          = columns;
-                    if (!d->paramInfo.dstRowStart || !d->paramInfo.srcRowStart || !d->paramInfo.maskRowStart) return false;
-                    d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
+                    localParamInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
+                    localParamInfo.srcRowStride  = srcRowStride;
+                    localParamInfo.maskRowStart  = maskIt->rawDataConst();
+                    localParamInfo.maskRowStride = maskRowStride;
+                    localParamInfo.rows          = rows;
+                    localParamInfo.cols          = columns;
+                    if (!localParamInfo.dstRowStart || !localParamInfo.srcRowStart || !localParamInfo.maskRowStart) return false;
+                    d->colorSpace->bitBlt(srcDev->colorSpace(), localParamInfo, compositeOp, d->renderingIntent, d->conversionFlags);
 
                     srcX_ += columns;
                     dstX_ += columns;
@@ -796,16 +832,16 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
                     qint32 dstRowStride = dstIt->rowStride(dstX_, dstY_);
                     dstIt->moveTo(dstX_, dstY_);
 
-                    d->paramInfo.dstRowStart   = dstIt->rawData();
-                    d->paramInfo.dstRowStride  = dstRowStride;
-                    d->paramInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
-                    d->paramInfo.srcRowStride  = srcRowStride;
-                    d->paramInfo.maskRowStart  = 0;
-                    d->paramInfo.maskRowStride = 0;
-                    d->paramInfo.rows          = rows;
-                    d->paramInfo.cols          = columns;
-                    if (!d->paramInfo.dstRowStart || !d->paramInfo.srcRowStart) return false;
-                    d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
+                    localParamInfo.dstRowStart   = dstIt->rawData();
+                    localParamInfo.dstRowStride  = dstRowStride;
+                    localParamInfo.srcRowStart   = useOldSrcData ? srcIt->oldRawData() : srcIt->rawDataConst();
+                    localParamInfo.srcRowStride  = srcRowStride;
+                    localParamInfo.maskRowStart  = 0;
+                    localParamInfo.maskRowStride = 0;
+                    localParamInfo.rows          = rows;
+                    localParamInfo.cols          = columns;
+                    if (!localParamInfo.dstRowStart || !localParamInfo.srcRowStart) return false;
+                    d->colorSpace->bitBlt(srcDev->colorSpace(), localParamInfo, compositeOp, d->renderingIntent, d->conversionFlags);
 
                     srcX_ += columns;
                     dstX_ += columns;
@@ -819,8 +855,11 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
         }
 
         return true;
-    });
-    if (!painted) return;
+    }, strokeOwner);
+    if (!painted) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter pixel operation failed"));
+        return;
+    }
     addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
 
 }
@@ -830,7 +869,8 @@ void KisPainter::bitBlt(qint32 dstX, qint32 dstY,
                         qint32 srcX, qint32 srcY,
                         qint32 srcWidth, qint32 srcHeight)
 {
-    bitBltImpl<false>(dstX, dstY, srcDev, srcX, srcY, srcWidth, srcHeight);
+    bitBltImpl<false>(dstX, dstY, srcDev, srcX, srcY, srcWidth, srcHeight,
+                      d->strokeMutationOwner);
 }
 
 
@@ -958,71 +998,54 @@ void KisPainter::bltFixed(qint32 dstX, qint32 dstY,
                           qint32 srcX, qint32 srcY,
                           qint32 srcWidth, qint32 srcHeight)
 {
-    /* This check for nonsense ought to be a Q_ASSERT. However, when paintops are just
-    initializing they perform some dummy passes with those parameters, and it must not crash */
-    if (srcWidth == 0 || srcHeight == 0) return;
-    if (srcDev.isNull()) return;
-    if (d->device.isNull()) return;
+    bltFixedImpl(dstX, dstY, srcDev, srcX, srcY, srcWidth, srcHeight,
+                 d->strokeMutationOwner);
+}
 
-    QRect srcRect = QRect(srcX, srcY, srcWidth, srcHeight);
-    QRect srcBounds = srcDev->bounds();
-
-    /* Trying to read outside a KisFixedPaintDevice is inherently wrong and shouldn't be done,
-    so crash if someone attempts to do this. Don't resize as it would obfuscate the mistake. */
+void KisPainter::bltFixedImpl(qint32 dstX, qint32 dstY,
+                              const KisFixedPaintDeviceSP srcDev,
+                              qint32 srcX, qint32 srcY,
+                              qint32 srcWidth, qint32 srcHeight,
+                              KisTransaction *strokeOwner)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+    // Paintops can make empty dummy calls during initialization.
+    if (srcWidth <= 0 || srcHeight <= 0 || !srcDev || !d->device) return;
+    const QRect srcRect(srcX, srcY, srcWidth, srcHeight);
+    const QRect srcBounds = srcDev->bounds();
     KIS_SAFE_ASSERT_RECOVER_RETURN(srcBounds.contains(srcRect));
-    Q_UNUSED(srcRect); // only used in above assertion
 
-    const KoCompositeOp *compositeOp = d->compositeOp(srcDev->colorSpace());
+    const QRect dirtyRect(dstX, dstY, srcWidth, srcHeight);
+    QRect writeRect = dirtyRect;
+    if (d->device->supportsWraproundMode() && d->device->defaultBounds()->wrapAroundMode()) {
+        // The old read/compose/writeBytes operation writes only the first
+        // period on each wrapped axis (KisWrappedRect). Keep that contract:
+        // traversing every repeated mapping would composite a pixel twice.
+        const auto bounds = d->device->defaultBounds();
+        const QRect wrap = bounds->imageBorderRect();
+        const auto axis = bounds->wrapAroundModeAxis();
+        if (axis != WRAPAROUND_VERTICAL) writeRect.setWidth(qMin(writeRect.width(), wrap.width()));
+        if (axis != WRAPAROUND_HORIZONTAL) writeRect.setHeight(qMin(writeRect.height(), wrap.height()));
+    }
+    if (writeRect.isEmpty()) return;
 
-    /* Create an intermediate byte array to hold information before it is written
-    to the current paint device (aka: d->device) */
-    quint8* dstBytes = 0;
-    try {
-         dstBytes = new quint8[srcWidth * srcHeight * d->device->pixelSize()];
-    } catch (const std::bad_alloc&) {
-        warnKrita << "KisPainter::bltFixed std::bad_alloc for " << srcWidth << " * " << srcHeight << " * " << d->device->pixelSize() << "total bytes";
+    // Reuse the fixed-source span kernel, retaining the caller's exact opacity,
+    // flow and optional lastOpacity semantics instead of dab defaults.
+    KisRenderedDab dab(srcDev);
+    dab.offset = QPoint(dstX, dstY);
+    KoCompositeOp::ParameterInfo localParamInfo = d->paramInfo;
+    const KoCompositeOp *operation = d->colorSpace->compositeOp(d->compositeOpId, srcDev->colorSpace());
+    KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : nullptr;
+    const bool painted = d->device->applyPixelOperation(writeRect, [&](KisPixelWriteCursor *cursor) {
+        return maskIt
+            ? d->applyDeviceWithSelection(writeRect, dab, cursor, maskIt, srcDev->colorSpace(), operation, localParamInfo, false, srcRect)
+            : d->applyDevice(writeRect, dab, cursor, srcDev->colorSpace(), operation, localParamInfo, false, srcRect);
+    }, strokeOwner);
+    if (!painted) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter fixed-source pixel operation failed"));
         return;
     }
-    d->device->readBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
-
-    const quint8 *srcRowStart = srcDev->data() +
-        (srcBounds.width() * (srcY - srcBounds.top()) + (srcX - srcBounds.left())) * srcDev->pixelSize();
-
-    d->paramInfo.dstRowStart   = dstBytes;
-    d->paramInfo.dstRowStride  = srcWidth * d->device->pixelSize();
-    d->paramInfo.srcRowStart   = srcRowStart;
-    d->paramInfo.srcRowStride  = srcBounds.width() * srcDev->pixelSize();
-    d->paramInfo.maskRowStart  = 0;
-    d->paramInfo.maskRowStride = 0;
-    d->paramInfo.rows          = srcHeight;
-    d->paramInfo.cols          = srcWidth;
-
-    if (d->selection) {
-        /* d->selection is a KisPaintDevice, so first a readBytes is performed to
-        get the area of interest... */
-        KisPaintDeviceSP selectionProjection(d->selection->projection());
-        quint8* selBytes = 0;
-        try {
-            selBytes = new quint8[srcWidth * srcHeight * selectionProjection->pixelSize()];
-        }
-        catch (const std::bad_alloc&) {
-            delete[] dstBytes;
-            return;
-        }
-
-        selectionProjection->readBytes(selBytes, dstX, dstY, srcWidth, srcHeight);
-        d->paramInfo.maskRowStart = selBytes;
-        d->paramInfo.maskRowStride = srcWidth * selectionProjection->pixelSize();
-    }
-
-    // ...and then blit.
-    d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
-    d->device->writeBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
-
-    delete[] d->paramInfo.maskRowStart;
-    delete[] dstBytes;
-
-    addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
+    addDirtyRect(dirtyRect);
 }
 
 void KisPainter::bltFixed(const QPoint & pos, const KisFixedPaintDeviceSP srcDev, const QRect & srcRect)
@@ -1037,6 +1060,7 @@ void KisPainter::bltFixedWithFixedSelection(qint32 dstX, qint32 dstY,
                                             qint32 srcX, qint32 srcY,
                                             quint32 srcWidth, quint32 srcHeight)
 {
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     // TODO: get selX and selY working as intended
 
     /* This check for nonsense ought to be a Q_ASSERT. However, when paintops are just
@@ -1066,13 +1090,16 @@ void KisPainter::bltFixedWithFixedSelection(qint32 dstX, qint32 dstY,
     /* Create an intermediate byte array to hold information before it is written
     to the current paint device (aka: d->device) */
     quint8* dstBytes = 0;
+    const auto freeDestination = qScopeGuard([&] { delete[] dstBytes; });
     try {
         dstBytes = new quint8[srcWidth * srcHeight * d->device->pixelSize()];
     } catch (const std::bad_alloc&) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter temporary buffer allocation failed"));
         warnKrita << "KisPainter::bltFixedWithFixedSelection std::bad_alloc for " << srcWidth << " * " << srcHeight << " * " << d->device->pixelSize() << "total bytes";
         return;
     }
     d->device->readBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
     const quint8 *srcRowStart = srcDev->data() +
         (srcBounds.width() * (srcY - srcBounds.top()) + (srcX - srcBounds.left())) * srcDev->pixelSize();
@@ -1097,14 +1124,17 @@ void KisPainter::bltFixedWithFixedSelection(qint32 dstX, qint32 dstY,
         to merge in the next block*/
         quint32 totalBytes = srcWidth * srcHeight * selection->pixelSize();
         quint8 * mergedSelectionBytes = 0;
+        const auto freeSelection = qScopeGuard([&] { delete[] mergedSelectionBytes; });
         try {
             mergedSelectionBytes = new quint8[ totalBytes ];
         } catch (const std::bad_alloc&) {
+            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter temporary buffer allocation failed"));
             warnKrita << "KisPainter::bltFixedWithFixedSelection std::bad_alloc for " << totalBytes << "total bytes";
-            delete[] dstBytes;
+
             return;
         }
         d->selection->projection()->readBytes(mergedSelectionBytes, dstX, dstY, srcWidth, srcHeight);
+        if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
         KoCompositeOp::ParameterInfo multiplyParamInfo;
         multiplyParamInfo.opacity = 1.0f;
@@ -1132,12 +1162,11 @@ void KisPainter::bltFixedWithFixedSelection(qint32 dstX, qint32 dstY,
         d->paramInfo.cols          = srcWidth;
         d->colorSpace->bitBlt(srcDev->colorSpace(), d->paramInfo, compositeOp, d->renderingIntent, d->conversionFlags);
 
-        delete[] mergedSelectionBytes;
     }
 
     d->device->writeBytes(dstBytes, dstX, dstY, srcWidth, srcHeight);
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
 
-    delete[] dstBytes;
 
     addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
 }
@@ -2930,6 +2959,12 @@ void KisPainter::renderMirrorMaskSafe(QRect rc, KisPaintDeviceSP dab, int sx, in
 
 void KisPainter::renderMirrorMask(QRect rc, KisFixedPaintDeviceSP dab)
 {
+    renderMirrorMaskImpl(rc, dab, d->strokeMutationOwner);
+}
+
+void KisPainter::renderMirrorMaskImpl(QRect rc, KisFixedPaintDeviceSP dab, KisTransaction *strokeOwner)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     int x = rc.topLeft().x();
     int y = rc.topLeft().y();
 
@@ -2941,20 +2976,20 @@ void KisPainter::renderMirrorMask(QRect rc, KisFixedPaintDeviceSP dab)
 
     if (d->mirrorHorizontally && d->mirrorVertically){
         dab->mirror(true, false);
-        bltFixed(mirrorX, y, dab, 0,0,rc.width(),rc.height());
+        bltFixedImpl(mirrorX, y, dab, 0,0,rc.width(),rc.height(), strokeOwner);
         dab->mirror(false,true);
-        bltFixed(mirrorX, mirrorY, dab, 0,0,rc.width(),rc.height());
+        bltFixedImpl(mirrorX, mirrorY, dab, 0,0,rc.width(),rc.height(), strokeOwner);
         dab->mirror(true, false);
-        bltFixed(x, mirrorY, dab, 0,0,rc.width(),rc.height());
+        bltFixedImpl(x, mirrorY, dab, 0,0,rc.width(),rc.height(), strokeOwner);
 
     }
     else if (d->mirrorHorizontally){
         dab->mirror(true, false);
-        bltFixed(mirrorX, y, dab, 0,0,rc.width(),rc.height());
+        bltFixedImpl(mirrorX, y, dab, 0,0,rc.width(),rc.height(), strokeOwner);
     }
     else if (d->mirrorVertically){
         dab->mirror(false, true);
-        bltFixed(x, mirrorY, dab, 0,0,rc.width(),rc.height());
+        bltFixedImpl(x, mirrorY, dab, 0,0,rc.width(),rc.height(), strokeOwner);
     }
 
 }
@@ -2997,7 +3032,18 @@ void KisPainter::renderMirrorMask(QRect rc, KisFixedPaintDeviceSP dab, KisFixedP
 }
 
 
-void KisPainter::renderMirrorMask(QRect rc, KisPaintDeviceSP dab){
+void KisPainter::renderMirrorMask(QRect rc, KisPaintDeviceSP dab)
+{
+    renderMirrorMaskImpl(rc, dab, d->strokeMutationOwner);
+}
+
+void KisPainter::renderMirrorMaskImpl(QRect rc, KisPaintDeviceSP dab, KisTransaction *strokeOwner)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+    if (strokeOwner && dab->dataManager() == d->device->dataManager()) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Stroke mirroring requires an independent source"));
+        return;
+    }
     if (d->mirrorHorizontally || d->mirrorVertically){
         KisFixedPaintDeviceSP mirrorDab(new KisFixedPaintDevice(dab->colorSpace()));
         QRect dabRc( QPoint(0,0), QSize(rc.width(),rc.height()) );
@@ -3006,7 +3052,8 @@ void KisPainter::renderMirrorMask(QRect rc, KisPaintDeviceSP dab){
 
         dab->readBytes(mirrorDab->data(),rc);
 
-        renderMirrorMask( QRect(rc.topLeft(),dabRc.size()), mirrorDab);
+        if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+        renderMirrorMaskImpl(QRect(rc.topLeft(), dabRc.size()), mirrorDab, strokeOwner);
     }
 }
 

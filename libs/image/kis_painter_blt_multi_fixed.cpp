@@ -11,18 +11,31 @@
 #include "kis_fixed_paint_device.h"
 #include "kis_random_accessor_ng.h"
 #include "KisRenderedDab.h"
+#include "KisPixelWriteCursor.h"
+#include "KisStrokeJobFailureContext.h"
+#include <utility>
 
-void KisPainter::Private::applyDevice(const QRect &applyRect,
+bool KisPainter::Private::applyDevice(const QRect &applyRect,
                                       const KisRenderedDab &dab,
-                                      KisRandomAccessorSP dstIt,
+                                      KisPixelWriteCursor *dstIt,
                                       const KoColorSpace *srcColorSpace,
-                                      KoCompositeOp::ParameterInfo &localParamInfo)
+                                      const KoCompositeOp *operation,
+                                      KoCompositeOp::ParameterInfo &localParamInfo,
+                                      bool useDabParameters,
+                                      const QRect &sourceRect)
 {
-    const QRect dabRect = dab.realBounds();
+    const QRect sourceBounds = dab.device->bounds();
+    const QRect sourceView = sourceRect.isNull() ? sourceBounds : sourceRect;
+    const QRect dabRect(dab.offset, sourceView.size());
     const QRect rc = applyRect & dabRect;
+    if (rc.isEmpty()) return true;
 
     const int srcPixelSize = srcColorSpace->pixelSize();
-    const int dabRowStride = srcPixelSize * dabRect.width();
+    const int dabRowStride = srcPixelSize * sourceBounds.width();
+    if (useDabParameters) {
+        localParamInfo.setOpacityAndAverage(dab.opacity, dab.averageOpacity);
+        localParamInfo.flow = dab.flow;
+    }
 
 
     qint32 dstY = rc.y();
@@ -34,6 +47,7 @@ void KisPainter::Private::applyDevice(const QRect &applyRect,
         qint32 numContiguousDstRows = dstIt->numContiguousRows(dstY);
         qint32 rows = qMin(rowsRemaining, numContiguousDstRows);
 
+        if (rows <= 0) return false;
         qint32 columnsRemaining = rc.width();
 
         while (columnsRemaining > 0) {
@@ -41,6 +55,7 @@ void KisPainter::Private::applyDevice(const QRect &applyRect,
             qint32 numContiguousDstColumns = dstIt->numContiguousColumns(dstX);
             qint32 columns = qMin(numContiguousDstColumns, columnsRemaining);
 
+            if (columns <= 0) return false;
             qint32 dstRowStride = dstIt->rowStride(dstX, dstY);
             dstIt->moveTo(dstX, dstY);
 
@@ -52,14 +67,13 @@ void KisPainter::Private::applyDevice(const QRect &applyRect,
             localParamInfo.cols          = columns;
 
 
-            const int dabX = dstX - dabRect.x();
-            const int dabY = dstY - dabRect.y();
+            const int dabX = dstX - dabRect.x() + sourceView.x() - sourceBounds.x();
+            const int dabY = dstY - dabRect.y() + sourceView.y() - sourceBounds.y();
 
             localParamInfo.srcRowStart   = dab.device->constData() + dabX * srcPixelSize + dabY * dabRowStride;
             localParamInfo.srcRowStride  = dabRowStride;
-            localParamInfo.setOpacityAndAverage(dab.opacity, dab.averageOpacity);
-            localParamInfo.flow = dab.flow;
-            colorSpace->bitBlt(srcColorSpace, localParamInfo, compositeOp(srcColorSpace), renderingIntent, conversionFlags);
+            if (!localParamInfo.dstRowStart || !localParamInfo.srcRowStart) return false;
+            colorSpace->bitBlt(srcColorSpace, localParamInfo, operation, renderingIntent, conversionFlags);
 
             dstX += columns;
             columnsRemaining -= columns;
@@ -68,21 +82,31 @@ void KisPainter::Private::applyDevice(const QRect &applyRect,
         dstY += rows;
         rowsRemaining -= rows;
     }
-
+    return true;
 }
 
-void KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
+bool KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
                                                    const KisRenderedDab &dab,
-                                                   KisRandomAccessorSP dstIt,
+                                                   KisPixelWriteCursor *dstIt,
                                                    KisRandomConstAccessorSP maskIt,
                                                    const KoColorSpace *srcColorSpace,
-                                                   KoCompositeOp::ParameterInfo &localParamInfo)
+                                                   const KoCompositeOp *operation,
+                                                   KoCompositeOp::ParameterInfo &localParamInfo,
+                                                   bool useDabParameters,
+                                                   const QRect &sourceRect)
 {
-    const QRect dabRect = dab.realBounds();
+    const QRect sourceBounds = dab.device->bounds();
+    const QRect sourceView = sourceRect.isNull() ? sourceBounds : sourceRect;
+    const QRect dabRect(dab.offset, sourceView.size());
     const QRect rc = applyRect & dabRect;
+    if (rc.isEmpty()) return true;
 
     const int srcPixelSize = srcColorSpace->pixelSize();
-    const int dabRowStride = srcPixelSize * dabRect.width();
+    const int dabRowStride = srcPixelSize * sourceBounds.width();
+    if (useDabParameters) {
+        localParamInfo.setOpacityAndAverage(dab.opacity, dab.averageOpacity);
+        localParamInfo.flow = dab.flow;
+    }
 
 
     qint32 dstY = rc.y();
@@ -95,6 +119,7 @@ void KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
         qint32 numContiguousMaskRows = maskIt->numContiguousRows(dstY);
         qint32 rows = qMin(rowsRemaining, qMin(numContiguousDstRows, numContiguousMaskRows));
 
+        if (rows <= 0) return false;
         qint32 columnsRemaining = rc.width();
 
         while (columnsRemaining > 0) {
@@ -103,6 +128,7 @@ void KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
             qint32 numContiguousMaskColumns = maskIt->numContiguousColumns(dstX);
             qint32 columns = qMin(columnsRemaining, qMin(numContiguousDstColumns, numContiguousMaskColumns));
 
+            if (columns <= 0) return false;
             qint32 dstRowStride = dstIt->rowStride(dstX, dstY);
             qint32 maskRowStride = maskIt->rowStride(dstX, dstY);
             dstIt->moveTo(dstX, dstY);
@@ -111,19 +137,19 @@ void KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
             localParamInfo.dstRowStart   = dstIt->rawData();
             localParamInfo.dstRowStride  = dstRowStride;
             localParamInfo.maskRowStart  = maskIt->rawDataConst();
+            if (!localParamInfo.maskRowStart) return false;
             localParamInfo.maskRowStride = maskRowStride;
             localParamInfo.rows          = rows;
             localParamInfo.cols          = columns;
 
 
-            const int dabX = dstX - dabRect.x();
-            const int dabY = dstY - dabRect.y();
+            const int dabX = dstX - dabRect.x() + sourceView.x() - sourceBounds.x();
+            const int dabY = dstY - dabRect.y() + sourceView.y() - sourceBounds.y();
 
             localParamInfo.srcRowStart   = dab.device->constData() + dabX * srcPixelSize + dabY * dabRowStride;
             localParamInfo.srcRowStride  = dabRowStride;
-            localParamInfo.setOpacityAndAverage(dab.opacity, dab.averageOpacity);
-            localParamInfo.flow = dab.flow;
-            colorSpace->bitBlt(srcColorSpace, localParamInfo, compositeOp(srcColorSpace), renderingIntent, conversionFlags);
+            if (!localParamInfo.dstRowStart || !localParamInfo.srcRowStart) return false;
+            colorSpace->bitBlt(srcColorSpace, localParamInfo, operation, renderingIntent, conversionFlags);
 
             dstX += columns;
             columnsRemaining -= columns;
@@ -132,26 +158,46 @@ void KisPainter::Private::applyDeviceWithSelection(const QRect &applyRect,
         dstY += rows;
         rowsRemaining -= rows;
     }
-
+    return true;
 }
 
 void KisPainter::bltFixed(const QRect &applyRect, const QList<KisRenderedDab> allSrcDevices)
 {
+    bltFixedImpl(QVector<QRect>{applyRect}, allSrcDevices, d->strokeMutationOwner);
+}
+
+void KisPainter::bltFixed(const QVector<QRect> &applyRects,
+                          const QList<KisRenderedDab> &allSrcDevices)
+{
+    bltFixedImpl(applyRects, allSrcDevices, d->strokeMutationOwner);
+}
+
+void KisPainter::bltFixedImpl(const QVector<QRect> &applyRects,
+                              const QList<KisRenderedDab> &allSrcDevices,
+                              KisTransaction *strokeOwner)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     const KoColorSpace *srcColorSpace = 0;
     QList<KisRenderedDab> devices;
-    QRect rc = applyRect;
-
-    if (d->selection) {
-        rc &= d->selection->selectedRect();
+    QVector<QRect> clips;
+    const QRect selectionBounds = d->selection ? d->selection->selectedRect() : QRect();
+    for (QRect rc : applyRects) {
+        if (d->selection) rc &= selectionBounds;
+        if (!rc.isEmpty()) clips.append(rc);
     }
 
-    QRect totalDevicesRect;
+    QVector<QRect> targetRects;
 
     Q_FOREACH (const KisRenderedDab &dab, allSrcDevices) {
-        if (rc.intersects(dab.realBounds())) {
-            devices.append(dab);
-            totalDevicesRect |= dab.realBounds();
+        bool intersects = false;
+        for (const QRect &rc : std::as_const(clips)) {
+            const QRect target = rc & dab.realBounds();
+            if (!target.isEmpty()) {
+                intersects = true;
+                targetRects.append(target);
+            }
         }
+        if (intersects) devices.append(dab);
 
         if (!srcColorSpace) {
             srcColorSpace = dab.device->colorSpace();
@@ -160,35 +206,25 @@ void KisPainter::bltFixed(const QRect &applyRect, const QList<KisRenderedDab> al
         }
     }
 
-    rc &= totalDevicesRect;
-
-    if (devices.isEmpty() || rc.isEmpty()) return;
+    if (devices.isEmpty()) return;
 
     KoCompositeOp::ParameterInfo localParamInfo = d->paramInfo;
-    KisRandomAccessorSP dstIt = d->device->createRandomAccessorNG();
-    KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : 0;
-
-    if (maskIt) {
-        Q_FOREACH (const KisRenderedDab &dab, devices) {
-            d->applyDeviceWithSelection(rc, dab, dstIt, maskIt, srcColorSpace, localParamInfo);
+    // This painter is shared by non-overlapping brush jobs. Resolve once into
+    // this operation's local state, without writing the painter-wide cache.
+    const KoCompositeOp *operation = d->colorSpace->compositeOp(d->compositeOpId, srcColorSpace);
+    KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : nullptr;
+    const bool painted = d->device->applyPixelOperation(targetRects, [&](KisPixelWriteCursor *dstIt) {
+        for (const KisRenderedDab &dab : std::as_const(devices)) {
+            for (const QRect &rc : std::as_const(clips)) {
+                const bool accepted = maskIt
+                    ? d->applyDeviceWithSelection(rc, dab, dstIt, maskIt, srcColorSpace, operation, localParamInfo)
+                    : d->applyDevice(rc, dab, dstIt, srcColorSpace, operation, localParamInfo);
+                if (!accepted) return false;
+            }
         }
-    } else {
-        Q_FOREACH (const KisRenderedDab &dab, devices) {
-            d->applyDevice(rc, dab, dstIt, srcColorSpace, localParamInfo);
-        }
+        return true;
+    }, strokeOwner);
+    if (!painted) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter multi-dab pixel operation failed"));
     }
-
-
-#if 0
-    // the code above does basically the same thing as this one,
-    // but more efficiently :)
-
-    Q_FOREACH (KisFixedPaintDeviceSP dev, devices) {
-        const QRect copyRect = dev->bounds() & rc;
-        if (copyRect.isEmpty()) continue;
-
-        bltFixed(copyRect.topLeft(), dev, copyRect);
-    }
-#endif
 }
-

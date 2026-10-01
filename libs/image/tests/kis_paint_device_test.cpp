@@ -10,6 +10,7 @@
 
 #include <QElapsedTimer>
 #include <QRandomGenerator>
+#include <memory>
 
 #include <KoColor.h>
 #include <KoColorSpace.h>
@@ -1446,14 +1447,14 @@ void KisPaintDeviceTest::testLodTransform()
 #include "krita_utils.h"
 void syncLodCache(KisPaintDeviceSP dev, int levelOfDetail)
 {
-    KisPaintDevice::LodDataStruct* s = dev->createLodDataStruct(levelOfDetail);
+    std::unique_ptr<KisPaintDevice::LodDataStruct> s(dev->createLodDataStruct(levelOfDetail));
 
     KisRegion region = dev->regionForLodSyncing();
     Q_FOREACH(QRect rect2, KritaUtils::splitRegionIntoPatches(region, KritaUtils::optimalPatchSize())) {
-        dev->updateLodDataStruct(s, rect2);
+        dev->updateLodDataStruct(s.get(), rect2);
     }
 
-    dev->uploadLodDataStruct(s);
+    dev->uploadLodDataStruct(s.get());
 }
 
 void KisPaintDeviceTest::testLodDevice()

@@ -28,6 +28,41 @@ private:
 
 private Q_SLOTS:
 
+    void testAlphaDarkenSpanInvariant_data();
+    void testAlphaDarkenSpanInvariant();
+    void testFixedCursor_data();
+    void testFixedCursor();
+    void testFixedCursorReuse_data();
+    void testFixedCursorReuse();
+    void testSharpnessMirrorOwner_data();
+    void testSharpnessMirrorOwner();
+    void testFixedCursorOwnerRejection();
+    void testFixedCursorCancellation();
+    void testFixedCursorSnapshots_data();
+    void testFixedCursorSnapshots();
+
+    void testCompositeOverTransparentLanes_data();
+    void testCompositeOverTransparentLanes();
+    void testMappedWritePartition_data();
+    void testMappedWritePartition();
+    void testMappedWritePartitionParallel_data();
+    void testMappedWritePartitionParallel();
+    void testMappedWritePartitionRejection();
+    void testMultiDabSparseFootprint_data();
+    void testMultiDabSparseFootprint();
+    void testMultiDabSparseConcurrent_data();
+    void testMultiDabSparseConcurrent();
+    void testSparsePixelOperationBounds_data();
+    void testSparsePixelOperationBounds();
+    void testMultiDabOperation_data();
+    void testMultiDabOperation();
+    void testMultiDabReuse_data();
+    void testMultiDabReuse();
+    void testMultiDabConcurrent();
+    void testMultiDabCancellation();
+    void testMultiDabSelectionSnapshot();
+    void testMultiDabOwnerRejection();
+
     void testSimpleBlt();
     void testSelectionBltSelectionIrregular(); // Irregular selection
     void testPaintDeviceBltSelectionInverted(); // Inverted selection

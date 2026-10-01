@@ -50,6 +50,11 @@ QVector<KisReplicaBackingDomainChange> KisPageReplicaProvider::backingDomainChan
     return {};
 }
 
+bool KisPageReplicaProvider::mayHaveBackingDomainChanges() const noexcept
+{
+    return true;
+}
+
 void KisPageReplicaProvider::acknowledgeBackingDomainChange(quint64, quint64)
 {
 }

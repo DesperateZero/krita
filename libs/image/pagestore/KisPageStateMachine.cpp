@@ -247,7 +247,9 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         }
         break;
     }
-    case KisPageTransitionKind::AcquireWrite: {
+    case KisPageTransitionKind::AcquireWrite:
+    case KisPageTransitionKind::AcquireRecoverableWrite: {
+        const bool recoverable = transition.kind == KisPageTransitionKind::AcquireRecoverableWrite;
         if (!isWriterEmpty(result.next.writer)) {
             return reject(QStringLiteral("page already has a reserved writer"));
         }
@@ -271,7 +273,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         const bool virtualBase = base->isVirtualDefault() &&
             !transition.source.isValid() &&
             transition.writeMode == KisPageWriteMode::DiscardContents;
-        if (!(base->authority == transition.source) ||
+        if ((!recoverable && !(base->authority == transition.source)) ||
             (!virtualBase && (!baseAuthority || baseAuthority->validity != KisReplicaValidity::Valid))) {
             return reject(QStringLiteral("write base authority is not a valid exact-generation replica"));
         }
@@ -285,6 +287,33 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         }
         if (baseAuthority && baseAuthority->pinCount == std::numeric_limits<quint32>::max()) {
             return reject(QStringLiteral("write before-image pin count is exhausted"));
+        }
+        if (recoverable) {
+            const auto *old = base->findReplica(base->authority);
+            if (!old || !baseAuthority || old == baseAuthority ||
+                !isHandoffEmpty(result.next.authorityHandoff) ||
+                old->validity != KisReplicaValidity::Valid || old->activeOperation.isValid() ||
+                old->pinCount || !old->readLeases.isEmpty() || !old->pendingLastUses.isEmpty() ||
+                baseAuthority->activeOperation.isValid() ||
+                !(old->replica.layout == baseAuthority->replica.layout) ||
+                !(old->replica.layout == transition.target.layout) ||
+                old->replica.domain != transition.target.domain ||
+                !(old->replica.physicalSlotIdentity() == transition.target.physicalSlotIdentity()) ||
+                old->replica.physicalSlotIdentity() == transition.source.physicalSlotIdentity() ||
+                old->replica.allocation.generation == std::numeric_limits<quint64>::max() ||
+                transition.target.allocation.generation != old->replica.allocation.generation + 1) {
+                return reject(QStringLiteral("recoverable write has no idle exact source and independent before"));
+            }
+            // This changes only logical ownership, not bytes or a provider
+            // tag. A production prepared install is paired with an already
+            // acquired physical claim; the reference model proves no such
+            // physical permission. Ordinary AcquireWrite keeps its collision
+            // guard unchanged.
+            const auto oldHandle = old->replica;
+            base->replicas.erase(std::find_if(base->replicas.begin(), base->replicas.end(),
+                [&](const auto &candidate) { return candidate.replica == oldHandle; }));
+            base->authority = transition.source;
+            baseAuthority = base->findReplica(transition.source);
         }
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral("write allocation token is already in use"));

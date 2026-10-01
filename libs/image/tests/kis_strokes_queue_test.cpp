@@ -6,6 +6,13 @@
 
 #include "kis_strokes_queue_test.h"
 #include <simpletest.h>
+#include <QScopeGuard>
+#include <QSemaphore>
+#include <atomic>
+#include "KisRunnableBasedStrokeStrategy.h"
+#include "KisRunnableStrokeJobData.h"
+#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
+#include "pagestore/KisPageStore.h"
 
 #include "kistest.h"
 
@@ -15,6 +22,177 @@
 #include "kis_update_job_item.h"
 #include "kis_merge_walker.h"
 
+
+namespace {
+class CheckpointStrokeStrategy : public KisRunnableBasedStrokeStrategy
+{
+public:
+    CheckpointStrokeStrategy() : KisRunnableBasedStrokeStrategy(QLatin1String("checkpoint"))
+    {
+        enableJob(JOB_DOSTROKE, true, KisStrokeJobData::CONCURRENT);
+        enableJob(JOB_FINISH);
+        enableJob(JOB_CANCEL);
+    }
+    using KisStrokeStrategy::addCheckpointJob;
+    using KisStrokeStrategy::addMutatedJob;
+    void finishStrokeCallback() override { if (finish) finish(); }
+    void cancelStrokeCallback() override { if (cancel) cancel(); }
+    std::function<void()> finish, cancel;
+};
+}
+
+void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("barrier"); QTest::addColumn<bool>("ended");
+    for (int bpp : {1, 4, 8, 16}) for (bool barrier : {false, true}) for (bool ended : {false, true})
+        QTest::newRow(qPrintable(QString("B%1-barrier%2-ended%3").arg(bpp).arg(barrier).arg(ended)))
+            << bpp << barrier << ended;
+}
+
+void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs()
+{
+    QFETCH(int, bpp); QFETCH(bool, barrier); QFETCH(bool, ended);
+    KisTiledDataManagerPageStoreBackend backend;
+    const QByteArray initial(bpp, char(0x2a)); QString error;
+    QVERIFY2(backend.configure(bpp, reinterpret_cast<const quint8 *>(initial.constData()), &error), qPrintable(error));
+    auto *store = backend.store(); const auto baseline = store->mutationStatistics();
+    const auto tx = store->beginCurrentTransaction(); auto scope = store->beginMutation(tx);
+    QVERIFY(scope.isActive());
+    KisCapturedReadView frozen;
+    KisStrokesQueue queue; KisUpdaterContext context(2);
+    auto *strategy = new CheckpointStrokeStrategy;
+    const auto id = queue.startStroke(strategy);
+    std::atomic<int> failures{0}, cuts{0}, finished{0}, after{0};
+    QSemaphore entered, release, requested;
+    const auto cleanup = qScopeGuard([&] {
+        release.release(4); context.waitForDone();
+        if (!id.isNull() && !id.toStrongRef()->isEnded()) queue.endStroke(id);
+        for (int i = 0; i < 32 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
+        scope.cancel(); store->abort(tx); frozen = {}; scope = {};
+    });
+    const auto write = [&](int x, quint8 value) {
+        auto execution = scope.borrowExecution(backend.surface(), {{x, 0}});
+        auto guard = execution.beginWrite({backend.surface(), {x, 0}});
+        if (!guard.isValid()) { ++failures; return; }
+        std::memset(guard.data(), value, size_t(bpp)); guard = {};
+        if (!execution.finish()) ++failures;
+    };
+    strategy->finish = [&] { ++finished; };
+    queue.addJob(id, new KisRunnableStrokeJobData([&] {
+        auto execution = scope.borrowExecution(backend.surface(), {{0, 0}});
+        auto guard = execution.beginWrite({backend.surface(), {0, 0}});
+        if (guard.isValid()) std::memset(guard.data(), 0x51, size_t(bpp)); else ++failures;
+        const bool accepted = strategy->addCheckpointJob(new KisRunnableStrokeJobData([&] {
+            if (cuts.fetch_add(1) || after.load()) ++failures;
+            frozen = scope.checkpointForRead();
+            if (!frozen.isValid()) { ++failures; return; }
+            for (int x = 0; x != 5; ++x) {
+                auto read = frozen.readResidentPage({backend.surface(), {x, 0}});
+                if (!read.isValid() || QByteArray(static_cast<const char *>(read.data()), bpp) != QByteArray(bpp, char(0x51 + x)))
+                    ++failures;
+            }
+        }, barrier ? KisStrokeJobData::BARRIER : KisStrokeJobData::SEQUENTIAL));
+        if (!accepted) ++failures;
+        requested.release(); entered.release(); release.acquire();
+        guard = {}; if (!execution.finish()) ++failures;
+    }, KisStrokeJobData::CONCURRENT));
+    queue.addJob(id, new KisRunnableStrokeJobData([&] {
+        auto execution = scope.borrowExecution(backend.surface(), {{1, 0}});
+        auto guard = execution.beginWrite({backend.surface(), {1, 0}});
+        if (guard.isValid()) std::memset(guard.data(), 0x52, size_t(bpp)); else ++failures;
+        entered.release(); release.acquire(); guard = {};
+        if (!execution.finish()) ++failures;
+        // These are produced after the checkpoint request and recurse through
+        // the real queue; both must still precede its exact view.
+        strategy->addMutatedJob(new KisRunnableStrokeJobData([&] {
+            write(3, 0x54);
+            strategy->addMutatedJob(new KisRunnableStrokeJobData([&] { write(4, 0x55); }));
+        }));
+    }, KisStrokeJobData::CONCURRENT));
+    queue.addJob(id, new KisRunnableStrokeJobData([&] { write(2, 0x53); }));
+    if (ended) queue.endStroke(id);
+    queue.processQueue(context, false);
+    QVERIFY(entered.tryAcquire(2, 5000)); QVERIFY(requested.tryAcquire(1, 5000));
+    QCOMPARE(cuts.load(), 0); QCOMPARE(finished.load(), 0);
+    if (!ended) {
+        queue.addJob(id, new KisRunnableStrokeJobData([&] {
+            if (cuts.load() != 1 || !frozen.isValid()) ++failures;
+            write(0, 0x71); ++after;
+            auto old = frozen.readResidentPage({backend.surface(), {0, 0}});
+            if (!old.isValid() || QByteArray(static_cast<const char *>(old.data()), bpp) != QByteArray(bpp, char(0x51))) ++failures;
+        }, KisStrokeJobData::CONCURRENT));
+        queue.endStroke(id);
+    }
+    queue.processQueue(context, false); // a full worker set cannot dispatch the cut
+    QCOMPARE(cuts.load(), 0);
+    release.release(2); context.waitForDone();
+    for (int i = 0; i < 32 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
+    QVERIFY(queue.isEmpty()); QCOMPARE(failures.load(), 0); QCOMPARE(cuts.load(), 1);
+    QCOMPARE(finished.load(), 1); QCOMPARE(after.load(), ended ? 0 : 1);
+    QVERIFY(scope.isActive()); QVERIFY(scope.seal());
+    QVERIFY(store->commit(tx, store->preparedPages(tx)).isValid());
+    const auto stats = store->mutationStatistics();
+    QCOMPARE(stats.operationSessionsCreated - baseline.operationSessionsCreated, quint64(1));
+    QCOMPARE(stats.generationsReserved - baseline.generationsReserved, quint64(ended ? 5 : 6));
+    QCOMPARE(stats.writablePinsAcquired - baseline.writablePinsAcquired, quint64(ended ? 5 : 6));
+    QCOMPARE(stats.writablePinsReleased - baseline.writablePinsReleased, quint64(ended ? 5 : 6));
+    frozen = {}; scope = {}; QVERIFY(store->closeSession());
+}
+
+void KisStrokesQueueTest::testCheckpointCancellation_data()
+{
+    QTest::addColumn<bool>("fail"); QTest::addColumn<bool>("ended");
+    for (bool fail : {false, true}) for (bool ended : {false, true})
+        QTest::newRow(qPrintable(QString("fail%1-ended%2").arg(fail).arg(ended))) << fail << ended;
+}
+
+void KisStrokesQueueTest::testCheckpointCancellation()
+{
+    QFETCH(bool, fail); QFETCH(bool, ended);
+    KisStrokesQueue queue; KisUpdaterContext context(2);
+    auto *strategy = new CheckpointStrokeStrategy; const auto id = queue.startStroke(strategy);
+    QSemaphore requested, release;
+    std::atomic<int> cuts{0}, children{0}, cancelled{0}, finished{0}, failures{0};
+    const auto cleanup = qScopeGuard([&] {
+        release.release(2); context.waitForDone();
+        if (!id.isNull() && !id.toStrongRef()->isEnded()) queue.endStroke(id);
+        for (int i = 0; i < 16 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
+    });
+    strategy->finish = [&] { ++finished; };
+    strategy->cancel = [&] { if (children.load() != 1) ++failures; ++cancelled; };
+    queue.addJob(id, new KisRunnableStrokeJobData([&] {
+        if (!strategy->addCheckpointJob(new KisRunnableStrokeJobData([&] { ++cuts; }))) ++failures;
+        requested.release(); release.acquire();
+        auto *required = new KisRunnableStrokeJobData([&] { ++children; }); required->setCancellable(false);
+        strategy->addMutatedJob(required);
+        if (strategy->addCheckpointJob(new KisRunnableStrokeJobData([&] { ++cuts; }))) ++failures;
+    }, KisStrokeJobData::CONCURRENT));
+    if (ended) queue.endStroke(id);
+    queue.processQueue(context, false); QVERIFY(requested.tryAcquire(1, 5000));
+    if (fail) queue.failStroke(id, QStringLiteral("checkpoint cancellation test")); else QVERIFY(queue.cancelStroke(id));
+    if (fail && !ended) queue.endStroke(id);
+    release.release(); context.waitForDone();
+    for (int i = 0; i < 16 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
+    QVERIFY(queue.isEmpty()); QCOMPARE(cuts.load(), 0); QCOMPARE(children.load(), 1);
+    QCOMPARE(cancelled.load(), 1); QCOMPARE(finished.load(), 0); QCOMPARE(failures.load(), 0);
+}
+
+void KisStrokesQueueTest::testCheckpointRejectsRetainedFinishedStroke()
+{
+    KisStrokesQueue queue; KisUpdaterContext context(1);
+    const auto id = queue.startStroke(new CheckpointStrokeStrategy);
+    const auto retained = id.toStrongRef(); // like an already completed LoD buddy
+    queue.endStroke(id);
+    for (int i = 0; i < 4 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
+    QVERIFY(queue.isEmpty()); QVERIFY(!id.isNull());
+    int destroyed = 0;
+    struct CountedData : KisStrokeJobData {
+        CountedData(int &count) : count(count) {} ~CountedData() override { ++count; } int &count;
+    };
+    QVERIFY(!queue.addCheckpointJob(id, new CountedData(destroyed)));
+    QVERIFY(!queue.addCheckpointJob({}, new CountedData(destroyed)));
+    QCOMPARE(destroyed, 2); QVERIFY(!retained->hasJobs());
+}
 
 void KisStrokesQueueTest::testSequentialJobs()
 {
@@ -374,6 +552,28 @@ void KisStrokesQueueTest::testAsyncCancelWhileOpenedStroke()
     VERIFY_EMPTY(jobs[2]);
 }
 
+void KisStrokesQueueTest::testWorkerFailureKeepsInputHandle()
+{
+    KisStrokesQueue queue;
+    KisTestableUpdaterContext context(2);
+    KisStrokeId id = queue.startStroke(new KisTestingStrokeStrategy());
+    queue.processQueue(context, false); context.clear(); // init
+    queue.failStroke(id, QStringLiteral("injected worker failure"));
+    queue.processQueue(context, false); context.clear(); // cancel
+    queue.processQueue(context, false);
+    QVERIFY(!id.isNull());
+    QVERIFY(queue.hasOpenedStrokes());
+    queue.addJob(id, new KisStrokeJobData());
+    QVERIFY(!id.toStrongRef()->hasJobs());
+    queue.endStroke(id);
+    QVERIFY(!queue.hasOpenedStrokes());
+    queue.cancelStroke(id); // do not decrement the counter a second time
+    QVERIFY(!queue.hasOpenedStrokes());
+    queue.processQueue(context, false);
+    QVERIFY(queue.isEmpty());
+    QVERIFY(id.isNull());
+}
+
 struct KisStrokesQueueTest::LodStrokesQueueTester {
 
     LodStrokesQueueTester(bool real = false)
@@ -493,6 +693,56 @@ struct KisStrokesQueueTest::LodStrokesQueueTester {
     }
 };
 
+void KisStrokesQueueTest::testWorkerFailureLod_data()
+{
+    QTest::addColumn<bool>("failBuddy");
+    QTest::newRow("lod0-to-lodn") << false;
+    QTest::newRow("lodn-to-lod0") << true;
+}
+
+void KisStrokesQueueTest::testWorkerFailureLod()
+{
+    QFETCH(bool, failBuddy);
+    LodStrokesQueueTester t;
+    t.queue.setLodPreferences(KisLodPreferences(2));
+    t.processQueue();
+    KisStrokeId id = t.queue.startStroke(new KisTestingStrokeStrategy());
+    auto stroke = id.toStrongRef();
+    auto buddy = stroke->lodBuddy();
+    QVERIFY(buddy);
+    t.queue.failStroke(failBuddy ? KisStrokeId(buddy) : id, QStringLiteral("injected LoD failure"));
+    t.queue.addJob(id, new KisTestingStrokeJobData());
+    QVERIFY(!stroke->hasJobs());
+    QVERIFY(!buddy->hasJobs());
+    QVERIFY(t.queue.hasOpenedStrokes());
+    t.queue.endStroke(id);
+    QVERIFY(!t.queue.hasOpenedStrokes());
+    for (int i = 0; i < 20 && !t.queue.isEmpty(); ++i) t.processQueue();
+    t.processQueueNoAdd();
+    QVERIFY(t.queue.isEmpty());
+}
+
+
+void KisStrokesQueueTest::testWorkerFailureAfterLodBuddyFinished()
+{
+    LodStrokesQueueTester t;
+    t.queue.setLodPreferences(KisLodPreferences(2));
+    t.processQueue();
+    KisStrokeId id = t.queue.startStroke(new KisTestingStrokeStrategy());
+    auto stroke = id.toStrongRef();
+    auto buddy = stroke->lodBuddy();
+    QVERIFY(buddy);
+    t.queue.endStroke(id);
+    for (int i = 0; i < 30 && !stroke->isInitialized(); ++i) t.processQueue();
+    QVERIFY(stroke->isInitialized());
+    QVERIFY(buddy->isEnded());
+    QVERIFY(!buddy->hasJobs());
+    t.queue.failStroke(id, QStringLiteral("failure after LoDN completion"));
+    QVERIFY(!buddy->hasJobs()); // retained by LoD0, but no longer schedulable
+    for (int i = 0; i < 30 && !t.queue.isEmpty(); ++i) t.processQueue();
+    t.processQueueNoAdd();
+    QVERIFY(t.queue.isEmpty());
+}
 
 void KisStrokesQueueTest::testStrokesLevelOfDetail()
 {
@@ -991,10 +1241,52 @@ void KisStrokesQueueTest::testLodUndoBase2()
 
 void KisStrokesQueueTest::testMutatedJobs()
 {
+    QSemaphore entered;
+    QSemaphore completed;
+    class HeldDabStrategy : public KisMutatableDabStrategy {
+    public:
+        HeldDabStrategy(KisStrokeStrategy *owner, QSemaphore &entered, QSemaphore &completed)
+            : KisMutatableDabStrategy(QStringLiteral("str1_dab"), owner),
+              entered(entered), completed(completed) {}
+        void run(KisStrokeJobData *data) override {
+            KisMutatableDabStrategy::run(data);
+            entered.release();
+            completed.acquire();
+        }
+    private:
+        QSemaphore &entered;
+        QSemaphore &completed;
+    };
+    class HeldStrokeStrategy : public KisTestingStrokeStrategy {
+    public:
+        HeldStrokeStrategy(QSemaphore &entered, QSemaphore &completed)
+            : KisTestingStrokeStrategy(QLatin1String("str1_"), false, true, false, true),
+              entered(entered), completed(completed) {}
+        KisStrokeJobStrategy *createDabStrategy() override {
+            return new HeldDabStrategy(this, entered, completed);
+        }
+    private:
+        QSemaphore &entered;
+        QSemaphore &completed;
+    };
     LodStrokesQueueTester t(true);
     KisStrokesQueue &queue = t.queue;
+    const auto cleanup = qScopeGuard([&] {
+        completed.release(8);
+        t.realContext.waitForDone();
+    });
+    const auto processBatch = [&](int expected) {
+        // Keep both real workers occupied until this dispatch pass returns.
+        // Otherwise a fast job may free its slot and let the third mutated
+        // job run in the same pass; a two-thread limit is not a batch limit.
+        queue.processQueue(t.context, false);
+        if (!entered.tryAcquire(expected, 5000)) return false;
+        completed.release(expected);
+        t.realContext.waitForDone();
+        return true;
+    };
 
-    KisStrokeId id1 = queue.startStroke(new KisTestingStrokeStrategy(QLatin1String("str1_"), false, true, false, true));
+    KisStrokeId id1 = queue.startStroke(new HeldStrokeStrategy(entered, completed));
 
     queue.addJob(id1,
                  new KisTestingStrokeJobData(
@@ -1010,20 +1302,19 @@ void KisStrokesQueueTest::testMutatedJobs()
 
     queue.endStroke(id1);
 
-    t.processQueue();
-
+    QVERIFY(processBatch(1));
     t.checkOnlyExecutedJob("str1_dab_1");
 
-    t.processQueue();
+    QVERIFY(processBatch(2));
 
     QStringList refList;
     refList << "str1_dab_mutated" << "str1_dab_mutated";
     t.checkExecutedJobs(refList);
 
-    t.processQueue();
+    QVERIFY(processBatch(1));
     t.checkOnlyExecutedJob("str1_dab_mutated");
 
-    t.processQueue();
+    QVERIFY(processBatch(1));
     t.checkOnlyExecutedJob("str1_dab_2");
 
     t.processQueue();

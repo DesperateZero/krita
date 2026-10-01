@@ -10,10 +10,12 @@
 #include <bitset>
 #include <mutex>
 #include <utility>
+#include <unordered_map>
 #include "KisCompletionRegistry.h"
 #include "KisPageReplicaProvider.h"
 
 class KisCpuWriteBindingReservation;
+class KisCpuBackingHandoff;
 
 /**
  * Provider-owned, stable allocation record. Not a consumer authorization: a
@@ -23,44 +25,74 @@ class KisCpuWriteBindingReservation;
 class KRITAIMAGE_EXPORT KisCpuResidentBinding
 {
 public:
-    KisCpuResidentBinding() = default;
     virtual ~KisCpuResidentBinding();
     KisCpuResidentBinding(const KisCpuResidentBinding &) = delete;
     KisCpuResidentBinding &operator=(const KisCpuResidentBinding &) = delete;
 
-    const void *acquireRead(bool residentOnly, KisCpuResidentReadStatus *status = nullptr,
+    const void *acquireRead(const KisReplicaAllocationIdentity &expected,
+                            bool residentOnly, KisCpuResidentReadStatus *status = nullptr,
                             bool waitForLocalGate = false);
     void releaseRead();
-    void *acquireWrite();
+    void *acquireWrite(const KisReplicaAllocationIdentity &expected);
     void releaseWrite();
+    // Cold retirement waiter. The callback only dispatches work; it must not
+    // enter provider/owner gates (a generic release can hold an outer gate).
+    KisPageReadinessStatus watchRetirementReadiness(
+        const KisReplicaAllocationIdentity &expected, KisPageReadinessCallback scheduleReady,
+        KisPageReadinessSubscription *subscription);
     KisReplicaAccess acquireAccess(KisPageLeaseId lease, KisPageOperationId operation,
                                    const KisReplicaHandle &replica,
                                    KisPageAccessRequirement requirement, KisPageAccessMode mode);
-    bool retire();
+    bool retire(const KisReplicaAllocationIdentity &expected);
     // Provider destruction closes new access; existing native holders keep
     // their storage until their final unpin. It does not grant new access.
     void revoke();
+    bool matchesHandle(const KisReplicaHandle &expected) const;
+    bool matchesAllocation(KisReplicaAllocationToken expected) const;
+    // Selection hint only. A matching identity still needs a physical pin.
+    bool matchesReadIdentity(const KisReplicaAllocationIdentity &expected,
+                             const KisPageVersion &version) const;
 
 protected:
+    explicit KisCpuResidentBinding(const KisReplicaHandle &handle)
+        : m_handle(handle) { Q_ASSERT(handle.isValid()); }
     virtual void *pinStorage(bool residentOnly, KisCpuResidentReadStatus *status) = 0;
     virtual void *pinResidentStorageAfterGateWait(KisCpuResidentReadStatus *status)
     { return pinStorage(true, status); }
     virtual void unpinStorage() = 0;
     virtual void releaseStorage() = 0;
+    virtual bool supportsBackingHandoff() const { return false; }
+    // Nonblocking physical exclusion, not a normal resident read pin. The
+    // matching finish either cancels or converts to the ordinary writer pin.
+    virtual void *tryClaimStorageForHandoff() { return nullptr; }
+    virtual void finishStorageHandoff(bool writable) noexcept { Q_UNUSED(writable); }
 
 private:
     friend class KisCpuWriteBindingReservation;
-    enum class WriteState : quint8 { Idle, Active, Reserved };
-    bool reserveWrite();
+    friend class KisCpuBackingHandoff;
+    friend class KisTiles3PageReplicaProvider;
+    // Only exported through an already active owner-issued read guard.
+    KisReplicaAllocationIdentity readIdentity(const KisPageVersion &version) const;
+    enum class WriteState : quint8 { Idle, Active, Reserved, Handoff };
+    bool prepareHandoff(const KisReplicaHandle &source, const KisPageVersion &target,
+                         const KisPageAllocationDescriptor &descriptor, KisReplicaHandle *result) const;
+    bool tryClaimHandoff(const KisReplicaHandle &source);
+    void finishHandoff(const KisReplicaHandle *target) noexcept;
+    bool reserveWrite(const KisReplicaAllocationIdentity &expected);
     void releaseWriter(WriteState state);
     void *pinReservedWrite(bool residentOnly, KisCpuResidentReadStatus *status);
     void unpinReservedWrite();
     void releaseReservedWrite();
-    QMutex m_mutex;
+    mutable QMutex m_mutex;
     quint64 m_readers = 0;
     WriteState m_writeState = WriteState::Idle;
     bool m_retired = false;
     void *m_data = nullptr;
+    // Keep the hot gate/pin state next to the provider-minted identity at the
+    // start of the handle. The stable binding is the single allocation record;
+    // slot indices retain only it, so retag has no second handle to update.
+    KisReplicaHandle m_handle;
+    std::shared_ptr<KisPageReadinessSignal> m_retirementReadiness;
 };
 
 struct KisCpuBindingLease
@@ -68,6 +100,8 @@ struct KisCpuBindingLease
     KisReplicaAllocationToken allocation;
     KisPageAccessMode mode;
 };
+
+using KisCpuBindingLeaseMap = std::unordered_map<quint64, KisCpuBindingLease>;
 
 struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
 {
@@ -110,7 +144,7 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
     quint64 completionSource = 0;
     quint64 nextSlot = 1;
     quint64 committedBytes = 0;
-    QHash<quint64, KisCpuBindingLease> activeLeases;
+    KisCpuBindingLeaseMap activeLeases;
     // Operation ids are globally monotonic but provider calls may arrive out
     // of order. Keep a fixed replay window and fail closed for older ids;
     // replay protection must not become a session-lifetime QSet.
@@ -118,10 +152,10 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
     quint64 consumedOperationHighWater = 0;
 };
 
-KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
+KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
     const QSharedPointer<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
     const KisReplicaHandle &replica, KisPageAccessRequirement requirement, KisPageAccessMode mode);
-KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(QHash<quint64, KisCpuBindingLease> &activeLeases,
+KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
     const QSharedPointer<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
 KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
     const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
@@ -147,17 +181,17 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
     typename QHash<quint64, Allocation>::iterator findExactAllocation(const KisReplicaHandle &handle)
     {
         auto found = allocations.find(handle.allocation.slot);
-        return owns(handle) && found != allocations.end() && found->handle == handle
+        return owns(handle) && found != allocations.end() && found->binding && found->binding->matchesHandle(handle)
             ? found : allocations.end();
     }
 
     void revokeBindings()
     {
         std::lock_guard<QMutex> locker(mutex);
-        for (const auto &lease : std::as_const(activeLeases)) {
+        for (const auto &[id, lease] : std::as_const(activeLeases)) {
             const auto found = allocations.find(lease.allocation.slot);
             if (found == allocations.end() ||
-                !(found->handle.allocation == lease.allocation) || !found->binding) continue;
+                !found->binding || !found->binding->matchesAllocation(lease.allocation)) continue;
             if (lease.mode == KisPageAccessMode::Read) found->binding->releaseRead();
             else found->binding->releaseWrite();
         }
@@ -208,8 +242,8 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         const auto source = findExactAllocation(request.source);
         const auto target = findExactAllocation(request.target);
         if (source == allocations.end() || target == allocations.end() ||
-            !source->handle.layout.matches(request.descriptor) ||
-            !target->handle.layout.matches(request.descriptor) ||
+            !request.source.layout.matches(request.descriptor) ||
+            !request.target.layout.matches(request.descriptor) ||
             !source->binding || !target->binding) return fail("allocation is stale");
         return kisTransferCpuBinding(request, completions, completionSource,
                                      source->binding, target->binding, providerLabel);
@@ -252,7 +286,8 @@ public:
     KisCpuWriteBindingReservation &operator=(KisCpuWriteBindingReservation &&) noexcept;
     KisCpuWriteBindingReservation(const KisCpuWriteBindingReservation &) = delete;
     KisCpuWriteBindingReservation &operator=(const KisCpuWriteBindingReservation &) = delete;
-    static KisCpuWriteBindingReservation acquire(const QSharedPointer<KisCpuResidentBinding> &binding);
+    static KisCpuWriteBindingReservation acquire(const QSharedPointer<KisCpuResidentBinding> &binding,
+                                                 const KisReplicaAllocationIdentity &expected);
     bool isValid() const { return !m_binding.isNull(); }
     // Waits only for the local gate/swap barrier, never initiates swap-in.
     void *pinResident(KisCpuResidentReadStatus *status = nullptr);
@@ -262,7 +297,43 @@ public:
     void unpin();
     void reset();
 private:
+    friend class KisCpuBackingHandoff;
     QSharedPointer<KisCpuResidentBinding> m_binding;
+};
+
+/** Prepared physical transfer only; no logical write or recovery permission.
+ * prepare() retains the provider and mints the target before metadata/storage
+ * preparation. tryClaim() excludes physical consumers without exposing bytes.
+ * After logical installation, commit() retags once and returns an already
+ * pinned writer reservation. No allocation or provider-index edit is needed.
+ * Claimed tokens are thread-affine and short lived; all other preparation
+ * must precede tryClaim(). Destroy/reset the consumed token outside owner
+ * gates: it keeps the provider alive even after commit, deferring destruction.
+ */
+class KRITAIMAGE_EXPORT KisCpuBackingHandoff
+{
+public:
+    KisCpuBackingHandoff() = default;
+    ~KisCpuBackingHandoff();
+    KisCpuBackingHandoff(KisCpuBackingHandoff &&other) noexcept;
+    KisCpuBackingHandoff &operator=(KisCpuBackingHandoff &&other) noexcept;
+    KisCpuBackingHandoff(const KisCpuBackingHandoff &) = delete;
+    KisCpuBackingHandoff &operator=(const KisCpuBackingHandoff &) = delete;
+    static KisCpuBackingHandoff prepare(const QSharedPointer<KisPageReplicaProvider> &provider,
+                                        const KisReplicaHandle &source, const KisPageVersion &target,
+                                        const KisPageAllocationDescriptor &descriptor);
+    bool isValid() const { return !m_binding.isNull(); }
+    bool isClaimed() const { return m_claimed; }
+    const KisReplicaHandle &target() const { return m_target; }
+    bool tryClaim();
+    KisCpuWriteBindingReservation commit() noexcept;
+    void reset() noexcept;
+private:
+    QSharedPointer<KisPageReplicaProvider> m_provider;
+    QSharedPointer<KisCpuResidentBinding> m_binding;
+    KisReplicaHandle m_source;
+    KisReplicaHandle m_target;
+    bool m_claimed = false;
 };
 
 // Metadata-owned immutable candidate; provider lookup is done once, outside

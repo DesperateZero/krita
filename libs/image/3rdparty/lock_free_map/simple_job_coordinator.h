@@ -33,6 +33,7 @@ public:
 
 private:
     Atomic<quint64> m_job;
+    Atomic<quint64> m_retryRevision{0};
     QMutex mutex;
     QWaitCondition condVar;
 
@@ -59,15 +60,18 @@ public:
     void participate()
     {
         quint64 prevJob = quint64(NULL);
+        quint64 prevRetryRevision = 0;
 
         for (;;) {
             quint64 job = m_job.load(Consume);
-            if (job == prevJob) {
+            quint64 retryRevision = m_retryRevision.load(Acquire);
+            if (job == prevJob && retryRevision == prevRetryRevision) {
                 QMutexLocker guard(&mutex);
 
                 for (;;) {
                     job = m_job.loadNonatomic(); // No concurrent writes inside lock
-                    if (job != prevJob) {
+                    retryRevision = m_retryRevision.loadNonatomic();
+                    if (job != prevJob || retryRevision != prevRetryRevision) {
                         break;
                     }
 
@@ -79,9 +83,21 @@ public:
                 return;
             }
 
-            reinterpret_cast<Job*>(job)->run();
             prevJob = job;
+            // Capture before run(): a failed finishing attempt may signal
+            // retry without replacing the still-owned job pointer.
+            prevRetryRevision = retryRevision;
+            reinterpret_cast<Job*>(job)->run();
         }
+    }
+
+    void notifyRetry()
+    {
+        {
+            QMutexLocker guard(&mutex);
+            m_retryRevision.fetchAdd(1, Release);
+        }
+        condVar.wakeAll();
     }
 
     void runOne(Job* job)

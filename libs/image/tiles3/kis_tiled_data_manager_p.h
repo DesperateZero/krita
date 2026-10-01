@@ -66,8 +66,13 @@ bool KisTiledDataManager::writeBytesBody(const quint8 *data,
             {
                 KisTileDataWrapper readWrapper(
                     this, imageX, imageY, KisTileDataWrapper::READ);
-                const quint8 *tileIt = readWrapper.data();
+                if (!readWrapper.isValid()) return false;
+                // A nested legacy write intent still needs canonical access.
+                // Reject acquisition failure before comparing stale cached
+                // bytes or entering the raw accessor's assertion path.
+                const quint8 *tileIt = readWrapper.tile()->tryWriteData();
                 if (!tileIt) return false;
+                tileIt += readWrapper.offset();
                 const quint8 *compareIt = dataIt;
                 for (qint32 row = 0; row < rowsToWork; ++row) {
                     if (memcmp(tileIt, compareIt, lineSize) != 0) {

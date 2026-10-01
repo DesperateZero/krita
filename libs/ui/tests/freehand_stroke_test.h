@@ -16,6 +16,12 @@ class FreehandStrokeTest : public QObject
 
 private Q_SLOTS:
     void testAutoBrushStroke();
+    void testPersistentAutoBrushStroke();
+    void testPersistentAutoBrushStrokeCancelled();
+    void testPersistentAutoBrushStrokeFailure_data();
+    void testPersistentAutoBrushStrokeFailure();
+    void testPersistentAutoBrushStrokePressure();
+    void testPersistentAutoBrushStrokePressureCancelled();
     void testHatchingStroke();
     void testColorSmudgeStroke();
     void testAutoTextured17();

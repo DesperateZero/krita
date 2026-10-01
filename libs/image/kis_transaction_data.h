@@ -10,8 +10,12 @@
 #include <kundo2command.h>
 #include "kis_types.h"
 #include <kritaimage_export.h>
+#include <functional>
+#include <QVector>
 
 class KisTransactionWrapperFactory;
+class KisPixelWriteCursor;
+class QRect;
 
 /**
  * A tile based undo command.
@@ -33,6 +37,30 @@ public:
     void undo() override;
 
     virtual void endTransaction();
+    // Internal result-bearing endpoint; keeps the legacy virtual ABI intact.
+    // Failure leaves the transaction open and its interstroke end command unrun.
+    bool tryEndTransaction(QString *error = nullptr);
+    // A failed cancellation remains cancelling; only cancellation may be retried.
+    bool tryAbortTransaction(QString *error = nullptr);
+    bool isTransactionFinished() const;
+    // Check admission before starting work; a rejected begin owns no pixels.
+    bool hasMemento() const;
+
+    // Internal explicit stroke-owner path. Ordinary transactions remain
+    // operation-scoped. Opt in during quiescent initialization before launching
+    // workers; this is not a concurrent conversion of existing legacy writers.
+    // Admission captures target identity, layout, offset and effective wrap;
+    // keep them stable until execution/checkpoint/commit. A changed context is
+    // rejected before borrowing; cancellation still targets the saved manager.
+    // After opt-in only these declared target operations may
+    // write; source input must be immutable and coordinates are manager-local.
+    // External/current immutable reads observe the last checkpoint. Scheduling
+    // a full cut, job read dependencies and async producers remain the strategy's
+    // responsibility; this does not enable arbitrary legacy paint callbacks.
+    bool beginStrokeMutation(QString *error = nullptr);
+    bool applyStrokePixelOperation(KisPaintDeviceSP target, const QVector<QRect> &rects,
+        const std::function<bool(KisPixelWriteCursor *)> &operation, QString *error = nullptr);
+    bool checkpointStrokeMutation(QString *error = nullptr);
 
 protected:
     virtual void saveSelectionOutlineCache();
@@ -45,6 +73,7 @@ private:
     void possiblyResetOutlineCache();
     void possiblyFlattenSelection(KisPaintDeviceSP device);
     void doFlattenUndoRedo(bool undo);
+    bool strokeMutationTargetIsCurrent(KisPaintDeviceSP target, QString *error) const;
 
 private:
     class Private;
@@ -52,4 +81,3 @@ private:
 };
 
 #endif /* KIS_TRANSACTION_DATA_H_ */
-

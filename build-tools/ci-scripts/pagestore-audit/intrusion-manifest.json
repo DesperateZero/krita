@@ -6,19 +6,19 @@
   "write_status": "r3-m5b-complete",
   "reviewed_ratchet_ceiling": {
     "libs/image/tiles3/kis_tile.h": {
-      "identifier_occurrences": 6,
+      "identifier_occurrences": 7,
       "direct_includes": 1,
-      "reason": "The tile compatibility boundary stores one exact read and one writable move-only capability in fixed slots; cache validity and pre-exposure write intent remain distinct non-authoritative lifetime facts."
+      "reason": "The tile compatibility boundary stores one exact read and one writable move-only capability in fixed slots; cache validity and pre-exposure write intent remain distinct non-authoritative lifetime facts. Current design 92 section 16.8 reviews one backend friend (6 to 7 identifiers, same include/layout limits): selectCurrentReadTile atomically inspects/reuses existing cache state under the original tile barrier and separates an active old reader from a fresh selection. No new Tile state or public PageStore identity API. Remove the friend and lower this ceiling when the raw-read adapter is migrated."
     },
     "libs/image/tiles3/kis_tiled_data_manager.cc": {
-      "identifier_occurrences": 21,
+      "identifier_occurrences": 25,
       "direct_includes": 3,
-      "reason": "The compatibility adapter names the canonical fixed read-view and operation boundary types directly so refresh and packed writes cannot recreate private transaction authority."
+      "reason": "Current design 92 HX7 candidate-consumer review: manager cursor installation now declares the same diagnostic phase/timer already used by refreshPageStorePages (23 to 25 identifiers; same type set and 3 includes). Existing WriteBatch/execution holders retain original admission through preparation and delivery. PreparedTileUpdates is operation-local missing-wrapper storage, not a page authority; no manager field or TLS is added. Remove this instrumentation/storage with the adapter consumer; other intrusion/layout ceilings are unchanged."
     },
     "libs/image/tiles3/kis_tiled_data_manager.h": {
-      "identifier_occurrences": 10,
+      "identifier_occurrences": 12,
       "direct_includes": 1,
-      "reason": "Private adapter declarations expose only canonical fixed-view and operation value types; no PageStore ownership or duplicate lifecycle state was added."
+      "reason": "Private adapter declarations expose only canonical fixed-view and operation value types; no PageStore ownership or duplicate lifecycle state was added. Current design 92 section 16.8 reviews one backend friend (10 to 11 identifiers, same include/layout limits) to acquire the original hash default reference before taking a tile barrier; there is no second default/current registry. Remove with selectCurrentReadTile after raw ABI migration. Current design 92 section 16.13 reviews copyPageStore: one existing result-enum occurrence in a private operation-local helper replaces duplicated precise/rough native copy policy (11 to 12 identifiers; same include/layout/friend limits). Fixed source and target views remain original caller-stack capabilities, held through adapter refresh, with no new authority or lock order. Remove this declaration and lower the added occurrence when the manager copy adapter consumer migrates; the earlier raw-read friend has its separate removal condition."
     }
   },
   "entries": [
@@ -32,7 +32,9 @@
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
-        "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure"
+        "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
+        "KisTiledDataManagerTest::testPageStoreFreshReadSelection",
+        "KisTiledDataManagerTest::testPageStoreFreshReadOutlivesManager"
       ],
       "id": "BR1-PS-TILE-STATE-001",
       "path": "libs/image/tiles3/kis_tile.h",
@@ -43,7 +45,8 @@
         "KisTile::lockForRead",
         "KisTile::lockForWrite",
         "KisTile::unlockForRead",
-        "KisTile::unlockForWrite"
+        "KisTile::unlockForWrite",
+        "KisTiledDataManagerPageStoreBackend::selectCurrentReadTile"
       ],
       "status": "quarantined",
       "symbols": [
@@ -123,7 +126,9 @@
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreHistoryClearStagesAbsence",
-        "KisTiledDataManagerTest::testPageStorePackedWriteNative"
+        "KisTiledDataManagerTest::testPageStorePackedWriteNative",
+        "KisTiledDataManagerTest::testPageStoreFreshReadFailure",
+        "KisTiledDataManagerTest::testPageStoreFreshReadDefaultPressure"
       ],
       "id": "BR1-PS-DM-ROUTING-004",
       "path": "libs/image/tiles3/kis_tiled_data_manager.cc",
@@ -133,7 +138,8 @@
       "static-callers": [
         "KisTiledDataManager::writeBytes",
         "KisTiledDataManager::readBytes",
-        "KisTiledDataManager::setDefaultPixel"
+        "KisTiledDataManager::setDefaultPixel",
+        "KisTiledDataManager::getReadOnlyTileLazy"
       ],
       "status": "inventoried",
       "symbols": [

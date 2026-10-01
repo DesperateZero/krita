@@ -33,6 +33,8 @@ struct KisPageHistoryCollectorSnapshot
     quint64 maximumVersionsPerPass = 0;
     quint64 reachabilityRefreshes = 0;
     quint64 reachabilityRootsVisited = 0;
+    quint64 maximumRootsPerPass = 0;
+    quint64 reachabilityRestarts = 0;
 };
 
 /**
@@ -47,6 +49,7 @@ class KisPageHistoryCollector final
 public:
     static constexpr qsizetype PageAdmissionBudget = 16;
     static constexpr qsizetype VersionScanBudget = 32;
+    static constexpr qsizetype RootVisitBudget = 32;
 
     using ReleaseOwnerLifetime = void (*)(void *context);
     using RemoveDescriptor = void (*)(void *context,
@@ -64,6 +67,7 @@ public:
                             ReleaseOwnerLifetime releaseOwnerLifetime,
                             RemoveDescriptor removeDescriptor);
     ~KisPageHistoryCollector();
+    void prepareTask(KisBackingBudgetController &budget);
 
     KisPageHistoryCollector(const KisPageHistoryCollector &) = delete;
     KisPageHistoryCollector &operator=(const KisPageHistoryCollector &) = delete;
@@ -86,8 +90,11 @@ private:
     struct Scan
     {
         KisPageVersion after;
-        KisImageEpochId rootEpoch;
-        QSet<KisPageVersion> reachable;
+        KisPageVersion sliceAfter;
+        QVector<KisPageVersion> candidates;
+        quint64 reachability = 0;
+        quint32 reachableMask = 0;
+        qsizetype historicalCount = 0;
         bool repeat = false;
     };
 
@@ -97,8 +104,7 @@ private:
         bool scanAll);
     QVector<KisPageTransitionEffect> collectSliceLocked(
         const KisPageKey &key,
-        QVector<QSet<KisPageVersion>> &releasedReachability,
-        quint64 &visitedVersions);
+        quint64 &visitedVersions, qsizetype &rootBudget);
 
     KisPageMetadataCoordinator &m_metadata;
     KisImageEpochReferenceModel &m_epochs;
@@ -119,6 +125,7 @@ private:
     QHash<KisPageKey, Scan> m_scans;
     bool m_rescanRequested = false;
     bool m_jobScheduled = false;
+    KisPageReclamationJobPointer m_task;
     QWaitCondition m_idle;
 
     quint64 m_pagesVisited = 0;
@@ -127,6 +134,8 @@ private:
     quint64 m_maximumVersionsPerPass = 0;
     quint64 m_reachabilityRefreshes = 0;
     quint64 m_reachabilityRootsVisited = 0;
+    quint64 m_maximumRootsPerPass = 0;
+    quint64 m_reachabilityRestarts = 0;
 };
 
 #endif // KIS_PAGE_HISTORY_COLLECTOR_P_H

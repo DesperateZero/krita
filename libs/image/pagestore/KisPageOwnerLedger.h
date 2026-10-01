@@ -11,11 +11,13 @@
 #include <QSharedPointer>
 
 #include "KisCompletionRegistry.h"
+#include "KisPageRetirementStorage_p.h"
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageReplicaProvider.h"
 
 class KisBackingBudgetController;
 class KisBackingBudgetReservation;
+class KisBackingBudgetWaiter;
 class KisPageOwnerDomainAdmission;
 class KisPageOwnerLedger;
 enum class KisBackingBudgetClass : quint8;
@@ -52,6 +54,24 @@ private:
     friend class KisPageOwnerLedger;
 };
 
+/** Prepared accounting only; does not authorize a physical or logical write.
+ * The ledger and its budget must outlive the reservation, as for class changes.
+ */
+class KRITAIMAGE_EXPORT KisBackingHandoffReservation final
+{
+public:
+    KisBackingHandoffReservation() = default;
+    KisBackingHandoffReservation(KisBackingHandoffReservation &&) noexcept = default;
+    KisBackingHandoffReservation &operator=(KisBackingHandoffReservation &&) noexcept = default;
+    bool isValid() const { return m_change.isValid(); }
+    void release() noexcept { m_change.release(); }
+private:
+    explicit KisBackingHandoffReservation(KisBackingClassChangeReservation change)
+        : m_change(std::move(change)) {}
+    KisBackingClassChangeReservation m_change;
+    friend class KisPageOwnerLedger;
+};
+
 /**
  * Document/session scoped identity and provider owner. It is the only BR1
  * component allowed to mint request/operation/lease/writer IDs, account for
@@ -71,7 +91,9 @@ public:
     bool registerBacking(const KisReplicaHandle &replica,
                          KisBackingBudgetReservation &reservation,
                          KisBackingBudgetClass budgetClass,
-                         QString *error = nullptr);
+                         QString *error = nullptr,
+                         KisPageRetirementRecordPointer *preparedRetirement = nullptr);
+    KisPageRetirementRecordPointer takeRetirementRecord(const KisReplicaHandle &replica);
     KisBackingBudgetClass backingClass(const KisReplicaHandle &replica) const;
     bool reclassifyBacking(const KisReplicaHandle &replica,
                            KisBackingBudgetClass budgetClass,
@@ -80,6 +102,10 @@ public:
                            KisBackingBudgetClass budgetClass,
                            KisBackingBudgetReservation &reservation,
                            QString *error = nullptr);
+    // Cold budget admission only. The consumer must revalidate the exact
+    // physical/class state using reclassifyBacking before calling its provider.
+    KisPageReadinessStatus watchRetirementBudget(const KisReplicaHandle &replica,
+        KisPageReadinessCallback notify, KisBackingBudgetWaiter *waiter);
     bool retainRetirementDebtReservation(const KisReplicaHandle &replica,
                                          KisBackingBudgetReservation &reservation,
                                          QString *error = nullptr);
@@ -89,6 +115,18 @@ public:
         const QVector<KisPageTransitionEffect> &retirementEffects,
         QString *error = nullptr);
     void commitBackingChanges(KisBackingClassChangeReservation &&reservation) noexcept;
+    // Freeze a sole, resident physical owner and reserve ActivePending plus
+    // cancellation debt before taking the physical claim. The old handle stays
+    // authoritative until commit. Cancel preparation before provider retag.
+    KisBackingHandoffReservation prepareBackingHandoff(
+        const KisReplicaHandle &source, const KisReplicaHandle &target,
+        QString *error = nullptr);
+    // Caller has installed logical detachment and consumed physical retag under
+    // its admission gate. Reuses the existing index node; no provider call or
+    // allocation. Keeps debt headroom in this ledger until ordinary publication
+    // or retirement consumes it; callers must not own a second terminal token.
+    bool commitBackingHandoff(
+        KisBackingHandoffReservation &&reservation) noexcept;
     /**
      * Pre-admit every owned replica emitted by a local metadata transition to
      * RetirementDebt. The returned cookie freezes the exact backing classes;
@@ -132,6 +170,10 @@ public:
         QString *error = nullptr) const;
     bool releaseTerminalProviderOperation(KisPageOperationId operation,
                                           QString *error = nullptr);
+    KisPageReadinessStatus watchProviderOperation(KisPageOperationId operation,
+        KisPageReadinessCallback scheduleReady, KisPageReadinessSubscription *subscription) const;
+    KisPageReadinessStatus watchCompletion(const KisCompletionTicket &ticket,
+        KisPageReadinessCallback scheduleReady, KisPageReadinessSubscription *subscription) const;
     qsizetype providerOperationCount() const;
     // One locked O(1) snapshot; do not subtract two independently sampled
     // counts while retirement workers can bind/release operations.

@@ -52,6 +52,10 @@ public:
     static QLatin1String jobTypeToString(JobType type);
 
 protected:
+    // Enable only for consumers whose failed drawing jobs can cancel the whole
+    // stroke. Non-cancellable jobs retain their own completion protocol.
+    void setSupportsJobFailureReporting(bool value) { m_jobFailureReporting = value; }
+
     void enableJob(JobType type, bool enable = true,
                    KisStrokeJobData::Sequentiality sequentiality = KisStrokeJobData::SEQUENTIAL,
                    KisStrokeJobData::Exclusivity exclusivity = KisStrokeJobData::NORMAL);
@@ -60,6 +64,8 @@ protected:
     KisSimpleStrokeStrategy(const KisSimpleStrokeStrategy &rhs);
 
 private:
+    friend class SimpleStrokeJobStrategy;
+    void reportJobFailure(const QString &error) { requestStrokeFailure(error); }
     KisStrokeJobStrategy* createStrategy(JobType type);
     KisStrokeJobData* createData(JobType type);
 
@@ -67,6 +73,7 @@ private:
     QVector<bool> m_jobEnabled;
     QVector<KisStrokeJobData::Sequentiality> m_jobSequentiality;
     QVector<KisStrokeJobData::Exclusivity> m_jobExclusivity;
+    bool m_jobFailureReporting = false;
 };
 
 #endif /* __KIS_SIMPLE_STROKE_STRATEGY_H */

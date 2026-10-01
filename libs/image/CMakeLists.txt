@@ -32,6 +32,7 @@ set(kritaimage_LIB_SRCS
    gpustroke/KisStrokeCoordinator.cpp
    pagestore/KisBackendServiceRegistry.cpp
    pagestore/KisCompletionRegistry.cpp
+   pagestore/KisPageReadiness.cpp
    pagestore/KisTiles3PageReplicaProvider.cpp
    pagestore/KisDocumentGpuSession.cpp
    pagestore/KisDerivedSurfaceCache.cpp
@@ -248,6 +249,7 @@ set(kritaimage_LIB_SRCS
    kis_stroke.cpp
    kis_strokes_queue.cpp
    KisStrokesQueueMutatedJobInterface.cpp
+   KisStrokeJobFailureContext.cpp
    kis_simple_update_queue.cpp
    kis_update_scheduler.cpp
    kis_queues_progress_updater.cpp

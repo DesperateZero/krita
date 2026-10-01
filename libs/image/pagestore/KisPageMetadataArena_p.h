@@ -181,19 +181,23 @@ public:
         ReleasedBlocks() = default;
         ReleasedBlocks(ReleasedBlocks &&other) noexcept
             : m_blocks(std::move(other.m_blocks))
+            , m_tail(std::exchange(other.m_tail, nullptr))
             , m_blockCount(std::exchange(other.m_blockCount, 0))
         {
         }
         ReleasedBlocks &operator=(ReleasedBlocks &&other) noexcept
         {
             if (this != &other) {
+                clear();
                 m_blocks = std::move(other.m_blocks);
+                m_tail = std::exchange(other.m_tail, nullptr);
                 m_blockCount = std::exchange(other.m_blockCount, 0);
             }
             return *this;
         }
         ReleasedBlocks(const ReleasedBlocks &) = delete;
         ReleasedBlocks &operator=(const ReleasedBlocks &) = delete;
+        ~ReleasedBlocks() { clear(); }
 
         bool isEmpty() const
         {
@@ -208,8 +212,34 @@ public:
             return quint64(m_blockCount) * quint64(BlockBytes);
         }
 
+        void append(ReleasedBlocks &&other) noexcept
+        {
+            if (this == &other || other.isEmpty()) return;
+            if (isEmpty()) {
+                *this = std::move(other);
+                return;
+            }
+            other.m_tail->nextReleased = std::move(m_blocks);
+            m_blocks = std::move(other.m_blocks);
+            m_blockCount += std::exchange(other.m_blockCount, 0);
+            other.m_tail = nullptr;
+        }
+
     private:
+        void clear() noexcept
+        {
+            // A long acknowledgement can empty many blocks. Do not destroy
+            // their intrusive ownership chain recursively on the caller stack.
+            while (m_blocks) {
+                auto next = std::move(m_blocks->nextReleased);
+                m_blocks = std::move(next);
+            }
+            m_blockCount = 0;
+            m_tail = nullptr;
+        }
+
         std::unique_ptr<Block> m_blocks;
+        Block *m_tail = nullptr;
         qsizetype m_blockCount = 0;
     };
 
@@ -415,7 +445,8 @@ public:
         return resolved.slot ? resolved.slot->value() : nullptr;
     }
 
-    bool erase(SlotId id)
+    bool erase(SlotId id, ReleasedBlocks *released = nullptr,
+               quint64 minimumActiveBlocksToKeep = 0)
     {
         ResolvedSlot resolved = resolve(id);
         if (!resolved.slot)
@@ -440,6 +471,13 @@ public:
             ++entry.freeSlots;
             ++m_statistics.freeSlots;
             m_freeBlockHint = resolved.directoryIndex;
+        }
+        // Optional local reclamation: examine only the block containing this
+        // slot. Existing reservations keep their admitted capacity; the normal
+        // reservation terminal path reclaims it after the final reservation.
+        if (released && entry.usedSlots == 0 && m_outstandingReservations == 0
+            && m_statistics.activeBlocks > minimumActiveBlocksToKeep) {
+            detachEntry(entry, released);
         }
         return true;
     }
@@ -555,6 +593,7 @@ private:
     void detachEntry(DirectoryEntry &entry, ReleasedBlocks *released)
     {
         Q_ASSERT(released && entry.state == DirectoryState::Active && entry.usedSlots == 0);
+        if (released->isEmpty()) released->m_tail = entry.block.get();
         entry.block->nextReleased = std::move(released->m_blocks);
         released->m_blocks = std::move(entry.block);
         ++released->m_blockCount;

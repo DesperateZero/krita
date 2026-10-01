@@ -7,6 +7,7 @@
 #ifndef KIS_IMAGE_EPOCH_REFERENCE_MODEL_H
 #define KIS_IMAGE_EPOCH_REFERENCE_MODEL_H
 
+#include <array>
 #include <QScopedPointer>
 #include <QSet>
 #include <QSharedPointer>
@@ -171,6 +172,26 @@ public:
     bool surfaceState(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
 
 private:
+    // Collector-only enumerators over the existing protection records. They
+    // retain no roots and cannot grant logical/pixel admission. Slots and
+    // outputs are bounded independently of history depth.
+    static constexpr qsizetype ReachabilityScanLimit = 16;
+    static constexpr qsizetype ReachabilityRootBudget = 32;
+    struct ReachabilityStart {
+        quint64 cookie = 0;
+        KisPageVersion current;
+    };
+    struct ReachabilitySlice {
+        bool valid = false;
+        bool complete = false;
+        qsizetype rootsVisited = 0;
+        std::array<KisPageVersion, ReachabilityRootBudget> versions{};
+    };
+    ReachabilityStart beginReachabilityScan(const KisPageKey &);
+    ReachabilitySlice advanceReachabilityScan(quint64 cookie, qsizetype rootBudget);
+    void endReachabilityScan(quint64 cookie);
+    friend class KisPageHistoryCollector;
+
     class Private;
     KisRetainedImageEpochSnapshot retainRootLocked(const KisImageEpochRootSnapshot &,
                                                     bool completeManifest);

@@ -99,7 +99,9 @@ struct OverCompositor128 {
             src_blend = src_alpha;
         } else if (xsimd::all(dst_alpha == zeroValue)) {
             new_alpha = src_alpha;
-            src_blend = oneValue;
+            // Preserve transparent-source lanes independently of vector
+            // neighbours, as the scalar compositor does.
+            src_blend = xsimd::select(src_alpha == zeroValue, zeroValue, oneValue);
         } else {
             /**
              * The value of new_alpha can have *some* zero values,

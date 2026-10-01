@@ -54,6 +54,9 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     , m_releaseOwnerLifetime(releaseOwnerLifetime)
     , m_removeDescriptor(removeDescriptor)
 {
+    static_assert(PageAdmissionBudget <= KisImageEpochReferenceModel::ReachabilityScanLimit);
+    static_assert(RootVisitBudget <= KisImageEpochReferenceModel::ReachabilityRootBudget);
+    static_assert(VersionScanBudget <= 32); // One reachability bit per candidate.
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_releaseOwnerLifetime);
     Q_ASSERT(m_removeDescriptor);
@@ -62,6 +65,7 @@ KisPageHistoryCollector::KisPageHistoryCollector(
 KisPageHistoryCollector::~KisPageHistoryCollector()
 {
     Q_ASSERT(!m_jobScheduled);
+    for (const auto &scan : m_scans) m_epochs.endReachabilityScan(scan.reachability);
 }
 
 void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
@@ -153,28 +157,71 @@ QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectBatchLocked(
 }
 
 QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectSliceLocked(
-    const KisPageKey &key,
-    QVector<QSet<KisPageVersion>> &releasedReachability,
-    quint64 &visitedVersions)
+    const KisPageKey &key, quint64 &visitedVersions, qsizetype &rootBudget)
 {
     auto &scan = m_scans[key];
-    const auto slice = m_metadata.historySlice(key, scan.after, VersionScanBudget);
-    const auto head = m_epochs.captureCommittedRoot().epoch();
-    if (!slice.versions.isEmpty() && !(scan.rootEpoch == head)) {
-        releasedReachability.append(std::move(scan.reachable));
-        quint64 visitedRoots = 0;
-        scan.reachable = m_epochs.reachablePageVersions({key}, &visitedRoots);
-        m_reachabilityRootsVisited += visitedRoots;
-        scan.rootEpoch = head;
+    ++m_pagesVisited;
+    const auto markReachable = [&](const KisPageVersion &version) {
+        for (qsizetype i = 0; i < scan.candidates.size(); ++i)
+            if (scan.candidates[i] == version) scan.reachableMask |= quint32(1) << i;
+    };
+    if (!scan.reachability) {
+        if (!rootBudget) { queueContinuationLocked(key); return {}; }
+        const auto slice = m_metadata.historySlice(key, scan.after, VersionScanBudget);
+        visitedVersions += quint64(slice.versions.size());
+        if (slice.versions.isEmpty()) {
+            const bool repeat = scan.repeat;
+            if (!slice.total) m_deferred.remove(key);
+            m_scans.remove(key);
+            if (repeat) queueContinuationLocked(key);
+            return {};
+        }
+        scan.candidates.clear();
+        scan.reachableMask = 0;
+        for (const auto &version : slice.versions) scan.candidates.append(version.version);
+        scan.sliceAfter = slice.after;
+        scan.historicalCount = slice.total;
+        const auto start = m_epochs.beginReachabilityScan(key);
+        if (!start.cookie) {
+            // Exhausted cursor storage/identity grants no permission to retire.
+            m_deferred.insert(key);
+            m_scans.remove(key);
+            return {};
+        }
+        scan.reachability = start.cookie;
+        markReachable(start.current);
+        --rootBudget;
+        ++m_reachabilityRootsVisited;
         ++m_reachabilityRefreshes;
     }
-    ++m_pagesVisited;
-    visitedVersions += quint64(slice.versions.size());
+    const auto roots = m_epochs.advanceReachabilityScan(scan.reachability, rootBudget);
+    rootBudget -= roots.rootsVisited;
+    m_reachabilityRootsVisited += quint64(roots.rootsVisited);
+    if (!roots.valid) {
+        m_epochs.endReachabilityScan(scan.reachability);
+        scan.reachability = 0;
+        scan.candidates.clear();
+        scan.after = {}; // The changed key can insert history below the cursor.
+        ++m_reachabilityRestarts;
+        queueContinuationLocked(key);
+        return {};
+    }
+    for (qsizetype i = 0; i < roots.rootsVisited; ++i) markReachable(roots.versions[size_t(i)]);
+    if (!roots.complete) { queueContinuationLocked(key); return {}; }
+
+    // Root validity was just rechecked under the epoch gate. The caller still
+    // holds the store owner gate, excluding publication/capture until detach.
+    // Re-read only these candidate identities; never reuse old pin/writer state.
     KisPageTransition discard;
     discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
-    for (const auto &version : slice.versions) {
-        if (scan.reachable.contains(version.version)) continue;
-        if (retirementEligible(version)) discard.versions.append(version.version);
+    for (qsizetype i = 0; i < scan.candidates.size(); ++i) {
+        if (scan.reachableMask & (quint32(1) << i)) continue;
+        KisPageStateSnapshot current;
+        const auto &identity = scan.candidates[i];
+        if (!m_metadata.versionSnapshot(identity, &current)) continue;
+        const auto *version = current.findVersion(identity);
+        if (version && version->publication == KisPagePublicationState::Historical &&
+            retirementEligible(*version)) discard.versions.append(identity);
     }
     QVector<KisPageTransitionEffect> effects;
     qsizetype discardedCount = 0;
@@ -183,41 +230,30 @@ QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectSliceLocked(
         if (discarded.accepted) {
             effects = discarded.effects;
             discardedCount = discard.versions.size();
-            for (const auto &version : discard.versions) {
-                m_removeDescriptor(m_ownerContext, version);
-            }
+            for (const auto &version : discard.versions) m_removeDescriptor(m_ownerContext, version);
         }
     }
-    if (slice.total > discardedCount) m_deferred.insert(key);
+    if (scan.historicalCount > discardedCount) m_deferred.insert(key);
     else m_deferred.remove(key);
-    if (slice.after.isValid()) {
-        scan.after = slice.after;
+    m_epochs.endReachabilityScan(scan.reachability);
+    scan.reachability = 0;
+    scan.candidates.clear();
+    if (scan.sliceAfter.isValid()) {
+        scan.after = scan.sliceAfter;
         queueContinuationLocked(key);
     } else {
         const bool repeat = scan.repeat;
-        releasedReachability.append(std::move(scan.reachable));
         m_scans.remove(key);
         if (repeat) queueContinuationLocked(key);
     }
     return effects;
 }
 
-void KisPageHistoryCollector::scheduleLocked()
+void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
 {
-    if (!m_backgroundReclamation || m_jobScheduled || m_closing ||
-        !m_operational) {
-        return;
-    }
-    if (!m_epochs.hasCollectionWork() && m_pending.isEmpty() &&
-        m_ready.empty() && !(m_rescanRequested && !m_deferred.isEmpty())) {
-        m_rescanRequested = false;
-        return;
-    }
-    m_jobScheduled = true;
-    m_ownerLifetimeReferences.ref();
-    kisSchedulePageStoreReclamation([this] {
+    if (m_task) return;
+    m_task = kisPreparePageStoreReclamation([this] {
         QVector<KisPageTransitionEffect> effects;
-        QVector<QSet<KisPageVersion>> releasedReachability;
         {
             QMutexLocker lock(&m_ownerMutex);
             if (!m_closing && m_operational) {
@@ -228,10 +264,8 @@ void KisPageHistoryCollector::scheduleLocked()
                     m_pending.swap(m_deferred);
                     m_rescanRequested = false;
                 }
-                // A scan caches reachability for one page until all of that
-                // page's history slices finish. Fill only vacant work slots;
-                // otherwise long histories could admit one more cache per
-                // pass and retain a document-sized second reachability set.
+                // At most 16 active scans, each with <=32 candidate identities
+                // and one bit per candidate. No history-sized reachability set.
                 const qsizetype admissionSlots = std::max(
                     qsizetype(0), PageAdmissionBudget - m_queued.size());
                 for (qsizetype admitted = 0;
@@ -250,10 +284,17 @@ void KisPageHistoryCollector::scheduleLocked()
                     m_ready.pop_front();
                 }
                 quint64 versions = 0;
-                for (const auto &key : std::as_const(keys)) {
-                    effects += collectSliceLocked(
-                        key, releasedReachability, versions);
+                qsizetype rootsRemaining = RootVisitBudget;
+                for (qsizetype i = 0; i < keys.size(); ++i) {
+                    // Share the pass budget between ready keys. A deep/hot
+                    // first key cannot consume every root visit indefinitely.
+                    const qsizetype allowance = rootsRemaining / (keys.size() - i);
+                    qsizetype remaining = allowance;
+                    effects += collectSliceLocked(keys[i], versions, remaining);
+                    rootsRemaining -= allowance - remaining;
                 }
+                m_maximumRootsPerPass = std::max(m_maximumRootsPerPass,
+                    quint64(RootVisitBudget - rootsRemaining));
                 m_maximumVersionsPerPass =
                     std::max(m_maximumVersionsPerPass, versions);
                 m_maximumPagesPerPass = std::max(
@@ -261,14 +302,33 @@ void KisPageHistoryCollector::scheduleLocked()
             }
         }
         m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
+    }, &budget, +[](void *value) {
+        auto *collector = static_cast<KisPageHistoryCollector *>(value);
         {
-            QMutexLocker lock(&m_ownerMutex);
-            m_jobScheduled = false;
-            scheduleLocked();
-            m_idle.wakeAll();
+            QMutexLocker lock(&collector->m_ownerMutex);
+            collector->m_jobScheduled = false;
+            collector->scheduleLocked();
+            collector->m_idle.wakeAll();
         }
-        m_releaseOwnerLifetime(m_ownerContext);
-    });
+        collector->m_releaseOwnerLifetime(collector->m_ownerContext);
+    }, this);
+}
+
+void KisPageHistoryCollector::scheduleLocked()
+{
+    if (!m_backgroundReclamation || m_jobScheduled || m_closing ||
+        !m_operational) {
+        return;
+    }
+    if (!m_epochs.hasCollectionWork() && m_pending.isEmpty() &&
+        m_ready.empty() && !(m_rescanRequested && !m_deferred.isEmpty())) {
+        m_rescanRequested = false;
+        return;
+    }
+    m_jobScheduled = true;
+    m_ownerLifetimeReferences.ref();
+    Q_ASSERT(m_task);
+    kisEnqueuePageStoreReclamation(m_task.get());
 }
 
 void KisPageHistoryCollector::collectEpochBookkeepingLocked(bool rescanHistory)
@@ -298,6 +358,7 @@ void KisPageHistoryCollector::clearLocked()
     m_pending.clear();
     m_ready.clear();
     m_queued.clear();
+    for (const auto &scan : m_scans) m_epochs.endReachabilityScan(scan.reachability);
     m_scans.clear();
     m_deferred.clear();
     m_rescanRequested = false;
@@ -311,7 +372,7 @@ KisPageHistoryCollector::snapshotLocked() const
     result.deferredPages = m_deferred.size();
     result.activeScans = m_scans.size();
     for (const auto &scan : m_scans)
-        result.cachedReachableVersions += quint64(scan.reachable.size());
+        result.cachedReachableVersions += quint64(qPopulationCount(scan.reachableMask));
     result.jobScheduled = m_jobScheduled;
     result.pagesVisited = m_pagesVisited;
     result.foregroundPagesVisited = m_foregroundPagesVisited;
@@ -319,5 +380,7 @@ KisPageHistoryCollector::snapshotLocked() const
     result.maximumVersionsPerPass = m_maximumVersionsPerPass;
     result.reachabilityRefreshes = m_reachabilityRefreshes;
     result.reachabilityRootsVisited = m_reachabilityRootsVisited;
+    result.maximumRootsPerPass = m_maximumRootsPerPass;
+    result.reachabilityRestarts = m_reachabilityRestarts;
     return result;
 }

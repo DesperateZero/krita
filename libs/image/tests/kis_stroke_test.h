@@ -15,12 +15,20 @@ class KisStrokeTest : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void testCheckpointOrdering_data();
+    void testCheckpointOrdering();
+    void testCheckpointRejection_data();
+    void testCheckpointRejection();
     void testRegularStroke();
     void testCancelStrokeCase1();
     void testCancelStrokeCase2and3();
     void testCancelStrokeCase5();
     void testCancelStrokeCase4();
     void testCancelStrokeCase6();
+    void testWorkerFailure();
+    void testFailureAfterFinish();
+    void testFailureBeforeExplicitInit();
+    void testCancellationRetry();
 };
 
 #endif /* __KIS_STROKE_TEST_H */

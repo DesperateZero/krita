@@ -78,19 +78,21 @@ struct OverCompositor32 {
             src_blend = src_alpha * uint8MaxRec1;
         } else if (xsimd::all(dst_alpha == zeroValue)) {
             new_alpha = src_alpha;
-            src_blend = oneValue;
+            // A transparent source lane is a no-op, just like the scalar
+            // compositor. Other lanes must not make it overwrite hidden RGB.
+            src_blend = xsimd::select(src_alpha == zeroValue, zeroValue, oneValue);
         } else {
             /**
-             * The value of new_alpha can have *some* zero values,
-             * which will result in NaN values while division. But
-             * when converted to integers these NaN values will
-             * be converted to zeroes, which is exactly what we need
+             * Zero-alpha lanes can produce NaN during division. Select
+             * a zero blend for transparent source lanes before color
+             * arithmetic, preserving their original destination bytes.
              */
             new_alpha = dst_alpha + (uint8Max - dst_alpha) * src_alpha * uint8MaxRec1;
 
             // Optimized version of:
             //     src_blend = src_alpha / new_alpha;
             src_blend = OptiDiv<_impl>::divVector(src_alpha, new_alpha);
+            src_blend = xsimd::select(src_alpha == zeroValue, zeroValue, src_blend);
 
         }
 

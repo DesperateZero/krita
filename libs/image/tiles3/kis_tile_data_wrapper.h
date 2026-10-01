@@ -43,7 +43,9 @@ public:
         m_tile = tile;
         m_offset = pixelIndex * dm->pixelSize();
 
-        if (type == READ) {
+        if (!m_tile) {
+            m_locked = false;
+        } else if (type == READ) {
             m_locked = m_tile->lockForRead();
         }
         else {
@@ -91,7 +93,11 @@ public:
      */
     inline quint8* data() const
     {
-        return m_locked ? m_tile->data() + m_offset : nullptr;
+        if (!m_locked) return nullptr;
+        // A write lock can be only an intent. Failed canonical admission must
+        // not expose the cached before-image, even when the tile is resident.
+        quint8 *bytes = m_type == WRITE ? m_tile->tryWriteData() : m_tile->data();
+        return bytes ? bytes + m_offset : nullptr;
     }
 
     inline bool isValid() const { return m_locked; }

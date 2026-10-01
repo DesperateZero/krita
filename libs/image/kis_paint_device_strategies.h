@@ -38,6 +38,14 @@ public:
     static bool fits(qint64 value) {
         return value >= std::numeric_limits<qint32>::min() && value <= std::numeric_limits<qint32>::max();
     }
+    qint64 columnsUntilWrap(qint32 x) const {
+        return m_wrap.isEmpty() || m_axis == WRAPAROUND_VERTICAL ? std::numeric_limits<qint32>::max() :
+            qint64(m_wrap.right()) + 1 - (mapX(x) + m_offset.x());
+    }
+    qint64 rowsUntilWrap(qint32 y) const {
+        return m_wrap.isEmpty() || m_axis == WRAPAROUND_HORIZONTAL ? std::numeric_limits<qint32>::max() :
+            qint64(m_wrap.bottom()) + 1 - (mapY(y) + m_offset.y());
+    }
     bool isValid() const { return !m_failed; }
     void moveTo(qint32 x, qint32 y) override {
         m_position = {x,y};
@@ -49,14 +57,12 @@ public:
     qint32 numContiguousColumns(qint32 x) const override {
         if (!fits(mapX(x))) return 0;
         const auto n = m_cursor->numContiguousColumns(qint32(mapX(x)));
-        return m_wrap.isEmpty() || m_axis == WRAPAROUND_VERTICAL ? n :
-            qint32(qMin<qint64>(n, qint64(m_wrap.right()) + 1 - (mapX(x) + m_offset.x())));
+        return qint32(qMin<qint64>(n, columnsUntilWrap(x)));
     }
     qint32 numContiguousRows(qint32 y) const override {
         if (!fits(mapY(y))) return 0;
         const auto n = m_cursor->numContiguousRows(qint32(mapY(y)));
-        return m_wrap.isEmpty() || m_axis == WRAPAROUND_HORIZONTAL ? n :
-            qint32(qMin<qint64>(n, qint64(m_wrap.bottom()) + 1 - (mapY(y) + m_offset.y())));
+        return qint32(qMin<qint64>(n, rowsUntilWrap(y)));
     }
     qint32 rowStride(qint32 x, qint32 y) const override {
         return fits(mapX(x)) && fits(mapY(y)) ? m_cursor->rowStride(qint32(mapX(x)), qint32(mapY(y))) : 0;
@@ -162,8 +168,14 @@ public:
         return new KisRandomAccessor2(m_d->dataManager().data(), m_d->x(), m_d->y(), false, m_d->cacheInvalidator());
     }
 
-    virtual bool applyPixelOperation(const QRect &rect, const KisPageStorePixelOperation &operation) {
-        return applyPixelOperationImpl({rect}, operation, {});
+    virtual bool applyPixelOperation(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
+                                     KisTransaction *strokeOwner) {
+        return applyPixelOperationImpl(rects, operation, {}, strokeOwner);
+    }
+
+    virtual bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,
+                                     QVector<QVector<QRect>> *jobs) {
+        return partitionWriteRectsImpl(rects, patchSize, {}, jobs);
     }
 
     virtual void fastBitBlt(KisPaintDeviceSP src, const QRect &rect) {
@@ -211,8 +223,62 @@ public:
         m_d->cache()->invalidate();
     }
 protected:
+    bool partitionWriteRectsImpl(const QVector<QRect> &rects, int patchSize, const QRect &wrap,
+                                 QVector<QVector<QRect>> *jobs) {
+        // Use the cursor's mapping and seam boundaries. A mapped patch owns all
+        // its source-coordinate clips, including both sides of a wrap seam.
+        // Neither this derived geometry nor its temporary index grants access.
+        KisOperationMappedAccessor mapped(nullptr, QPoint(m_d->x(), m_d->y()), wrap,
+                                          m_device->defaultBounds()->wrapAroundModeAxis());
+        QRegion coverage;
+        for (const QRect &rect : rects) if (!rect.isEmpty()) coverage += rect;
+        QHash<QPair<int, int>, int> patchIndices;
+        QVector<QRegion> patches;
+        const auto remainder = [patchSize](qint64 value) {
+            const qint64 r = value % patchSize;
+            return r < 0 ? r + patchSize : r;
+        };
+        for (const QRect &rect : coverage) {
+            for (qint64 y = rect.top(); y <= rect.bottom();) {
+                const qint64 localY = mapped.mapY(qint32(y));
+                if (!mapped.fits(localY)) return false;
+                const qint64 ry = remainder(localY);
+                const qint64 height = std::min({qint64(rect.bottom()) + 1 - y,
+                                               patchSize - ry, mapped.rowsUntilWrap(qint32(y))});
+                if (height <= 0 || !mapped.fits(localY + height - 1)) return false;
+                for (qint64 x = rect.left(); x <= rect.right();) {
+                    const qint64 localX = mapped.mapX(qint32(x));
+                    if (!mapped.fits(localX)) return false;
+                    const qint64 rx = remainder(localX);
+                    const qint64 width = std::min({qint64(rect.right()) + 1 - x,
+                                                  patchSize - rx, mapped.columnsUntilWrap(qint32(x))});
+                    if (width <= 0 || !mapped.fits(localX + width - 1)) return false;
+                    const QPair<int, int> key(int((localX - rx) / patchSize), int((localY - ry) / patchSize));
+                    auto it = patchIndices.find(key);
+                    if (it == patchIndices.end()) {
+                        it = patchIndices.insert(key, patches.size());
+                        patches.append(QRegion());
+                    }
+                    patches[*it] += QRect(qint32(x), qint32(y), qint32(width), qint32(height));
+                    x += width;
+                }
+                y += height;
+            }
+        }
+        QVector<QVector<QRect>> result;
+        result.reserve(patches.size());
+        for (const QRegion &patch : patches) {
+            QVector<QRect> clips;
+            clips.reserve(patch.rectCount());
+            for (const QRect &rect : patch) clips.append(rect);
+            result.append(clips);
+        }
+        jobs->swap(result);
+        return true;
+    }
+
     bool applyPixelOperationImpl(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
-                                 const QRect &wrap) {
+                                 const QRect &wrap, KisTransaction *strokeOwner) {
         const QPoint offset(m_d->x(), m_d->y());
         QVector<QRect> localRects;
         for (const auto &rect : rects) if (!rect.isEmpty()) {
@@ -226,14 +292,22 @@ protected:
         // callback and cache update. Device metadata must not be mutated here.
         auto manager = m_d->dataManager();
         QString error;
-        const auto result = manager->writePageStoreOperation(localRects, [&](KisPixelWriteCursor *cursor) {
+        const auto mappedOperation = [&](KisPixelWriteCursor *cursor) {
             KisOperationMappedAccessor mapped(cursor, offset, wrap, m_device->defaultBounds()->wrapAroundModeAxis());
             const bool accepted = operation(&mapped);
             return accepted && mapped.isValid();
-        }, &error);
+        };
+        if (strokeOwner) {
+            return strokeOwner->applyStrokePixelOperation(KisPaintDeviceSP(m_device), localRects,
+                                                         mappedOperation, &error);
+        }
+        const auto result = manager->writePageStoreOperation(localRects, mappedOperation, &error);
         using Result = KisPageStoreWriteOperationResult;
         if (result == Result::Succeeded) return true;
-        if (result == Result::Failed) { qWarning() << "PageStore pixel operation failed:" << error; return false; }
+        if (result != Result::Unavailable && result != Result::Borrowed) {
+            qWarning() << "PageStore pixel operation failed:" << error;
+            return false;
+        }
         // Borrowed/unsupported is decided before callback execution. Keep the
         // legacy visibility contract; never execute this branch after failure.
         auto cursor = createRandomAccessorNG();
@@ -443,9 +517,18 @@ public:
             m_device->defaultBounds()->wrapAroundModeAxis());
     }
 
-    bool applyPixelOperation(const QRect &rect, const KisPageStorePixelOperation &operation) override {
-        const KisWrappedRect parts(rect, m_wrapRect, m_device->defaultBounds()->wrapAroundModeAxis());
-        return applyPixelOperationImpl(parts, operation, m_wrapRect);
+    bool applyPixelOperation(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
+                             KisTransaction *strokeOwner) override {
+        QVector<QRect> parts;
+        for (const QRect &rect : rects) {
+            if (!rect.isEmpty()) parts += KisWrappedRect(rect, m_wrapRect, m_device->defaultBounds()->wrapAroundModeAxis());
+        }
+        return applyPixelOperationImpl(parts, operation, m_wrapRect, strokeOwner);
+    }
+
+    bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,
+                             QVector<QVector<QRect>> *jobs) override {
+        return partitionWriteRectsImpl(rects, patchSize, m_wrapRect, jobs);
     }
 
     void fastBitBltImpl(KisDataManagerSP srcDataManager, const QRect &rect) override {

@@ -9,6 +9,7 @@
 
 #include <QQueue>
 #include <QScopedPointer>
+#include <QDeadlineTimer>
 
 #include <kis_types.h>
 #include "kritaimage_export.h"
@@ -35,6 +36,7 @@ public:
 
     void addJob(KisStrokeJobData *data);
     void addMutatedJobs(const QVector<KisStrokeJobData *> list);
+    bool addCheckpointJob(KisStrokeJobData *data);
 
     KUndo2MagicString name() const;
     QString id() const;
@@ -45,6 +47,9 @@ public:
 
     void endStroke();
     void cancelStroke();
+    bool failStroke();
+    int retryCancellation();
+    int cancellationRetryDelay() const;
 
     bool canCancel() const;
 
@@ -106,10 +111,18 @@ private:
     QScopedPointer<KisStrokeJobStrategy> m_resumeStrategy;
 
     QQueue<KisStrokeJob*> m_jobsQueue;
+    // Non-owning position in m_jobsQueue; cleared when removed. A checkpoint
+    // requested after pen-up must precede this job, never run after teardown.
+    KisStrokeJob *m_queuedFinishJob = nullptr;
     bool m_strokeInitialized;
     bool m_strokeEnded;
     bool m_strokeSuspended;
-    bool m_isCancelled; // cancelled strokes are always 'ended' as well
+    bool m_isCancelled;
+    // A failed stroke may still await endStroke from its input owner.
+    bool m_failed = false;
+    bool m_retryCancellation = false;
+    quint8 m_cancellationRetries = 0;
+    QDeadlineTimer m_retryDeadline;
 
     int m_worksOnLevelOfDetail;
     Type m_type;

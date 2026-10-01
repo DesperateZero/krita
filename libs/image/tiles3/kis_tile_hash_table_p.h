@@ -243,6 +243,46 @@ KisTileHashTableTraits<T>::getTileLazy(qint32 col, qint32 row,
 }
 
 template<class T>
+typename KisTileHashTableTraits<T>::PreparedTile
+KisTileHashTableTraits<T>::prepareMissingTile(qint32 col, qint32 row)
+{
+    PreparedTile prepared;
+    {
+        QReadLocker locker(&m_lock);
+        if (getTile(col, row, calculateHash(col, row))) return prepared;
+        prepared.m_tile = new TileType(col, row, m_defaultTileData, nullptr);
+        prepared.m_identity = m_preparationIdentity;
+    }
+    if (!prepared.m_identity) {
+        // First cold preparation only; neither allocation nor loser cleanup
+        // is inside the table's write gate.
+        auto candidate = std::make_shared<const char>(0);
+        QWriteLocker locker(&m_lock);
+        if (!m_preparationIdentity) m_preparationIdentity = candidate;
+        prepared.m_identity = m_preparationIdentity;
+    }
+    return prepared;
+}
+
+template<class T>
+typename KisTileHashTableTraits<T>::TileTypeSP
+KisTileHashTableTraits<T>::installPreparedTile(PreparedTile &prepared, bool &newTile)
+{
+    newTile = false;
+    if (!prepared) return {};
+    QWriteLocker locker(&m_lock);
+    if (prepared.m_identity != m_preparationIdentity) return {};
+    const auto col = prepared.col(), row = prepared.row();
+    const auto idx = calculateHash(col, row);
+    prepared.m_consumed = true;
+    if (auto winner = getTile(col, row, idx)) return winner;
+    linkTile(prepared.m_tile, idx);
+    prepared.m_tile->notifyAttachedToDataManager(m_mementoManager);
+    newTile = true;
+    return prepared.m_tile;
+}
+
+template<class T>
 typename KisTileHashTableTraits<T>::TileTypeSP
 KisTileHashTableTraits<T>::getReadOnlyTileLazy(qint32 col, qint32 row, bool &existingTile)
 {

@@ -1018,7 +1018,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "class KisPageRetirementQueue final",
             "WorkerBatchBudget = 32",
             "void beginClose()",
-            "QVector<KisPageRetirementRecord> takeForClose()",
+            "KisPageRetirementRecords takeForClose()",
         )
         for contract in required_contracts:
             if contract not in header_text:
@@ -1148,7 +1148,11 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "class KisPreparedMutationCommit final",
             "std::unique_ptr<Data> data",
             "struct PreparedTransactionState",
-            "QHash<quint64, PreparedTransactionState> m_preparedTransactions",
+            "QHash<quint64, std::shared_ptr<PreparedTransactionState>> m_preparedTransactions",
+            "ProofMap proofs",
+            "RemovalSet removals",
+            "std::atomic<size_t> proofInsertions",
+            "std::atomic<size_t> removalInsertions",
             "stageSurfaceMetadataLocked",
             "commitLocked",
             "restoreRetainedEpochLocked",
@@ -1452,9 +1456,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisMutationPageEntry final",
             "KisMutationWriteSet final",
             "struct TransactionActivity",
-            "QHash<quint64, TransactionActivity> transactionActivities",
+            "KisMutationAdmissionTable<quint64, TransactionActivity> transactionActivities",
+            "KisMutationAdmissionTable<KisPageKey, ActiveClaim> m_claims",
             "std::optional<KisMutationPageEntry> inlineEntry",
-            "std::optional<QHash<KisPageKey, EntryIndex>> index",
+            "KisMutationStorage<KisMutationPageEntry, 8> overflow",
+            "std::optional<Index> index",
+            "KisMutationStorageAllocator<std::pair<const KisPageKey, EntryHandle>>",
             "static_assert(sizeof(KisPageWriteIntent) <= 32)",
             "static_assert(sizeof(KisMutationPageEntry) <= 104)",
             "QSharedPointer<const KisPageReplicaSource> initialization",
@@ -1506,6 +1513,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
     if page_store_source.is_file():
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
+        if "KisMutationStorage<Page, 2> overflow" not in store_text:
+            errors.append("mutation cold resources lost stable budgeted storage")
         cold_page = store_text[page_begin:page_end]
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:

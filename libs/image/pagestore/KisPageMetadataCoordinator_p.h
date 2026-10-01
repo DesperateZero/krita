@@ -82,4 +82,30 @@ struct KisSlotIdFor<KisMetadataOverflowNode> {
     using Type = KisMetadataOverflowSlotId;
 };
 
+namespace KisPageStoreDetail { class MetadataBudgetAuthority; }
+
+// A caller-owned terminal value, not another metadata owner. Detached empty
+// blocks remain charged until clear() destroys them outside every held owner
+// gate. Concatenation and transfer use the blocks' existing intrusive links.
+class KRITAIMAGE_EXPORT KisPageMetadataReadCleanup
+{
+public:
+    KisPageMetadataReadCleanup() = default;
+    ~KisPageMetadataReadCleanup();
+    KisPageMetadataReadCleanup(const KisPageMetadataReadCleanup &) = delete;
+    KisPageMetadataReadCleanup &operator=(const KisPageMetadataReadCleanup &) = delete;
+    KisPageMetadataReadCleanup(KisPageMetadataReadCleanup &&) noexcept;
+    KisPageMetadataReadCleanup &operator=(KisPageMetadataReadCleanup &&) noexcept;
+    bool isEmpty() const { return m_bytes == 0; }
+    quint64 byteSize() const { return m_bytes; }
+    void clear() noexcept;
+
+private:
+    using Blocks = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>::ReleasedBlocks;
+    std::shared_ptr<KisPageStoreDetail::MetadataBudgetAuthority> m_authority;
+    quint64 m_bytes = 0;
+    Blocks m_blocks;
+    friend class KisPageMetadataCoordinator;
+};
+
 #endif // KIS_PAGE_METADATA_COORDINATOR_P_H

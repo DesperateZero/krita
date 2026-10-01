@@ -12,6 +12,7 @@
 
 #include "KisCompletionRegistry.h"
 #include "KisPageReplicaProvider.h"
+#include "tiles3/KisTilePageStoreBridge.h"
 
 class KisTileData;
 class KisCpuWriteGuard;
@@ -100,6 +101,7 @@ public:
     KisReplicaBackingFootprint backingFootprint(
         const KisReplicaHandle &replica) const override;
     QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override;
+    bool mayHaveBackingDomainChanges() const noexcept override;
     void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                         quint64 revision) override;
     bool registerBackingDomainAdmission(
@@ -128,6 +130,12 @@ public:
     bool sourceMatchesReadGuard(const QSharedPointer<const KisPageReplicaSource> &source,
                                 const KisCpuReadGuard &guard) const;
     KisTileData *tileDataForCpuReadGuard(const KisCpuReadGuard &guard) const;
+    TileLease acquireTileReadCache(const KisCpuReadGuard &guard, TileLease reuse = {}) const;
+    TileLease acquireTileReadCache(KisPageLeaseId lease, TileLease reuse = {}) const;
+    bool readCacheMatchesVersion(const KisTilePageStoreLease *cache, const KisPageVersion &version) const;
+    // Prepared while the writer is active, first repinned only after finish.
+    // The KisTile wrapper owns the cached storage's immutable/COW reference.
+    TileLease prepareTileReadCache(const KisCpuWriteGuard &guard, TileLease reuse = {}) const;
     KisReplicaOperation prepareSynchronousSource(
         KisPageOperationId operation, const QSharedPointer<const KisPageReplicaSource> &source,
         const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,

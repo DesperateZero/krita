@@ -174,6 +174,27 @@ void KisStrokeStrategy::addMutatedJobs(const QVector<KisStrokeJobData *> list)
     m_mutatedJobsInterface->addMutatedJobs(m_strokeId, list);
 }
 
+bool KisStrokeStrategy::addCheckpointJob(KisStrokeJobData *data)
+{
+    if (!m_mutatedJobsInterface || !m_strokeId) {
+        delete data;
+        return false;
+    }
+    return m_mutatedJobsInterface->addCheckpointJob(m_strokeId, data);
+}
+
+void KisStrokeStrategy::requestStrokeFailure(const QString &reason)
+{
+    KIS_SAFE_ASSERT_RECOVER_RETURN(m_mutatedJobsInterface);
+    m_mutatedJobsInterface->failStroke(m_strokeId, reason);
+}
+
+void KisStrokeStrategy::retryStrokeCancellation()
+{
+    KIS_SAFE_ASSERT_RECOVER_RETURN(m_mutatedJobsInterface);
+    m_mutatedJobsInterface->retryStrokeCancellation(m_strokeId);
+}
+
 void KisStrokeStrategy::addMutatedJob(KisStrokeJobData *data)
 {
     addMutatedJobs({data});

@@ -7,8 +7,10 @@
 #include "kis_painter_based_stroke_strategy.h"
 
 #include <KoColorSpace.h>
+#include <KoColorModelStandardIds.h>
 #include <KoColor.h>
 #include <KoCompositeOp.h>
+#include <KoCompositeOpRegistry.h>
 #include "kis_painter.h"
 #include "kis_paint_device.h"
 #include "kis_paint_layer.h"
@@ -74,6 +76,7 @@ KisPainterBasedStrokeStrategy::~KisPainterBasedStrokeStrategy()
 
 void KisPainterBasedStrokeStrategy::init()
 {
+    setSupportsJobFailureReporting(true);
     enableJob(KisSimpleStrokeStrategy::JOB_INIT);
     enableJob(KisSimpleStrokeStrategy::JOB_FINISH);
     enableJob(KisSimpleStrokeStrategy::JOB_CANCEL, true, KisStrokeJobData::SEQUENTIAL, KisStrokeJobData::EXCLUSIVE);
@@ -88,7 +91,8 @@ KisPainterBasedStrokeStrategy::KisPainterBasedStrokeStrategy(const KisPainterBas
       m_useMergeID(rhs.m_useMergeID),
       m_supportsMaskingBrush(rhs.m_supportsMaskingBrush),
       m_supportsIndirectPainting(rhs.m_supportsIndirectPainting),
-      m_supportsContinuedInterstrokeData(rhs.m_supportsContinuedInterstrokeData)
+      m_supportsContinuedInterstrokeData(rhs.m_supportsContinuedInterstrokeData),
+      m_usePersistentStrokeMutation(rhs.m_usePersistentStrokeMutation)
 {
     Q_FOREACH (KisFreehandStrokeInfo *info, rhs.m_strokeInfos) {
         m_strokeInfos.append(new KisFreehandStrokeInfo(info, levelOfDetail));
@@ -183,6 +187,28 @@ void KisPainterBasedStrokeStrategy::setSupportsTimedMergeId(bool value)
     m_useMergeID = value;
 }
 
+void KisPainterBasedStrokeStrategy::setUsesPersistentStrokeMutation(bool value)
+{
+    m_usePersistentStrokeMutation = value;
+}
+
+bool KisPainterBasedStrokeStrategy::checkpointStrokeMutationBeforeDirtyPublish()
+{
+    if (!m_persistentStrokeMutationActive) return true;
+
+    bool hasDirtyRegion = false;
+    for (int i = 0; i < m_maskedPainters.size(); i++) {
+        hasDirtyRegion |= m_maskedPainters[i]->hasDirtyRegion();
+    }
+    if (!hasDirtyRegion) return true;
+
+    QString error;
+    if (m_transaction && m_transaction->checkpointStrokeMutation(&error)) return true;
+    requestStrokeFailure(
+        error.isEmpty() ? QStringLiteral("Stroke mutation checkpoint failed") : error);
+    return false;
+}
+
 void KisPainterBasedStrokeStrategy::initPainters(KisPaintDeviceSP targetDevice,
                                                  KisPaintDeviceSP maskingDevice,
                                                  KisSelectionSP selection,
@@ -195,6 +221,8 @@ void KisPainterBasedStrokeStrategy::initPainters(KisPaintDeviceSP targetDevice,
         painter->begin(targetDevice, !hasIndirectPainting ? selection : nullptr);
         painter->setRunnableStrokeJobsInterface(runnableJobsInterface());
         m_resources->setupPainter(painter);
+        painter->setStrokeMutationOwner(
+            m_persistentStrokeMutationActive ? m_transaction.data() : nullptr);
 
         if(hasIndirectPainting) {
             painter->setCompositeOpId(indirectPaintingCompositeOp);
@@ -229,6 +257,7 @@ void KisPainterBasedStrokeStrategy::initPainters(KisPaintDeviceSP targetDevice,
 void KisPainterBasedStrokeStrategy::deletePainters()
 {
     Q_FOREACH (KisFreehandStrokeInfo *info, m_strokeInfos) {
+        info->painter->setStrokeMutationOwner(nullptr);
         delete info;
     }
 
@@ -311,6 +340,34 @@ void KisPainterBasedStrokeStrategy::initStrokeCallback()
         m_transaction.reset(new KisTransaction(KUndo2MagicString(), targetDevice, nullptr,
                                                -1,
                                                wrapper.release()));
+
+        if (!m_transaction->hasMemento()) {
+            requestStrokeFailure(QStringLiteral("Stroke transaction admission failed"));
+            return;
+        }
+
+        const auto preset = m_resources->currentPaintOpPreset();
+        const auto bounds = targetDevice->defaultBounds();
+        const auto *colorSpace = targetDevice->colorSpace();
+        const bool eligiblePersistentMutation =
+            m_usePersistentStrokeMutation && m_strokeInfos.size() == 1 &&
+            !hasIndirectPainting && !selection &&
+            !(supportsMaskingBrush() && m_resources->needsMaskingBrushRendering()) &&
+            preset && preset->paintOp().id() == QLatin1String("paintbrush") &&
+            m_resources->compositeOpId() == COMPOSITE_OVER &&
+            colorSpace->colorModelId() == RGBAColorModelID &&
+            colorSpace->colorDepthId() == Integer8BitsColorDepthID &&
+            bounds && bounds->currentLevelOfDetail() == 0 && !bounds->wrapAroundMode();
+
+        if (eligiblePersistentMutation) {
+            QString error;
+            if (!m_transaction->beginStrokeMutation(&error)) {
+                requestStrokeFailure(error.isEmpty()
+                    ? QStringLiteral("Stroke mutation admission failed") : error);
+                return;
+            }
+            m_persistentStrokeMutationActive = true;
+        }
 
         // WARNING: masked brush cannot work without indirect painting mode!
         KIS_SAFE_ASSERT_RECOVER_NOOP(!(supportsMaskingBrush() &&
@@ -414,16 +471,20 @@ void KisPainterBasedStrokeStrategy::finishStrokeCallback()
     parentCommand->setTime(m_transaction->undoCommand()->time());
     parentCommand->setEndTime(QTime::currentTime());
 
-    if (m_autokeyCommand) {
-        KisCommandUtils::CompositeCommand *wrapper = new KisCommandUtils::CompositeCommand(parentCommand.data());
-        wrapper->addCommand(m_autokeyCommand.release());
-    }
+    // Allocate command wrappers before completion; transfer auxiliary ownership
+    // only once the pixel transaction has actually completed.
+    auto *autokeyWrapper = m_autokeyCommand
+        ? new KisCommandUtils::CompositeCommand(parentCommand.data()) : nullptr;
 
     if (indirect && indirect->hasTemporaryTarget()) {
-        KUndo2MagicString transactionText = m_transaction->text();
-        m_transaction->end();
-        m_transaction.reset();
+        QString error;
+        if (!m_transaction->tryEnd(&error)) {
+            requestStrokeFailure(error);
+            return;
+        }
+        if (autokeyWrapper) autokeyWrapper->addCommand(m_autokeyCommand.release());
         deletePainters();
+        m_transaction.reset();
 
         QVector<KisRunnableStrokeJobData*> jobs;
 
@@ -454,10 +515,17 @@ void KisPainterBasedStrokeStrategy::finishStrokeCallback()
     }
     else {
         KisCommandUtils::CompositeCommand *wrapper = new KisCommandUtils::CompositeCommand(parentCommand.data());
-        wrapper->addCommand(m_transaction->endAndTake());
+        KUndo2Command *command = nullptr;
+        QString error;
+        if (!m_transaction->tryEndAndTake(command, &error)) {
+            requestStrokeFailure(error);
+            return;
+        }
+        if (autokeyWrapper) autokeyWrapper->addCommand(m_autokeyCommand.release());
+        wrapper->addCommand(command);
 
-        m_transaction.reset();
         deletePainters();
+        m_transaction.reset();
 
         if (undoAdapter) {
             parentCommand->redo();
@@ -470,34 +538,39 @@ void KisPainterBasedStrokeStrategy::finishStrokeCallback()
 
 void KisPainterBasedStrokeStrategy::cancelStrokeCallback()
 {
-    if (!m_transaction) return;
-
-    if (m_autokeyCommand) {
-        m_autokeyCommand->undo();
-    }
+    // A merge that has already transferred ownership is non-cancellable.
+    if (!m_transaction && !m_autokeyCommand) return;
 
     KisNodeSP node = m_resources->currentNode();
     KisIndirectPaintingSupport *indirect =
         dynamic_cast<KisIndirectPaintingSupport*>(node.data());
+    const KisPaintDeviceSP temporary = indirect ? indirect->temporaryTarget() : nullptr;
+    const KisRegion cancelledRegion = temporary ? temporary->region() : KisRegion();
 
-    bool revert = true;
-    if (indirect) {
-        KisPaintDeviceSP t = indirect->temporaryTarget();
-        if (t) {
-            m_transaction.reset();
-            deletePainters();
-
-            KisRegion region = t->region();
-            indirect->setTemporaryTarget(nullptr);
-            node->setDirty(region);
-            revert = false;
+    if (m_transaction) {
+        QString error;
+        if (!m_transaction->tryRevert(&error)) {
+            // Keep the transaction, painters and auto-key frame alive until the
+            // outstanding writer/reader releases the cancellation precondition.
+            retryStrokeCancellation();
+            return;
         }
+        deletePainters();
+        m_transaction.reset();
+    }
+    else {
+        deletePainters();
     }
 
-    if (revert) {
-        m_transaction->revert();
-        m_transaction.reset();
-        deletePainters();
+    if (temporary) {
+        indirect->setTemporaryTarget(nullptr);
+        node->setDirty(cancelledRegion);
+    }
+
+    // Restore frame contents before removing the auto-created frame itself.
+    if (m_autokeyCommand) {
+        m_autokeyCommand->undo();
+        m_autokeyCommand.reset();
     }
 }
 

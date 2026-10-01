@@ -160,6 +160,31 @@ protected:
      */
     void addMutatedJob(KisStrokeJobData *data);
 
+    /**
+     * Queue a checkpoint after all currently admitted jobs and their necessary
+     * children, before subsequently admitted input and the queued finish job.
+     * Call only from this strategy's running worker, return from that job, and
+     * release its guards before the checkpoint runs. Never wait for it here.
+     *
+     * Data must be cancellable and SEQUENTIAL (stroke jobs quiescent) or BARRIER
+     * (also drain projection/update work). It runs through this stroke's dab
+     * strategy at its own LoD; there is no implicit clone to the buddy stroke.
+     * The queue position defines this cut; addMutatedJob would instead skip
+     * older queued input. Cancellation discards an unstarted checkpoint.
+     *
+     * Consumes data on success and rejection. Returns false after cancellation,
+     * after finish has been dispatched, or for an invalid data contract. This
+     * orders scheduler work only; it does not grant a PageStore write/read view
+     * or authorize outstanding producers outside this stroke's job tree.
+     */
+    bool addCheckpointJob(KisStrokeJobData *data);
+
+    // Worker endpoints. Failure stops future cancellable work but preserves
+    // an open input handle until its owner ends/cancels it. A rejected cleanup
+    // keeps this strategy alive in the existing queue through a retry job.
+    void requestStrokeFailure(const QString &reason);
+    void retryStrokeCancellation();
+
 
     // you are not supposed to change these parameters
     // after the KisStroke object has been created

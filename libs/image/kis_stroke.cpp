@@ -69,6 +69,12 @@ void KisStroke::suspendStroke(KisStrokeSP recipient)
 
 void KisStroke::addJob(KisStrokeJobData *data)
 {
+    // Input submitted after a worker failure must not run after cleanup.
+    // Required children of already running jobs use addMutatedJobs instead.
+    if (m_failed) {
+        delete data;
+        return;
+    }
     KIS_SAFE_ASSERT_RECOVER_NOOP(!m_strokeEnded);
     enqueue(m_dabStrategy.data(), data);
 }
@@ -92,9 +98,44 @@ void KisStroke::addMutatedJobs(const QVector<KisStrokeJobData *> list)
                            std::mem_fn(&KisStrokeJob::isOwnJob));
 
     Q_FOREACH (KisStrokeJobData *data, list) {
+        if (m_failed && (!data || data->isCancellable())) {
+            delete data;
+            continue;
+        }
         it = m_jobsQueue.insert(it, new KisStrokeJob(m_dabStrategy.data(), data, worksOnLevelOfDetail(), true));
         ++it;
     }
+}
+
+bool KisStroke::addCheckpointJob(KisStrokeJobData *data)
+{
+    QScopedPointer<KisStrokeJobData> input(data);
+    if (!data || !m_dabStrategy || m_isCancelled || m_failed ||
+        (!data->isSequential() && !data->isBarrier()) || !data->isCancellable() ||
+        (data->levelOfDetailOverride() >= 0 &&
+         data->levelOfDetailOverride() != worksOnLevelOfDetail()) ||
+        (m_strokeEnded && !m_queuedFinishJob)) {
+        return false;
+    }
+
+    // The queue mutex linearizes this position with normal input admission.
+    // Existing jobs and their recursively prepended children remain before it;
+    // input accepted later stays after it. Sequential dispatch waits for all
+    // running stroke jobs without making the requester wait for itself.
+    auto position = m_jobsQueue.end();
+    if (m_queuedFinishJob) {
+        // Normal input has closed, and mutations only prepend. The queued
+        // finish stays last, so locating it must not scan the stroke backlog.
+        KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(
+            !m_jobsQueue.isEmpty() && m_jobsQueue.back() == m_queuedFinishJob, false);
+        --position;
+    }
+    QScopedPointer<KisStrokeJob> job(new KisStrokeJob(
+        m_dabStrategy.data(), input.data(), worksOnLevelOfDetail(), true));
+    input.take();
+    m_jobsQueue.insert(position, job.data());
+    job.take();
+    return true;
 }
 
 KisStrokeJob* KisStroke::popOneJob()
@@ -102,6 +143,7 @@ KisStrokeJob* KisStroke::popOneJob()
     KisStrokeJob *job = dequeue();
 
     if(job) {
+        m_retryCancellation = false;
         m_strokeInitialized = true;
         m_strokeSuspended = false;
     }
@@ -134,7 +176,10 @@ void KisStroke::endStroke()
     KIS_SAFE_ASSERT_RECOVER_RETURN(!m_strokeEnded);
     m_strokeEnded = true;
 
-    enqueue(m_finishStrategy.data(), m_strokeStrategy->createFinishData());
+    if (!m_failed) {
+        enqueue(m_finishStrategy.data(), m_strokeStrategy->createFinishData());
+        if (m_finishStrategy) m_queuedFinishJob = m_jobsQueue.back();
+    }
     m_strokeStrategy->notifyUserEndedStroke();
 }
 
@@ -156,6 +201,10 @@ void KisStroke::endStroke()
 
 void KisStroke::cancelStroke()
 {
+    if (m_failed) {
+        m_strokeEnded = true;
+        return;
+    }
     // case 6
     if (m_isCancelled) return;
 
@@ -194,6 +243,41 @@ void KisStroke::cancelStroke()
     m_strokeEnded = true;
 }
 
+bool KisStroke::failStroke()
+{
+    if (m_failed) return false;
+    m_failed = true;
+    m_isCancelled = true;
+    m_strokeStrategy->tryCancelCurrentStrokeJobAsync();
+    clearQueueOnCancel();
+    // Unlike a user cancel, a worker failure must also clean up a finish job
+    // that has just failed with no more jobs queued. Do not close the input
+    // handle here: addJob/endStroke may still arrive from its GUI owner.
+    if (m_strokeInitialized || m_strokeSuspended || m_strokeStrategy->needsExplicitCancel())
+        enqueue(m_cancelStrategy.data(), m_strokeStrategy->createCancelData());
+    return true;
+}
+
+int KisStroke::retryCancellation()
+{
+    KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(m_isCancelled && m_cancelStrategy, 0);
+    KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(!m_retryCancellation, 0);
+    m_failed = true;
+    const int delay = qMin(100, 1 << qMin<int>(m_cancellationRetries, 7));
+    if (m_cancellationRetries < 7) ++m_cancellationRetries;
+    m_retryDeadline = QDeadlineTimer(delay, Qt::PreciseTimer);
+    m_retryCancellation = true;
+    auto *data = m_strokeStrategy->createCancelData();
+    if (data) data->setCancellable(false);
+    enqueue(m_cancelStrategy.data(), data);
+    return delay;
+}
+
+int KisStroke::cancellationRetryDelay() const
+{
+    return m_retryCancellation ? qMax(0, int(m_retryDeadline.remainingTime())) : 0;
+}
+
 bool KisStroke::canCancel() const
 {
     return m_isCancelled || !m_strokeInitialized ||
@@ -216,6 +300,7 @@ void KisStroke::clearQueueOnCancel()
 
     while (it != m_jobsQueue.end()) {
         if ((*it)->isCancellable()) {
+            if (*it == m_queuedFinishJob) m_queuedFinishJob = nullptr;
             delete (*it);
             it = m_jobsQueue.erase(it);
         } else {
@@ -317,7 +402,9 @@ void KisStroke::prepend(KisStrokeJobStrategy *strategy,
 
 KisStrokeJob* KisStroke::dequeue()
 {
-    return !m_jobsQueue.isEmpty() ? m_jobsQueue.dequeue() : 0;
+    KisStrokeJob *job = !m_jobsQueue.isEmpty() ? m_jobsQueue.dequeue() : nullptr;
+    if (job == m_queuedFinishJob) m_queuedFinishJob = nullptr;
+    return job;
 }
 
 void KisStroke::setLodBuddy(KisStrokeSP buddy)

@@ -19,6 +19,30 @@ private:
 
 private Q_SLOTS:
     void testOperations();
+    void testPreparedRetirement();
+    void testEmbeddedRetirement();
+    void testConcurrentRetirement();
+    void testInsertIfAbsentAcrossMigration();
+    void testConcurrentInsertIfAbsent();
+    void testTileHashReferenceLifetime();
+    void testTileHashNotificationFailure();
+    void testTileHashConcurrentClear();
+    void testReadEraseDuringPartialMigration();
+    void testMigrationOverflowCompletion();
+    void testPrepareRedirectedEmptyCell();
+    void testPartialMigrationTileHashDestruction();
+    void testInvalidMapCapacity();
+    void testCoordinatorRetryWakeup();
+    void testPreparedKeySurvivesMigration();
+    void testPreparedKeyLogicalOperations();
+    void testPreparedKeyDuringPartialMigration();
+    void testPreparedKeyCloseAndLifetime();
+    void testPreparedKeyConcurrentRelease();
+    void testPreparedKeySameKeyCompetition();
+    void testPreparedKeyMapAddressReuse();
+    void testTileHashPreparedKeyLifecycle();
+    void testPreparedTileCandidatesLockFree();
+    void testPreparedTileCandidatesChained();
     void stressTestLockless();
     void stressTestQStack();
 
@@ -29,4 +53,3 @@ private Q_SLOTS:
 };
 
 #endif /* KIS_LOCKLESS_STACK_TEST_H */
-
