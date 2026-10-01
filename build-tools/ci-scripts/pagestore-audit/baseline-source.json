@@ -1416,7 +1416,7 @@
       "synchronization_declarations": 5
     },
     "libs/image/pagestore/KisPageHistoryCollector.cpp": {
-      "container_declarations": 13,
+      "container_declarations": 11,
       "include_edges": [
         "KisPageHistoryCollector_p.h",
         "KisPageStoreReclamation_p.h",
@@ -1424,15 +1424,15 @@
         "algorithm",
         "utility"
       ],
-      "lines": 386,
+      "lines": 387,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "eb66af4e31df76ce61aa27f2a7966f1f438a94e82416b1aacadb18829b6bcdb5",
+      "sha256": "1d61e1fe9cdc87bfb9f8cbf87b678143495b5d24b6fcdb2acd410f6a1845916e",
       "synchronization_declarations": 1
     },
     "libs/image/pagestore/KisPageHistoryCollector_p.h": {
-      "container_declarations": 11,
+      "container_declarations": 9,
       "include_edges": [
         "KisImageEpochReferenceModel.h",
         "KisPageMetadataCoordinator.h",
@@ -1473,7 +1473,7 @@
         "KisPageHistoryCollectorSnapshot",
         "Scan"
       ],
-      "sha256": "1acfdbf6d23d60d7321cbd03afc20881a77058ca0a92c59a224bd2bc49357fe6",
+      "sha256": "b70787224e81918e67a3b2f99d665b6ca8ed3cf4219c8b49d6cfb5c3cf3d9687",
       "synchronization_declarations": 5
     },
     "libs/image/pagestore/KisPageMetadataArena_p.h": {
@@ -1795,7 +1795,7 @@
         "utility",
         "vector"
       ],
-      "lines": 1672,
+      "lines": 1673,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStore",
@@ -1808,7 +1808,7 @@
         "Change",
         "KisPagePublicationCoordinator"
       ],
-      "sha256": "d10088dfa04c4bb47f4d1f81963197ae89faa56d7a53f53d36b444b1ae0fec54",
+      "sha256": "dd7925bb1ef6e002f89a6c84c3abdfbd9df25eb15c67d241a9b09a40677b3bd4",
       "synchronization_declarations": 7
     },
     "libs/image/pagestore/KisPagePublicationCoordinator_p.h": {
@@ -1869,7 +1869,7 @@
       "synchronization_declarations": 8
     },
     "libs/image/pagestore/KisPageReadCoordinator.cpp": {
-      "container_declarations": 30,
+      "container_declarations": 20,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisPageReadCoordinator_p.h",
@@ -1883,17 +1883,19 @@
         "optional",
         "utility"
       ],
-      "lines": 918,
+      "lines": 1088,
       "member_fields": [],
-      "pagestore_identifiers": [],
+      "pagestore_identifiers": [
+        "KisPageStoreDetail"
+      ],
       "public_types": [
         "KisPageReadCoordinator"
       ],
-      "sha256": "28e2de5c450447556025459bf27072c43e8c7331d9b4cae27a5287543f918e4e",
-      "synchronization_declarations": 14
+      "sha256": "e11c8651f6b51d531bebcfb07311265f9a0258bd4f8ba376ba1c63e47b148342",
+      "synchronization_declarations": 19
     },
     "libs/image/pagestore/KisPageReadCoordinator_p.h": {
-      "container_declarations": 24,
+      "container_declarations": 22,
       "include_edges": [
         "KisMutationStorage_p.h",
         "KisPageHistoryCollector_p.h",
@@ -1906,12 +1908,13 @@
         "QMutexLocker",
         "QSharedPointer",
         "QVector",
+        "boost/intrusive/list.hpp",
         "deque",
         "map",
         "memory",
         "optional"
       ],
-      "lines": 258,
+      "lines": 284,
       "member_fields": [
         "m_active",
         "m_activeReads",
@@ -1924,7 +1927,10 @@
         "m_lastUsePasses",
         "m_lastUseWakeContext",
         "m_maximumLastUsesPerPass",
+        "m_pendingHistoryReads",
         "m_pendingLastUses",
+        "m_preparedRequestId",
+        "m_reads",
         "m_releaseRetries",
         "m_requests",
         "m_requestsCreated",
@@ -1942,8 +1948,8 @@
         "PendingCapturedRelease",
         "State"
       ],
-      "sha256": "7c187e93e8184d49720bb79aa220ac222e4d48b250e8cef786c4d93f51d0f554",
-      "synchronization_declarations": 12
+      "sha256": "7f22d11cee17e7b512c88f3bd81600cf8d3c6b1f20fa72a88d62bc8171bf3292",
+      "synchronization_declarations": 17
     },
     "libs/image/pagestore/KisPageReadiness.cpp": {
       "container_declarations": 1,
@@ -2248,7 +2254,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4597,
+      "lines": 4591,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2283,7 +2289,7 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "23752af7a6d1cb0bcd9253f51df4861dcf06fbd89d9bee322fefeafe797527c7",
+      "sha256": "bb84f1ef4e06e8ff0013b9dc1035bc45f4b77fab44b4d93b40daf1dee141c607",
       "synchronization_declarations": 23
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -3229,9 +3235,11 @@
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisImageEpochReferenceModel.h",
+        "KisPageHistoryCollector_p.h",
         "KisPageMetadataCoordinator.h",
         "KisPageMetadataCoordinator_p.h",
         "KisPageOwnerLedger.h",
+        "KisPageReadCoordinator_p.h",
         "KisPageRetirementQueue_p.h",
         "KisPageStoreCpuMutationTest.moc",
         "KisPageStoreCpuSurfaceOps.h",
@@ -3258,7 +3266,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 7980,
+      "lines": 8184,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3281,10 +3289,11 @@
       "public_types": [
         "Fixture",
         "KisPageStoreCpuMutationTest",
+        "ReadTerminalFixture",
         "TestProvider"
       ],
-      "sha256": "b88692c68425e0a9dc0b4c1412a20f82d7bbb2863c77d64d066e0e189b734c5c",
-      "synchronization_declarations": 0
+      "sha256": "818ce3a3dd95f032b67cccfd942bfbf710b4db78dee20ea747aab41c83f03710",
+      "synchronization_declarations": 1
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
       "container_declarations": 0,
@@ -6111,5 +6120,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "9697196acab538329359a2d6c5bc45c2cf001a36"
+  "working_tree_head": "125ed0c0e2a7d5224a062239330066a638803e88"
 }

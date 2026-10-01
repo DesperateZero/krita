@@ -18,14 +18,52 @@
 #include <new>
 #include <utility>
 
+KisPageReadCleanup::KisPageReadCleanup(KisPageReadCoordinator &owner)
+    : m_owner(owner)
+    , m_requests(std::less<quint64>{}, owner.m_requests.get_allocator())
+    , m_reads(std::less<quint64>{}, owner.m_activeReads.get_allocator())
+{
+}
+
 KisPageReadCleanup::~KisPageReadCleanup()
 {
     finish();
 }
 
+bool KisPageReadCleanup::prepareRequestLocked(QMutexLocker<QMutex> &ownerLock, QString *error)
+{
+    Q_ASSERT(!m_preparedRequestId);
+    const auto id = m_owner.m_owner.nextRequestId();
+    if (!id.isValid()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore read identity allocation failed"));
+        return false;
+    }
+    KisPageReadCoordinator::PendingReadMap::node_type node;
+    ++m_owner.m_activeProviderCalls;
+    ownerLock.unlock();
+    try {
+        KisPageReadCoordinator::PendingReadMap prepared(std::less<quint64>{}, m_requests.get_allocator());
+        prepared.emplace(id.value, KisPagePendingReadRecord{});
+        node = prepared.extract(prepared.begin());
+    } catch (const std::bad_alloc &) {
+        ownerLock.relock(); --m_owner.m_activeProviderCalls;
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore read request storage is unavailable"));
+        return false;
+    }
+    ownerLock.relock(); --m_owner.m_activeProviderCalls;
+    m_requests.insert(std::move(node));
+    m_preparedRequestId = id.value;
+    retainLocked(); // Also covers refused cold candidates until actual gate-free disposal.
+    if (!m_owner.m_operational) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore changed during read preparation"));
+        return false;
+    }
+    return true;
+}
+
 void KisPageReadCleanup::retainLocked()
 {
-    if (!m_active && !m_storage.isEmpty()) {
+    if (!m_active && (!m_storage.isEmpty() || !m_requests.empty() || !m_reads.empty())) {
         ++m_owner.m_activeProviderCalls;
         m_active = true;
     }
@@ -37,6 +75,8 @@ void KisPageReadCleanup::finish()
     // Keep both the metadata charge and the owner's unlocked activity until
     // the detached payload has actually been destroyed.
     m_storage.clear();
+    m_requests.clear();
+    m_reads.clear();
     QMutexLocker lock(&m_owner.m_ownerMutex);
     --m_owner.m_activeProviderCalls;
     m_active = false;
@@ -59,9 +99,13 @@ struct KisPageReadCoordinator::LastUseWakeContext
     KisPageReclamationJobPointer task;
     std::shared_ptr<ActiveReadRecord> head;
     ActiveReadRecord *tail = nullptr;
+    qsizetype readyCount = 0;
     bool accepting = true;
     bool jobScheduled = false;
-    bool dispatchFailed = false;
+    KisPageReclamationDelay retry;
+    bool retryScheduled = false;
+    bool cancelPending = false;
+    int nextRetryDelayMs = 1;
     quint64 dispatchFailures = 0;
 
     void clearReadyLocked()
@@ -72,6 +116,7 @@ struct KisPageReadCoordinator::LastUseWakeContext
             record->readyQueued = false;
         }
         tail = nullptr;
+        readyCount = 0;
     }
 };
 
@@ -83,53 +128,40 @@ KisPageReadCoordinator::~KisPageReadCoordinator()
         m_lastUseWakeContext->coordinator = nullptr;
         m_lastUseWakeContext->accepting = false;
         m_lastUseWakeContext->clearReadyLocked();
+        m_lastUseWakeContext->retry.cancel();
         m_lastUseWakeContext->wake.reset();
     }
 }
 
-bool KisPageReadCoordinator::prepareLastUseContextLocked()
+void KisPageReadCoordinator::prepareTask()
 {
-    if (m_lastUseWakeContext) return true;
-    std::shared_ptr<LastUseWakeContext> prepared;
-    const auto discard = qScopeGuard([&] {
-        if (!prepared) return;
-        m_ownerMutex.unlock();
-        prepared.reset();
-        m_ownerMutex.lock();
-    });
-    {
-        m_ownerMutex.unlock();
-        const auto relock = qScopeGuard([&] { m_ownerMutex.lock(); });
-        try {
-            prepared = std::allocate_shared<LastUseWakeContext>(
-                KisMutationStorageAllocator<LastUseWakeContext>::retained(&m_budget));
-            prepared->coordinator = this;
-            prepared->task = kisPreparePageStoreReclamation([this] {
-                processLastUses(m_lastUseWakeContext);
-            }, &m_budget, +[](void *value) {
-                auto *coordinator = static_cast<KisPageReadCoordinator *>(value);
-                const auto context = coordinator->m_lastUseWakeContext;
-                {
-                    QMutexLocker lock(&context->mutex);
-                    context->jobScheduled = false;
-                    if (!context->dispatchFailed && context->accepting && context->head)
-                        context->wake.notify();
-                    context->idle.wakeAll();
-                }
-                coordinator->m_releaseLifetime(coordinator->m_lifetimeContext);
-            }, this);
-            prepared->wake = kisPreparePageStoreReclamationWake(
-                KisPageReadinessCallback([weak = std::weak_ptr<LastUseWakeContext>(prepared)] {
-                    dispatchLastUses(weak);
-                }, &m_budget), &m_budget);
-        } catch (const std::bad_alloc &) {
-            // Original read debt is still present; no consumer was installed.
+    if (m_lastUseWakeContext) return;
+    auto prepared = std::allocate_shared<LastUseWakeContext>(
+        KisMutationStorageAllocator<LastUseWakeContext>::retained(&m_budget));
+    prepared->coordinator = this;
+    prepared->task = kisPreparePageStoreReclamation([this] {
+        processLastUses(m_lastUseWakeContext);
+    }, &m_budget, +[](void *value) {
+        auto *coordinator = static_cast<KisPageReadCoordinator *>(value);
+        const auto context = coordinator->m_lastUseWakeContext;
+        {
+            QMutexLocker lock(&context->mutex);
+            context->jobScheduled = false;
+            if (context->accepting && !context->retryScheduled &&
+                (context->head || context->cancelPending))
+                context->wake.notify();
+            context->idle.wakeAll();
         }
-    }
-    if (!prepared || !prepared->wake.isValid() || !m_backgroundReclamation ||
-        m_automaticWakeupsStopped || m_lastUseClosing) return false;
-    if (!m_lastUseWakeContext) m_lastUseWakeContext = std::move(prepared);
-    return true;
+        coordinator->m_releaseLifetime(coordinator->m_lifetimeContext);
+    }, this);
+    prepared->wake = kisPreparePageStoreReclamationWake(
+        KisPageReadinessCallback([weak = std::weak_ptr<LastUseWakeContext>(prepared)] {
+            dispatchLastUses(weak);
+        }, &m_budget), &m_budget);
+    prepared->retry = KisPageReclamationDelay(KisPageReadinessCallback(
+        [weak = std::weak_ptr<LastUseWakeContext>(prepared)] { dispatchLastUses(weak); }, &m_budget), &m_budget);
+    if (!prepared->wake.isValid() || !prepared->retry.isValid()) throw std::bad_alloc();
+    m_lastUseWakeContext = std::move(prepared);
 }
 
 void KisPageReadCoordinator::armLastUseLocked(const std::shared_ptr<ActiveReadRecord> &source)
@@ -138,7 +170,7 @@ void KisPageReadCoordinator::armLastUseLocked(const std::shared_ptr<ActiveReadRe
     if (!m_backgroundReclamation || m_automaticWakeupsStopped || m_lastUseClosing ||
         !record->metadataReleased || record->lastUseSubscription.isValid()) return;
     try {
-        if (!prepareLastUseContextLocked()) return;
+        Q_ASSERT(m_lastUseWakeContext);
         const auto active = m_activeReads.find(record->leaseId);
         if (active == m_activeReads.end() || active->second != record ||
             m_automaticWakeupsStopped || m_lastUseClosing ||
@@ -164,10 +196,12 @@ void KisPageReadCoordinator::armLastUseLocked(const std::shared_ptr<ActiveReadRe
             m_automaticWakeupsStopped || m_lastUseClosing || !record->metadataReleased ||
             record->lastUseSubscription.isValid()) return;
         record->lastUseSubscription = std::move(subscription);
-        if (status == KisPageReadinessStatus::Ready) notifyLastUse(context, pending);
+        if (status != KisPageReadinessStatus::Waiting || !record->lastUseSubscription.isValid())
+            notifyLastUse(context, pending);
     } catch (const std::bad_alloc &) {
-        // The original record and metadata protection survive. Explicit
-        // acknowledgement/close still consume them; never drop a last-use debt.
+        // The original cold task/timer owns progress when a subscription does
+        // not fit. Retain the exact record and poll its original terminal.
+        notifyLastUse(m_lastUseWakeContext, record);
     }
 }
 
@@ -179,12 +213,16 @@ void KisPageReadCoordinator::notifyLastUse(
     const auto record = weakRecord.lock();
     if (!context || !record) return;
     QMutexLocker lock(&context->mutex);
-    if (!context->coordinator || !context->accepting || record->readyQueued) return;
-    record->readyQueued = true;
-    if (context->tail) context->tail->nextReady = record;
-    else context->head = record;
-    context->tail = record.get();
-    context->dispatchFailed = false;
+    if (!context->coordinator || !context->accepting) return;
+    if (!record->readyQueued) {
+        record->readyQueued = true;
+        if (context->tail) context->tail->nextReady = record;
+        else context->head = record;
+        context->tail = record.get();
+        ++context->readyCount;
+    }
+    context->retry.cancel();
+    context->retryScheduled = false;
     // The producer may still hold provider/registry gates. Only splice an
     // already prepared monitor node here; never enter the owner or metadata.
     context->wake.notify();
@@ -196,7 +234,14 @@ void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeCon
     if (!context) return;
     QMutexLocker lock(&context->mutex);
     auto *coordinator = context->coordinator;
-    if (!coordinator || !context->accepting || !context->head || context->jobScheduled) return;
+    if (!coordinator || !context->accepting || (!context->head && !context->cancelPending)) return;
+    if (context->retryScheduled) {
+        if (!context->retry.takeReady()) return;
+        context->retryScheduled = false;
+    }
+    // A timer can publish while the task is still finishing. Consume that
+    // notification now; the original finish point will enqueue the next pass.
+    if (context->jobScheduled) return;
     auto &references = coordinator->m_ownerLifetime;
     int count = references.loadAcquire();
     for (;;) {
@@ -205,7 +250,6 @@ void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeCon
         count = references.loadAcquire();
     }
     context->jobScheduled = true;
-    context->dispatchFailed = false;
     lock.unlock();
     kisEnqueuePageStoreReclamation(context->task.get());
 }
@@ -213,14 +257,26 @@ void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeCon
 void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeContext> &context)
 {
     KisPageReadCleanup cleanup(*this);
-    bool failed = false;
-    try {
+    bool retry = false;
+    bool allocationFailed = false;
+    bool progressed = false;
+    {
         QMutexLocker ownerLock(&m_ownerMutex);
         constexpr qsizetype maximumPerPass = 32;
-        QVector<KisPageKey> released;
-        released.reserve(maximumPerPass);
         qsizetype visited = 0;
-        for (; visited < maximumPerPass; ++visited) {
+        qsizetype readyBudget = 0;
+        {
+            QMutexLocker notificationLock(&context->mutex);
+            readyBudget = context->readyCount;
+        }
+        if (!m_cancelRetries.empty() && m_operational) {
+            try { retryCancelledRequestsLocked(ownerLock, cleanup); }
+            catch (const std::bad_alloc &) { allocationFailed = true; }
+            retry = !m_cancelRetries.empty();
+            ++visited;
+        }
+        const qsizetype passEnd = std::min(maximumPerPass, visited + readyBudget);
+        for (; visited < passEnd; ++visited) {
             std::shared_ptr<ActiveReadRecord> record;
             {
                 QMutexLocker lock(&context->mutex);
@@ -229,28 +285,51 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
                 context->head = std::move(record->nextReady);
                 if (!context->head) context->tail = nullptr;
                 record->readyQueued = false;
+                --context->readyCount;
             }
             const auto active = m_activeReads.find(record->leaseId);
-            if (!m_operational || !record->metadataReleased ||
+            if (!m_operational ||
                 active == m_activeReads.end() || active->second != record) continue;
-            const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
-            if (terminal.isValid() && acknowledgeRecordLocked(record, terminal, cleanup))
-                released.append(record->replica.version.key);
+            if (record->releaseHook.is_linked()) {
+                m_releaseRetries.erase(m_releaseRetries.iterator_to(*record));
+                if (!finishReleasedReadLocked(record->leaseId, cleanup)) {
+                    m_releaseRetries.push_back(*record);
+                    notifyLastUse(context, record);
+                    retry = true;
+                    continue;
+                }
+            }
+            if (record->metadataReleased) {
+                const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
+                if (!terminal.isValid() || !acknowledgeRecordLocked(record, terminal, cleanup)) {
+                    notifyLastUse(context, record);
+                    retry = true;
+                    continue;
+                }
+            }
+            if (record->historyPending) {
+                if (finishHistoryReadLocked(record, ownerLock, cleanup)) progressed = true;
+                else { notifyLastUse(context, record); retry = true; }
+            }
         }
         if (visited) {
             ++m_lastUsePasses;
             m_maximumLastUsesPerPass = std::max(m_maximumLastUsesPerPass, quint64(visited));
         }
-        if (!released.isEmpty())
-            retireEffectsUnlocked(m_history.collectUnreachableLocked(released), ownerLock);
-    } catch (const std::bad_alloc &) {
-        failed = true;
+        QMutexLocker notificationLock(&context->mutex);
+        context->cancelPending = !m_cancelRetries.empty();
     }
     cleanup.finish(); // complete physical cleanup before idle/lifetime publication
     {
         QMutexLocker lock(&context->mutex);
-        context->dispatchFailed = failed;
-        if (failed) ++context->dispatchFailures;
+        if (allocationFailed) ++context->dispatchFailures;
+        if (context->accepting && retry && (context->head || context->cancelPending)) {
+            if (progressed) context->nextRetryDelayMs = 1;
+            context->retryScheduled = context->retry.arm(context->nextRetryDelayMs);
+            context->nextRetryDelayMs = std::min(100, context->nextRetryDelayMs * 2);
+        } else if (progressed) {
+            context->nextRetryDelayMs = 1;
+        }
     }
 }
 
@@ -260,6 +339,8 @@ void KisPageReadCoordinator::beginCloseLocked()
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         m_lastUseWakeContext->accepting = false;
+        m_lastUseWakeContext->retry.cancel();
+        m_lastUseWakeContext->retryScheduled = false;
         m_lastUseWakeContext->clearReadyLocked();
         m_lastUseWakeContext->idle.wakeAll();
     }
@@ -271,13 +352,24 @@ void KisPageReadCoordinator::cancelCloseLocked()
 {
     m_lastUseClosing = false;
     if (!m_backgroundReclamation || m_automaticWakeupsStopped) return;
-    if (!m_lastUseWakeContext && !m_activeReads.empty() && !prepareLastUseContextLocked()) return;
+    Q_ASSERT(m_lastUseWakeContext);
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         m_lastUseWakeContext->accepting = true;
+        m_lastUseWakeContext->cancelPending = !m_cancelRetries.empty();
+        if (m_lastUseWakeContext->cancelPending) m_lastUseWakeContext->wake.notify();
     }
-    for (const auto &[id, record] : std::as_const(m_activeReads))
+    const quint64 last = m_activeReads.empty() ? 0 : m_activeReads.rbegin()->first;
+    quint64 after = 0;
+    for (;;) {
+        const auto it = m_activeReads.upper_bound(after);
+        if (it == m_activeReads.end() || it->first > last) break;
+        after = it->first;
+        const auto record = it->second;
         if (record->metadataReleased) armLastUseLocked(record);
+        else if (record->historyPending || record->releaseHook.is_linked())
+            notifyLastUse(m_lastUseWakeContext, record);
+    }
 }
 
 void KisPageReadCoordinator::stopAutomaticWakeups()
@@ -297,7 +389,7 @@ void KisPageReadCoordinator::waitForIdle()
     if (!context) return;
     QMutexLocker lock(&context->mutex);
     while (context->jobScheduled ||
-           (context->accepting && context->head && !context->dispatchFailed))
+           (context->accepting && !context->retryScheduled && (context->head || context->cancelPending)))
         context->idle.wait(&context->mutex);
 }
 
@@ -345,6 +437,7 @@ KisPageReadCoordinator::KisPageReadCoordinator(
     , m_ownerLifetime(ownerLifetime)
     , m_lifetimeContext(lifetimeContext)
     , m_releaseLifetime(releaseLifetime)
+    , m_requests(std::less<quint64>{}, PendingReadAllocator(&budget))
     , m_activeReads(std::less<quint64>{}, ActiveReadAllocator(&budget))
 {
 }
@@ -371,11 +464,12 @@ KisReadRequest KisPageReadCoordinator::registerRequestLocked(
     const KisReplicaHandle &replica,
     KisPageAccessRequirement access,
     const KisCompletionTicket &readiness,
-    KisPageTransactionId transaction)
+    KisPageTransactionId transaction,
+    KisPageReadCleanup &cleanup)
 {
     KisReadRequest request;
     request.access = access;
-    request.id = m_owner.nextRequestId();
+    request.id = KisPageRequestId{cleanup.m_preparedRequestId};
     request.version = version;
     request.readiness = readiness;
     request.status = request.id.isValid() && request.readiness.isValid()
@@ -391,6 +485,7 @@ KisReadRequest KisPageReadCoordinator::registerRequestLocked(
     pending.accessOperation = m_owner.nextOperationId();
     pending.reservedLease = m_owner.nextLeaseId();
     pending.readiness = readiness;
+    pending.requestId = request.id.value;
     if (!pending.accessOperation.isValid() ||
         !pending.reservedLease.isValid()) {
         request = {};
@@ -399,16 +494,18 @@ KisReadRequest KisPageReadCoordinator::registerRequestLocked(
             "PageStore read operation identity allocation failed");
         return request;
     }
-    try {
-        m_requests.emplace(request.id.value, pending);
-    } catch (const std::bad_alloc &) {
-        request.status = KisPageRequestStatus::Failed;
-        request.error = QStringLiteral("PageStore read request storage is unavailable");
-        return request;
-    }
+    auto node = cleanup.m_requests.extract(request.id.value);
+    Q_ASSERT(!node.empty());
+    node.mapped() = pending;
+    cleanup.m_preparedRequestId = 0;
+    const auto inserted = m_requests.insert(std::move(node));
+    Q_ASSERT(inserted.inserted);
     // No caller can observe this node before AcquireRead succeeds. Rejection
     // removes it; successful protection already has its cancellation owner.
-    auto removePrepared = qScopeGuard([&] { m_requests.erase(request.id.value); });
+    auto removePrepared = qScopeGuard([&] {
+        cleanup.m_requests.insert(m_requests.extract(request.id.value));
+        cleanup.retainLocked();
+    });
     KisPageTransition acquire;
     acquire.kind = KisPageTransitionKind::AcquireRead;
     acquire.version = pending.replica.version;
@@ -525,7 +622,8 @@ KisReadLease KisPageReadCoordinator::resolveLocked(
     // consumer. Node transfer cannot allocate or invalidate another lease.
     const auto installed = m_activeReads.insert(std::move(preparedNode));
     Q_ASSERT(installed.inserted);
-    m_requests.erase(requestIt);
+    cleanup.m_requests.insert(m_requests.extract(requestIt));
+    cleanup.retainLocked();
     return lease;
 }
 
@@ -537,21 +635,45 @@ bool KisPageReadCoordinator::cancelLocked(
     if (!m_operational || !request.isValid() ||
         requestIt == m_requests.end() ||
         requestIt->second.state == KisPagePendingReadRecord::State::Resolving ||
+        requestIt->second.state == KisPagePendingReadRecord::State::Collecting ||
         !(requestIt->second.replica.version == request.version) ||
         !(requestIt->second.readiness == request.readiness) ||
         !(requestIt->second.access == request.access)) {
         return false;
     }
-    if (!releaseReadLocked(requestIt->second.replica, requestIt->second.reservedLease, cleanup)) {
-        if (requestIt->second.state != KisPagePendingReadRecord::State::Cancelling) {
-            requestIt->second.state = KisPagePendingReadRecord::State::Cancelling;
-            m_cancelRetries.push_back(request.id.value);
-        }
-        return false;
+    auto &pending = requestIt->second;
+    bool released = pending.state == KisPagePendingReadRecord::State::Released;
+    try {
+        if (!released) released = releaseReadLocked(pending.replica, pending.reservedLease, cleanup);
+    } catch (const std::bad_alloc &) {
+        // The original request remains the cancellation owner.
     }
-    m_requests.erase(requestIt);
-    retireEffectsUnlocked(m_history.collectUnreachableLocked({request.version.key}), ownerLock);
-    return true;
+    pending.state = released ? KisPagePendingReadRecord::State::Released
+                             : KisPagePendingReadRecord::State::Cancelling;
+    if (released) {
+        pending.state = KisPagePendingReadRecord::State::Collecting;
+        try {
+            retireEffectsUnlocked(m_history.collectUnreachableLocked(&request.version.key, 1), ownerLock);
+            requestIt = m_requests.find(request.id.value);
+            Q_ASSERT(requestIt != m_requests.end());
+            if (requestIt->second.cancelHook.is_linked())
+                m_cancelRetries.erase(m_cancelRetries.iterator_to(requestIt->second));
+            cleanup.m_requests.insert(m_requests.extract(requestIt));
+            cleanup.retainLocked();
+            return true;
+        } catch (const std::bad_alloc &) {
+            pending.state = KisPagePendingReadRecord::State::Released;
+        }
+    }
+    if (!pending.cancelHook.is_linked()) m_cancelRetries.push_back(pending);
+    if (m_backgroundReclamation && !m_lastUseClosing && !m_automaticWakeupsStopped) {
+        QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
+        m_lastUseWakeContext->cancelPending = true;
+        m_lastUseWakeContext->retry.cancel();
+        m_lastUseWakeContext->retryScheduled = false;
+        m_lastUseWakeContext->wake.notify();
+    }
+    return false;
 }
 
 void KisPageReadCoordinator::retryCancelledRequestsLocked(
@@ -560,7 +682,7 @@ void KisPageReadCoordinator::retryCancelledRequestsLocked(
     const size_t attempts = drain ? m_cancelRetries.size()
                                   : std::min<size_t>(1, m_cancelRetries.size());
     for (size_t i = 0; i < attempts && !m_cancelRetries.empty(); ++i) {
-        const quint64 id = m_cancelRetries.front();
+        const quint64 id = m_cancelRetries.front().requestId;
         m_cancelRetries.pop_front();
         const auto pending = m_requests.find(id);
         if (pending == m_requests.cend()) continue;
@@ -570,21 +692,20 @@ void KisPageReadCoordinator::retryCancelledRequestsLocked(
         request.version = pending->second.replica.version;
         request.access = pending->second.access;
         request.readiness = pending->second.readiness;
-        if (!cancelLocked(request, ownerLock, cleanup)) m_cancelRetries.push_back(id);
+        cancelLocked(request, ownerLock, cleanup); // Refusal relinks the same original node.
     }
 }
 
-KisPageKey KisPageReadCoordinator::releaseLocked(
+void KisPageReadCoordinator::releaseLocked(
     KisReadLease lease,
     const KisCompletionTicket &consumerLastUse,
     QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
 {
-    KisPageKey releasedKey;
     auto activeIt = m_activeReads.find(lease.m_leaseId.value);
     if (!lease.isValid() || activeIt == m_activeReads.end() ||
         !(activeIt->second->replica.version == lease.m_version) ||
         (!activeIt->second->access || !activeIt->second->access->isValid())) {
-        return {};
+        return;
     }
     const auto active = activeIt->second;
     active->releaseLastUse = consumerLastUse;
@@ -593,17 +714,19 @@ KisPageKey KisPageReadCoordinator::releaseLocked(
         std::move(*active->access), consumerLastUse);
     ownerLock.relock();
     activeIt = m_activeReads.find(lease.m_leaseId.value);
-    if (activeIt == m_activeReads.end()) return {};
+    if (activeIt == m_activeReads.end()) return;
     active->provider.clear();
-    if (!finishReleasedReadLocked(lease.m_leaseId.value, &releasedKey, cleanup)) {
-        m_releaseRetries.push_back(lease.m_leaseId.value);
-        return {};
+    if (!finishReleasedReadLocked(lease.m_leaseId.value, cleanup)) {
+        if (!active->releaseHook.is_linked()) m_releaseRetries.push_back(*active);
+        if (m_backgroundReclamation) notifyLastUse(m_lastUseWakeContext, active);
+        return;
     }
-    return releasedKey;
+    if (active->historyPending && !finishHistoryReadLocked(active, ownerLock, cleanup) && m_backgroundReclamation)
+        notifyLastUse(m_lastUseWakeContext, active);
 }
 
 bool KisPageReadCoordinator::finishReleasedReadLocked(
-    quint64 leaseId, KisPageKey *key, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged)
+    quint64 leaseId, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged) try
 {
     if (lastUseAcknowledged) *lastUseAcknowledged = false;
     auto activeIt = m_activeReads.find(leaseId);
@@ -628,9 +751,38 @@ bool KisPageReadCoordinator::finishReleasedReadLocked(
             armLastUseLocked(active);
         }
     } else {
-        m_activeReads.erase(activeIt);
+        active->historyPending = true;
+        ++m_pendingHistoryReads;
     }
-    if (key) *key = active->replica.version.key;
+    return true;
+}
+catch (const std::bad_alloc &) { return false; }
+
+bool KisPageReadCoordinator::finishHistoryReadLocked(
+    const std::shared_ptr<ActiveReadRecord> &record,
+    QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
+{
+    if (!record->historyPending) return true;
+    if (record->historyProcessing) return false;
+    record->historyProcessing = true;
+    const auto done = qScopeGuard([&] { record->historyProcessing = false; });
+    try {
+        const auto key = record->replica.version.key;
+        retireEffectsUnlocked(m_history.collectUnreachableLocked(&key, 1), ownerLock);
+    } catch (const std::bad_alloc &) {
+        // Preserve the exact key in its original admitted read record. A
+        // failed GC notification must not discard that obligation after ack.
+        QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
+        ++m_lastUseWakeContext->dispatchFailures;
+        return false;
+    }
+    const auto active = m_activeReads.find(record->leaseId);
+    Q_ASSERT(active != m_activeReads.end() && active->second == record);
+    record->historyPending = false;
+    --m_pendingHistoryReads;
+    if (record->releaseHook.is_linked()) m_releaseRetries.erase(m_releaseRetries.iterator_to(*record));
+    cleanup.m_reads.insert(m_activeReads.extract(active));
+    cleanup.retainLocked();
     return true;
 }
 
@@ -650,73 +802,79 @@ bool KisPageReadCoordinator::releaseReadLocked(
     return result.accepted;
 }
 
-QVector<KisPageKey> KisPageReadCoordinator::retryReleasedReadsLocked(
-    KisPageReadCleanup &cleanup, const KisCompletionTicket &observed,
+void KisPageReadCoordinator::retryReleasedReadsLocked(
+    QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup, const KisCompletionTicket &observed,
     bool *acknowledged, bool drain)
 {
     if (acknowledged) *acknowledged = false;
-    QVector<KisPageKey> released;
     const size_t attempts = drain || observed.isValid() ? m_releaseRetries.size()
                                                        : std::min<size_t>(1, m_releaseRetries.size());
     for (size_t i = 0; i < attempts && !m_releaseRetries.empty(); ++i) {
-        const quint64 leaseId = m_releaseRetries.front();
+        const quint64 leaseId = m_releaseRetries.front().leaseId;
         m_releaseRetries.pop_front();
         const auto found = m_activeReads.find(leaseId);
         const auto active = found == m_activeReads.end() ? nullptr : found->second;
         if (!active || active->metadataReleased) continue;
         const bool matches = observed.isValid() && active && active->releaseLastUse == observed;
-        KisPageKey key;
         bool lastUseAcknowledged = false;
-        if (finishReleasedReadLocked(leaseId, &key, cleanup, &lastUseAcknowledged)) {
-            released.append(key);
+        if (finishReleasedReadLocked(leaseId, cleanup, &lastUseAcknowledged)) {
+            if (active->historyPending && !finishHistoryReadLocked(active, ownerLock, cleanup) && m_backgroundReclamation)
+                notifyLastUse(m_lastUseWakeContext, active);
             if (acknowledged && matches && lastUseAcknowledged) *acknowledged = true;
         } else {
-            m_releaseRetries.push_back(leaseId);
+            m_releaseRetries.push_back(*active);
+            if (m_backgroundReclamation) notifyLastUse(m_lastUseWakeContext, active);
         }
     }
-    return released;
 }
 
 KisPageLastUseAcknowledgeResult
 KisPageReadCoordinator::acknowledgeLastUseLocked(
-    const KisVerifiedCompletion &completion, KisPageReadCleanup &cleanup)
+    const KisVerifiedCompletion &completion, QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
 {
     KisPageLastUseAcknowledgeResult result;
     // Explicit acknowledgement is a cold compatibility endpoint. Automatic
     // notifications address the original record directly and never scan this map.
-    QVector<std::shared_ptr<ActiveReadRecord>> matching;
-    for (const auto &[id, record] : std::as_const(m_activeReads)) {
-        if (record->metadataReleased && record->releaseLastUse == completion.ticket())
-            matching.append(record);
-    }
-    for (const auto &record : std::as_const(matching)) {
+    const quint64 last = m_activeReads.empty() ? 0 : m_activeReads.rbegin()->first;
+    quint64 after = 0;
+    for (;;) {
+        const auto it = m_activeReads.upper_bound(after);
+        if (it == m_activeReads.end() || it->first > last) break;
+        after = it->first;
+        const auto record = it->second;
+        if (!record->metadataReleased || !(record->releaseLastUse == completion.ticket())) continue;
         result.matched = true;
-        if (acknowledgeRecordLocked(record, completion, cleanup))
-            result.releasedKeys.append(record->replica.version.key);
-        else
+        if (acknowledgeRecordLocked(record, completion, cleanup)) {
+            if (!finishHistoryReadLocked(record, ownerLock, cleanup) && m_backgroundReclamation)
+                notifyLastUse(m_lastUseWakeContext, record);
+        } else {
             result.accepted = false;
+        }
     }
     return result;
 }
 
-QVector<KisPageKey> KisPageReadCoordinator::acknowledgeCompletedLastUsesLocked(
-    KisPageReadCleanup &cleanup)
+void KisPageReadCoordinator::acknowledgeCompletedLastUsesLocked(
+    QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
 {
-    QVector<std::shared_ptr<ActiveReadRecord>> pending;
-    for (const auto &[id, record] : std::as_const(m_activeReads))
-        if (record->metadataReleased) pending.append(record);
-    QVector<KisPageKey> released;
-    for (const auto &record : std::as_const(pending)) {
-        const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
-        if (terminal.isValid() && acknowledgeRecordLocked(record, terminal, cleanup))
-            released.append(record->replica.version.key);
+    const quint64 last = m_activeReads.empty() ? 0 : m_activeReads.rbegin()->first;
+    quint64 after = 0;
+    for (;;) {
+        const auto it = m_activeReads.upper_bound(after);
+        if (it == m_activeReads.end() || it->first > last) break;
+        after = it->first;
+        const auto record = it->second;
+        if (record->metadataReleased) {
+            const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
+            if (terminal.isValid()) acknowledgeRecordLocked(record, terminal, cleanup);
+        }
+        if (record->historyPending) finishHistoryReadLocked(record, ownerLock, cleanup);
     }
-    return released;
 }
 
 bool KisPageReadCoordinator::acknowledgeRecordLocked(
     const std::shared_ptr<ActiveReadRecord> &record, const KisVerifiedCompletion &completion,
-    KisPageReadCleanup &cleanup)
+    KisPageReadCleanup &cleanup) try
 {
     const auto active = m_activeReads.find(record->leaseId);
     if (!record->metadataReleased || !(record->releaseLastUse == completion.ticket()) ||
@@ -737,9 +895,11 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
     record->metadataReleased = false;
     --m_pendingLastUses;
     record->lastUseSubscription.reset();
-    m_activeReads.erase(record->leaseId);
+    record->historyPending = true;
+    ++m_pendingHistoryReads;
     return true;
 }
+catch (const std::bad_alloc &) { return false; }
 
 bool KisPageReadCoordinator::belongsToPreparedTransactionLocked(
     const KisPageVersion &version,
@@ -771,11 +931,16 @@ bool KisPageReadCoordinator::cancelPreparedRequestsLocked(
             ++it;
             continue;
         }
-        if (it->second.state == KisPagePendingReadRecord::State::Resolving) return false;
-        if (!releaseReadLocked(it->second.replica, it->second.reservedLease, cleanup)) {
+        if (it->second.state == KisPagePendingReadRecord::State::Resolving ||
+            it->second.state == KisPagePendingReadRecord::State::Collecting) return false;
+        if (it->second.state != KisPagePendingReadRecord::State::Released &&
+            !releaseReadLocked(it->second.replica, it->second.reservedLease, cleanup)) {
             return false;
         }
-        it = m_requests.erase(it);
+        if (it->second.cancelHook.is_linked()) m_cancelRetries.erase(m_cancelRetries.iterator_to(it->second));
+        const auto retired = it++;
+        cleanup.m_requests.insert(m_requests.extract(retired));
+        cleanup.retainLocked();
     }
     return true;
 }
@@ -787,9 +952,11 @@ void KisPageReadCoordinator::retireEffectsUnlocked(
     if (effects.isEmpty()) return;
     ++m_activeProviderCalls;
     ownerLock.unlock();
+    const auto relock = qScopeGuard([&] {
+        ownerLock.relock();
+        --m_activeProviderCalls;
+    });
     m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
-    ownerLock.relock();
-    --m_activeProviderCalls;
 }
 
 void KisPageReadCoordinator::noteCapturedViewCreatedLocked()
@@ -815,7 +982,7 @@ bool KisPageReadCoordinator::releaseCapturedView(
         pending.versions.append(version);
     }
     const auto keys = releaseCapturedVersionsLocked(pending);
-    retireEffectsUnlocked(m_history.collectUnreachableLocked(keys), lock);
+    retireEffectsUnlocked(m_history.collectUnreachableLocked(keys.constData(), keys.size()), lock);
     if (pending.versions.isEmpty() && releaseSnapshotLocked(token, nullptr, capturedScope, lock))
         return true;
     m_ownerLifetime.ref();
@@ -832,7 +999,7 @@ void KisPageReadCoordinator::retryCapturedReleasesLocked(QMutexLocker<QMutex> &o
         PendingCapturedRelease pending = std::move(m_capturedReleaseRetries.front());
         m_capturedReleaseRetries.pop_front();
         const auto keys = releaseCapturedVersionsLocked(pending);
-        retireEffectsUnlocked(m_history.collectUnreachableLocked(keys), ownerLock);
+        retireEffectsUnlocked(m_history.collectUnreachableLocked(keys.constData(), keys.size()), ownerLock);
         if (pending.versions.isEmpty() &&
             releaseSnapshotLocked(pending.token, nullptr, pending.capturedScope, ownerLock)) {
             m_releaseLifetime(m_lifetimeContext);
@@ -887,31 +1054,34 @@ bool KisPageReadCoordinator::releaseSnapshotLocked(
     if (m_backgroundReclamation) {
         if (!becameUnretained) return true;
         m_history.collectUnreachableLocked(
-            changedPages ? *changedPages : QVector<KisPageKey>{}, true);
+            changedPages ? changedPages->constData() : nullptr, changedPages ? changedPages->size() : 0, true);
         return true;
     }
     const qsizetype removedRoots = m_epochs.collectUnretainedRoots();
     if (capturedScope && removedRoots == 0) return true;
     const QVector<KisPageTransitionEffect> retirements = changedPages
-        ? m_history.collectUnreachableLocked(*changedPages)
+        ? m_history.collectUnreachableLocked(changedPages->constData(), changedPages->size())
         : capturedScope
-            ? m_history.collectUnreachableLocked(m_history.deferredKeysLocked())
-            : m_history.collectUnreachableLocked({}, true);
+            ? [&] {
+                const auto keys = m_history.deferredKeysLocked();
+                return m_history.collectUnreachableLocked(keys.constData(), keys.size());
+              }()
+            : m_history.collectUnreachableLocked(nullptr, 0, true);
     retireEffectsUnlocked(retirements, lock);
     return true;
 }
 
 KisPageReadCoordinatorSnapshot KisPageReadCoordinator::snapshotLocked() const
 {
-    KisPageReadCoordinatorSnapshot result{qsizetype(m_requests.size()), qsizetype(m_activeReads.size()) - m_pendingLastUses,
+    KisPageReadCoordinatorSnapshot result{qsizetype(m_requests.size()), qsizetype(m_activeReads.size()) - m_pendingLastUses - m_pendingHistoryReads,
         m_pendingLastUses, m_requestsCreated, m_capturedViewsCreated, m_capturedViewReleases};
     result.lastUsePasses = m_lastUsePasses;
     result.maximumLastUsesPerPass = m_maximumLastUsesPerPass;
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         result.lastUseJobScheduled = m_lastUseWakeContext->jobScheduled ||
-            (m_lastUseWakeContext->accepting && m_lastUseWakeContext->head &&
-             !m_lastUseWakeContext->dispatchFailed);
+            (m_lastUseWakeContext->accepting && !m_lastUseWakeContext->retryScheduled &&
+             (m_lastUseWakeContext->head || m_lastUseWakeContext->cancelPending));
         result.lastUseDispatchFailures = m_lastUseWakeContext->dispatchFailures;
     }
     return result;

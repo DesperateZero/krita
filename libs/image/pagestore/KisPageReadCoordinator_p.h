@@ -25,46 +25,27 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <boost/intrusive/list.hpp>
 
-class KisPageReadCoordinator;
-
-// Construct before the outer store lock. Detached blocks are destroyed after
-// that lock unwinds; an owner activity count protects the unlocked interval.
-// Background passes finish this scope before publishing their idle state.
-class KisPageReadCleanup
-{
-public:
-    explicit KisPageReadCleanup(KisPageReadCoordinator &owner) : m_owner(owner) {}
-    ~KisPageReadCleanup();
-    KisPageReadCleanup(const KisPageReadCleanup &) = delete;
-    KisPageReadCleanup &operator=(const KisPageReadCleanup &) = delete;
-    void finishUnlocked(QMutexLocker<QMutex> &ownerLock);
-
-private:
-    void retainLocked();
-    void finish();
-    KisPageReadCoordinator &m_owner;
-    KisPageMetadataReadCleanup m_storage;
-    bool m_active = false;
-    friend class KisPageReadCoordinator;
-};
+class KisPageReadCleanup;
 
 struct KisPagePendingReadRecord
 {
-    enum class State : quint8 { Pending, Resolving, Cancelling };
+    enum class State : quint8 { Pending, Resolving, Cancelling, Released, Collecting };
     State state = State::Pending;
     KisReplicaHandle replica;
     KisPageAccessRequirement access;
     KisPageOperationId accessOperation;
     KisPageLeaseId reservedLease;
     KisCompletionTicket readiness;
+    quint64 requestId = 0;
+    boost::intrusive::list_member_hook<> cancelHook;
 };
 
 struct KisPageLastUseAcknowledgeResult
 {
     bool matched = false;
     bool accepted = true;
-    QVector<KisPageKey> releasedKeys;
 };
 
 struct KisPageReadCoordinatorSnapshot
@@ -84,7 +65,8 @@ struct KisPageReadCoordinatorSnapshot
 class KisPageReadCoordinator final
 {
 public:
-    KisPageReadCoordinator(KisPageMetadataCoordinator &metadata,
+    // Original private composition boundary, also exercised by budget tests.
+    KRITAIMAGE_EXPORT KisPageReadCoordinator(KisPageMetadataCoordinator &metadata,
                            KisImageEpochReferenceModel &epochs,
                            KisPageOwnerLedger &owner,
                            KisBackingBudgetController &budget,
@@ -98,7 +80,9 @@ public:
                            QAtomicInt &ownerLifetime,
                            void *lifetimeContext,
                            void (*releaseLifetime)(void *));
-    ~KisPageReadCoordinator();
+    KRITAIMAGE_EXPORT ~KisPageReadCoordinator();
+    // Original configure cold boundary, before any read protection or pin.
+    KRITAIMAGE_EXPORT void prepareTask();
 
     KisPageReadCoordinator(const KisPageReadCoordinator &) = delete;
     KisPageReadCoordinator &operator=(const KisPageReadCoordinator &) = delete;
@@ -113,36 +97,39 @@ public:
         const KisPageVersion &version,
         const QSharedPointer<KisCpuReadBindingLink> &stale = {});
 
-    KisReadRequest registerRequestLocked(
+    KRITAIMAGE_EXPORT KisReadRequest registerRequestLocked(
         const KisPageVersion &version,
         const KisReplicaHandle &replica,
         KisPageAccessRequirement access,
         const KisCompletionTicket &readiness,
-        KisPageTransactionId transaction = {});
-    KisReadLease resolveLocked(const KisReadRequest &request,
+        KisPageTransactionId transaction,
+        KisPageReadCleanup &cleanup);
+    KRITAIMAGE_EXPORT KisReadLease resolveLocked(const KisReadRequest &request,
                                const KisCompletionTicket &completion,
                                QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
-    bool cancelLocked(const KisReadRequest &request, QMutexLocker<QMutex> &ownerLock,
+    KRITAIMAGE_EXPORT bool cancelLocked(const KisReadRequest &request, QMutexLocker<QMutex> &ownerLock,
                       KisPageReadCleanup &cleanup);
     void retryCancelledRequestsLocked(QMutexLocker<QMutex> &ownerLock,
                                      KisPageReadCleanup &cleanup, bool drain = false);
-    KisPageKey releaseLocked(
+    KRITAIMAGE_EXPORT void releaseLocked(
         KisReadLease lease,
         const KisCompletionTicket &consumerLastUse,
         QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
-    QVector<KisPageKey> retryReleasedReadsLocked(
-        KisPageReadCleanup &cleanup,
+    void retryReleasedReadsLocked(
+        QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup,
         const KisCompletionTicket &observed = {}, bool *acknowledged = nullptr,
         bool drain = false);
     KisPageLastUseAcknowledgeResult acknowledgeLastUseLocked(
-        const KisVerifiedCompletion &completion, KisPageReadCleanup &cleanup);
+        const KisVerifiedCompletion &completion,
+        QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
     // The original read-release records own pending last uses. Notifications
     // only schedule exact records on the existing reclamation executor.
-    void beginCloseLocked();
-    void cancelCloseLocked();
-    void stopAutomaticWakeups();
-    void waitForIdle();
-    QVector<KisPageKey> acknowledgeCompletedLastUsesLocked(KisPageReadCleanup &cleanup);
+    KRITAIMAGE_EXPORT void beginCloseLocked();
+    KRITAIMAGE_EXPORT void cancelCloseLocked();
+    KRITAIMAGE_EXPORT void stopAutomaticWakeups();
+    KRITAIMAGE_EXPORT void waitForIdle();
+    KRITAIMAGE_EXPORT void acknowledgeCompletedLastUsesLocked(
+        QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
 
     bool protectsPreparedTransactionLocked(
         KisPageTransactionId transaction) const;
@@ -159,7 +146,7 @@ public:
     bool releaseSnapshot(KisImageEpochSnapshotToken token,
                          const QVector<KisPageKey> *changedPages);
 
-    KisPageReadCoordinatorSnapshot snapshotLocked() const;
+    KRITAIMAGE_EXPORT KisPageReadCoordinatorSnapshot snapshotLocked() const;
 
 private:
     struct ActiveReadRecord
@@ -176,6 +163,9 @@ private:
         KisCompletionTicket releaseLastUse;
         quint64 leaseId = 0;
         bool metadataReleased = false; // owner mutex; this record now owns last-use debt
+        bool historyPending = false;
+        bool historyProcessing = false;
+        boost::intrusive::list_member_hook<> releaseHook;
         KisPageReadinessSubscription lastUseSubscription;
         // Intrusive ready queue under LastUseWakeContext::mutex. The original
         // lease map remains the owner; no second replica/completion ledger.
@@ -188,14 +178,15 @@ private:
     static void notifyLastUse(const std::weak_ptr<LastUseWakeContext> &context,
                              const std::weak_ptr<ActiveReadRecord> &record);
     static void dispatchLastUses(const std::weak_ptr<LastUseWakeContext> &context);
-    bool prepareLastUseContextLocked();
     void processLastUses(const std::shared_ptr<LastUseWakeContext> &context);
     bool acknowledgeRecordLocked(const std::shared_ptr<ActiveReadRecord> &record,
                                  const KisVerifiedCompletion &completion,
                                  KisPageReadCleanup &cleanup);
 
-    bool finishReleasedReadLocked(quint64 leaseId, KisPageKey *key, KisPageReadCleanup &cleanup,
+    bool finishReleasedReadLocked(quint64 leaseId, KisPageReadCleanup &cleanup,
                                   bool *lastUseAcknowledged = nullptr);
+    bool finishHistoryReadLocked(const std::shared_ptr<ActiveReadRecord> &record,
+                                 QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
     bool releaseReadLocked(const KisReplicaHandle &replica,
                            KisPageLeaseId lease, KisPageReadCleanup &cleanup,
                            const KisCompletionTicket &completion = {});
@@ -235,16 +226,25 @@ private:
 
     // Node storage precedes protection/pinning. Active nodes can be installed
     // without allocation even when other requests grow the maps during resolve.
-    std::map<quint64, KisPagePendingReadRecord> m_requests;
-    std::deque<quint64> m_cancelRetries;
+    using PendingReadAllocator = KisMutationStorageAllocator<
+        std::pair<const quint64, KisPagePendingReadRecord>>;
+    using PendingReadMap = std::map<quint64, KisPagePendingReadRecord,
+                                   std::less<quint64>, PendingReadAllocator>;
+    PendingReadMap m_requests;
+    boost::intrusive::list<KisPagePendingReadRecord, boost::intrusive::member_hook<
+        KisPagePendingReadRecord, boost::intrusive::list_member_hook<>,
+        &KisPagePendingReadRecord::cancelHook>> m_cancelRetries;
     using ActiveReadAllocator = KisMutationStorageAllocator<
         std::pair<const quint64, std::shared_ptr<ActiveReadRecord>>>;
     using ActiveReadMap = std::map<quint64, std::shared_ptr<ActiveReadRecord>,
                                   std::less<quint64>, ActiveReadAllocator>;
     ActiveReadMap m_activeReads;
-    std::deque<quint64> m_releaseRetries;
+    boost::intrusive::list<ActiveReadRecord, boost::intrusive::member_hook<
+        ActiveReadRecord, boost::intrusive::list_member_hook<>,
+        &ActiveReadRecord::releaseHook>> m_releaseRetries;
     std::deque<PendingCapturedRelease> m_capturedReleaseRetries;
     qsizetype m_pendingLastUses = 0;
+    qsizetype m_pendingHistoryReads = 0;
     std::shared_ptr<LastUseWakeContext> m_lastUseWakeContext;
     bool m_automaticWakeupsStopped = false;
     bool m_lastUseClosing = false;
@@ -253,6 +253,32 @@ private:
     quint64 m_requestsCreated = 0;
     quint64 m_capturedViewsCreated = 0;
     quint64 m_capturedViewReleases = 0;
+};
+
+// Construct before the outer store lock. Transfer the original map nodes and
+// detached metadata blocks here without allocation, then free after that lock
+// unwinds. The activity count covers actual cleanup through idle publication.
+class KisPageReadCleanup
+{
+public:
+    KRITAIMAGE_EXPORT explicit KisPageReadCleanup(KisPageReadCoordinator &owner);
+    KRITAIMAGE_EXPORT ~KisPageReadCleanup();
+    // Prepare the original request node before selecting a version. Selection
+    // and AcquireRead must share one owner interval, including virtual defaults.
+    KRITAIMAGE_EXPORT bool prepareRequestLocked(QMutexLocker<QMutex> &ownerLock, QString *error);
+    KisPageReadCleanup(const KisPageReadCleanup &) = delete;
+    KisPageReadCleanup &operator=(const KisPageReadCleanup &) = delete;
+    void finishUnlocked(QMutexLocker<QMutex> &ownerLock);
+private:
+    void retainLocked();
+    void finish();
+    KisPageReadCoordinator &m_owner;
+    KisPageMetadataReadCleanup m_storage;
+    KisPageReadCoordinator::PendingReadMap m_requests;
+    KisPageReadCoordinator::ActiveReadMap m_reads;
+    quint64 m_preparedRequestId = 0;
+    bool m_active = false;
+    friend class KisPageReadCoordinator;
 };
 
 #endif // KIS_PAGE_READ_COORDINATOR_P_H

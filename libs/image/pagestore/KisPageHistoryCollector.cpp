@@ -85,20 +85,20 @@ void KisPageHistoryCollector::queueContinuationLocked(const KisPageKey &key)
 
 QVector<KisPageTransitionEffect>
 KisPageHistoryCollector::collectUnreachableLocked(
-    const QVector<KisPageKey> &candidateKeys,
+    const KisPageKey *candidateKeys, qsizetype candidateCount,
     bool scanAll)
 {
     if (m_backgroundReclamation) {
-        for (const auto &key : candidateKeys) requestKeyLocked(key);
+        for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
         m_rescanRequested = m_rescanRequested || scanAll;
         scheduleLocked();
         return {};
     }
-    return collectBatchLocked(candidateKeys, scanAll);
+    return collectBatchLocked(candidateKeys, candidateCount, scanAll);
 }
 
 QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectBatchLocked(
-    const QVector<KisPageKey> &candidateKeys,
+    const KisPageKey *candidateKeys, qsizetype candidateCount,
     bool scanAll)
 {
     QVector<KisPageKey> keys;
@@ -106,8 +106,9 @@ QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectBatchLocked(
         keys = m_metadata.pageKeys();
     } else {
         QSet<KisPageKey> seen;
-        keys.reserve(candidateKeys.size());
-        for (const KisPageKey &key : candidateKeys) {
+        keys.reserve(candidateCount);
+        for (qsizetype i = 0; i < candidateCount; ++i) {
+            const KisPageKey &key = candidateKeys[i];
             if (seen.contains(key)) continue;
             seen.insert(key);
             keys.append(key);

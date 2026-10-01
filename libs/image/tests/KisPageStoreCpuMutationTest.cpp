@@ -22,6 +22,8 @@
 #include "KisImageEpochReferenceModel.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageRetirementQueue_p.h"
+#include "KisPageReadCoordinator_p.h"
+#include "KisPageHistoryCollector_p.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
@@ -49,6 +51,7 @@ public:
     std::atomic<bool> rejectNativeBinding{false};
     KisReplicaHandle rejectBindingFor;
     bool rejectReadAccess = false;
+    std::atomic<int> readAccessCalls{0};
     int writeAccessMismatch = 0;
     KisReplicaHandle mismatchedWriteReplica;
     bool disableNativeMutation = false;
@@ -136,6 +139,7 @@ public:
             if (writeAccessMismatch == 3) l.value += 100000;
             if (writeAccessMismatch == 4) o.value += 100000;
         }
+        if (m == KisPageAccessMode::Read) ++readAccessCalls;
         auto access = p->resolveAccess(l, o, resolvedReplica, a, m);
         if (access.isValid() && m == KisPageAccessMode::Write && afterWriteResolve) afterWriteResolve(r);
         return access;
@@ -277,6 +281,97 @@ struct Fixture
         QByteArray result(static_cast<const char *>(lease.cpuData()) + offset, bpp);
         store->release(std::move(lease)); return result;
     }
+};
+// Compose the original owners against a real imported provider replica. The
+// test owns this budget from construction; Store initialization limits remain
+// frozen. Capacity is occupied/released through the actual storage allocator.
+struct ReadTerminalFixture
+{
+    Fixture physical;
+    QMutex mutex;
+    QAtomicInt references{1};
+    qsizetype activeCalls = 0;
+    bool operational = true;
+    bool closing = false;
+    bool background = true;
+    KisPageBackingLimits limits = [] {
+        KisPageBackingLimits result; result.metadataArenaBytes = 64 * 1024; return result;
+    }();
+    KisBackingBudgetController budget{limits};
+    KisPageOwnerLedger owner;
+    KisPageMetadataCoordinator metadata;
+    KisImageEpochReferenceModel epochs;
+    static void releaseLifetime(void *value) { static_cast<QAtomicInt *>(value)->deref(); }
+    KisPageRetirementQueue retirement{owner, metadata, budget, references, &references, releaseLifetime};
+    KisPageHistoryCollector history{metadata, epochs, retirement, mutex, references,
+        operational, closing, background, &references, releaseLifetime,
+        +[](void *, const KisPageVersion &) {}};
+    KisPageReadCoordinator read{metadata, epochs, owner, budget, history, retirement,
+        physical.completions, mutex, activeCalls, operational, background,
+        references, &references, releaseLifetime};
+    KisCompletionTicket ready;
+    KisReplicaHandle replica;
+    QString error;
+
+    bool init()
+    {
+        if (!physical.init(4, 1) || !owner.configure(physical.completions, &error)
+            || !owner.registerProvider(physical.provider) || !metadata.configure(1, &error)) return false;
+        owner.attachBackingBudget(budget);
+        replica = physical.initialReplicas.first();
+        KisSurfaceEpochState surface;
+        if (!physical.store->resolveSurfaceState({1}, {}, &surface)) return false;
+        KisImageEpochSnapshot initial; initial.epoch = {1};
+        initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+        initial.surfaces = {surface}; initial.manifest = {replica.version};
+        if (!epochs.initialize(initial, &error)) return false;
+        KisReplicaStateSnapshot resident; resident.replica = replica;
+        resident.validity = KisReplicaValidity::Valid;
+        KisPageVersionStateSnapshot version; version.version = replica.version;
+        version.publication = KisPagePublicationState::Published;
+        version.authority = replica; version.replicas = {resident};
+        KisPageStateSnapshot page; page.key = key(); page.publishedEpoch = {1};
+        page.publishedGeneration = replica.version.generation;
+        page.publishedDefaultPixelRevision = replica.version.defaultPixelRevision;
+        page.nextGeneration = {2}; page.versions = {version};
+        if (!metadata.registerPage(page, &error)) return false;
+        retirement.prepareTask(); history.prepareTask(budget); read.prepareTask();
+        ready = physical.completions->allocatePending(
+            physical.completions->registerSource(KisCompletionDomain::HostLogical));
+        return ready.isValid() && physical.completions->complete(ready, KisCompletionStatus::Succeeded);
+    }
+    ~ReadTerminalFixture()
+    {
+        read.stopAutomaticWakeups(); read.waitForIdle();
+        retirement.stopAutomaticWakeups(); retirement.waitForIdle();
+        QMutexLocker lock(&mutex); operational = false; history.waitForIdleLocked();
+        Q_ASSERT(references.loadAcquire() == 1);
+    }
+    KisReadRequest acquire()
+    {
+        KisPageReadCleanup cleanup(read); QMutexLocker lock(&mutex);
+        if (!cleanup.prepareRequestLocked(lock, &error)) return {};
+        return read.registerRequestLocked(replica.version, replica, cpu, ready, {}, cleanup);
+    }
+    KisReadLease resolve(const KisReadRequest &request)
+    {
+        KisPageReadCleanup cleanup(read); QMutexLocker lock(&mutex);
+        return read.resolveLocked(request, request.readiness, lock, cleanup);
+    }
+    void release(KisReadLease lease, const KisCompletionTicket &ticket = {})
+    {
+        KisPageReadCleanup cleanup(read); QMutexLocker lock(&mutex);
+        read.releaseLocked(std::move(lease), ticket, lock, cleanup);
+    }
+    bool cancel(const KisReadRequest &request)
+    {
+        KisPageReadCleanup cleanup(read); QMutexLocker lock(&mutex);
+        return read.cancelLocked(request, lock, cleanup);
+    }
+    KisPageReadCoordinatorSnapshot snapshot()
+    { QMutexLocker lock(&mutex); return read.snapshotLocked(); }
+    quint64 live() const
+    { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; }
 };
 void pixelRows()
 {
@@ -661,6 +756,15 @@ private Q_SLOTS:
     void lastUseCloseAndLifetime_data();
     void lastUseCloseAndLifetime();
     void lastUseManualCompatibility();
+    void lastUseAtMetadataCapacity_data();
+    void lastUseAtMetadataCapacity();
+    void readStorageRefusalPreservesOriginalRequest_data()
+    {
+        QTest::addColumn<bool>("resolve");
+        QTest::newRow("request-before-protection") << false;
+        QTest::newRow("lease-before-physical-pin") << true;
+    }
+    void readStorageRefusalPreservesOriginalRequest();
     void readProtectionBlockCleanup_data();
     void readProtectionBlockCleanup();
     void oldTransactionBaseReleaseReclaimsDeferredHistory();
@@ -1797,6 +1901,106 @@ void KisPageStoreCpuMutationTest::lastUseManualCompatibility()
     QCOMPARE(f.store->sessionStats().pendingLastUses, qsizetype(0));
     QVERIFY(!f.store->acknowledgeLastUse(f.completions->verifyTerminal(completion)));
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::lastUseAtMetadataCapacity_data()
+{
+    QTest::addColumn<int>("terminal");
+    QTest::addColumn<int>("exit");
+    for (int terminal = 0; terminal < 3; ++terminal)
+        for (int exit = 0; exit < 2; ++exit)
+            QTest::newRow(qPrintable(QStringLiteral("terminal-%1-exit-%2").arg(terminal).arg(exit)))
+                << terminal << exit;
+    QTest::newRow("stop-pending-retry") << 0 << 2;
+}
+
+void KisPageStoreCpuMutationTest::lastUseAtMetadataCapacity()
+{
+    QFETCH(int, terminal); QFETCH(int, exit);
+    ReadTerminalFixture f; QVERIFY2(f.init(), qPrintable(f.error));
+    const auto request = f.acquire(); auto lease = f.resolve(request); QVERIFY(lease.isValid());
+    const auto source = f.physical.completions->registerSource(KisCompletionDomain::HostLogical);
+    const auto ticket = f.physical.completions->allocatePending(source); QVERIFY(ticket.isValid());
+    const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+    void *filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+    const auto free = qScopeGuard([&] { kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1); });
+    f.release(std::move(lease), ticket);
+    QCOMPARE(f.physical.completions->sourceStatistics(source).readinessWaiters, quint64(0));
+    QCOMPARE(f.snapshot().pendingLastUses, qsizetype(1));
+    QTRY_VERIFY_WITH_TIMEOUT(f.snapshot().lastUsePasses >= 3, 5000);
+    QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+    QCOMPARE(f.snapshot().pendingLastUses, qsizetype(1));
+    if (exit == 2) {
+        f.read.stopAutomaticWakeups(); f.read.waitForIdle();
+        QVERIFY(f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded));
+        kisDrainPageStoreReclamation();
+        QCOMPARE(f.snapshot().pendingLastUses, qsizetype(1));
+        QCOMPARE(f.references.loadAcquire(), 1);
+        KisPageReadCleanup cleanup(f.read); QMutexLocker lock(&f.mutex);
+        f.read.acknowledgeCompletedLastUsesLocked(lock, cleanup);
+    } else {
+        if (exit == 1) {
+            { QMutexLocker lock(&f.mutex); f.read.beginCloseLocked(); }
+            f.read.waitForIdle();
+            QCOMPARE(f.snapshot().pendingLastUses, qsizetype(1));
+            { QMutexLocker lock(&f.mutex); f.read.cancelCloseLocked(); }
+        }
+        const auto status = terminal == 0 ? KisCompletionStatus::Succeeded
+            : terminal == 1 ? KisCompletionStatus::Failed : KisCompletionStatus::Cancelled;
+        QVERIFY(f.physical.completions->complete(ticket, status)); // No new request or explicit ack.
+        QTRY_COMPARE_WITH_TIMEOUT(f.snapshot().pendingLastUses, qsizetype(0), 5000);
+    }
+    f.read.waitForIdle();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    const auto stats = f.snapshot();
+    QCOMPARE(stats.pendingRequests, qsizetype(0));
+    QCOMPARE(stats.activeLeases, qsizetype(0));
+    QCOMPARE(f.activeCalls, qsizetype(0));
+    QVERIFY(stats.maximumLastUsesPerPass <= 32);
+    KisPageStateSnapshot page;
+    QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    const auto *version = page.findVersion(f.replica.version); QVERIFY(version);
+    const auto *resident = version->findReplica(f.replica); QVERIFY(resident);
+    QVERIFY(resident->pendingLastUses.isEmpty());
+    QVERIFY(resident->readLeases.isEmpty()); QCOMPARE(resident->pinCount, quint32(0));
+    QCOMPARE(f.references.loadAcquire(), 1);
+    QVERIFY(f.live() < f.limits.metadataArenaBytes); // Original record/control storage was actually freed.
+}
+
+void KisPageStoreCpuMutationTest::readStorageRefusalPreservesOriginalRequest()
+{
+    QFETCH(bool, resolve);
+    ReadTerminalFixture f; QVERIFY2(f.init(), qPrintable(f.error));
+    const auto original = f.acquire();
+    QVERIFY(original.isValid());
+    const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+    void *filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+    const auto free = qScopeGuard([&] { kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1); });
+    if (resolve) {
+        QVERIFY(!f.resolve(original).isValid());
+        QCOMPARE(f.physical.provider->readAccessCalls.load(), 0);
+    } else {
+        QVERIFY(!f.acquire().isValid());
+    }
+    QCOMPARE(f.snapshot().pendingRequests, qsizetype(1));
+    QCOMPARE(f.snapshot().activeLeases, qsizetype(0));
+    QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+    if (resolve) {
+        kisFreeMutationStorage(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
+        auto lease = f.resolve(original); QVERIFY(lease.isValid());
+        QCOMPARE(f.physical.provider->readAccessCalls.load(), 1);
+        f.release(std::move(lease));
+    } else {
+        QVERIFY(f.cancel(original));
+        const auto retry = f.acquire();
+        QVERIFY(retry.isValid()); QVERIFY(f.cancel(retry));
+    }
+    f.read.waitForIdle();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    QCOMPARE(f.snapshot().pendingRequests, qsizetype(0));
+    QCOMPARE(f.snapshot().activeLeases, qsizetype(0));
+    QCOMPARE(f.activeCalls, qsizetype(0));
+    QCOMPARE(f.references.loadAcquire(), 1);
 }
 
 void KisPageStoreCpuMutationTest::readProtectionBlockCleanup_data()

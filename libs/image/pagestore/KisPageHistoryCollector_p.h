@@ -55,7 +55,7 @@ public:
     using RemoveDescriptor = void (*)(void *context,
                                       const KisPageVersion &version);
 
-    KisPageHistoryCollector(KisPageMetadataCoordinator &metadata,
+    KRITAIMAGE_EXPORT KisPageHistoryCollector(KisPageMetadataCoordinator &metadata,
                             KisImageEpochReferenceModel &epochs,
                             KisPageRetirementQueue &retirementQueue,
                             QMutex &ownerMutex,
@@ -66,8 +66,8 @@ public:
                             void *ownerContext,
                             ReleaseOwnerLifetime releaseOwnerLifetime,
                             RemoveDescriptor removeDescriptor);
-    ~KisPageHistoryCollector();
-    void prepareTask(KisBackingBudgetController &budget);
+    KRITAIMAGE_EXPORT ~KisPageHistoryCollector();
+    KRITAIMAGE_EXPORT void prepareTask(KisBackingBudgetController &budget);
 
     KisPageHistoryCollector(const KisPageHistoryCollector &) = delete;
     KisPageHistoryCollector &operator=(const KisPageHistoryCollector &) = delete;
@@ -75,12 +75,12 @@ public:
     KisPageHistoryCollector &operator=(KisPageHistoryCollector &&) = delete;
 
     QVector<KisPageTransitionEffect> collectUnreachableLocked(
-        const QVector<KisPageKey> &candidateKeys,
+        const KisPageKey *candidateKeys, qsizetype candidateCount,
         bool scanAll = false);
     void collectEpochBookkeepingLocked(bool rescanHistory = false);
     void requestKeyLocked(const KisPageKey &key);
     void scheduleLocked();
-    void waitForIdleLocked();
+    KRITAIMAGE_EXPORT void waitForIdleLocked();
     QVector<KisPageKey> deferredKeysLocked() const;
     void clearLocked();
 
@@ -100,7 +100,7 @@ private:
 
     void queueContinuationLocked(const KisPageKey &key);
     QVector<KisPageTransitionEffect> collectBatchLocked(
-        const QVector<KisPageKey> &candidateKeys,
+        const KisPageKey *candidateKeys, qsizetype candidateCount,
         bool scanAll);
     QVector<KisPageTransitionEffect> collectSliceLocked(
         const KisPageKey &key,

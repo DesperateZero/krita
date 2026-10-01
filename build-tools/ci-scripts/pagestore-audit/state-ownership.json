@@ -403,8 +403,8 @@
         "KisPageStore::captureReadView",
         "KisPageReadCoordinator::discoverCpuReadBinding reselects only the caller-retained exact version",
         "the original ActiveReadRecord retains its exact replica/ticket after metadata ReleaseRead; no separate pending-last-use replica table",
-        "request index nodes are allocated before AcquireRead; original ActiveReadRecord and transferable lease index node are prepared before provider resolveAccess, with no new owner table",
-        "cold last-use context preparation admits one original reusable inline task outside the store gate; notification consumes this stored node, never allocating a dispatch task under pressure"
+        "actual funded request index nodes are prepared outside the owner gate before AcquireRead and exact identity is rechecked by the original transition; original ActiveReadRecord and transferable lease index node precede provider resolveAccess",
+        "original configure admits the read context, task, wake and reusable retry deadline before protection or physical adoption; refused record subscriptions use the same original ready/task/timer path, never a second worker or debt owner"
       ],
       "current-writers": [
         "KisPageReadCoordinator"
@@ -427,8 +427,9 @@
         "one ticket covering multiple leases is resolved from exact metadata protection, not a duplicate acknowledgement authority; explicit acknowledgement stays available",
         "close cancels subscriptions and freezes dispatch before waiting; terminal records are polled in original close, and refused close rearms pending notifications",
         "facade stop closes notification admission without waiting; dormant notifications hold no owner lifetime reference, and worker admission only increments a nonzero lifetime count",
-        "cold notification preparation or dispatch failure retains original metadata/record debt for explicit acknowledgement or close; full metadata budget/fault recovery remains open",
-        "KisPageReadCleanup is a stack terminal scope, not a second read or metadata owner: release/cancel/acknowledge/abort/close transfer detached blocks past the outer store mutex, retaining the original activeProviderCalls count until physical cleanup; worker idle and lifetime release follow cleanup, and close finishes its own scope before the capability gate",
+        "cancel and release retries link their original request/lease bodies without an ID deque allocation; terminal acknowledgement scans the original identity cut without copied matching/pending arrays; a failed history notification remains in the same original admitted record",
+        "the original read task consumes at most 32 original ready/cancel records per pass; nonterminal or refused work rearms its prepaid generation-qualified deadline, including a timer publication during task finishing; cancel/close stop future dispatch before draining",
+        "KisPageReadCleanup is a stack terminal scope, not a second read or metadata owner: release/cancel/acknowledge/abort/close transfer detached blocks and original map nodes past the outer store mutex without allocation, retaining activeProviderCalls until physical cleanup; worker idle and lifetime release follow cleanup",
         "storage rejection before resolve preserves the Pending request; provider bad_alloc restores Pending after reacquiring the owner gate; successful resolve transfers the prepared node without allocation, and rejected registration removes its unpublished request node"
       ]
     },

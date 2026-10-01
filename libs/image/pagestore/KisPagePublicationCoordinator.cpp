@@ -417,7 +417,8 @@ void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirements
         Q_UNUSED(revoked);
     }
     if (!data->historical.isEmpty())
-        *retirementEffects += data->owner->m_history.collectUnreachableLocked(data->historical);
+        *retirementEffects += data->owner->m_history.collectUnreachableLocked(
+            data->historical.constData(), data->historical.size());
     data->collected = true;
 }
 
@@ -1136,7 +1137,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         }
         QVector<KisPageTransitionEffect> historyRetirements = std::move(preparedCommit.data->publicationRetirements);
         diagnostic.next(Phase::CommitHistoryCollect, quint64(historyCandidates.size()));
-        historyRetirements += m_history.collectUnreachableLocked(historyCandidates);
+        historyRetirements += m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
         diagnostic.next(Phase::CommitProviderRetire, quint64(historyRetirements.size()));
         retireEffectsUnlocked(std::move(historyRetirements), ownerLock);
         ++m_committedTransactions;
@@ -1345,7 +1346,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     m_epochs.releaseSnapshot(source.token);
     sourceClaim.dismiss();
     m_history.collectEpochBookkeepingLocked();
-    retireEffectsUnlocked(m_history.collectUnreachableLocked(historyCandidates), ownerLock);
+    retireEffectsUnlocked(m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size()), ownerLock);
     return {restored.root.epoch(), completion};
 }
 

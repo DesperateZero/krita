@@ -3051,9 +3051,8 @@ bool KisPageStore::closeSession(QString *error)
     d->epochs.collectFinishedTransactions();
     d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup, true);
     d->readCoordinator.retryCapturedReleasesLocked(locker, true);
-    auto releasedReadKeys = d->readCoordinator.retryReleasedReadsLocked(cleanup, {}, nullptr, true);
-    releasedReadKeys += d->readCoordinator.acknowledgeCompletedLastUsesLocked(cleanup);
-    d->retireEffectsLocked(d->historyCollector.collectUnreachableLocked(releasedReadKeys), locker);
+    d->readCoordinator.retryReleasedReadsLocked(locker, cleanup, {}, nullptr, true);
+    d->readCoordinator.acknowledgeCompletedLastUsesLocked(locker, cleanup);
     cleanup.finishUnlocked(locker);
     KisPageStoreSessionStats stats = d->stats();
     const qsizetype pendingShutdownReplicas = stats.pendingShutdownReplicas;
@@ -3204,6 +3203,7 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
         }
         d->retirementQueue.prepareTask();
         d->historyCollector.prepareTask(d->backingBudget);
+        d->readCoordinator.prepareTask();
     } catch (const std::bad_alloc &) {
         locker.relock();
         --d->activeProviderCalls;
@@ -3628,6 +3628,8 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
         return request;
     };
 
+    QString preparationError;
+    if (!cleanup.prepareRequestLocked(locker, &preparationError)) return fail(preparationError);
     KisPageVersion version;
     KisPageStateSnapshot page;
     if (!(captured ? captured->resolvePageVersion(key, &version)
@@ -3723,7 +3725,7 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
                                                     replica->replica,
                                                     access,
                                                     d->readyHostCompletion,
-                                                    readTransaction);
+                                                    readTransaction, cleanup);
 }
 
 KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction,
@@ -4137,12 +4139,8 @@ void KisPageStore::release(KisReadLease lease, const KisCompletionTicket &consum
 {
     KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
-    auto keys = d->readCoordinator.retryReleasedReadsLocked(cleanup);
-    const auto released = d->readCoordinator.releaseLocked(std::move(lease), consumerLastUse, locker, cleanup);
-    if (released.isValid()) keys.append(released);
-    if (keys.isEmpty()) return;
-    const auto retirements = d->historyCollector.collectUnreachableLocked(keys);
-    d->retireEffectsLocked(retirements, locker);
+    d->readCoordinator.retryReleasedReadsLocked(locker, cleanup);
+    d->readCoordinator.releaseLocked(std::move(lease), consumerLastUse, locker, cleanup);
 }
 
 bool KisPageStore::acknowledgeLastUse(const KisVerifiedCompletion &completion)
@@ -4152,12 +4150,8 @@ bool KisPageStore::acknowledgeLastUse(const KisVerifiedCompletion &completion)
     KisPageReadCleanup cleanup(d->readCoordinator);
     QMutexLocker locker(&d->mutex);
     bool retriedAcknowledge = false;
-    auto releasedKeys = d->readCoordinator.retryReleasedReadsLocked(cleanup, completion.ticket(),
-                                                                    &retriedAcknowledge);
-    const auto acknowledged = d->readCoordinator.acknowledgeLastUseLocked(completion, cleanup);
-    releasedKeys += acknowledged.releasedKeys;
-    const auto retirements = d->historyCollector.collectUnreachableLocked(releasedKeys);
-    d->retireEffectsLocked(retirements, locker);
+    d->readCoordinator.retryReleasedReadsLocked(locker, cleanup, completion.ticket(), &retriedAcknowledge);
+    const auto acknowledged = d->readCoordinator.acknowledgeLastUseLocked(completion, locker, cleanup);
     return (retriedAcknowledge || acknowledged.matched) && acknowledged.accepted;
 }
 
