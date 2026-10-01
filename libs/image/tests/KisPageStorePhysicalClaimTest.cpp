@@ -70,6 +70,18 @@ struct Fixture
     }
 };
 
+quint64 retirementStorageBytes(KisBackingBudgetController &budget)
+{
+    const auto live = [&] {
+        return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    // Warm the retained accounting cache, then measure the complete real node.
+    { auto warm = kisPreparePageRetirementRecord(&budget); }
+    const quint64 before = live();
+    auto record = kisPreparePageRetirementRecord(&budget);
+    return live() - before;
+}
+
 }
 
 class KisPageStorePhysicalClaimTest : public QObject
@@ -325,7 +337,7 @@ void KisPageStorePhysicalClaimTest::handoffDebtFollowsTerminal()
     QCOMPARE(ledger.backingClass(target), KisBackingBudgetClass::RetirementDebt);
     const auto terminalBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({612}, target, {}).isValid()); ledger.releaseRetiredBacking(target);
-    const quint64 retainedCache = terminalBytes - sizeof(KisPageRetirementRecord);
+    const quint64 retainedCache = terminalBytes - retirementStorageBytes(budget);
     const auto finalUsage = budget.usage();
     for (size_t i = 0; i < finalUsage.buckets.size(); ++i) {
         const auto &bucket = finalUsage.buckets[i];
@@ -371,7 +383,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     const auto firstNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({621}, target, {}).isValid()); ledger.releaseRetiredBacking(target);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             firstNodeBytes - sizeof(KisPageRetirementRecord));
+             firstNodeBytes - retirementStorageBytes(budget));
     if (keepAlias) {
         QCOMPARE(ledger.backingClass(alias.replica), KisBackingBudgetClass::Current);
         const auto usage = budget.usage(); const auto &debt = usage.buckets[size_t(KisBackingBudgetClass::RetirementDebt)];
@@ -380,7 +392,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     }
     const auto terminalBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({622}, alias.replica, {}).isValid()); ledger.releaseRetiredBacking(alias.replica);
-    const quint64 retainedCache = terminalBytes - sizeof(KisPageRetirementRecord);
+    const quint64 retainedCache = terminalBytes - retirementStorageBytes(budget);
     const auto finalUsage = budget.usage();
     for (size_t i = 0; i < finalUsage.buckets.size(); ++i) {
         const auto &bucket = finalUsage.buckets[i];
@@ -465,7 +477,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     const auto terminalBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({302}, target, {}).isValid());
     ledger.releaseRetiredBacking(target);
-    const quint64 retainedCache = terminalBytes - sizeof(KisPageRetirementRecord);
+    const quint64 retainedCache = terminalBytes - retirementStorageBytes(budget);
     const auto finalUsage = budget.usage();
     for (size_t i = 0; i < finalUsage.buckets.size(); ++i) {
         const auto &bucket = finalUsage.buckets[i];
@@ -602,7 +614,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
         QVERIFY(ledger.reclassifyBacking(handle, KisBackingBudgetClass::RetirementDebt));
         const auto terminalBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
         QVERIFY(f.provider->retire({retirementId++}, handle, {}).isValid()); ledger.releaseRetiredBacking(handle);
-        retainedCache = terminalBytes - sizeof(KisPageRetirementRecord);
+        retainedCache = terminalBytes - retirementStorageBytes(budget);
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, retainedCache);
     }
     const auto finalUsage = budget.usage();

@@ -192,14 +192,15 @@
     },
     {
       "creation-paths": [
-        "KisPageOwnerLedger::beginProviderOperation"
+        "KisPageOwnerLedger::bindProviderOperation for generic operations",
+        "original retirement admission prepares a charged operation-index node before physical allocation; prepareRetirementOperation inserts that node before retire, and bindRetirementOperation only fills its completion"
       ],
       "current-writers": [
         "KisPageOwnerLedger"
       ],
       "fact": "provider operation",
       "id": "BR1-OWN-PROVIDER-OP",
-      "lock-or-claim": "owner ledger mutex and provider epoch token",
+      "lock-or-claim": "owner ledger mutex and provider epoch token; a valid retirement result stays in its original record until binding succeeds",
       "read-only-observers": [
         "KisCompletionRegistry",
         "KisPageStore retirement paths",
@@ -209,7 +210,7 @@
       "target-authoritative-owner": "KisPageOwnerLedger",
       "terminal-paths": [
         "releaseTerminalProviderOperation",
-        "provider unregister",
+        "terminal extraction returns the operation node to its original retirement record; invalid provider refusal cancels the prepared slot without losing its storage",
         "closeSession drain"
       ]
     },
@@ -266,6 +267,7 @@
     {
       "creation-paths": [
         "KisPageRetirementQueue::retireEffects",
+        "KisPageRetirementQueue::acceptEffect transfers an already funded Debt node without provider code or allocation; history retains each unaccepted effect in its original key record",
         "KisPageRetirementQueue::retireOrDefer",
         "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
         "unadmitted owned records request actual budget reservation grants through their original ledger; unowned orphans retain only their original reservation",
@@ -278,7 +280,7 @@
       ],
       "fact": "retirement debt and its cancellable readiness/deadline incarnation",
       "id": "BR1-OWN-RETIREMENT",
-      "lock-or-claim": "queue mutex protects sole pending/retry/ready record partitions; provider and ledger calls run outside queue/store gates; notification gate closes admission before idle wait and acquires only nonzero owner lifetime references before dispatch",
+      "lock-or-claim": "queue mutex protects sole pending/retry/ready record partitions; effect acceptance under the store gate only moves funded storage using the registered threading permission; physical provider retirement runs outside queue/store gates; notification gate closes admission before idle wait and acquires only nonzero owner lifetime references before dispatch",
       "read-only-observers": [
         "sessionStats",
         "closeSession"
@@ -304,7 +306,8 @@
       "creation-paths": [
         "epoch root retention change",
         "published version supersession",
-        "cold configuration admits the original collector reusable task with its inline capture; original owner-gated scheduled flag and per-enqueue root pin exclude duplicate enqueue"
+        "cold configuration admits the original collector reusable task, retained wake context and one deadline; original owner-gated scheduled flag and per-enqueue root pin exclude duplicate enqueue",
+        "one charged key-index node owns readiness linkage, fixed 32 candidate identities, root cookie, slice cursor and the moved metadata effect packet before detach; a fixed 16-pointer pass selects original records"
       ],
       "current-writers": [
         "KisImageEpochReferenceModel roots plus KisPageHistoryCollector cursor"
@@ -322,9 +325,11 @@
         "retained root release",
         "historical discard transition after complete current-incarnation root enumeration",
         "final protection removal adjusts next/end cursors before unlink; cursor cancellation releases no root protection",
-        "collector bounds each candidate bitmap to 32 exact versions including default revision; close/destruction ends all outstanding cursors",
+        "collector bounds each candidate bitmap to 32 exact versions including default revision; a protection change marks an existing cookie or between-slice cursor for repeat; close/destruction ends all outstanding cursors",
         "close drain",
-        "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation"
+        "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation",
+        "foreground and background share collectPassLocked/collectSliceLocked; detach refusal retains the original key/cookie, accepted detach moves effects into that key and advances the effect cursor only after queue acceptance",
+        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; Qt metadata/effect scratch and permanent-pressure exits remain unqualified"
       ]
     },
     {

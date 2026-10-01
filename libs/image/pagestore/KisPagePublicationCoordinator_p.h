@@ -85,7 +85,7 @@ public:
         bool tryInstallLocked(
             KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
             QString *error);
-        void collectRetirementsLocked(QVector<KisPageTransitionEffect> *retirementEffects);
+        void collectRetirementsLocked();
 
     private:
         class Data;

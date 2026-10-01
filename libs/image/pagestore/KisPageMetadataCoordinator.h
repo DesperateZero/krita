@@ -392,6 +392,7 @@ private:
     friend class KisPageOwnerLedger;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
+    friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
     KisPageTransitionResult applyProjectedSequence(const KisPageKey &key,
                                                    const QVector<KisPageTransition> &transitions);

@@ -501,7 +501,7 @@ public:
 
     void retireEffectsLocked(const QVector<KisPageTransitionEffect> &effects, QMutexLocker<QMutex> &lock)
     {
-        if (effects.isEmpty()) return;
+        if (effects.isEmpty() && backgroundReclamation) return;
         ++activeProviderCalls;
         lock.unlock();
         retirementQueue.retireEffects(effects, backgroundReclamation);
@@ -2515,7 +2515,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     phase.next(Phase::MutationSealCleanup, pageWork);
     disposeDeferredMetadataCleanup(std::move(metadataCleanup), owner->metadataCleanupStatistics);
     lock.relock();
-    overlay.collectRetirementsLocked(&retirements);
+    overlay.collectRetirementsLocked();
     lock.unlock();
     overlay = {};
     sealedPages = Private::ColdPageSet{};
@@ -2847,6 +2847,7 @@ KisPageStore::~KisPageStore()
     // waiting on providers or invalidating the capabilities' original bytes.
     d->readCoordinator.stopAutomaticWakeups();
     d->retirementQueue.stopAutomaticWakeups();
+    d->historyCollector.stopAutomaticWakeups();
 }
 
 void KisPageStore::PrivateReleaser::cleanup(Private *owner)
@@ -3080,6 +3081,7 @@ bool KisPageStore::closeSession(QString *error)
     d->closing = true;
     d->readCoordinator.beginCloseLocked();
     d->retirementQueue.beginClose();
+    d->historyCollector.scheduleLocked(); // Freeze semantic retry before idle observation.
     locker.unlock();
     d->readCoordinator.waitForIdle();
     d->retirementQueue.waitForIdle();
@@ -3093,6 +3095,7 @@ bool KisPageStore::closeSession(QString *error)
     locker.relock();
     d->historyCollector.waitForIdleLocked();
     d->epochs.collectFinishedTransactions();
+    d->historyCollector.collectUnreachableLocked(nullptr, 0);
     d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup, true);
     d->readCoordinator.retryCapturedReleasesLocked(locker, true);
     d->readCoordinator.retryReleasedReadsLocked(locker, cleanup, {}, nullptr, true);
@@ -3110,7 +3113,8 @@ bool KisPageStore::closeSession(QString *error)
     // The public total remains unchanged: this is only the pre-drain gate.
     stats.providerOperations = d->owner.publicationBlockingOperationCount();
     const auto capturedReleases = d->readCoordinator.snapshotLocked().pendingCapturedReleases;
-    if (stats.hasOutstandingCapabilities() || capturedReleases) {
+    const auto historyEffects = d->historyCollector.snapshotLocked().pendingEffects;
+    if (stats.hasOutstandingCapabilities() || capturedReleases || historyEffects) {
         d->closing = false;
         d->readCoordinator.cancelCloseLocked();
         d->retirementQueue.cancelCloseAndSchedule();
@@ -3122,7 +3126,7 @@ bool KisPageStore::closeSession(QString *error)
                                 "proofs=%7 surfaceChanges=%8 removals=%9 "
                                 "providerCalls=%10 blockingOperations=%11 "
                                 "seals=%12 archives=%13 shutdownReplicas=%14 "
-                                "defaultPreparations=%15 capturedReleases=%16")
+                                "defaultPreparations=%15 capturedReleases=%16 historyEffects=%17")
                      .arg(stats.activeTransactions)
                      .arg(stats.retainedSnapshots)
                      .arg(stats.pendingRequests)
@@ -3138,7 +3142,8 @@ bool KisPageStore::closeSession(QString *error)
                      .arg(stats.pendingArchiveOperations)
                      .arg(pendingShutdownReplicas)
                      .arg(stats.activeDefaultPreparations)
-                     .arg(capturedReleases));
+                     .arg(capturedReleases)
+                     .arg(historyEffects));
         return false;
     }
 
@@ -4447,7 +4452,7 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryInstallLocked(
             &metadataCleanup, nullptr);
         if (success)
-            overlay.collectRetirementsLocked(&retirements);
+            overlay.collectRetirementsLocked();
     }
     const auto disposeCleanup = qScopeGuard([&] {
         lock.unlock();

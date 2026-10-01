@@ -341,15 +341,21 @@ bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
     }
 
     if (!record.retirementOperation.isValid()) {
-        const auto operation = m_owner.nextOperationId();
+        const auto operation = m_owner.prepareRetirementOperation(record);
+        if (!operation.isValid()) return false;
+        auto cancelPrepared = qScopeGuard([&] { m_owner.cancelRetirementOperation(operation); });
         const auto result = record.provider->retire(
             operation, record.replica, record.lastUse);
-        if (!result.isValid() || !(result.operation == operation) ||
-            !(result.replica == record.replica) ||
-            !m_owner.bindRetirementOperation(operation, result)) {
-            return false;
-        }
+        if (!result.isValid()) return false;
+        cancelPrepared.dismiss();
         record.retirementOperation = operation;
+        record.retirementResult = result;
+    }
+    if (record.retirementResult.isValid()) {
+        if (!(record.retirementResult.replica == record.replica) ||
+            !m_owner.bindRetirementOperation(record.retirementOperation, record.retirementResult))
+            return false; // Keep an accepted provider result; never reissue retire.
+        record.retirementResult = {};
     }
     // A late completion is polled, never replayed as a second retire.
     const auto terminal =
@@ -478,9 +484,14 @@ void KisPageRetirementQueue::retireOrDefer(
         // an unaccounted record after an external provider result.
         Q_ASSERT(!owned && !backing.reservation.isValid());
         if (!owned && !backing.reservation.isValid()) {
-            KisPageRetirementRecord external(KisMutationStorageAllocator<KisPageRetirementRecord>{});
-            external.replica = replica; external.provider = provider; external.lastUse = lastUse;
-            retireRecord(external);
+            // This legacy foreign-handle path has no original record to retain.
+            // Keep its operation in the generic ledger, never a stack pointer.
+            const auto operation = m_owner.nextOperationId();
+            const auto result = provider ? provider->retire(operation, replica, lastUse) : KisReplicaOperation{};
+            if (result.isValid() && result.replica == replica &&
+                m_owner.bindRetirementOperation(operation, result) &&
+                m_owner.verifyProviderOperation(operation).isValid())
+                m_owner.releaseTerminalProviderOperation(operation);
         }
         return;
     }
@@ -548,7 +559,8 @@ void KisPageRetirementQueue::retireEffects(
     const QVector<KisPageTransitionEffect> &effects,
     bool backgroundReclamation)
 {
-    if (!backgroundReclamation || kisOnPageStoreReclamationThread()) process(8);
+    if (!backgroundReclamation || kisOnPageStoreReclamationThread())
+        process(backgroundReclamation ? 8 : std::numeric_limits<qsizetype>::max());
     KisPageRetirementRecords ready;
     quint64 bytes = 0;
     for (const KisPageTransitionEffect &effect : effects) {
@@ -576,6 +588,26 @@ void KisPageRetirementQueue::retireEffects(
     m_ready.splice(m_ready.end(), ready);
     updatePeaksLocked();
     schedulePassLocked();
+}
+
+bool KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
+{
+    if (m_owner.backingClass(effect.replica) != KisBackingBudgetClass::RetirementDebt)
+        return false;
+    m_metadata.removeCpuReadBinding(effect.replica);
+    auto record = m_owner.takeRetirementRecord(effect.replica);
+    Q_ASSERT(record);
+    if (!record) return false;
+    // Registration fixed this threading permission before any backing existed.
+    // Transfer needs neither a provider callback nor additional storage.
+    const bool background = record->backgroundRetirement;
+    record->lastUse = effect.lastUse;
+    QMutexLocker lock(&m_mutex);
+    m_pendingBytes += effect.replica.layout.byteSize;
+    (background ? m_ready : m_pending).push_back(*record.release());
+    updatePeaksLocked();
+    if (background) schedulePassLocked();
+    return true;
 }
 
 void KisPageRetirementQueue::disarmAutomaticWakeupsLocked()

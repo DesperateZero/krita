@@ -61,6 +61,7 @@ public:
     std::atomic<int> retireCalls{0};
     KisCompletionTicket deferredRetirement;
     std::function<void()> beforeRetire;
+    std::function<void()> beforeCapabilities;
     std::function<void(const KisReplicaHandle &, const KisReplicaOperation &)> afterRetire;
     std::function<void()> beforePrepareWrite;
     std::function<void()> beforeTransfer;
@@ -83,7 +84,8 @@ public:
     KisReplicaProviderId providerId() const override { return p->providerId(); }
     KisReplicaProviderEpoch providerEpoch() const override { return p->providerEpoch(); }
     KisReplicaCapabilities capabilities() const override
-    { auto c = p->capabilities(); if (disableNativeMutation) { c.nativeCpuMutation = false; c.synchronousSourceAdoption = false; }
+    { if (beforeCapabilities) beforeCapabilities();
+      auto c = p->capabilities(); if (disableNativeMutation) { c.nativeCpuMutation = false; c.synchronousSourceAdoption = false; }
       if (disableCpuPayload) c.synchronousCpuPayload = false;
       if (disableSynchronousWriteCopy) c.synchronousWriteCopy = false;
       if (disableBackgroundRetirement) c.backgroundRetirement = false;
@@ -294,9 +296,14 @@ struct ReadTerminalFixture
     bool operational = true;
     bool closing = false;
     bool background = true;
-    KisPageBackingLimits limits = [] {
-        KisPageBackingLimits result; result.metadataArenaBytes = 64 * 1024; return result;
-    }();
+    explicit ReadTerminalFixture(quint64 metadataBytes = 64 * 1024)
+        : limits([metadataBytes] {
+        KisPageBackingLimits result;
+        result.metadataArenaBytes = metadataBytes;
+        result.retirementDebtBytes = 64 * 64 * 4;
+        return result;
+    }()) {}
+    KisPageBackingLimits limits;
     KisBackingBudgetController budget{limits};
     KisPageOwnerLedger owner;
     KisPageMetadataCoordinator metadata;
@@ -312,18 +319,33 @@ struct ReadTerminalFixture
     KisCompletionTicket ready;
     KisReplicaHandle replica;
     QString error;
+    std::function<void()> afterDebtCommit;
 
-    bool init(KisPageCapturedRelease *capture = nullptr)
+    bool init(KisPageCapturedRelease *capture = nullptr, bool historical = false)
     {
-        if (!physical.init(4, 1) || !owner.configure(physical.completions, &error)
-            || !owner.registerProvider(physical.provider) || !metadata.configure(1, &error)) return false;
+        if (!physical.init(4, historical ? 0 : 1) || !owner.configure(physical.completions, &error)
+            || !owner.registerProvider(physical.provider)) return false;
         owner.attachBackingBudget(budget);
-        replica = physical.initialReplicas.first();
+        if (!metadata.configure(1, &error)) return false;
         KisSurfaceEpochState surface;
         if (!physical.store->resolveSurfaceState({1}, {}, &surface)) return false;
+        KisPageBackingPreparation backing;
+        if (historical) {
+            KisPageWriteCoordinator coordinator(metadata, epochs, budget, owner);
+            backing = coordinator.reserveBacking(surface.allocationDescriptor(), cpu.domain,
+                KisBackingBudgetClass::RetainedHistory, &error);
+            if (!backing.reservation.isValid()) return false;
+            const auto result = physical.provider->prepareWrite(owner.nextOperationId(), {key(), {1}},
+                surface.allocationDescriptor(), cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+            if (!result.isValid()) return false;
+            replica = result.replica;
+        } else {
+            replica = physical.initialReplicas.first();
+        }
         KisImageEpochSnapshot initial; initial.epoch = {1};
         initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
-        initial.surfaces = {surface}; initial.manifest = {replica.version};
+        initial.surfaces = {surface};
+        if (!historical) initial.manifest = {replica.version};
         if (!epochs.initialize(initial, &error)) return false;
         if (capture) {
             capture->versions.push_back(replica.version);
@@ -342,6 +364,18 @@ struct ReadTerminalFixture
         page.publishedGeneration = replica.version.generation;
         page.publishedDefaultPixelRevision = replica.version.defaultPixelRevision;
         page.nextGeneration = {2}; page.versions = {version};
+        if (historical) {
+            page.versions[0].publication = KisPagePublicationState::Historical;
+            KisPageVersionStateSnapshot current;
+            current.version = {key(), {2}, surface.defaultPixelRevision};
+            current.publication = KisPagePublicationState::Published;
+            page.versions.prepend(current);
+            page.publishedGeneration = {2};
+            page.nextGeneration = {3};
+            page.publishedDefaultPixelRevision = surface.defaultPixelRevision;
+            if (!owner.registerBacking(replica, backing.reservation,
+                KisBackingBudgetClass::RetainedHistory, &error, &backing.retirement)) return false;
+        }
         if (!metadata.registerPage(page, &error)) return false;
         retirement.prepareTask(); history.prepareTask(budget); read.prepareTask();
         ready = physical.completions->allocatePending(
@@ -352,6 +386,7 @@ struct ReadTerminalFixture
     {
         read.stopAutomaticWakeups(); read.waitForIdle();
         retirement.stopAutomaticWakeups(); retirement.waitForIdle();
+        history.stopAutomaticWakeups();
         QMutexLocker lock(&mutex); operational = false; history.waitForIdleLocked();
         Q_ASSERT(references.loadAcquire() == 1);
     }
@@ -608,6 +643,21 @@ private Q_SLOTS:
         QTest::newRow("registered-automatic-budget-release") << false << true << true;
     }
     void retirementRecordTransfersAtCapacity();
+    void historyRefusalPreservesOriginalWork_data()
+    {
+        QTest::addColumn<int>("refusal");
+        QTest::newRow("work-storage") << 0;
+        QTest::newRow("detach-debt") << 1;
+        QTest::newRow("effect-transfer-at-capacity") << 2;
+    }
+    void historyRefusalPreservesOriginalWork();
+    void retirementResultBindsAtCapacity_data()
+    {
+        QTest::addColumn<bool>("close");
+        QTest::newRow("automatic") << false;
+        QTest::newRow("close") << true;
+    }
+    void retirementResultBindsAtCapacity();
     void budgetWaitersReserveInOrder();
     void budgetWaiterStateStorageIsChargedAndReleased();
     void budgetWaiterCancellationAndLifetime();
@@ -4380,7 +4430,7 @@ void KisPageStoreCpuMutationTest::retirementRecordRefusedBeforePhysicalResult()
         auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
             KisBackingBudgetClass::Current, &error);
         QVERIFY2(prepared.reservation.isValid() && prepared.retirement, qPrintable(error));
-        QCOMPARE(live(), baseline + sizeof(KisPageRetirementRecord));
+        QVERIFY(live() > baseline + sizeof(KisPageRetirementRecord)); // Includes the prepaid operation node.
     }
     QCOMPARE(live(), baseline);
 }
@@ -4406,6 +4456,11 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     queue.prepareTask();
     if (!automatic) queue.stopAutomaticWakeups();
     QString error;
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto beforeRecord = live();
+    quint64 recordBytes = 0;
+    { auto probe = kisPreparePageRetirementRecord(&budget); recordBytes = live() - beforeRecord; }
+    QCOMPARE(live(), beforeRecord);
     auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
         KisBackingBudgetClass::Current, &error);
     QVERIFY2(prepared.reservation.isValid() && prepared.retirement, qPrintable(error));
@@ -4432,7 +4487,6 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         }
     }
     f.provider->rejectRetire = true;
-    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
     void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
     const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
@@ -4463,7 +4517,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         f.provider->rejectRetire = false;
         QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
         queue.waitForIdle(); kisDrainPageStoreReclamation();
-        QCOMPARE(live(), limits.metadataArenaBytes - sizeof(KisPageRetirementRecord));
+        QCOMPARE(live(), limits.metadataArenaBytes - recordBytes);
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, quint64(0));
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
         QCOMPARE(references.loadAcquire(), 1);
@@ -4481,12 +4535,144 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     QVERIFY(queue.retireRecord(records.front()));
     QCOMPARE(live(), limits.metadataArenaBytes); // Real inert node is still owned.
     records.clear_and_dispose(KisPageRetirementRecordDeleter{});
-    QCOMPARE(live(), limits.metadataArenaBytes - sizeof(KisPageRetirementRecord));
+    QCOMPARE(live(), limits.metadataArenaBytes - recordBytes);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, quint64(0));
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
     QVERIFY(queue.isDrained());
     kisDrainPageStoreReclamation();
     QCOMPARE(references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
+{
+    QFETCH(int, refusal);
+    ReadTerminalFixture f(256 * 1024);
+    // Limits were fixed before constructing the original controller.
+    f.metadata.attachBackingBudget(f.budget);
+    f.metadata.attachRetirementDebtOwner(&f,
+        +[](void *p, const QVector<KisPageTransitionEffect> &effects, quint64 *cookie, QString *error) {
+            return static_cast<ReadTerminalFixture *>(p)->owner.prepareRetirementDebt(effects, cookie, error);
+        }, +[](void *p, quint64 cookie) noexcept {
+            auto &fixture = *static_cast<ReadTerminalFixture *>(p);
+            fixture.owner.commitRetirementDebt(cookie);
+            if (fixture.afterDebtCommit) fixture.afterDebtCommit();
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<ReadTerminalFixture *>(p)->owner.cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    const auto stats = [&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked(); };
+    const quint64 before = f.live();
+    void *filler = nullptr;
+    size_t fillerBytes = 0;
+    KisBackingBudgetReservation blockingDebt;
+    std::atomic<int> capabilityCalls{0};
+    if (refusal == 0) {
+        fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+        filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+    } else if (refusal == 1) {
+        KisBackingBudgetDelta debt;
+        debt.buckets[size_t(KisBackingBudgetClass::RetirementDebt)].cpuRam =
+            qint64(f.limits.retirementDebtBytes);
+        blockingDebt = f.budget.reserve(debt, &f.error);
+        QVERIFY2(blockingDebt.isValid(), qPrintable(f.error));
+    } else {
+        f.physical.provider->beforeCapabilities = [&] { ++capabilityCalls; };
+        f.afterDebtCommit = [&] {
+            if (!filler) {
+                fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+                filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+            }
+            QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        };
+    }
+    const auto release = qScopeGuard([&] {
+        f.history.stopAutomaticWakeups();
+        { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked();
+          f.physical.provider->beforeCapabilities = {}; f.afterDebtCommit = {}; }
+        blockingDebt.release();
+        kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1);
+    });
+    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    if (refusal != 2) QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
+    else QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
+    KisPageStateSnapshot page;
+    QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    QCOMPARE(bool(page.findVersion(f.replica.version)), refusal != 2);
+    if (refusal == 2) {
+        QCOMPARE(stats().pendingEffects, qsizetype(0));
+        QCOMPARE(capabilityCalls.load(), 0);
+    } else QCOMPARE(f.physical.provider->retireCalls.load(), 0);
+    blockingDebt.release();
+    { QMutexLocker lock(&f.mutex); f.physical.provider->beforeCapabilities = {}; f.afterDebtCommit = {}; }
+    kisFreeMutationStorage(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    // No new request, collect call, completion or explicit wake after capacity release.
+    QTRY_COMPARE_WITH_TIMEOUT(stats().pendingPages, qsizetype(0), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
+    f.retirement.waitForIdle();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    QVERIFY(f.retirement.isDrained());
+    QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    QVERIFY(!page.findVersion(f.replica.version));
+    QCOMPARE(stats().pendingEffects, qsizetype(0));
+    QCOMPARE(stats().activeScans, qsizetype(0));
+    QVERIFY(!stats().retryScheduled);
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    QVERIFY(f.live() < before); // The real key/retirement/operation storage was freed.
+    QCOMPARE(f.references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::retirementResultBindsAtCapacity()
+{
+    QFETCH(bool, close);
+    ReadTerminalFixture f(256 * 1024);
+    f.metadata.attachBackingBudget(f.budget);
+    f.metadata.attachRetirementDebtOwner(&f.owner,
+        +[](void *p, const QVector<KisPageTransitionEffect> &effects, quint64 *cookie, QString *error) {
+            return static_cast<KisPageOwnerLedger *>(p)->prepareRetirementDebt(effects, cookie, error);
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->commitRetirementDebt(cookie); },
+        +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    const auto ticket = f.physical.completions->allocatePending(
+        f.physical.completions->registerSource(KisCompletionDomain::CpuJob));
+    QVERIFY(ticket.isValid());
+    f.physical.provider->deferredRetirement = ticket;
+    void *filler = nullptr;
+    size_t fillerBytes = 0;
+    f.physical.provider->afterRetire = [&](const KisReplicaHandle &, const KisReplicaOperation &result) {
+        if (!result.isValid()) return;
+        fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+        filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+    };
+    const auto cleanup = qScopeGuard([&] {
+        f.physical.provider->afterRetire = {};
+        f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded);
+        kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1);
+    });
+    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    QTRY_COMPARE_WITH_TIMEOUT(f.owner.providerOperationCount(), qsizetype(1), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(f.retirement.snapshot().retryWakeups >= 3, 5000);
+    f.retirement.waitForIdle();
+    QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+    QCOMPARE(f.physical.provider->retireCalls.load(), 1);
+    QCOMPARE(f.owner.publicationBlockingOperationCount(), qsizetype(0));
+    QVERIFY(!f.retirement.isDrained());
+    KisPageRetirementRecords records;
+    if (close) {
+        f.retirement.beginClose();
+        f.retirement.waitForIdle();
+        records = f.retirement.takeForClose();
+        QCOMPARE(records.size(), size_t(1));
+    }
+    QVERIFY(f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded));
+    if (close) {
+        QVERIFY(f.retirement.retireRecord(records.front()));
+        records.clear_and_dispose(KisPageRetirementRecordDeleter{});
+    } else {
+        QTRY_VERIFY_WITH_TIMEOUT(f.retirement.isDrained(), 5000);
+        f.retirement.waitForIdle();
+    }
+    QCOMPARE(f.physical.provider->retireCalls.load(), 1);
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    QCOMPARE(f.physical.provider->memoryUsage().committedBytes, quint64(0));
+    QVERIFY(f.live() < f.limits.metadataArenaBytes);
 }
 
 void KisPageStoreCpuMutationTest::retirementBudgetWaitersProgress()

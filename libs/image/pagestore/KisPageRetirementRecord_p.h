@@ -7,17 +7,36 @@
 #include "KisPageWriteCoordinator_p.h"
 #include "KisPageReplicaProvider.h"
 #include <boost/intrusive/list.hpp>
+#include <map>
 struct KisPageRetirementWait;
+
+struct KisPageProviderOperationRecord
+{
+    KisCompletionTicket completion;
+    bool detachedRetirement = false;
+    KisPageRetirementRecord *retirement = nullptr;
+};
+using KisPageProviderOperationIndex = std::map<quint64, KisPageProviderOperationRecord,
+    std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, KisPageProviderOperationRecord>>>;
 
 struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
 {
     explicit KisPageRetirementRecord(KisMutationStorageAllocator<KisPageRetirementRecord> allocator)
-        : storage(std::move(allocator)) {}
+        : storage(std::move(allocator))
+    {
+        KisPageProviderOperationIndex prepared(std::less<quint64>{},
+            KisMutationStorageAllocator<std::pair<const quint64, KisPageProviderOperationRecord>>(storage));
+        prepared.emplace(0, KisPageProviderOperationRecord{{}, true, this});
+        operationStorage = prepared.extract(0);
+    }
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
     KisReplicaHandle replica;
     QSharedPointer<KisPageReplicaProvider> provider;
+    bool backgroundRetirement = false;
     KisCompletionTicket lastUse;
     KisPageOperationId retirementOperation;
+    KisReplicaOperation retirementResult;
+    KisPageProviderOperationIndex::node_type operationStorage;
     // Rare provider-result rejection: keep the preallocation reservation
     // charged until an unregistered physical replica reaches terminal retire.
     KisBackingBudgetReservation orphanReservation;

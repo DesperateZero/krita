@@ -200,6 +200,8 @@ public:
 private:
     KisReplicaBackingFootprint observeBackingFootprint(
         const KisReplicaHandle &replica) const;
+    KisPageOperationId prepareRetirementOperation(KisPageRetirementRecord &record);
+    void cancelRetirementOperation(KisPageOperationId operation);
     bool reclassifyBackingImpl(const KisReplicaHandle &replica,
                                KisBackingBudgetClass budgetClass,
                                KisBackingBudgetReservation *reservation,
@@ -214,6 +216,7 @@ private:
     QScopedPointer<Private> d;
     friend class KisPageOwnerDomainAdmission;
     friend class KisBackingClassChangeReservation;
+    friend class KisPageRetirementQueue;
 };
 
 #endif // KIS_PAGE_OWNER_LEDGER_H

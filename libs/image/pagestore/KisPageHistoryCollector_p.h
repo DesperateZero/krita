@@ -12,19 +12,23 @@
 #include "KisPageRetirementQueue_p.h"
 
 #include <QAtomicInt>
-#include <QHash>
 #include <QMutex>
-#include <QSet>
 #include <QVector>
 #include <QWaitCondition>
 
-#include <deque>
+#include <array>
+#include <map>
+
+struct KisPageHistoryWakeContext;
 
 struct KisPageHistoryCollectorSnapshot
 {
     qsizetype pendingPages = 0;
     qsizetype deferredPages = 0;
     qsizetype activeScans = 0;
+    qsizetype pendingEffects = 0;
+    quint64 retryWakeups = 0;
+    bool retryScheduled = false;
     quint64 cachedReachableVersions = 0;
     bool jobScheduled = false;
     quint64 pagesVisited = 0;
@@ -74,37 +78,49 @@ public:
     KisPageHistoryCollector(KisPageHistoryCollector &&) = delete;
     KisPageHistoryCollector &operator=(KisPageHistoryCollector &&) = delete;
 
-    QVector<KisPageTransitionEffect> collectUnreachableLocked(
+    KRITAIMAGE_EXPORT void collectUnreachableLocked(
         const KisPageKey *candidateKeys, qsizetype candidateCount,
         bool scanAll = false);
     void collectEpochBookkeepingLocked(bool rescanHistory = false);
     void requestKeyLocked(const KisPageKey &key);
     void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();
-    QVector<KisPageKey> deferredKeysLocked() const;
+    KRITAIMAGE_EXPORT void stopAutomaticWakeups();
     void clearLocked();
 
-    KisPageHistoryCollectorSnapshot snapshotLocked() const;
+    KRITAIMAGE_EXPORT KisPageHistoryCollectorSnapshot snapshotLocked() const;
 
 private:
-    struct Scan
+    struct Work : boost::intrusive::list_base_hook<>
     {
+        KisPageKey key;
         KisPageVersion after;
         KisPageVersion sliceAfter;
-        QVector<KisPageVersion> candidates;
+        std::array<KisPageVersion, VersionScanBudget> candidates{};
+        qsizetype candidateCount = 0;
         quint64 reachability = 0;
         quint32 reachableMask = 0;
         qsizetype historicalCount = 0;
+        bool scanning = false;
         bool repeat = false;
+        // Move the accepted metadata result here before any further allocation.
+        QVector<KisPageTransitionEffect> effects;
+        qsizetype nextEffect = 0;
     };
-
-    void queueContinuationLocked(const KisPageKey &key);
-    QVector<KisPageTransitionEffect> collectBatchLocked(
-        const KisPageKey *candidateKeys, qsizetype candidateCount,
-        bool scanAll);
-    QVector<KisPageTransitionEffect> collectSliceLocked(
-        const KisPageKey &key,
+    struct KeyLess {
+        bool operator()(const KisPageKey &a, const KisPageKey &b) const {
+            if (a.surface.value != b.surface.value) return a.surface.value < b.surface.value;
+            if (a.page.row != b.page.row) return a.page.row < b.page.row;
+            return a.page.column < b.page.column;
+        }
+    };
+    using WorkIndex = std::map<KisPageKey, Work, KeyLess,
+        KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>>;
+    bool collectSliceLocked(Work &work,
         quint64 &visitedVersions, qsizetype &rootBudget);
+    bool finishEffectsLocked(Work &work);
+    bool collectPassLocked();
+    void endScanLocked(Work &work, bool finished = false);
 
     KisPageMetadataCoordinator &m_metadata;
     KisImageEpochReferenceModel &m_epochs;
@@ -118,14 +134,19 @@ private:
     ReleaseOwnerLifetime m_releaseOwnerLifetime = nullptr;
     RemoveDescriptor m_removeDescriptor = nullptr;
 
-    QSet<KisPageKey> m_deferred;
-    QSet<KisPageKey> m_pending;
-    std::deque<KisPageKey> m_ready;
-    QSet<KisPageKey> m_queued;
-    QHash<KisPageKey, Scan> m_scans;
+    WorkIndex m_work;
+    boost::intrusive::list<Work> m_ready;
+    qsizetype m_activeScans = 0;
     bool m_rescanRequested = false;
     bool m_jobScheduled = false;
     KisPageReclamationJobPointer m_task;
+    std::shared_ptr<KisPageHistoryWakeContext> m_wakeContext;
+    KisPageReclamationDelay m_retry;
+    bool m_retryScheduled = false;
+    bool m_blocked = false;
+    bool m_automaticWakeupsStopped = false;
+    int m_retryDelayMs = 1;
+    quint64 m_retryWakeups = 0;
     QWaitCondition m_idle;
 
     quint64 m_pagesVisited = 0;

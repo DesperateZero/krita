@@ -403,11 +403,9 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
     return true;
 }
 
-void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirementsLocked(
-    QVector<KisPageTransitionEffect> *retirementEffects)
+void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirementsLocked()
 {
     if (!data || !data->installed || data->collected) return;
-    Q_ASSERT(retirementEffects);
     // The old identities no longer select the overlay. Their ledger records
     // and historical metadata are disposal work, not part of publication.
     for (const auto &change : std::as_const(data->changes)) {
@@ -417,7 +415,7 @@ void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirements
         Q_UNUSED(revoked);
     }
     if (!data->historical.isEmpty())
-        *retirementEffects += data->owner->m_history.collectUnreachableLocked(
+        data->owner->m_history.collectUnreachableLocked(
             data->historical.constData(), data->historical.size());
     data->collected = true;
 }
@@ -606,7 +604,7 @@ bool KisPagePublicationCoordinator::hasActiveTransactionLocked(
 void KisPagePublicationCoordinator::retireEffectsUnlocked(
     QVector<KisPageTransitionEffect> effects, QMutexLocker<QMutex> &ownerLock)
 {
-    if (effects.isEmpty()) return;
+    if (effects.isEmpty() && m_backgroundReclamation) return;
     ++m_activeProviderCalls;
     ownerLock.unlock();
     m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
@@ -787,7 +785,7 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
     }
     if (!update.prepareSurfaceLocked(error) || !update.tryInstallLocked(&metadataCleanup, error)) return false;
     QVector<KisPageTransitionEffect> retirementEffects;
-    update.collectRetirementsLocked(&retirementEffects);
+    update.collectRetirementsLocked();
     retireEffectsUnlocked(std::move(retirementEffects), ownerLock);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -1137,7 +1135,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         }
         QVector<KisPageTransitionEffect> historyRetirements = std::move(preparedCommit.data->publicationRetirements);
         diagnostic.next(Phase::CommitHistoryCollect, quint64(historyCandidates.size()));
-        historyRetirements += m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
+        m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
         diagnostic.next(Phase::CommitProviderRetire, quint64(historyRetirements.size()));
         retireEffectsUnlocked(std::move(historyRetirements), ownerLock);
         ++m_committedTransactions;
@@ -1346,7 +1344,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     m_epochs.releaseSnapshot(source.token);
     sourceClaim.dismiss();
     m_history.collectEpochBookkeepingLocked();
-    retireEffectsUnlocked(m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size()), ownerLock);
+    m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
+    retireEffectsUnlocked({}, ownerLock);
     return {restored.root.epoch(), completion};
 }
 

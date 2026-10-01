@@ -1,9 +1,7 @@
 /*
- *  SPDX-FileCopyrightText: 2026 Krita contributors
- *
- *  SPDX-License-Identifier: GPL-2.0-or-later
+ * SPDX-FileCopyrightText: 2026 Krita contributors
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
-
 #include "KisPageHistoryCollector_p.h"
 
 #include "KisPageStoreReclamation_p.h"
@@ -12,6 +10,15 @@
 
 #include <algorithm>
 #include <utility>
+
+struct KisPageHistoryWakeContext
+{
+    QMutex mutex;
+    KisPageHistoryCollector *collector = nullptr;
+    QAtomicInt *references = nullptr;
+    qsizetype activities = 0;
+    QWaitCondition idle;
+};
 
 namespace {
 bool retirementEligible(const KisPageVersionStateSnapshot &version)
@@ -56,7 +63,7 @@ KisPageHistoryCollector::KisPageHistoryCollector(
 {
     static_assert(PageAdmissionBudget <= KisImageEpochReferenceModel::ReachabilityScanLimit);
     static_assert(RootVisitBudget <= KisImageEpochReferenceModel::ReachabilityRootBudget);
-    static_assert(VersionScanBudget <= 32); // One reachability bit per candidate.
+    static_assert(VersionScanBudget <= 32);
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_releaseOwnerLifetime);
     Q_ASSERT(m_removeDescriptor);
@@ -65,246 +72,230 @@ KisPageHistoryCollector::KisPageHistoryCollector(
 KisPageHistoryCollector::~KisPageHistoryCollector()
 {
     Q_ASSERT(!m_jobScheduled);
-    for (const auto &scan : m_scans) m_epochs.endReachabilityScan(scan.reachability);
+    m_retry.cancel();
+    if (m_wakeContext) {
+        QMutexLocker lock(&m_wakeContext->mutex);
+        m_wakeContext->collector = nullptr;
+    }
+    clearLocked();
 }
 
 void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
 {
-    auto scan = m_scans.find(key);
-    if (scan != m_scans.end()) scan->repeat = true;
-    if (!m_queued.contains(key)) m_pending.insert(key);
+    auto [entry, inserted] = m_work.try_emplace(key);
+    auto &work = entry->second;
+    work.key = key;
+    // Protection can disappear between slices, when the root cookie is gone
+    // but the cursor has already passed versions that must now be revisited.
+    if (!inserted && work.scanning)
+        work.repeat = true;
+    if (!work.is_linked()) m_ready.push_back(work);
 }
 
-void KisPageHistoryCollector::queueContinuationLocked(const KisPageKey &key)
+bool KisPageHistoryCollector::finishEffectsLocked(Work &work)
 {
-    if (m_queued.contains(key)) return;
-    m_pending.remove(key);
-    m_queued.insert(key);
-    m_ready.push_back(key);
-}
-
-QVector<KisPageTransitionEffect>
-KisPageHistoryCollector::collectUnreachableLocked(
-    const KisPageKey *candidateKeys, qsizetype candidateCount,
-    bool scanAll)
-{
-    if (m_backgroundReclamation) {
-        for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
-        m_rescanRequested = m_rescanRequested || scanAll;
-        scheduleLocked();
-        return {};
+    while (work.nextEffect < work.effects.size()) {
+        if (!m_retirementQueue.acceptEffect(work.effects[work.nextEffect])) return false;
+        ++work.nextEffect;
     }
-    return collectBatchLocked(candidateKeys, candidateCount, scanAll);
+    work.effects.clear();
+    work.nextEffect = 0;
+    return true;
 }
 
-QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectBatchLocked(
-    const KisPageKey *candidateKeys, qsizetype candidateCount,
-    bool scanAll)
+void KisPageHistoryCollector::endScanLocked(Work &work, bool finished)
 {
-    QVector<KisPageKey> keys;
-    if (scanAll) {
-        keys = m_metadata.pageKeys();
-    } else {
-        QSet<KisPageKey> seen;
-        keys.reserve(candidateCount);
-        for (qsizetype i = 0; i < candidateCount; ++i) {
-            const KisPageKey &key = candidateKeys[i];
-            if (seen.contains(key)) continue;
-            seen.insert(key);
-            keys.append(key);
-        }
+    if (work.reachability) {
+        m_epochs.endReachabilityScan(work.reachability);
+        work.reachability = 0;
     }
-    const QSet<KisPageVersion> reachable =
-        m_epochs.reachablePageVersions(keys);
-    QVector<KisPageTransitionEffect> effects;
-    for (const KisPageKey &key : keys) {
-        KisPageVersion after;
-        qsizetype historicalCount = 0;
-        qsizetype discardedCount = 0;
-        bool exists = false;
-        bool failed = false;
-        for (;;) {
-            const auto history = m_metadata.historySlice(key, after, VersionScanBudget);
-            if (!history.exists) break;
-            if (!exists) historicalCount = history.total;
-            exists = true;
-            KisPageTransition discard;
-            discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
-            for (const auto &version : history.versions) {
-                if (reachable.contains(version.version)) continue;
-                if (retirementEligible(version)) discard.versions.append(version.version);
-            }
-            if (!discard.versions.isEmpty()) {
-                const auto discarded = m_metadata.applyOwner(key, discard);
-                if (!discarded.accepted) {
-                    failed = true;
-                    break;
-                }
-                effects += discarded.effects;
-                discardedCount += discard.versions.size();
-                for (const auto &version : discard.versions)
-                    m_removeDescriptor(m_ownerContext, version);
-            }
-            if (!history.after.isValid()) break;
-            after = history.after;
-        }
-        if (!exists) continue;
-        ++m_pagesVisited;
-        if (!kisOnPageStoreReclamationThread()) ++m_foregroundPagesVisited;
-        if (failed || historicalCount > discardedCount) m_deferred.insert(key);
-        else m_deferred.remove(key);
+    work.candidateCount = 0;
+    if (finished) {
+        work.reachableMask = 0;
+        if (work.scanning) --m_activeScans;
+        work.scanning = false;
     }
-    return effects;
 }
 
-QVector<KisPageTransitionEffect> KisPageHistoryCollector::collectSliceLocked(
-    const KisPageKey &key, quint64 &visitedVersions, qsizetype &rootBudget)
+bool KisPageHistoryCollector::collectSliceLocked(
+    Work &work, quint64 &visitedVersions, qsizetype &rootBudget)
 {
-    auto &scan = m_scans[key];
-    ++m_pagesVisited;
+    // A previous detach remains in this same node until every effect is accepted.
+    if (!finishEffectsLocked(work)) return false;
     const auto markReachable = [&](const KisPageVersion &version) {
-        for (qsizetype i = 0; i < scan.candidates.size(); ++i)
-            if (scan.candidates[i] == version) scan.reachableMask |= quint32(1) << i;
+        for (qsizetype i = 0; i < work.candidateCount; ++i)
+            if (work.candidates[size_t(i)] == version) work.reachableMask |= quint32(1) << i;
     };
-    if (!scan.reachability) {
-        if (!rootBudget) { queueContinuationLocked(key); return {}; }
-        const auto slice = m_metadata.historySlice(key, scan.after, VersionScanBudget);
+    if (!work.reachability) {
+        if (!rootBudget || (!work.scanning && m_activeScans == PageAdmissionBudget)) return true;
+        if (!work.scanning) {
+            work.scanning = true;
+            ++m_activeScans;
+        }
+        const auto slice = m_metadata.historySlice(work.key, work.after, VersionScanBudget);
         visitedVersions += quint64(slice.versions.size());
         if (slice.versions.isEmpty()) {
-            const bool repeat = scan.repeat;
-            if (!slice.total) m_deferred.remove(key);
-            m_scans.remove(key);
-            if (repeat) queueContinuationLocked(key);
-            return {};
+            endScanLocked(work, true);
+            m_ready.erase(m_ready.iterator_to(work));
+            if (!slice.total) m_work.erase(work.key);
+            else if (work.repeat) {
+                work.repeat = false;
+                work.after = {};
+                m_ready.push_back(work);
+            }
+            return true;
         }
-        scan.candidates.clear();
-        scan.reachableMask = 0;
-        for (const auto &version : slice.versions) scan.candidates.append(version.version);
-        scan.sliceAfter = slice.after;
-        scan.historicalCount = slice.total;
-        const auto start = m_epochs.beginReachabilityScan(key);
-        if (!start.cookie) {
-            // Exhausted cursor storage/identity grants no permission to retire.
-            m_deferred.insert(key);
-            m_scans.remove(key);
-            return {};
-        }
-        scan.reachability = start.cookie;
+        work.candidateCount = slice.versions.size();
+        work.reachableMask = 0;
+        for (qsizetype i = 0; i < work.candidateCount; ++i)
+            work.candidates[size_t(i)] = slice.versions[i].version;
+        work.sliceAfter = slice.after;
+        work.historicalCount = slice.total;
+        const auto start = m_epochs.beginReachabilityScan(work.key);
+        if (!start.cookie) return false;
+        work.reachability = start.cookie;
         markReachable(start.current);
         --rootBudget;
         ++m_reachabilityRootsVisited;
         ++m_reachabilityRefreshes;
     }
-    const auto roots = m_epochs.advanceReachabilityScan(scan.reachability, rootBudget);
+    ++m_pagesVisited;
+    if (!kisOnPageStoreReclamationThread()) ++m_foregroundPagesVisited;
+    const auto roots = m_epochs.advanceReachabilityScan(work.reachability, rootBudget);
     rootBudget -= roots.rootsVisited;
     m_reachabilityRootsVisited += quint64(roots.rootsVisited);
     if (!roots.valid) {
-        m_epochs.endReachabilityScan(scan.reachability);
-        scan.reachability = 0;
-        scan.candidates.clear();
-        scan.after = {}; // The changed key can insert history below the cursor.
+        endScanLocked(work);
+        work.reachableMask = 0;
+        work.after = {};
         ++m_reachabilityRestarts;
-        queueContinuationLocked(key);
-        return {};
+        return true;
     }
     for (qsizetype i = 0; i < roots.rootsVisited; ++i) markReachable(roots.versions[size_t(i)]);
-    if (!roots.complete) { queueContinuationLocked(key); return {}; }
+    if (!roots.complete) return true;
 
-    // Root validity was just rechecked under the epoch gate. The caller still
-    // holds the store owner gate, excluding publication/capture until detach.
-    // Re-read only these candidate identities; never reuse old pin/writer state.
     KisPageTransition discard;
     discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
-    for (qsizetype i = 0; i < scan.candidates.size(); ++i) {
-        if (scan.reachableMask & (quint32(1) << i)) continue;
+    for (qsizetype i = 0; i < work.candidateCount; ++i) {
+        if (work.reachableMask & (quint32(1) << i)) continue;
         KisPageStateSnapshot current;
-        const auto &identity = scan.candidates[i];
+        const auto &identity = work.candidates[size_t(i)];
         if (!m_metadata.versionSnapshot(identity, &current)) continue;
         const auto *version = current.findVersion(identity);
-        if (version && version->publication == KisPagePublicationState::Historical &&
-            retirementEligible(*version)) discard.versions.append(identity);
+        if (version && version->publication == KisPagePublicationState::Historical && retirementEligible(*version))
+            discard.versions.append(identity);
     }
-    QVector<KisPageTransitionEffect> effects;
-    qsizetype discardedCount = 0;
     if (!discard.versions.isEmpty()) {
-        const auto discarded = m_metadata.applyOwner(key, discard);
-        if (discarded.accepted) {
-            effects = discarded.effects;
-            discardedCount = discard.versions.size();
-            for (const auto &version : discard.versions) m_removeDescriptor(m_ownerContext, version);
+        auto result = m_metadata.applyOwner(work.key, discard);
+        if (!result.accepted) return false;
+        work.effects = std::move(result.effects); // No allocation after authoritative detach.
+        work.historicalCount -= discard.versions.size();
+        for (const auto &version : discard.versions) m_removeDescriptor(m_ownerContext, version);
+        if (!finishEffectsLocked(work)) return false;
+    }
+    work.after = work.sliceAfter;
+    endScanLocked(work, !work.after.isValid());
+    if (!work.after.isValid()) {
+        if (work.repeat) {
+            work.repeat = false;
+            work.after = {};
+        }
+        else {
+            m_ready.erase(m_ready.iterator_to(work));
+            if (!work.historicalCount) m_work.erase(work.key);
         }
     }
-    if (scan.historicalCount > discardedCount) m_deferred.insert(key);
-    else m_deferred.remove(key);
-    m_epochs.endReachabilityScan(scan.reachability);
-    scan.reachability = 0;
-    scan.candidates.clear();
-    if (scan.sliceAfter.isValid()) {
-        scan.after = scan.sliceAfter;
-        queueContinuationLocked(key);
-    } else {
-        const bool repeat = scan.repeat;
-        m_scans.remove(key);
-        if (repeat) queueContinuationLocked(key);
+    return true;
+}
+
+bool KisPageHistoryCollector::collectPassLocked()
+{
+    std::array<Work *, PageAdmissionBudget> keys{};
+    qsizetype count = 0;
+    for (auto &work : m_ready) {
+        keys[size_t(count++)] = &work;
+        if (count == PageAdmissionBudget) break;
     }
-    return effects;
+    quint64 versions = 0;
+    qsizetype rootsRemaining = RootVisitBudget;
+    bool blocked = false;
+    for (qsizetype i = 0; i < count; ++i) {
+        auto &work = *keys[size_t(i)];
+        const auto key = work.key;
+        const qsizetype allowance = rootsRemaining / (count - i);
+        qsizetype remaining = allowance;
+        try { blocked = !collectSliceLocked(work, versions, remaining) || blocked; }
+        catch (const std::bad_alloc &) { blocked = true; }
+        rootsRemaining -= allowance - remaining;
+        auto found = m_work.find(key);
+        if (found != m_work.end() && found->second.is_linked())
+            m_ready.splice(m_ready.end(), m_ready, m_ready.iterator_to(found->second));
+    }
+    m_maximumRootsPerPass = std::max(m_maximumRootsPerPass, quint64(RootVisitBudget - rootsRemaining));
+    m_maximumVersionsPerPass = std::max(m_maximumVersionsPerPass, versions);
+    m_maximumPagesPerPass = std::max(m_maximumPagesPerPass, quint64(count));
+    return blocked;
+}
+
+void KisPageHistoryCollector::collectUnreachableLocked(
+    const KisPageKey *candidateKeys, qsizetype candidateCount, bool scanAll)
+{
+    try {
+        if (scanAll) {
+            // Every accepted key stays indexed while history remains. Do not
+            // visit unchanged pages merely because a retained root was released.
+            for (const auto &entry : m_work) requestKeyLocked(entry.first);
+        }
+        for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
+    } catch (const std::bad_alloc &) {
+        // Metadata still owns every undetached version; retry a complete enumeration.
+        m_rescanRequested = true;
+        m_blocked = true;
+        scheduleLocked();
+        if (!m_backgroundReclamation) throw;
+        return;
+    }
+    if (!m_backgroundReclamation || m_closing || m_automaticWakeupsStopped) {
+        while (!m_ready.empty()) {
+            if (collectPassLocked()) {
+                m_blocked = true;
+                break;
+            }
+        }
+    }
+    scheduleLocked();
 }
 
 void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
 {
     if (m_task) return;
-    m_task = kisPreparePageStoreReclamation([this] {
-        QVector<KisPageTransitionEffect> effects;
+    Q_ASSERT(m_work.empty());
+    m_work = WorkIndex(KeyLess{},
+        KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>(&budget));
+    auto context = std::allocate_shared<KisPageHistoryWakeContext>(
+        KisMutationStorageAllocator<KisPageHistoryWakeContext>::retained(&budget));
+    context->collector = this;
+    context->references = &m_ownerLifetimeReferences;
+    auto task = kisPreparePageStoreReclamation([this] {
         {
             QMutexLocker lock(&m_ownerMutex);
-            if (!m_closing && m_operational) {
+            m_blocked = false;
+            if (!m_closing && m_operational && !m_automaticWakeupsStopped) {
                 m_epochs.collectFinishedTransactions(VersionScanBudget);
                 m_epochs.collectUnretainedRoots(VersionScanBudget);
-                if (m_pending.isEmpty() && m_ready.empty() &&
-                    m_rescanRequested) {
-                    m_pending.swap(m_deferred);
-                    m_rescanRequested = false;
+                if (m_rescanRequested) {
+                    try {
+                        for (const auto &key : m_metadata.pageKeys()) requestKeyLocked(key);
+                        m_rescanRequested = false;
+                    } catch (const std::bad_alloc &) { m_blocked = true; }
                 }
-                // At most 16 active scans, each with <=32 candidate identities
-                // and one bit per candidate. No history-sized reachability set.
-                const qsizetype admissionSlots = std::max(
-                    qsizetype(0), PageAdmissionBudget - m_queued.size());
-                for (qsizetype admitted = 0;
-                     admitted < admissionSlots && !m_pending.isEmpty();
-                     ++admitted) {
-                    const auto it = m_pending.begin();
-                    const auto key = *it;
-                    m_pending.erase(it);
-                    queueContinuationLocked(key);
-                }
-                QVector<KisPageKey> keys;
-                while (!m_ready.empty() &&
-                       keys.size() < PageAdmissionBudget) {
-                    keys.append(m_ready.front());
-                    m_queued.remove(m_ready.front());
-                    m_ready.pop_front();
-                }
-                quint64 versions = 0;
-                qsizetype rootsRemaining = RootVisitBudget;
-                for (qsizetype i = 0; i < keys.size(); ++i) {
-                    // Share the pass budget between ready keys. A deep/hot
-                    // first key cannot consume every root visit indefinitely.
-                    const qsizetype allowance = rootsRemaining / (keys.size() - i);
-                    qsizetype remaining = allowance;
-                    effects += collectSliceLocked(keys[i], versions, remaining);
-                    rootsRemaining -= allowance - remaining;
-                }
-                m_maximumRootsPerPass = std::max(m_maximumRootsPerPass,
-                    quint64(RootVisitBudget - rootsRemaining));
-                m_maximumVersionsPerPass =
-                    std::max(m_maximumVersionsPerPass, versions);
-                m_maximumPagesPerPass = std::max(
-                    m_maximumPagesPerPass, quint64(keys.size()));
+                m_blocked = collectPassLocked() || m_blocked;
             }
         }
-        m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
+        if (m_backgroundReclamation) m_retirementQueue.process(8);
     }, &budget, +[](void *value) {
         auto *collector = static_cast<KisPageHistoryCollector *>(value);
+        const auto context = collector->m_wakeContext;
         {
             QMutexLocker lock(&collector->m_ownerMutex);
             collector->m_jobScheduled = false;
@@ -312,22 +303,61 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
             collector->m_idle.wakeAll();
         }
         collector->m_releaseOwnerLifetime(collector->m_ownerContext);
+        QMutexLocker notificationLock(&context->mutex);
+        --context->activities;
+        context->idle.wakeAll();
     }, this);
+    KisPageReclamationDelay retry(KisPageReadinessCallback(
+        [weak = std::weak_ptr<KisPageHistoryWakeContext>(context)] {
+            const auto state = weak.lock();
+            if (!state) return;
+            KisPageHistoryCollector *collector;
+            {
+                QMutexLocker lock(&state->mutex);
+                collector = state->collector;
+                if (!collector) return;
+                state->references->ref();
+                ++state->activities;
+            }
+            {
+                QMutexLocker lock(&collector->m_ownerMutex);
+                if (collector->m_retry.takeReady()) {
+                    ++collector->m_retryWakeups;
+                    collector->m_retryScheduled = false;
+                    collector->m_blocked = false;
+                    collector->scheduleLocked();
+                }
+            }
+            collector->m_releaseOwnerLifetime(collector->m_ownerContext);
+            QMutexLocker notificationLock(&state->mutex);
+            --state->activities;
+            state->idle.wakeAll();
+        }, &budget), &budget);
+    if (!retry.isValid()) throw std::bad_alloc();
+    m_task = std::move(task);
+    m_wakeContext = std::move(context);
+    m_retry = std::move(retry);
 }
 
 void KisPageHistoryCollector::scheduleLocked()
 {
-    if (!m_backgroundReclamation || m_jobScheduled || m_closing ||
-        !m_operational) {
+    if (m_closing || m_automaticWakeupsStopped) {
+        m_retry.cancel();
+        m_retryScheduled = false;
+        m_idle.wakeAll();
         return;
     }
-    if (!m_epochs.hasCollectionWork() && m_pending.isEmpty() &&
-        m_ready.empty() && !(m_rescanRequested && !m_deferred.isEmpty())) {
-        m_rescanRequested = false;
+    if (!m_backgroundReclamation || m_jobScheduled || !m_operational || m_retryScheduled) return;
+    if (!m_epochs.hasCollectionWork() && m_ready.empty() && !m_rescanRequested) return;
+    if (m_blocked) {
+        m_retryScheduled = m_retry.arm(m_retryDelayMs);
+        m_retryDelayMs = std::min(100, m_retryDelayMs * 2);
         return;
     }
+    m_retryDelayMs = 1;
     m_jobScheduled = true;
     m_ownerLifetimeReferences.ref();
+    { QMutexLocker notificationLock(&m_wakeContext->mutex); ++m_wakeContext->activities; }
     Q_ASSERT(m_task);
     kisEnqueuePageStoreReclamation(m_task.get());
 }
@@ -345,35 +375,59 @@ void KisPageHistoryCollector::collectEpochBookkeepingLocked(bool rescanHistory)
 
 void KisPageHistoryCollector::waitForIdleLocked()
 {
-    while (m_jobScheduled) m_idle.wait(&m_ownerMutex);
+    // Idle observes in-flight jobs, as the physical queue does. A future retry
+    // can retain semantic work under permanent pressure; it is not a drain.
+    for (;;) {
+        while (m_jobScheduled) m_idle.wait(&m_ownerMutex);
+        if (!m_wakeContext) return;
+        QMutexLocker notificationLock(&m_wakeContext->mutex);
+        if (!m_wakeContext->activities) return;
+        // The retained context survives the callback's final root release.
+        // Drop the owner gate while that callback may still need it.
+        m_ownerMutex.unlock();
+        while (m_wakeContext->activities)
+            m_wakeContext->idle.wait(&m_wakeContext->mutex);
+        notificationLock.unlock();
+        m_ownerMutex.lock();
+    }
 }
 
-QVector<KisPageKey> KisPageHistoryCollector::deferredKeysLocked() const
+void KisPageHistoryCollector::stopAutomaticWakeups()
 {
-    return m_deferred.values();
+    QMutexLocker lock(&m_ownerMutex);
+    m_automaticWakeupsStopped = true;
+    if (m_wakeContext) {
+        QMutexLocker notificationLock(&m_wakeContext->mutex);
+        m_wakeContext->collector = nullptr;
+    }
+    m_retry.cancel();
+    m_retryScheduled = false;
+    m_idle.wakeAll();
 }
 
 void KisPageHistoryCollector::clearLocked()
 {
     Q_ASSERT(!m_jobScheduled);
-    m_pending.clear();
+    m_retry.cancel();
+    m_retryScheduled = false;
     m_ready.clear();
-    m_queued.clear();
-    for (const auto &scan : m_scans) m_epochs.endReachabilityScan(scan.reachability);
-    m_scans.clear();
-    m_deferred.clear();
+    for (auto &entry : m_work) endScanLocked(entry.second, true);
+    m_work.clear();
     m_rescanRequested = false;
 }
 
-KisPageHistoryCollectorSnapshot
-KisPageHistoryCollector::snapshotLocked() const
+KisPageHistoryCollectorSnapshot KisPageHistoryCollector::snapshotLocked() const
 {
     KisPageHistoryCollectorSnapshot result;
-    result.pendingPages = m_pending.size() + m_queued.size();
-    result.deferredPages = m_deferred.size();
-    result.activeScans = m_scans.size();
-    for (const auto &scan : m_scans)
-        result.cachedReachableVersions += quint64(qPopulationCount(scan.reachableMask));
+    result.pendingPages = qsizetype(m_ready.size());
+    result.deferredPages = qsizetype(m_work.size()) - result.pendingPages;
+    result.activeScans = m_activeScans;
+    result.retryWakeups = m_retryWakeups;
+    result.retryScheduled = m_retryScheduled;
+    for (const auto &entry : m_work) {
+        result.pendingEffects += entry.second.effects.size() - entry.second.nextEffect;
+        result.cachedReachableVersions += quint64(qPopulationCount(entry.second.reachableMask));
+    }
     result.jobScheduled = m_jobScheduled;
     result.pagesVisited = m_pagesVisited;
     result.foregroundPagesVisited = m_foregroundPagesVisited;
