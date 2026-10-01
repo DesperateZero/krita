@@ -312,7 +312,7 @@ void KisPageStorePhysicalClaimTest::handoffDebtFollowsTerminal()
         QVERIFY2(ledger.reclassifyBacking(target, KisBackingBudgetClass::RetirementDebt, &f.error), qPrintable(f.error));
     } else if (finish < 3) {
         KisPageTransitionEffect effect; effect.replica = target; quint64 cookie = 0;
-        QVERIFY2(ledger.prepareRetirementDebt({effect}, &cookie, &f.error), qPrintable(f.error));
+        QVERIFY2(ledger.prepareRetirementDebt(&effect, 1, &cookie, &f.error), qPrintable(f.error));
         if (finish == 2) {
             ledger.cancelRetirementDebt(cookie);
             QCOMPARE(ledger.backingClass(target), KisBackingBudgetClass::ActivePending);
@@ -324,7 +324,7 @@ void KisPageStorePhysicalClaimTest::handoffDebtFollowsTerminal()
                 QVERIFY(access.isValid()); QCOMPARE(static_cast<const quint8 *>(access.cpuReadData)[0], quint8(0x75));
                 f.provider->releaseAccess(std::move(access), {}); QVERIFY(f.swap());
             }
-            QVERIFY2(ledger.prepareRetirementDebt({effect}, &cookie, &f.error), qPrintable(f.error));
+            QVERIFY2(ledger.prepareRetirementDebt(&effect, 1, &cookie, &f.error), qPrintable(f.error));
         }
         ledger.commitRetirementDebt(cookie);
     } else {
@@ -377,9 +377,9 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     QVector<KisPageTransitionEffect> effects; KisPageTransitionEffect effect; effect.replica = target; effects.append(effect);
     if (!keepAlias) { effect.replica = alias.replica; effects.append(effect); }
     if (reverse) std::reverse(effects.begin(), effects.end());
-    quint64 cookie = 0; QVERIFY2(ledger.prepareRetirementDebt(effects, &cookie, &f.error), qPrintable(f.error));
+    quint64 cookie = 0; QVERIFY2(ledger.prepareRetirementDebt(effects.constData(), effects.size(), &cookie, &f.error), qPrintable(f.error));
     ledger.cancelRetirementDebt(cookie);
-    QVERIFY2(ledger.prepareRetirementDebt(effects, &cookie, &f.error), qPrintable(f.error)); ledger.commitRetirementDebt(cookie);
+    QVERIFY2(ledger.prepareRetirementDebt(effects.constData(), effects.size(), &cookie, &f.error), qPrintable(f.error)); ledger.commitRetirementDebt(cookie);
     const auto firstNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({621}, target, {}).isValid()); ledger.releaseRetiredBacking(target);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,

@@ -317,12 +317,9 @@ bool KisPageRetirementQueue::admitOwnedRetirementDebt(
         m_owner.reclassifyBacking(
             record.replica, KisBackingBudgetClass::RetirementDebt, *reservation))
         return true;
-    KisPageTransitionEffect effect;
-    effect.replica = record.replica;
-    effect.lastUse = record.lastUse;
-    quint64 cookie = 0;
-    if (!m_owner.prepareRetirementDebt({effect}, &cookie)) return false;
-    m_owner.commitRetirementDebt(cookie);
+    // This original record already owns the detached replica. A single atomic
+    // reclassification needs no batch projection or new preparation storage.
+    if (!m_owner.reclassifyBacking(record.replica, KisBackingBudgetClass::RetirementDebt)) return false;
     if (reservation) reservation->release();
     return true;
 }

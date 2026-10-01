@@ -2842,15 +2842,15 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
     int visited = 0;
     do {
         const auto slice = coordinator.historySlice(expected.key, cursor, 32);
-        QVERIFY(slice.versions.size() <= 32);
+        QVERIFY(slice.count <= 32);
         QCOMPARE(slice.total, qsizetype(history - visited));
         KisPageTransition discard;
         discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
-        for (const auto &v : slice.versions) {
-            QCOMPARE(v.publication, KisPagePublicationState::Historical);
-            QVERIFY(v.version.generation.value > cursor.generation.value);
-            discard.versions.append(v.version);
-            cursor = v.version;
+        for (qsizetype i = 0; i < slice.count; ++i) {
+            const auto &v = slice.versions[size_t(i)];
+            QVERIFY(v.generation.value > cursor.generation.value);
+            discard.versions.append(v);
+            cursor = v;
             ++visited;
         }
         if (!discard.versions.isEmpty()) {
@@ -2859,11 +2859,14 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
             const auto oracle = KisPageStateMachine().apply(expected, discard);
             QVERIFY(oracle.accepted);
             expected = oracle.next;
-            const auto actual = coordinator.applyOwner(expected.key, discard);
-            QVERIFY(actual.accepted);
-            QCOMPARE(actual.effects.size(), oracle.effects.size());
+            KisPageMetadataCoordinator::HistoryEffects effects;
+            quint32 removed = 0;
+            QVERIFY(coordinator.discardHistory(expected.key, slice.versions.data(), slice.count,
+                                               0, effects, &removed));
+            QCOMPARE(removed, slice.count == 32 ? ~quint32(0) : (quint32(1) << slice.count) - 1);
+            QCOMPARE(qsizetype(effects.size()), oracle.effects.size());
             for (const auto &effect : oracle.effects) {
-                QVERIFY(std::any_of(actual.effects.cbegin(), actual.effects.cend(), [&](const auto &a) {
+                QVERIFY(std::any_of(effects.cbegin(), effects.cend(), [&](const auto &a) {
                     return a.replica == effect.replica && a.lastUse == effect.lastUse;
                 }));
             }
@@ -2903,10 +2906,10 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
     QVERIFY(batch.isValid());
     QVERIFY(coordinator.installPublication(std::move(batch), {}, {3}, nullptr));
     const auto restarted = coordinator.historySlice(expected.key, {}, 32);
-    QCOMPARE(restarted.versions.size(), 2);
+    QCOMPARE(restarted.count, qsizetype(2));
     QCOMPARE(restarted.total, qsizetype(2));
-    QVERIFY(std::any_of(restarted.versions.cbegin(), restarted.versions.cend(), [](const auto &v) {
-        return v.version.defaultPixelRevision == 11;
+    QVERIFY(std::any_of(restarted.versions.cbegin(), restarted.versions.cbegin() + restarted.count, [](const auto &v) {
+        return v.defaultPixelRevision == 11;
     }));
 }
 
@@ -5195,7 +5198,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
             [](const KisPageVersionStateSnapshot &version) {
                 return version.publication == KisPagePublicationState::Historical;
             });
-        QCOMPARE(history.versions.size(), expectedHistory);
+        QCOMPARE(history.count, expectedHistory);
     }
 }
 
@@ -6630,7 +6633,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
              4096u);
     mergedReservation.release();
     quint64 debtCookie = 0;
-    QVERIFY2(owner.prepareRetirementDebt(duplicatedRetirement, &debtCookie, &error),
+    QVERIFY2(owner.prepareRetirementDebt(duplicatedRetirement.constData(), duplicatedRetirement.size(), &debtCookie, &error),
              qPrintable(error));
     auto preparedDebt = budget.usage();
     QCOMPARE(preparedDebt.buckets[size_t(KisBackingBudgetClass::RetainedHistory)].live.cpuRam,
@@ -6640,7 +6643,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     owner.cancelRetirementDebt(debtCookie);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,
              0u);
-    QVERIFY2(owner.prepareRetirementDebt(retireCurrent, &debtCookie, &error),
+    QVERIFY2(owner.prepareRetirementDebt(retireCurrent.constData(), retireCurrent.size(), &debtCookie, &error),
              qPrintable(error));
     owner.commitRetirementDebt(debtCookie);
     const auto committedDebt = budget.usage();

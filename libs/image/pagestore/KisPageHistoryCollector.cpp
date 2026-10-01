@@ -20,23 +20,6 @@ struct KisPageHistoryWakeContext
     QWaitCondition idle;
 };
 
-namespace {
-bool retirementEligible(const KisPageVersionStateSnapshot &version)
-{
-    if (!version.capturedReadViews.isEmpty() ||
-        (!version.authority.isValid() && !version.isVirtualDefault()))
-        return false;
-    for (const auto &replica : version.replicas) {
-        if ((replica.validity != KisReplicaValidity::Valid &&
-             replica.validity != KisReplicaValidity::Failed) ||
-            !replica.readLeases.isEmpty() || replica.pinCount != 0 ||
-            !replica.pendingLastUses.isEmpty() || replica.activeOperation.isValid())
-            return false;
-    }
-    return true;
-}
-}
-
 KisPageHistoryCollector::KisPageHistoryCollector(
     KisPageMetadataCoordinator &metadata,
     KisImageEpochReferenceModel &epochs,
@@ -84,6 +67,8 @@ void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
 {
     auto [entry, inserted] = m_work.try_emplace(key);
     auto &work = entry->second;
+    if (inserted) work.effects = KisPageMetadataCoordinator::HistoryEffects(
+        KisMutationStorageAllocator<KisPageTransitionEffect>(m_work.get_allocator()));
     work.key = key;
     // Protection can disappear between slices, when the root cookie is gone
     // but the cursor has already passed versions that must now be revisited.
@@ -94,11 +79,12 @@ void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
 
 bool KisPageHistoryCollector::finishEffectsLocked(Work &work)
 {
-    while (work.nextEffect < work.effects.size()) {
+    while (size_t(work.nextEffect) < work.effects.size()) {
         if (!m_retirementQueue.acceptEffect(work.effects[work.nextEffect])) return false;
         ++work.nextEffect;
     }
-    work.effects.clear();
+    // Release actual capacity once responsibility has crossed the boundary.
+    KisPageMetadataCoordinator::HistoryEffects(work.effects.get_allocator()).swap(work.effects);
     work.nextEffect = 0;
     return true;
 }
@@ -133,8 +119,8 @@ bool KisPageHistoryCollector::collectSliceLocked(
             ++m_activeScans;
         }
         const auto slice = m_metadata.historySlice(work.key, work.after, VersionScanBudget);
-        visitedVersions += quint64(slice.versions.size());
-        if (slice.versions.isEmpty()) {
+        visitedVersions += quint64(slice.count);
+        if (!slice.count) {
             endScanLocked(work, true);
             m_ready.erase(m_ready.iterator_to(work));
             if (!slice.total) m_work.erase(work.key);
@@ -145,10 +131,10 @@ bool KisPageHistoryCollector::collectSliceLocked(
             }
             return true;
         }
-        work.candidateCount = slice.versions.size();
+        work.candidateCount = slice.count;
         work.reachableMask = 0;
         for (qsizetype i = 0; i < work.candidateCount; ++i)
-            work.candidates[size_t(i)] = slice.versions[i].version;
+            work.candidates[size_t(i)] = slice.versions[size_t(i)];
         work.sliceAfter = slice.after;
         work.historicalCount = slice.total;
         const auto start = m_epochs.beginReachabilityScan(work.key);
@@ -174,25 +160,16 @@ bool KisPageHistoryCollector::collectSliceLocked(
     for (qsizetype i = 0; i < roots.rootsVisited; ++i) markReachable(roots.versions[size_t(i)]);
     if (!roots.complete) return true;
 
-    KisPageTransition discard;
-    discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
+    quint32 removed = 0;
+    if (!m_metadata.discardHistory(work.key, work.candidates.data(), work.candidateCount,
+                                  work.reachableMask, work.effects, &removed)) return false;
     for (qsizetype i = 0; i < work.candidateCount; ++i) {
-        if (work.reachableMask & (quint32(1) << i)) continue;
-        KisPageStateSnapshot current;
-        const auto &identity = work.candidates[size_t(i)];
-        if (!m_metadata.versionSnapshot(identity, &current)) continue;
-        const auto *version = current.findVersion(identity);
-        if (version && version->publication == KisPagePublicationState::Historical && retirementEligible(*version))
-            discard.versions.append(identity);
+        if (removed & (quint32(1) << i)) {
+            --work.historicalCount;
+            m_removeDescriptor(m_ownerContext, work.candidates[size_t(i)]);
+        }
     }
-    if (!discard.versions.isEmpty()) {
-        auto result = m_metadata.applyOwner(work.key, discard);
-        if (!result.accepted) return false;
-        work.effects = std::move(result.effects); // No allocation after authoritative detach.
-        work.historicalCount -= discard.versions.size();
-        for (const auto &version : discard.versions) m_removeDescriptor(m_ownerContext, version);
-        if (!finishEffectsLocked(work)) return false;
-    }
+    if (!finishEffectsLocked(work)) return false;
     work.after = work.sliceAfter;
     endScanLocked(work, !work.after.isValid());
     if (!work.after.isValid()) {
@@ -285,7 +262,9 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
                 m_epochs.collectUnretainedRoots(VersionScanBudget);
                 if (m_rescanRequested) {
                     try {
-                        for (const auto &key : m_metadata.pageKeys()) requestKeyLocked(key);
+                        m_metadata.visitPageKeys(this, +[](void *p, const KisPageKey &key) {
+                            static_cast<KisPageHistoryCollector *>(p)->requestKeyLocked(key);
+                        });
                         m_rescanRequested = false;
                     } catch (const std::bad_alloc &) { m_blocked = true; }
                 }

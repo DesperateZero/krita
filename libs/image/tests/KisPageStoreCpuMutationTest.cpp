@@ -296,11 +296,12 @@ struct ReadTerminalFixture
     bool operational = true;
     bool closing = false;
     bool background = true;
-    explicit ReadTerminalFixture(quint64 metadataBytes = 64 * 1024)
-        : limits([metadataBytes] {
+    explicit ReadTerminalFixture(quint64 metadataBytes = 64 * 1024,
+                                 quint64 retirementBytes = 64 * 64 * 4)
+        : limits([metadataBytes, retirementBytes] {
         KisPageBackingLimits result;
         result.metadataArenaBytes = metadataBytes;
-        result.retirementDebtBytes = 64 * 64 * 4;
+        result.retirementDebtBytes = retirementBytes;
         return result;
     }()) {}
     KisPageBackingLimits limits;
@@ -649,8 +650,12 @@ private Q_SLOTS:
         QTest::newRow("work-storage") << 0;
         QTest::newRow("detach-debt") << 1;
         QTest::newRow("effect-transfer-at-capacity") << 2;
+        QTest::newRow("effect-preparation-storage") << 3;
+        QTest::newRow("ledger-preparation-storage") << 4;
     }
     void historyRefusalPreservesOriginalWork();
+    void retirementPreparationRollsBackAtCapacity();
+    void historyPreparationRevalidatesProtection();
     void retirementResultBindsAtCapacity_data()
     {
         QTest::addColumn<bool>("close");
@@ -4550,8 +4555,8 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     // Limits were fixed before constructing the original controller.
     f.metadata.attachBackingBudget(f.budget);
     f.metadata.attachRetirementDebtOwner(&f,
-        +[](void *p, const QVector<KisPageTransitionEffect> &effects, quint64 *cookie, QString *error) {
-            return static_cast<ReadTerminalFixture *>(p)->owner.prepareRetirementDebt(effects, cookie, error);
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<ReadTerminalFixture *>(p)->owner.prepareRetirementDebt(effects, count, cookie, error);
         }, +[](void *p, quint64 cookie) noexcept {
             auto &fixture = *static_cast<ReadTerminalFixture *>(p);
             fixture.owner.commitRetirementDebt(cookie);
@@ -4564,8 +4569,14 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     size_t fillerBytes = 0;
     KisBackingBudgetReservation blockingDebt;
     std::atomic<int> capabilityCalls{0};
-    if (refusal == 0) {
-        fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+    if (refusal == 0 || refusal == 3 || refusal == 4) {
+        QMutexLocker lock(&f.mutex);
+        if (refusal != 0) {
+            const auto k = key();
+            f.history.collectUnreachableLocked(&k, 1); // Prepare Work before filling capacity.
+        }
+        fillerBytes = size_t(f.limits.metadataArenaBytes - f.live())
+            - (refusal == 4 ? sizeof(KisPageTransitionEffect) : 0);
         filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
     } else if (refusal == 1) {
         KisBackingBudgetDelta debt;
@@ -4619,14 +4630,114 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     QCOMPARE(f.references.loadAcquire(), 1);
 }
 
+void KisPageStoreCpuMutationTest::retirementPreparationRollsBackAtCapacity()
+{
+    int refused = 0;
+    int accepted = 0;
+    // Sweep real allocator capacity through scratch maps, slot growth and
+    // persistent claim-node insertion. Each sample starts with a cold ledger.
+    for (size_t headroom = 0; headroom <= 4096; headroom += 64) {
+        ReadTerminalFixture f(256 * 1024, 2 * 64 * 64 * 4);
+        f.metadata.attachBackingBudget(f.budget);
+        QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+        KisSurfaceEpochState surface;
+        QVERIFY(f.physical.store->resolveSurfaceState({1}, {}, &surface));
+        KisPageWriteCoordinator write(f.metadata, f.epochs, f.budget, f.owner);
+        auto backing = write.reserveBacking(surface.allocationDescriptor(), cpu.domain,
+                                             KisBackingBudgetClass::RetainedHistory, &f.error);
+        QVERIFY2(backing.reservation.isValid(), qPrintable(f.error));
+        const auto replica = f.physical.provider->prepareWrite(f.owner.nextOperationId(),
+            {key(), {3}}, surface.allocationDescriptor(), cpu.domain,
+            KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+        QVERIFY(replica.isValid());
+        QVERIFY(f.owner.registerBacking(replica.replica, backing.reservation,
+            KisBackingBudgetClass::RetainedHistory, &f.error, &backing.retirement));
+        // Initial adoption is complete; its caller-owned fallback is no
+        // longer live input to this independent class-change preparation.
+        backing.reservation.release();
+        const std::array<KisPageTransitionEffect, 2> effects{{{f.replica, {}}, {replica.replica, {}}}};
+        const quint64 originalDebt = f.budget.usage()
+            .buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam;
+        const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live()) - headroom;
+        void *filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+        const auto release = qScopeGuard([&] { kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1); });
+        quint64 cookie = 0;
+        const bool prepared = f.owner.prepareRetirementDebt(effects.data(), 2, &cookie, &f.error);
+        if (prepared) { ++accepted; f.owner.cancelRetirementDebt(cookie); }
+        else { ++refused; QCOMPARE(cookie, quint64(0)); }
+        for (const auto &effect : effects) {
+            QCOMPARE(f.owner.backingClass(effect.replica), KisBackingBudgetClass::RetainedHistory);
+        }
+        QCOMPARE(f.budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,
+                 originalDebt);
+        kisFreeMutationStorage(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
+        // A failed preparation must leave neither a key claim nor a physical
+        // claim behind; the same two original backings can immediately retry.
+        QVERIFY2(f.owner.prepareRetirementDebt(effects.data(), 2, &cookie, &f.error), qPrintable(f.error));
+        f.owner.commitRetirementDebt(cookie);
+        for (const auto &effect : effects) {
+            QCOMPARE(f.owner.backingClass(effect.replica), KisBackingBudgetClass::RetirementDebt);
+        }
+    }
+    QVERIFY(refused > 0);
+    QVERIFY(accepted > 0);
+}
+
+void KisPageStoreCpuMutationTest::historyPreparationRevalidatesProtection()
+{
+    ReadTerminalFixture f(256 * 1024);
+    f.metadata.attachBackingBudget(f.budget);
+    KisPageTransition read;
+    bool installed = false;
+    struct Context { ReadTerminalFixture *fixture; KisPageTransition *read; bool *installed; } context{&f, &read, &installed};
+    f.metadata.attachRetirementDebtOwner(&context,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            auto &c = *static_cast<Context *>(p);
+            if (!c.fixture->owner.prepareRetirementDebt(effects, count, cookie, error)) return false;
+            // Change the real page revision during the existing shard-unlock
+            // window, after Debt preparation and before authoritative removal.
+            if (!*c.installed)
+                *c.installed = c.fixture->metadata.applyOwner(c.read->version.key, *c.read).accepted;
+            return true;
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<Context *>(p)->fixture->owner.commitRetirementDebt(cookie); },
+        +[](void *p, quint64 cookie) noexcept { static_cast<Context *>(p)->fixture->owner.cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    read.kind = KisPageTransitionKind::AcquireRead;
+    read.version = f.replica.version;
+    read.target = f.replica;
+    read.lease = f.owner.nextLeaseId();
+    const auto detach = qScopeGuard([&] {
+        f.history.stopAutomaticWakeups();
+        QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked();
+    });
+    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked().deferredPages == 1; }()), 5000);
+    QVERIFY(installed);
+    QCOMPARE(f.physical.provider->retireCalls.load(), 0);
+    QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::RetainedHistory);
+    QCOMPARE(f.budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, quint64(0));
+    KisPageStateSnapshot page;
+    QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    QVERIFY(page.findVersion(f.replica.version)->replicas.first().readLeases.contains(read.lease));
+    read.kind = KisPageTransitionKind::ReleaseRead;
+    { QMutexLocker lock(&f.mutex);
+      QVERIFY(f.metadata.applyOwner(key(), read).accepted);
+      const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
+    f.retirement.waitForIdle();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    QVERIFY(f.retirement.isDrained());
+    QCOMPARE(f.references.loadAcquire(), 1);
+}
+
 void KisPageStoreCpuMutationTest::retirementResultBindsAtCapacity()
 {
     QFETCH(bool, close);
     ReadTerminalFixture f(256 * 1024);
     f.metadata.attachBackingBudget(f.budget);
     f.metadata.attachRetirementDebtOwner(&f.owner,
-        +[](void *p, const QVector<KisPageTransitionEffect> &effects, quint64 *cookie, QString *error) {
-            return static_cast<KisPageOwnerLedger *>(p)->prepareRetirementDebt(effects, cookie, error);
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<KisPageOwnerLedger *>(p)->prepareRetirementDebt(effects, count, cookie, error);
         }, +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->commitRetirementDebt(cookie); },
         +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->cancelRetirementDebt(cookie); });
     QVERIFY2(f.init(nullptr, true), qPrintable(f.error));

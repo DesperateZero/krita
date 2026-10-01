@@ -12,6 +12,9 @@
 #include <QString>
 #include <QVector>
 #include <memory>
+#include <array>
+
+#include "KisMutationStorage_p.h"
 
 #include "KisCompletionRegistry.h"
 #include "KisPageStateMachine.h"
@@ -208,7 +211,7 @@ public:
 
 private:
     using PrepareRetirementDebt = bool (*)(void *,
-                                           const QVector<KisPageTransitionEffect> &,
+                                           const KisPageTransitionEffect *, qsizetype,
                                            quint64 *,
                                            QString *);
     using FinalizeRetirementDebt = void (*)(void *, quint64) noexcept;
@@ -239,7 +242,9 @@ private:
     // Owner directory revision and per-page candidate revisions still apply.
     QVector<KisPageStateSnapshot> publicationHeaders() const;
     struct HistorySlice {
-        QVector<KisPageVersionStateSnapshot> versions;
+        static constexpr qsizetype Limit = 32;
+        std::array<KisPageVersion, Limit> versions{};
+        qsizetype count = 0;
         KisPageVersion after;
         qsizetype total = 0;
         bool exists = false;
@@ -248,6 +253,15 @@ private:
     // caller must rescan after semantic changes can insert before the cursor;
     // this is enumeration, NOT root reachability or retirement authorization.
     HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after, qsizetype budget) const;
+    using HistoryEffects = std::vector<KisPageTransitionEffect,
+        KisMutationStorageAllocator<KisPageTransitionEffect>>;
+    // Select eligible, unreachable records and prepare their exact effects and
+    // Debt before removal. A refusal changes no record and returns no effects.
+    // The caller owns the root proof and retains this packet until accepted.
+    bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
+                        qsizetype count, quint32 reachableMask,
+                        HistoryEffects &effects, quint32 *removedMask);
+    void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &)) const;
     KisPageTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
                                       KisPageMetadataReadCleanup *cleanup = nullptr);
     KisPageTransitionResult acknowledgeLastUse(const KisPageVersion &version,

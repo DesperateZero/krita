@@ -270,7 +270,7 @@
         "KisPageRetirementQueue::acceptEffect transfers an already funded Debt node without provider code or allocation; history retains each unaccepted effect in its original key record",
         "KisPageRetirementQueue::retireOrDefer",
         "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
-        "unadmitted owned records request actual budget reservation grants through their original ledger; unowned orphans retain only their original reservation",
+        "unadmitted owned records request actual budget reservation grants through their original ledger; an already detached single record uses the existing atomic reclassification without batch Debt scratch, including at metadata hard capacity; unowned orphans retain only their original reservation",
         "cold configuration admits the original queue pass, wake context, retry notification task and funded reusable deadline before physical adoption; per-record subscriptions keep distinct weak wait incarnations, and refusal falls back to the already admitted retry",
         "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node; retry arm/cancel retain that same storage and takeReady consumes only its current monitor-published generation",
         "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait"
@@ -307,7 +307,8 @@
         "epoch root retention change",
         "published version supersession",
         "cold configuration admits the original collector reusable task, retained wake context and one deadline; original owner-gated scheduled flag and per-enqueue root pin exclude duplicate enqueue",
-        "one charged key-index node owns readiness linkage, fixed 32 candidate identities, root cookie, slice cursor and the moved metadata effect packet before detach; a fixed 16-pointer pass selects original records"
+        "one charged key-index node owns readiness linkage, fixed 32 candidate identities, root cookie, slice cursor and the charged metadata effect packet prepared before detach; a fixed 16-pointer pass selects original records",
+        "historySlice enumerates only fixed identity storage; discardHistory validates original compact records and prepares exact allocator capacity plus Debt before removal; visitPageKeys streams keys without a Qt directory projection"
       ],
       "current-writers": [
         "KisImageEpochReferenceModel roots plus KisPageHistoryCollector cursor"
@@ -328,8 +329,8 @@
         "collector bounds each candidate bitmap to 32 exact versions including default revision; a protection change marks an existing cookie or between-slice cursor for repeat; close/destruction ends all outstanding cursors",
         "close drain",
         "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation",
-        "foreground and background share collectPassLocked/collectSliceLocked; detach refusal retains the original key/cookie, accepted detach moves effects into that key and advances the effect cursor only after queue acceptance",
-        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; Qt metadata/effect scratch and permanent-pressure exits remain unqualified"
+        "foreground and background share collectPassLocked/collectSliceLocked; detach refusal retains the original key/cookie, accepted detach moves effects into that key and advances the effect cursor only after queue acceptance; accepted packet capacity is freed only after all effects cross the boundary",
+        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; generic transition projections, provider journal and complete permanent-pressure exits remain unqualified"
       ]
     },
     {
@@ -611,7 +612,9 @@
         "KisPageOwnerLedger::registerBacking",
         "KisPageOwnerLedger::prepareBackingChanges",
         "KisPageOwnerLedger::prepareBackingHandoff",
-        "reserveBacking prepares the actual charged retirement node before a fresh provider call; the same node enters the original backing record only after registration succeeds; direct initial adoption prepares its complete node footprint outside the store gate before any partial registration"
+        "reserveBacking prepares the actual charged retirement node before a fresh provider call; the same node enters the original backing record only after registration succeeds; direct initial adoption prepares its complete node footprint outside the store gate before any partial registration",
+        "implicit default materialization revalidates original key deduplication and the 64-entry admission limit after cold backing preparation releases/reacquires the owner gate; accepted materialization observed after the wait returns without another provider request",
+        "prepareBackingChangesImpl charges scratch classification/maps, slot/free-list capacity, exact change/physical/credit arrays and persistent claim nodes; storePreparedChange rolls back every inserted claim and reservation on actual storage refusal before publishing physical class claims"
       ],
       "current-writers": [
         "KisPageOwnerLedger"

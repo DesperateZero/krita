@@ -607,8 +607,15 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     auto a = provider->requestReplica({1}, version, desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
     auto b = beforeProvider->requestReplica({2}, version, desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
     QVERIFY(a.isValid()); QVERIFY(b.isValid());
+    const auto process = QSharedPointer<KisBackingBudgetController>::create();
+    { auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
+      QVERIFY(first.isValid() && second.isValid()); }
+    { KisBackingBudgetController warm; QVERIFY(warm.configureSharedNonPayloadBudget(process)); }
+    const quint64 processCache = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     KisPageBackingLimits limits; limits.retirementDebtBytes = a.replica.layout.byteSize;
+    {
     KisBackingBudgetController budget(limits); KisPageOwnerLedger owner;
+    QVERIFY(budget.configureSharedNonPayloadBudget(process));
     QVERIFY(owner.configure(completions)); owner.attachBackingBudget(budget);
     QVERIFY(owner.registerProvider(provider));
     if (crossProvider) QVERIFY(owner.registerProvider(beforeProvider));
@@ -618,8 +625,8 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     }
     KisPageMetadataCoordinator metadata;
     metadata.attachRetirementDebtOwner(&owner,
-        [](void *context, const QVector<KisPageTransitionEffect> &effects, quint64 *cookie, QString *error) {
-            return static_cast<KisPageOwnerLedger *>(context)->prepareRetirementDebt(effects, cookie, error);
+        [](void *context, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<KisPageOwnerLedger *>(context)->prepareRetirementDebt(effects, count, cookie, error);
         },
         [](void *context, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(context)->commitRetirementDebt(cookie); },
         [](void *context, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(context)->cancelRetirementDebt(cookie); });
@@ -698,9 +705,15 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     QVERIFY(provider->retire({100}, target, {}).isValid()); owner.releaseRetiredBacking(target);
     QVERIFY(owner.reclassifyBacking(b.replica, KisBackingBudgetClass::RetirementDebt));
     QVERIFY(beforeProvider->retire({101}, b.replica, {}).isValid()); owner.releaseRetiredBacking(b.replica);
-    for (const auto &bucket : budget.usage().buckets) {
-        QCOMPARE(bucket.live.cpuRam, 0u); QCOMPARE(bucket.reserved.cpuRam, 0u);
+    const auto usage = budget.usage();
+    for (size_t i = 0; i < usage.buckets.size(); ++i) {
+        if (i != size_t(KisBackingBudgetClass::MetadataArena))
+            QCOMPARE(usage.buckets[i].live.cpuRam, quint64(0));
+        QCOMPARE(usage.buckets[i].reserved.cpuRam, quint64(0));
     }
+    QVERIFY(usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam > 0);
+    } // Ledger arrays/claim buckets and controller caches are actually freed.
+    QCOMPARE(process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, processCache);
 }
 
 void KisPageStoreResidentReadTest::defaultMaterializationAdmissionIsBounded()

@@ -103,8 +103,8 @@ private:
         qsizetype historicalCount = 0;
         bool scanning = false;
         bool repeat = false;
-        // Move the accepted metadata result here before any further allocation.
-        QVector<KisPageTransitionEffect> effects;
+        // Metadata prepares this charged packet before authoritative detach.
+        KisPageMetadataCoordinator::HistoryEffects effects;
         qsizetype nextEffect = 0;
     };
     struct KeyLess {

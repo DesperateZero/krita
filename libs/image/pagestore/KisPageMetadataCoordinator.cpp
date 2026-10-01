@@ -3094,21 +3094,122 @@ KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVer
             }
         }
     }
-    while (nextHint.isValid() && result.versions.size() < budget) {
+    while (nextHint.isValid() && result.count < qMin(budget, HistorySlice::Limit)) {
         const KisVersionRecord *record = shard->records.version(nextHint);
         Q_ASSERT(record);
         if (!record)
             break;
-        result.versions.append(shard->records.project(*record));
+        result.versions[size_t(result.count++)] = record->version;
         result.after = record->version;
         nextHint = record->nextHistory;
     }
     if (!nextHint.isValid()) result.after = {};
     ++shard->historySliceQueries;
-    shard->historySliceVersionInputs += quint64(result.versions.size());
+    shard->historySliceVersionInputs += quint64(result.count);
     shard->maximumHistorySliceVersionInputs =
-        qMax(shard->maximumHistorySliceVersionInputs, quint64(result.versions.size()));
+        qMax(shard->maximumHistorySliceVersionInputs, quint64(result.count));
     return result;
+}
+
+bool KisPageMetadataCoordinator::discardHistory(
+    const KisPageKey &key, const KisPageVersion *versions, qsizetype count,
+    quint32 reachableMask, HistoryEffects &effects, quint32 *removedMask)
+{
+    Q_ASSERT(effects.empty());
+    *removedMask = 0;
+    auto *shard = d->shardFor(key);
+    if (!shard || count < 0 || count > HistorySlice::Limit) return false;
+    for (;;) {
+        HistoryEffects prepared(effects.get_allocator());
+        MetadataArenas::ReleasedBlocks released;
+        quint64 debtCookie = 0;
+        bool debtPrepared = false;
+        const auto cancelDebt = qScopeGuard([&] {
+            if (debtPrepared) d->cancelRetirementDebt(d->retirementDebtContext, debtCookie);
+        });
+        QMutexLocker lock(&shard->mutex);
+        auto page = shard->pages.find(key);
+        if (page == shard->pages.end() || !shard->canMutate(key, page.value())) return false;
+        quint32 selected = 0;
+        size_t replicaCount = 0;
+        for (qsizetype i = 0; i < count; ++i) {
+            if (reachableMask & (quint32(1) << i)) continue;
+            if (!versions[i].isValid() || !(versions[i].key == key)) return false;
+            KisVersionSlotId slot;
+            if (!shard->records.findVersion(versions[i], &slot)) continue;
+            const auto *record = shard->records.version(slot);
+            if (record->publication != KisPagePublicationState::Historical
+                || record->capturedReadViews.isValid()
+                || (!record->authorityReplica.isValid()
+                    && !(record->version.isDefaultPixel() && !record->replicaCount))) continue;
+            bool eligible = true;
+            for (auto r = record->firstReplica; r.isValid();) {
+                const auto *replica = shard->records.replica(r);
+                if ((replica->validity != KisReplicaValidity::Valid
+                     && replica->validity != KisReplicaValidity::Failed)
+                    || replica->overflow.isValid() || replica->pinCount
+                    || replica->activeOperation.isValid()) { eligible = false; break; }
+                r = replica->nextReplica;
+            }
+            if (!eligible) continue;
+            // Identity enumeration never duplicates a record.
+            for (qsizetype j = 0; j < i; ++j)
+                if (versions[j] == versions[i]) return false;
+            selected |= quint32(1) << i;
+            replicaCount += record->replicaCount;
+        }
+        if (!selected) return true;
+        prepared.reserve(replicaCount);
+        for (qsizetype i = 0; i < count; ++i) {
+            if (!(selected & (quint32(1) << i))) continue;
+            KisVersionSlotId slot;
+            shard->records.findVersion(versions[i], &slot);
+            const auto *record = shard->records.version(slot);
+            for (auto r = record->firstReplica; r.isValid();) {
+                const auto *replica = shard->records.replica(r);
+                prepared.push_back({replicaHandle(*replica, record->version), {}});
+                r = replica->nextReplica;
+            }
+        }
+        const quint64 revision = page->revision;
+        if (!prepared.empty() && d->prepareRetirementDebt) {
+            lock.unlock();
+            const bool accepted = d->prepareRetirementDebt(d->retirementDebtContext,
+                prepared.data(), qsizetype(prepared.size()), &debtCookie, nullptr);
+            debtPrepared = accepted;
+            lock.relock();
+            if (!accepted) { ++shard->rejectedTransitions; return false; }
+            page = shard->pages.find(key);
+            if (page == shard->pages.end() || !shard->canMutate(key, page.value())
+                || page->revision != revision) continue;
+        }
+        // All storage and claims exist. Removal only unlinks original records.
+        quint64 removed = 0;
+        for (qsizetype i = 0; i < count; ++i) {
+            if (!(selected & (quint32(1) << i))) continue;
+            shard->records.remove(&page.value(), versions[i]);
+            ++removed;
+        }
+        ++page->revision;
+        ++shard->localTransitionSequences;
+        shard->localVersionInputs += removed;
+        shard->localVersionRemovals += removed;
+        if (kisOnPageStoreReclamationThread()) {
+            ++shard->backgroundLocalTransitionSequences;
+            shard->backgroundLocalVersionInputs += removed;
+            shard->backgroundLocalVersionRemovals += removed;
+        }
+        ++shard->acceptedTransitions;
+        effects = std::move(prepared);
+        *removedMask = selected;
+        released = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
+        lock.unlock();
+        if (debtPrepared) {
+            d->commitRetirementDebt(d->retirementDebtContext, debtCookie);
+            debtPrepared = false;
+        }
+        return true;
+    }
 }
 
 QVector<KisPageStateSnapshot> KisPageMetadataCoordinator::publicationHeaders() const
@@ -3368,7 +3469,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             QString debtError;
             lock.unlock();
             if (!d->prepareRetirementDebt(d->retirementDebtContext,
-                                          result.effects,
+                                          result.effects.constData(), result.effects.size(),
                                           &retirementDebtCookie,
                                           &debtError)) {
                 ++shard->rejectedTransitions;
@@ -3456,20 +3557,23 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
 
 QVector<KisPageKey> KisPageMetadataCoordinator::pageKeys() const
 {
-    QVector<MetadataShard *> shards;
-    {
-        QMutexLocker configurationLock(&d->configurationMutex);
-        if (!d->operational) return {};
-        for (const auto &shard : d->shards) shards.append(shard.get());
-    }
     QVector<KisPageKey> result;
-    for (MetadataShard *shard : std::as_const(shards)) {
-        QMutexLocker shardLock(&shard->mutex);
-        result.reserve(result.size() + shard->pages.size());
-        for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
-            result.append(page.key());
-    }
+    visitPageKeys(&result, +[](void *p, const KisPageKey &key) {
+        static_cast<QVector<KisPageKey> *>(p)->append(key);
+    });
     return result;
+}
+
+void KisPageMetadataCoordinator::visitPageKeys(
+    void *context, void (*visit)(void *, const KisPageKey &)) const
+{
+    QMutexLocker configurationLock(&d->configurationMutex);
+    if (!d->operational) return;
+    for (const auto &shard : d->shards) {
+        QMutexLocker shardLock(&shard->mutex);
+        for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
+            visit(context, page.key()); // Under shard lock: consumer must not reenter metadata.
+    }
 }
 
 QVector<KisReplicaHandle> KisPageMetadataCoordinator::shutdownReplicaHandles() const

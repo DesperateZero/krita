@@ -133,7 +133,7 @@ public:
      * metadata must commit it only after its authoritative detach succeeds,
      * or cancel it on every rejection/stale retry.
      */
-    bool prepareRetirementDebt(const QVector<KisPageTransitionEffect> &effects,
+    bool prepareRetirementDebt(const KisPageTransitionEffect *effects, qsizetype count,
                                quint64 *cookie,
                                QString *error = nullptr);
     void commitRetirementDebt(quint64 cookie) noexcept;
@@ -198,6 +198,9 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
+    KisBackingClassChangeReservation prepareBackingChangesImpl(
+        const QVector<KisBackingClassChange> &changes,
+        const KisPageTransitionEffect *effects, qsizetype count, QString *error);
     KisReplicaBackingFootprint observeBackingFootprint(
         const KisReplicaHandle &replica) const;
     KisPageOperationId prepareRetirementOperation(KisPageRetirementRecord &record);

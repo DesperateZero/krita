@@ -300,12 +300,12 @@ public:
     }
 
     static bool prepareRetirementDebt(void *context,
-                                      const QVector<KisPageTransitionEffect> &effects,
+                                      const KisPageTransitionEffect *effects, qsizetype count,
                                       quint64 *cookie,
                                       QString *error)
     {
         auto *ledger = static_cast<KisPageOwnerLedger *>(context);
-        return ledger->prepareRetirementDebt(effects, cookie, error);
+        return ledger->prepareRetirementDebt(effects, count, cookie, error);
     }
 
     static void commitRetirementDebt(void *context, quint64 cookie) noexcept
@@ -546,13 +546,16 @@ public:
             KisPageStoreDetail::setError(error, QStringLiteral("implicit default page request is invalid"));
             return false;
         }
-        while (operational && defaultStorage.preparationBlockedLocked(version.key)) {
-            defaultStorage.waitForPreparationChangeLocked(&mutex);
-        }
-        if (!operational || closed) {
-            KisPageStoreDetail::setError(error, QStringLiteral("implicit default page preparation was interrupted"));
-            return false;
-        }
+        const auto awaitPreparation = [&] {
+            while (operational && defaultStorage.preparationBlockedLocked(version.key))
+                defaultStorage.waitForPreparationChangeLocked(&mutex);
+            if (!operational || closed) {
+                KisPageStoreDetail::setError(error, QStringLiteral("implicit default page preparation was interrupted"));
+                return false;
+            }
+            return true;
+        };
+        if (!awaitPreparation()) return false;
         if (isMaterialized()) {
             KisPageStoreDetail::setError(error, {});
             return true;
@@ -587,7 +590,14 @@ public:
             locker->unlock(); backing.retirement.reset(); locker->relock();
         });
         if (!backing.reservation.isValid()) return false;
-
+        // Cold record allocation releases the owner gate. Another caller may
+        // now own this key or the last preparation slot, or have materialized
+        // it already. Revalidate the same admission policy before provider I/O.
+        if (!awaitPreparation()) return false;
+        if (isMaterialized()) {
+            KisPageStoreDetail::setError(error, {});
+            return true;
+        }
         defaultStorage.beginPreparationLocked(version.key);
         ++activeProviderCalls;
         locker->unlock();
