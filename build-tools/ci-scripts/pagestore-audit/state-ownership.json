@@ -269,8 +269,8 @@
         "KisPageRetirementQueue::retireOrDefer",
         "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
         "unadmitted owned records request actual budget reservation grants through their original ledger; unowned orphans retain only their original reservation",
-        "cold configuration admits one reusable queue pass task; each real wait/retry state admits its own inline notification task before registration; repeated in-flight notifications coalesce on the original wait identity",
-        "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node, without a second map allocation; retry identities are still newly prepared",
+        "cold configuration admits the original queue pass, wake context, retry notification task and funded reusable deadline before physical adoption; per-record subscriptions keep distinct weak wait incarnations, and refusal falls back to the already admitted retry",
+        "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node; retry arm/cancel retain that same storage and takeReady consumes only its current monitor-published generation",
         "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait"
       ],
       "current-writers": [
@@ -291,7 +291,7 @@
         "close drain report",
         "last pin/completion dispatches a bounded ready pass; notification does not authorize physical retirement",
         "disarm on process/close invalidates late wait identities; dormant subscriptions and deadlines do not retain the owner",
-        "one cancelable deadline per queue moves at most 32 no-signal records per wake; a lazy deadline monitor dispatches to the original worker without holding it asleep",
+        "one cold-prepared deadline per queue moves at most 32 no-signal records per wake; arm/cancel and enqueue need no allocation; late callbacks only notify, current-generation consumption rejects canceled arms, and in-flight retry events coalesce while retaining the original root pin",
         "close cancels the deadline and takes all record partitions; refused close resumes admission and revalidation",
         "facade destruction closes automatic admission without waiting; already active capabilities retain Private but recurring work cannot sustain owner lifetime",
         "original backing/orphan admission must succeed before a delayed provider call; successful retirement releases the orphan reservation before releasing the worker owner lease",

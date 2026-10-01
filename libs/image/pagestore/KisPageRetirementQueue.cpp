@@ -128,9 +128,11 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
     state->task = kisPreparePageStoreReclamation([queue = this, wait = state.get()] {
         {
             QMutexLocker lock(&queue->m_mutex);
+            if (wait->retryPass) wait->notified.storeRelease(0);
             if (!queue->m_closing && !queue->m_automaticWakeupsStopped) {
-                if (wait->retryPass && wait == queue->m_retryWait.get()) {
-                    queue->cancelRetryLocked();
+                if (wait->retryPass && wait == queue->m_retryWait.get() &&
+                    queue->m_retryScheduled && queue->m_retryTask.takeReady()) {
+                    queue->m_retryScheduled = false;
                     qsizetype moved = 0;
                     while (!queue->m_retryPending.empty() && moved < WorkerBatchBudget) {
                         queue->m_ready.splice(queue->m_ready.end(), queue->m_retryPending,
@@ -159,6 +161,15 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
         {
             QMutexLocker lock(&context->mutex);
             pin = std::move(wait->inFlight);
+            // A new arm can fire before this reusable task finishes. Retain
+            // the original activity pin and coalesce that event into the next
+            // invocation, which still validates the current timer generation.
+            if (wait->retryPass && context->queue == queue && context->accepting &&
+                wait->notified.fetchAndStoreOrdered(0)) {
+                wait->inFlight = std::move(pin);
+                kisEnqueuePageStoreReclamation(wait->task.get());
+                return;
+            }
         }
         // The last active wait/task can now physically free and return its
         // charge; the original root pin still protects queue/idle publication.
@@ -191,17 +202,8 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
         if (m_closing || m_automaticWakeupsStopped) return;
         context = m_wakeContext;
     }
-    if (!context) {
-        auto prepared = std::allocate_shared<KisPageRetirementWakeContext>(
-            KisMutationStorageAllocator<KisPageRetirementWakeContext>::retained(&m_budget));
-        prepared->queue = this;
-        {
-            QMutexLocker lock(&m_mutex);
-            if (m_closing || m_automaticWakeupsStopped) return;
-            if (!m_wakeContext) m_wakeContext = prepared;
-            context = m_wakeContext;
-        }
-    }
+    Q_ASSERT(context); // Cold composition admitted the fallback before any backing.
+    if (!context) return;
     auto wait = prepareWaitState(context);
     const KisPageReadinessCallback scheduleReady([context = std::weak_ptr<KisPageRetirementWakeContext>(context),
                                weakWait = std::weak_ptr<KisPageRetirementWait>(wait)] {
@@ -238,7 +240,7 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
 catch (const std::bad_alloc &) {
     // The sole retirement record is still owned by the caller/queue. Failed
     // notification preparation cannot drop its physical debt or fabricate a
-    // ready grant. Original process/close remains available.
+    // ready grant. The cold-prepared retry resumes the same debt automatically.
     record.wait.reset();
 }
 
@@ -278,27 +280,18 @@ void KisPageRetirementQueue::enqueuePendingLocked(
 
 void KisPageRetirementQueue::cancelRetryLocked()
 {
-    m_retryWait.reset(); // invalidate even a deadline already taken by the monitor
-    m_retryTask.reset();
+    m_retryTask.cancel(); // invalidate even a generation already taken by the monitor
+    m_retryScheduled = false;
+    if (m_retryWait) m_retryWait->notified.storeRelease(0);
 }
 
 void KisPageRetirementQueue::scheduleRetryLocked()
 {
-    if (m_closing || m_automaticWakeupsStopped || m_retryPending.empty() || m_retryWait || !m_wakeContext) return;
-    try {
-        m_retryWait = prepareWaitState(m_wakeContext);
-        m_retryWait->retryPass = true;
-        m_retryTask = kisSchedulePageStoreReclamationAfter(m_nextRetryDelayMs,
-            KisPageReadinessCallback([context = std::weak_ptr<KisPageRetirementWakeContext>(m_wakeContext),
-             wait = std::weak_ptr<KisPageRetirementWait>(m_retryWait)] {
-                dispatchReady(context, wait);
-            }, &m_budget), &m_budget);
-        if (!m_retryTask.isValid()) m_retryWait.reset(); // executor shutdown
+    if (m_closing || m_automaticWakeupsStopped || m_retryPending.empty() || m_retryScheduled) return;
+    Q_ASSERT(m_retryWait && m_retryTask.isValid());
+    m_retryScheduled = m_retryTask.arm(m_nextRetryDelayMs);
+    if (m_retryScheduled)
         m_nextRetryDelayMs = std::min(100, m_nextRetryDelayMs * 2);
-    } catch (const std::bad_alloc &) {
-        m_retryWait.reset();
-        m_retryTask.reset();
-    }
 }
 
 bool KisPageRetirementQueue::admitOwnedRetirementDebt(
@@ -412,7 +405,7 @@ void KisPageRetirementQueue::finishAttemptLocked(
 void KisPageRetirementQueue::prepareTask()
 {
     if (m_task) return;
-    m_task = kisPreparePageStoreReclamation([this] {
+    auto task = kisPreparePageStoreReclamation([this] {
         KisPageRetirementRecords batch;
         {
             QMutexLocker lock(&m_mutex);
@@ -444,6 +437,21 @@ void KisPageRetirementQueue::prepareTask()
         }
         queue->m_releaseOwnerLifetime(queue->m_ownerLifetimeContext);
     }, this);
+    auto context = std::allocate_shared<KisPageRetirementWakeContext>(
+        KisMutationStorageAllocator<KisPageRetirementWakeContext>::retained(&m_budget));
+    context->queue = this;
+    auto retry = prepareWaitState(context);
+    retry->retryPass = true;
+    KisPageReclamationDelay timer(KisPageReadinessCallback(
+        [weakContext = std::weak_ptr<KisPageRetirementWakeContext>(context),
+         weakWait = std::weak_ptr<KisPageRetirementWait>(retry)] {
+            dispatchReady(weakContext, weakWait);
+        }, &m_budget), &m_budget);
+    if (!timer.isValid()) throw std::bad_alloc();
+    m_wakeContext = std::move(context);
+    m_retryWait = std::move(retry);
+    m_retryTask = std::move(timer);
+    m_task = std::move(task);
 }
 
 void KisPageRetirementQueue::schedulePassLocked()
@@ -645,7 +653,7 @@ KisPageRetirementRecords KisPageRetirementQueue::takeForClose()
 bool KisPageRetirementQueue::isDrained() const
 {
     QMutexLocker lock(&m_mutex);
-    return m_pending.empty() && m_retryPending.empty() && m_ready.empty() && !m_retryWait &&
+    return m_pending.empty() && m_retryPending.empty() && m_ready.empty() && !m_retryScheduled &&
            m_activeReplicas == 0 && !m_jobScheduled && m_pendingBytes == 0 &&
            m_pendingNotifications.loadAcquire() == 0;
 }
@@ -666,7 +674,7 @@ KisPageRetirementQueueSnapshot KisPageRetirementQueue::snapshot() const
     result.retryRequeues = m_retryRequeues;
     result.closeDrainedReplicas = m_closeDrainedReplicas;
     result.delayedReplicas = qsizetype(m_retryPending.size());
-    result.retryScheduled = bool(m_retryWait);
+    result.retryScheduled = m_retryScheduled;
     result.retryWakeups = m_retryWakeups;
     result.maximumReplicasPerRetryWake = m_maximumReplicasPerRetryWake;
     result.nextRetryDelayMs = m_nextRetryDelayMs;

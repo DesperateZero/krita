@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <limits>
 #include <boost/intrusive/set.hpp>
 #include <mutex>
 #include <thread>
@@ -27,6 +28,9 @@ struct KisPageReclamationDelayState : boost::intrusive::set_base_hook<>
     std::chrono::steady_clock::time_point deadline;
     std::shared_ptr<KisPageReclamationDelayState> queuedPin;
     bool queued = false; // protected by clock->mutex
+    bool armed = false;
+    quint64 generation = 0;
+    quint64 readyGeneration = 0;
 };
 struct DeadlineLess {
     bool operator()(const KisPageReclamationDelayState &a, const KisPageReclamationDelayState &b) const
@@ -145,8 +149,8 @@ public:
         pool.waitForDone();
     }
 
-    std::shared_ptr<KisPageReclamationDelayState> scheduleAfter(
-        int delayMs, KisPageReadinessCallback dispatch, KisBackingBudgetController *storageBudget)
+    std::shared_ptr<KisPageReclamationDelayState> prepareDelay(
+        KisPageReadinessCallback dispatch, KisBackingBudgetController *storageBudget)
     {
         if (!dispatch) return {};
         dispatch.fund(storageBudget);
@@ -157,15 +161,6 @@ public:
         if (m_stopping) return {};
         ensureClockLocked();
         task->clock = m_clock;
-        {
-            std::lock_guard<std::mutex> lock(m_clock->mutex);
-            task->deadline = KisPageReclamationDelayClock::Time::now() +
-                std::chrono::milliseconds(std::max(1, delayMs));
-            task->queuedPin = task;
-            m_clock->tasks.insert(*task);
-            task->queued = true;
-        }
-        m_clock->changed.notify_one();
         return task;
     }
 
@@ -208,7 +203,11 @@ public:
                 std::lock_guard<std::mutex> lock(m_clock->mutex);
                 m_clock->stopping = true;
                 cancelled.swap(m_clock->tasks);
-                for (auto &entry : cancelled) entry.queued = false;
+                for (auto &entry : cancelled) {
+                    entry.queued = false;
+                    entry.armed = false;
+                    entry.readyGeneration = 0;
+                }
                 m_clock->changed.notify_one();
             }
         }
@@ -316,7 +315,8 @@ private:
                     auto task = std::move(clock->tasks.begin()->queuedPin);
                     clock->tasks.erase(clock->tasks.begin());
                     task->queued = false;
-                    auto dispatch = std::move(task->dispatch);
+                    task->readyGeneration = task->generation;
+                    auto dispatch = task->dispatch;
                     lock.unlock();
                     dispatch();
                     dispatch = {}; // captures destroyed outside the clock gate
@@ -358,6 +358,9 @@ void shutdownReclamation()
 }
 
 KisPageReclamationDelay::KisPageReclamationDelay() = default;
+KisPageReclamationDelay::KisPageReclamationDelay(
+    KisPageReadinessCallback dispatch, KisBackingBudgetController *storageBudget)
+    : d(executor().prepareDelay(std::move(dispatch), storageBudget)) {}
 KisPageReclamationDelay::~KisPageReclamationDelay() { reset(); }
 KisPageReclamationDelay::KisPageReclamationDelay(KisPageReclamationDelay &&) noexcept = default;
 KisPageReclamationDelay &KisPageReclamationDelay::operator=(KisPageReclamationDelay &&other) noexcept
@@ -367,30 +370,60 @@ KisPageReclamationDelay &KisPageReclamationDelay::operator=(KisPageReclamationDe
 }
 void KisPageReclamationDelay::reset()
 {
-    auto task = std::move(d);
-    if (!task) return;
-    const auto clock = task->clock.lock();
+    cancel();
+    d.reset();
+}
+void KisPageReclamationDelay::cancel()
+{
+    if (!d) return;
+    const auto clock = d->clock.lock();
     if (!clock) return;
-    KisPageReadinessCallback cancelled;
+    std::shared_ptr<KisPageReclamationDelayState> queued;
     {
         std::lock_guard<std::mutex> lock(clock->mutex);
-        if (task->queued) {
-            clock->tasks.erase(clock->tasks.iterator_to(*task));
-            task->queuedPin.reset();
-            task->queued = false;
-            cancelled = std::move(task->dispatch);
+        d->armed = false;
+        d->readyGeneration = 0;
+        if (d->queued) {
+            clock->tasks.erase(clock->tasks.iterator_to(*d));
+            queued = std::move(d->queuedPin);
+            d->queued = false;
         }
     }
     clock->changed.notify_one();
 }
 bool KisPageReclamationDelay::isValid() const { return bool(d); }
-
-KisPageReclamationDelay kisSchedulePageStoreReclamationAfter(
-    int delayMs, KisPageReadinessCallback dispatch, KisBackingBudgetController *storageBudget)
+bool KisPageReclamationDelay::arm(int delayMs)
 {
-    KisPageReclamationDelay result;
-    result.d = executor().scheduleAfter(delayMs, std::move(dispatch), storageBudget);
-    return result;
+    if (!d) return false;
+    const auto clock = d->clock.lock();
+    if (!clock) return false;
+    {
+        std::lock_guard<std::mutex> lock(clock->mutex);
+        if (clock->stopping || !d->dispatch || d->generation == std::numeric_limits<quint64>::max())
+            return false;
+        if (d->queued) clock->tasks.erase(clock->tasks.iterator_to(*d));
+        ++d->generation;
+        d->readyGeneration = 0;
+        d->armed = true;
+        d->deadline = KisPageReclamationDelayClock::Time::now() +
+            std::chrono::milliseconds(std::max(1, delayMs));
+        d->queuedPin = d;
+        clock->tasks.insert(*d);
+        d->queued = true;
+    }
+    clock->changed.notify_one();
+    return true;
+}
+bool KisPageReclamationDelay::takeReady()
+{
+    if (!d) return false;
+    const auto clock = d->clock.lock();
+    if (!clock) return false;
+    std::lock_guard<std::mutex> lock(clock->mutex);
+    if (clock->stopping || !d->armed || d->readyGeneration != d->generation) return false;
+    d->armed = false;
+    d->readyGeneration = 0;
+    return true;
 }
 
 KisPageReclamationWake::KisPageReclamationWake() = default;

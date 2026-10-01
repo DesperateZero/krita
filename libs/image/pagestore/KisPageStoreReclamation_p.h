@@ -97,15 +97,16 @@ void kisSchedulePageStoreReclamation(Function &&function,
 }
 KRITAIMAGE_EXPORT bool kisOnPageStoreReclamationThread();
 
-// One cancelable cold deadline. Its callback may only dispatch work: it runs
-// on the deadline monitor, never on the image or reclamation worker. Cancel
-// removes a queued deadline; an already-dispatched callback needs its own weak
-// consumer incarnation. Waiting deadlines do not keep a PageStore alive.
+// A cold-prepared deadline retains its charged storage across arm/cancel.
+// Callbacks only notify a weak consumer; takeReady consumes the current arm's
+// monitor-published generation, so a late canceled callback grants nothing.
 struct KisPageReclamationDelayState;
 class KRITAIMAGE_EXPORT KisPageReclamationDelay
 {
 public:
     KisPageReclamationDelay();
+    explicit KisPageReclamationDelay(KisPageReadinessCallback dispatch,
+                                    KisBackingBudgetController *storageBudget = nullptr);
     ~KisPageReclamationDelay();
     KisPageReclamationDelay(KisPageReclamationDelay &&) noexcept;
     KisPageReclamationDelay &operator=(KisPageReclamationDelay &&) noexcept;
@@ -113,13 +114,12 @@ public:
     KisPageReclamationDelay &operator=(const KisPageReclamationDelay &) = delete;
     void reset();
     bool isValid() const;
+    bool arm(int delayMs);
+    void cancel();
+    bool takeReady();
 private:
     std::shared_ptr<KisPageReclamationDelayState> d;
-    friend KisPageReclamationDelay kisSchedulePageStoreReclamationAfter(
-        int, KisPageReadinessCallback, KisBackingBudgetController *);
 };
-KRITAIMAGE_EXPORT KisPageReclamationDelay kisSchedulePageStoreReclamationAfter(
-    int delayMs, KisPageReadinessCallback dispatch, KisBackingBudgetController *storageBudget = nullptr);
 
 // Cold-prepared reusable notification. notify() only splices its existing node
 // and signals the monitor: no allocation, callback, or task destruction on the

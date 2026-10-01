@@ -2058,7 +2058,7 @@
         "limits",
         "utility"
       ],
-      "lines": 674,
+      "lines": 682,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStoreRetirementProgress"
@@ -2067,7 +2067,7 @@
         "KisPageRetirementWait",
         "KisPageRetirementWakeContext"
       ],
-      "sha256": "1b5eb5e333f22647680a577857f50d9a8ee3e7888ed62b3cdf8225d362bb07ba",
+      "sha256": "3225cb22e8b5983a740fd4d28a6111b5e155f14a3882e7e53673d77e74e58dd3",
       "synchronization_declarations": 1
     },
     "libs/image/pagestore/KisPageRetirementQueue_p.h": {
@@ -2086,7 +2086,7 @@
         "QWaitCondition",
         "memory"
       ],
-      "lines": 149,
+      "lines": 150,
       "member_fields": [
         "m_activeReplicas",
         "m_automaticWakeupsStopped",
@@ -2108,6 +2108,7 @@
         "m_releaseOwnerLifetime",
         "m_retryPending",
         "m_retryRequeues",
+        "m_retryScheduled",
         "m_retryTask",
         "m_retryWait",
         "m_retryWakeups",
@@ -2124,7 +2125,7 @@
         "KisPageRetirementWait",
         "KisPageRetirementWakeContext"
       ],
-      "sha256": "aa1acaa99098ed9dfef083dc36d1f364a90ef0cb100e89ac8fa1699c20981ea2",
+      "sha256": "034ce1aa05763f5abb48f79139fc2d7c837c70261ce5fef0beb33f66d56308f6",
       "synchronization_declarations": 4
     },
     "libs/image/pagestore/KisPageRetirementRecord_p.h": {
@@ -2524,7 +2525,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreReclamation.cpp": {
-      "container_declarations": 6,
+      "container_declarations": 7,
       "include_edges": [
         "KisMutationStorage_p.h",
         "KisPageStoreReclamation_p.h",
@@ -2539,11 +2540,12 @@
         "boost/intrusive/set.hpp",
         "chrono",
         "condition_variable",
+        "limits",
         "mutex",
         "thread",
         "utility"
       ],
-      "lines": 454,
+      "lines": 487,
       "member_fields": [
         "m_clock",
         "m_delayMutex",
@@ -2567,8 +2569,8 @@
         "WakeQueue",
         "Wakes"
       ],
-      "sha256": "70b407b82c923ef49e5eb3581c9e54e27b025bf1f3c6f3889b5e0125a585c4dc",
-      "synchronization_declarations": 24
+      "sha256": "9155d01884c358f23f9fb51c84845cd9210ce647bc77c08eb2ec1766297bbf4b",
+      "synchronization_declarations": 25
     },
     "libs/image/pagestore/KisPageStoreReclamation_p.h": {
       "container_declarations": 2,
@@ -2595,7 +2597,7 @@
         "KisPageReclamationWakeState",
         "KisPageTreeReclamationStatistics"
       ],
-      "sha256": "32a7b0dad7d9da8dc5ec0f60692c8aa1c2ed6c9d073c6bd5e9aa797550e6d6f6",
+      "sha256": "d6fa8658e0428c6b203ee030e811bcb97dcaa57f7baee4672db72b02e89f8cf4",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreTypes.h": {
@@ -3256,7 +3258,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 7936,
+      "lines": 7980,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3281,7 +3283,7 @@
         "KisPageStoreCpuMutationTest",
         "TestProvider"
       ],
-      "sha256": "9bd1b094de08124f53490b2c13d96f01ab18a0c5602428a38893fc996f73ea8e",
+      "sha256": "b88692c68425e0a9dc0b4c1412a20f82d7bbb2863c77d64d066e0e189b734c5c",
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -3431,7 +3433,7 @@
         "utility",
         "vector"
       ],
-      "lines": 10347,
+      "lines": 10401,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3491,7 +3493,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "74c21275cd05d554e7159a03353cff1ae64eb917a2dfc5ba221ebae24763dce8",
+      "sha256": "259644fd94c74afcd579aa02efa411ea18c547c87b7f25315bb1140ba7427436",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -5922,6 +5924,8 @@
     "libs/image/3rdparty/lock_free_map/simple_job_coordinator.h",
     "libs/image/CMakeLists.txt",
     "libs/image/KisPixelWriteCursor.h",
+    "libs/image/KisStrokeJobFailureContext.cpp",
+    "libs/image/KisStrokeJobFailureContext.h",
     "libs/image/KisStrokesQueueMutatedJobInterface.h",
     "libs/image/brushengine/kis_paintop_utils.cpp",
     "libs/image/brushengine/kis_paintop_utils.h",
@@ -5960,6 +5964,7 @@
     "libs/image/pagestore/KisEvaluationGraphTypes.h",
     "libs/image/pagestore/KisImageEpochReferenceModel.cpp",
     "libs/image/pagestore/KisImageEpochReferenceModel.h",
+    "libs/image/pagestore/KisMutationStorage_p.h",
     "libs/image/pagestore/KisPageDefaultStorage.cpp",
     "libs/image/pagestore/KisPageDefaultStorage_p.h",
     "libs/image/pagestore/KisPageHistoryCollector.cpp",
@@ -5976,10 +5981,14 @@
     "libs/image/pagestore/KisPagePublicationCoordinator_p.h",
     "libs/image/pagestore/KisPageReadCoordinator.cpp",
     "libs/image/pagestore/KisPageReadCoordinator_p.h",
+    "libs/image/pagestore/KisPageReadiness.cpp",
+    "libs/image/pagestore/KisPageReadiness_p.h",
     "libs/image/pagestore/KisPageReplicaProvider.cpp",
     "libs/image/pagestore/KisPageReplicaProvider.h",
     "libs/image/pagestore/KisPageRetirementQueue.cpp",
     "libs/image/pagestore/KisPageRetirementQueue_p.h",
+    "libs/image/pagestore/KisPageRetirementRecord_p.h",
+    "libs/image/pagestore/KisPageRetirementStorage_p.h",
     "libs/image/pagestore/KisPageStateMachine.cpp",
     "libs/image/pagestore/KisPageStateMachine.h",
     "libs/image/pagestore/KisPageStore.cpp",
@@ -6101,14 +6110,6 @@
     "libs/vulkanbackend/tests/CMakeLists.txt",
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
-  "untracked_sources": [
-    "libs/image/KisStrokeJobFailureContext.cpp",
-    "libs/image/KisStrokeJobFailureContext.h",
-    "libs/image/pagestore/KisMutationStorage_p.h",
-    "libs/image/pagestore/KisPageReadiness.cpp",
-    "libs/image/pagestore/KisPageReadiness_p.h",
-    "libs/image/pagestore/KisPageRetirementRecord_p.h",
-    "libs/image/pagestore/KisPageRetirementStorage_p.h"
-  ],
-  "working_tree_head": "5173c807c87bb1619325249a07a8b4f4f8f09f09"
+  "untracked_sources": [],
+  "working_tree_head": "9697196acab538329359a2d6c5bc45c2cf001a36"
 }

@@ -496,8 +496,13 @@ private Q_SLOTS:
     void retirementRecordTransfersAtCapacity_data()
     {
         QTest::addColumn<bool>("orphan");
-        QTest::newRow("registered") << false;
-        QTest::newRow("rejected-unregistered") << true;
+        QTest::addColumn<bool>("automatic");
+        QTest::addColumn<bool>("waitForBudget");
+        QTest::newRow("registered") << false << false << false;
+        QTest::newRow("rejected-unregistered") << true << false << false;
+        QTest::newRow("registered-automatic") << false << true << false;
+        QTest::newRow("rejected-unregistered-automatic") << true << true << false;
+        QTest::newRow("registered-automatic-budget-release") << false << true << true;
     }
     void retirementRecordTransfersAtCapacity();
     void budgetWaitersReserveInOrder();
@@ -4089,9 +4094,12 @@ void KisPageStoreCpuMutationTest::retirementRecordRefusedBeforePhysicalResult()
 void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
 {
     QFETCH(bool, orphan);
+    QFETCH(bool, automatic);
+    QFETCH(bool, waitForBudget);
     Fixture f; QVERIFY(f.init());
     KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    if (waitForBudget) limits.retirementDebtBytes = surface.allocationDescriptor().minimumByteSize();
     KisBackingBudgetController budget(limits);
     KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
     owner.attachBackingBudget(budget); QVERIFY(owner.registerProvider(f.provider));
@@ -4101,7 +4109,8 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     QAtomicInt references{1};
     KisPageRetirementQueue queue(owner, metadata, budget, references, &references,
         [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
-    queue.prepareTask(); queue.stopAutomaticWakeups();
+    queue.prepareTask();
+    if (!automatic) queue.stopAutomaticWakeups();
     QString error;
     auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
         KisBackingBudgetClass::Current, &error);
@@ -4111,12 +4120,22 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
         KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
     QVERIFY(result.isValid());
+    KisBackingBudgetReservation blockingDebt;
     if (!orphan) {
         QVERIFY(owner.registerBacking(result.replica, prepared.reservation,
             KisBackingBudgetClass::Current, &error, &prepared.retirement));
         QVERIFY(!prepared.retirement);
-        QVERIFY(owner.reclassifyBacking(result.replica, KisBackingBudgetClass::RetirementDebt,
-            prepared.reservation, &error));
+        if (waitForBudget) {
+            prepared.reservation.release();
+            KisBackingBudgetDelta delta;
+            delta.buckets[size_t(KisBackingBudgetClass::RetirementDebt)].cpuRam =
+                qint64(surface.allocationDescriptor().minimumByteSize());
+            blockingDebt = budget.reserve(delta, &error);
+            QVERIFY2(blockingDebt.isValid(), qPrintable(error));
+        } else {
+            QVERIFY(owner.reclassifyBacking(result.replica, KisBackingBudgetClass::RetirementDebt,
+                prepared.reservation, &error));
+        }
     }
     f.provider->rejectRetire = true;
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
@@ -4124,6 +4143,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
     const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
     const auto cleanup = qScopeGuard([&] {
+        blockingDebt.release();
         f.provider->rejectRetire = false;
         queue.beginClose(); queue.waitForIdle();
         auto records = queue.takeForClose();
@@ -4135,6 +4155,26 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     queue.waitForIdle();
     QCOMPARE(queue.snapshot().pendingReplicas, qsizetype(1));
     QCOMPARE(live(), limits.metadataArenaBytes);
+    if (automatic) {
+        // Subscriber/Wait preparation has no capacity. The original admitted
+        // timer must continue retrying without another process call or input.
+        QTRY_VERIFY_WITH_TIMEOUT(queue.snapshot().retryWakeups >= 3, 5000);
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        QCOMPARE(queue.snapshot().pendingReplicas, qsizetype(1));
+        QCOMPARE(budget.usage().waitingRequests, quint32(0));
+        if (waitForBudget) {
+            QCOMPARE(owner.backingClass(result.replica), KisBackingBudgetClass::Current);
+            blockingDebt.release(); // Actual capacity release, with no new request/input.
+        }
+        f.provider->rejectRetire = false;
+        QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
+        queue.waitForIdle(); kisDrainPageStoreReclamation();
+        QCOMPARE(live(), limits.metadataArenaBytes - sizeof(KisPageRetirementRecord));
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, quint64(0));
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
+        QCOMPARE(references.loadAcquire(), 1);
+        return;
+    }
     const auto retry = queue.process(1);
     QCOMPARE(retry.attempted, qsizetype(1)); QCOMPARE(retry.retired, qsizetype(0));
     QCOMPARE(live(), limits.metadataArenaBytes);
@@ -4220,7 +4260,8 @@ void KisPageStoreCpuMutationTest::reclamationDeadlinesCancelAndDoNotOccupyWorker
     const auto calls = std::make_shared<std::atomic<int>>(0);
     auto captured = std::make_shared<int>(1);
     const std::weak_ptr<int> weak = captured;
-    auto cancelled = kisSchedulePageStoreReclamationAfter(60000, [captured, calls] { ++*calls; });
+    KisPageReclamationDelay cancelled(KisPageReadinessCallback([captured, calls] { ++*calls; }));
+    QVERIFY(cancelled.arm(60000));
     captured.reset();
     QVERIFY(!weak.expired());
     auto moved = std::move(cancelled);
@@ -4231,15 +4272,17 @@ void KisPageStoreCpuMutationTest::reclamationDeadlinesCancelAndDoNotOccupyWorker
 
     QSemaphore dispatched, immediate;
     std::atomic<bool> wrongThread{false};
-    auto future = kisSchedulePageStoreReclamationAfter(60000, [calls] { ++*calls; });
+    KisPageReclamationDelay future(KisPageReadinessCallback([calls] { ++*calls; }));
+    QVERIFY(future.arm(60000));
     kisSchedulePageStoreReclamation([&] { immediate.release(); });
     // A future deadline must not put the sole reclamation worker to sleep.
     QVERIFY(immediate.tryAcquire(1, 5000));
     future.reset();
-    auto near = kisSchedulePageStoreReclamationAfter(1, [&] {
+    KisPageReclamationDelay near(KisPageReadinessCallback([&] {
         wrongThread = kisOnPageStoreReclamationThread();
         kisSchedulePageStoreReclamation([&] { dispatched.release(); });
-    });
+    }));
+    QVERIFY(near.arm(1));
     QVERIFY(dispatched.tryAcquire(1, 5000));
     near.reset(); kisDrainPageStoreReclamation();
     QVERIFY(!wrongThread.load()); QCOMPARE(calls->load(), 0);
@@ -4347,7 +4390,8 @@ void KisPageStoreCpuMutationTest::retirementRetryCloseAndLifetime()
         callsUntilBlock = 2;
         QVERIFY(blocked.tryAcquire(1, 5000));
         QSemaphore laterDeadline;
-        auto later = kisSchedulePageStoreReclamationAfter(200, [&] { laterDeadline.release(); });
+        KisPageReclamationDelay later(KisPageReadinessCallback([&] { laterDeadline.release(); }));
+        QVERIFY(later.arm(200));
         QVERIFY(laterDeadline.tryAcquire(1, 5000));
         later.reset();
         const auto calls = f.provider->retireCalls.load();

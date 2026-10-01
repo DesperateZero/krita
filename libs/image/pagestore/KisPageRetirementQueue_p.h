@@ -126,6 +126,7 @@ private:
     KisPageRetirementRecords m_retryPending;
     KisPageReclamationDelay m_retryTask;
     std::shared_ptr<KisPageRetirementWait> m_retryWait;
+    bool m_retryScheduled = false;
     int m_nextRetryDelayMs = 1;
     quint64 m_retryWakeups = 0;
     quint64 m_maximumReplicasPerRetryWake = 0;

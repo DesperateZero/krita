@@ -956,6 +956,8 @@ private Q_SLOTS:
     void preparedReadinessAtCapacity();
     void readinessRetainsOriginalPayer();
     void retainedDeadlineInFlightAfterController();
+    void preparedDeadlineRearmsAtCapacity();
+    void preparedDeadlineRejectsCancelledGeneration();
     void metadataShardIndexesEnforcePhysicalOwnership();
     void indexedHistoricalDiscard_data()
     {
@@ -3782,7 +3784,7 @@ void KisPageStoreReferenceTest::preparedReadinessAtCapacity()
     QCOMPARE(copies, 0);
     QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisPageReadinessSubscription{callback});
-    QVERIFY_THROWS_EXCEPTION(std::bad_alloc, kisSchedulePageStoreReclamationAfter(1, callback, &budget));
+    QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisPageReclamationDelay(callback, &budget));
     KisPageReadinessCallback external([&] { ++calls; });
     QVERIFY_THROWS_EXCEPTION(std::bad_alloc, external.fund(&budget));
     external(); // Rejected sponsorship did not lose the original capture.
@@ -3846,9 +3848,10 @@ void KisPageStoreReferenceTest::retainedDeadlineInFlightAfterController()
     auto child = std::make_unique<KisBackingBudgetController>();
     QVERIFY(child->configureSharedNonPayloadBudget(parent));
     QSemaphore entered, resume, finished;
-    auto delay = kisSchedulePageStoreReclamationAfter(1,
+    KisPageReclamationDelay delay(
         KisPageReadinessCallback([&] { entered.release(); resume.acquire(); finished.release(); }, child.get()), child.get());
     const auto unblock = qScopeGuard([&] { resume.release(); delay.reset(); });
+    QVERIFY(delay.arm(1));
     QVERIFY(entered.tryAcquire(1, 5000));
     delay.reset();
     child.reset();
@@ -3858,6 +3861,57 @@ void KisPageStoreReferenceTest::retainedDeadlineInFlightAfterController()
     resume.release();
     QVERIFY(finished.tryAcquire(1, 5000));
     QTRY_VERIFY(lifetime.isNull());
+}
+
+void KisPageStoreReferenceTest::preparedDeadlineRearmsAtCapacity()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
+    auto warm = KisMutationStorageAllocator<char>::retained(&budget);
+    std::atomic<int> calls{0};
+    KisPageReclamationDelay delay(KisPageReadinessCallback([&] { ++calls; }, &budget), &budget);
+    QVERIFY(delay.isValid());
+    const auto live = [&] {
+        return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    for (int i = 1; i <= 32; ++i) {
+        QVERIFY(delay.arm(1));
+        QTRY_COMPARE_WITH_TIMEOUT(calls.load(), i, 5000);
+        QVERIFY(delay.takeReady());
+        QVERIFY(!delay.takeReady());
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        QVERIFY(delay.arm(60000));
+        delay.cancel();
+        QVERIFY(!delay.takeReady());
+        QCOMPARE(live(), limits.metadataArenaBytes);
+    }
+}
+
+void KisPageStoreReferenceTest::preparedDeadlineRejectsCancelledGeneration()
+{
+    KisBackingBudgetController budget;
+    QSemaphore entered, resume;
+    std::atomic<int> finished{0};
+    KisPageReclamationDelay delay(KisPageReadinessCallback([&] {
+        entered.release(); resume.acquire(); ++finished;
+    }, &budget), &budget);
+    const auto unblock = qScopeGuard([&] { resume.release(2); delay.reset(); });
+    QVERIFY(delay.arm(1));
+    QVERIFY(entered.tryAcquire(1, 5000)); // First generation already dispatched.
+    delay.cancel();
+    QVERIFY(delay.arm(1));
+    QVERIFY(!delay.takeReady()); // An old callback cannot grant the new generation.
+    resume.release();
+    QVERIFY(entered.tryAcquire(1, 5000)); // The monitor now publishes the new generation.
+    QVERIFY(delay.takeReady());
+    QVERIFY(!delay.takeReady());
+    delay.cancel();
+    resume.release();
+    QTRY_COMPARE_WITH_TIMEOUT(finished.load(), 2, 5000);
 }
 
 void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
