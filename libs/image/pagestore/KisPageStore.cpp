@@ -620,7 +620,7 @@ public:
         if (!operational || closed || !backingOwned || !allocation.isValid()
             || allocation.replica.domain != access.domain
             || !allocation.replica.layout.matches(descriptor)
-            || !owner.consumeTerminalProviderOperation(operation, allocation, &failure).succeeded()) {
+            || !owner.verifyTerminalProviderResult(operation, allocation, &failure).succeeded()) {
             retireRejected();
             KisPageStoreDetail::setError(error, failure.isEmpty() ? QStringLiteral("implicit default allocation failed") : failure);
             return false;
@@ -1232,7 +1232,7 @@ public:
         if (!backingOwned || allocation.status != KisPageRequestStatus::Ready
             || allocation.replica.domain != KisPageAccessDomain::CpuRam
             || !allocation.replica.layout.matches(descriptor)
-            || !owner->owner.consumeTerminalProviderOperation(adoption.operation, allocation, error).succeeded()) {
+            || !owner->owner.verifyTerminalProviderResult(adoption.operation, allocation, error).succeeded()) {
             reject();
             return false;
         }
@@ -2130,7 +2130,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             if (!backingOwned || !allocation.isValid() || allocation.status != KisPageRequestStatus::Ready
                 || allocation.replica.domain != KisPageAccessDomain::CpuRam
                 || !allocation.replica.layout.matches(descriptor) || !binding
-                || !data || !owner->owner.consumeTerminalProviderOperation(operation, allocation, &failure).succeeded()) {
+                || !data || !owner->owner.verifyTerminalProviderResult(operation, allocation, &failure).succeeded()) {
                 rejectAllocation();
                 fail(QStringLiteral("CPU mutation native allocation/access failed: ") + failure);
                 return result;
@@ -3526,7 +3526,7 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
     const bool backingOwned = ownsNewTarget && d->owner.registerBacking(
         allocation.replica, backing.reservation, KisBackingBudgetClass::Current, &failure, &backing.retirement);
     const KisVerifiedCompletion allocated = allocation.isValid()
-        ? d->owner.consumeTerminalProviderOperation(allocationOperation, allocation, &failure)
+        ? d->owner.verifyTerminalProviderResult(allocationOperation, allocation, &failure)
         : KisVerifiedCompletion();
     bool bytesCopied = false;
     if (backingOwned && allocated.isValid() && allocated.succeeded()
@@ -3992,7 +3992,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         rejectAllocation(QStringLiteral("write allocation failed"));
         return request;
     }
-    if (!d->owner.consumeTerminalProviderOperation(writeOperation, allocation, &failure).succeeded()) {
+    if (!d->owner.verifyTerminalProviderResult(writeOperation, allocation, &failure).succeeded()) {
         rejectAllocation(failure.isEmpty() ? QStringLiteral("write allocation completion failed") : failure);
         return request;
     }

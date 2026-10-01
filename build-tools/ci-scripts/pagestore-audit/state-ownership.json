@@ -192,7 +192,8 @@
     },
     {
       "creation-paths": [
-        "KisPageOwnerLedger::bindProviderOperation for generic operations",
+        "synchronous Store allocation/adoption/write and WriteCoordinator transfer retain results in the original caller; verifyTerminalProviderResult checks identity and registry terminal evidence without registering an operation",
+        "KisPageOwnerLedger::bindProviderOperation remains the explicit pending/reference binding seam, not a production synchronous-result consumer",
         "original retirement admission prepares a charged operation-index node before physical allocation; prepareRetirementOperation inserts that node before retire, and bindRetirementOperation only fills its completion"
       ],
       "current-writers": [
@@ -200,7 +201,7 @@
       ],
       "fact": "provider operation",
       "id": "BR1-OWN-PROVIDER-OP",
-      "lock-or-claim": "owner ledger mutex and provider epoch token; a valid retirement result stays in its original record until binding succeeds",
+      "lock-or-claim": "original Store request/activity and writer/adoption claim protect synchronous results through acceptance; owner ledger mutex and provider epoch token protect binding; a valid retirement result stays in its original record until binding succeeds",
       "read-only-observers": [
         "KisCompletionRegistry",
         "KisPageStore retirement paths",
@@ -209,7 +210,8 @@
       "status": "canonical",
       "target-authoritative-owner": "KisPageOwnerLedger",
       "terminal-paths": [
-        "releaseTerminalProviderOperation",
+        "synchronous result identity and completion use the same acceptance policy as explicit binding, then verify the original registry ticket without creating an operation node; foreign synchronous retire uses this path too",
+        "releaseTerminalProviderOperation for explicitly retained operations",
         "terminal extraction returns the operation node to its original retirement record; invalid provider refusal cancels the prepared slot without losing its storage",
         "closeSession drain"
       ]

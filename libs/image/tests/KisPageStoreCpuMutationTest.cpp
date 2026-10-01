@@ -58,6 +58,7 @@ public:
     bool disableCpuPayload = false;
     bool disableSynchronousWriteCopy = false;
     bool disableBackgroundRetirement = false;
+    bool mismatchTransferOperation = false;
     std::atomic<int> retireCalls{0};
     KisCompletionTicket deferredRetirement;
     std::function<void()> beforeRetire;
@@ -128,7 +129,8 @@ public:
     { if (beforeBinding) beforeBinding(r);
       return rejectNativeBinding || r == rejectBindingFor ? QSharedPointer<KisCpuResidentBinding>{} : p->cpuResidentBinding(r, status); }
     KisReplicaOperation transfer(const KisReplicaTransferRequest &r, KisPagePriority pri) override
-    { if (beforeTransfer) beforeTransfer(); return p->transfer(r, pri); }
+    { if (beforeTransfer) beforeTransfer(); auto result = p->transfer(r, pri);
+      if (mismatchTransferOperation) ++result.operation.value; return result; }
     KisReplicaAccess resolveAccess(KisPageLeaseId l, KisPageOperationId o, const KisReplicaHandle &r,
         KisPageAccessRequirement a, KisPageAccessMode m) override
     {
@@ -655,6 +657,8 @@ private Q_SLOTS:
     }
     void historyRefusalPreservesOriginalWork();
     void retirementPreparationRollsBackAtCapacity();
+    void synchronousProviderResultsAtCapacity();
+    void writeTransferRejectsMismatchedOperation();
     void historyPreparationRevalidatesProtection();
     void retirementResultBindsAtCapacity_data()
     {
@@ -4628,6 +4632,92 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
     QVERIFY(f.live() < before); // The real key/retirement/operation storage was freed.
     QCOMPARE(f.references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::synchronousProviderResultsAtCapacity()
+{
+    Fixture f; QVERIFY(f.init());
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    auto descriptor = surface.allocationDescriptor();
+    descriptor.initialization = KisPageInitialization::DefaultPixel;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
+    owner.attachBackingBudget(budget); QVERIFY(owner.registerProvider(f.provider));
+    const auto allocation = f.provider->requestReplica(owner.nextOperationId(), {key(), {1}},
+        descriptor, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
+    const auto write = f.provider->prepareWrite(owner.nextOperationId(), {key(), {2}},
+        descriptor, cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(allocation.isValid() && write.isValid());
+    KisReplicaTransferRequest request{owner.nextOperationId(), allocation.replica, write.replica,
+        descriptor, KisReplicaTransferKind::WriteGenerationInitialization};
+    int transfers = 0; f.provider->beforeTransfer = [&] { ++transfers; };
+    const auto transfer = f.provider->transfer(request, KisPagePriority::Normal);
+    QVERIFY(transfer.isValid());
+
+    // Establish the real accounting owner and reusable reservation capacity
+    // before filling the arena; their cold storage is part of the live total.
+    auto accounting = KisMutationStorageAllocator<char>::retained(&budget);
+    auto first = budget.reserve({}, nullptr), second = budget.reserve({}, nullptr);
+    QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    // This is the exact charged insertion used by the old synchronous path.
+    // Refusal after physical success must not require replay or retain a node.
+    QVERIFY(!owner.bindProviderOperation(allocation.operation, allocation, &f.error));
+    QVERIFY(f.error.contains(QStringLiteral("storage was refused")));
+    for (const auto &result : {allocation, write, transfer}) {
+        QVERIFY2(owner.verifyTerminalProviderResult(result.operation, result, &f.error).succeeded(), qPrintable(f.error));
+        QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+        QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(0));
+        QCOMPARE(live(), limits.metadataArenaBytes);
+    }
+    QCOMPARE(transfers, 1);
+
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    QAtomicInt references{1};
+    KisPageRetirementQueue queue(owner, metadata, budget, references, &references,
+        [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
+    // No original record exists for these foreign handles. The synchronous
+    // fallback must also finish at capacity without an unowned operation.
+    queue.retireOrDefer(allocation.replica, f.provider, {}, {});
+    queue.retireOrDefer(write.replica, f.provider, {}, {});
+    QCOMPARE(f.provider->retireCalls.load(), 2);
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+    QCOMPARE(references.loadAcquire(), 1);
+    QCOMPARE(live(), limits.metadataArenaBytes);
+}
+
+void KisPageStoreCpuMutationTest::writeTransferRejectsMismatchedOperation()
+{
+    Fixture f; QVERIFY(f.init(4, 1));
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    const auto descriptor = surface.allocationDescriptor();
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
+    QVERIFY(owner.registerProvider(f.provider));
+    KisBackingBudgetController budget;
+    KisPageMetadataCoordinator metadata; KisImageEpochReferenceModel epochs;
+    KisPageWriteCoordinator coordinator(metadata, epochs, budget, owner);
+    const auto write = f.provider->prepareWrite(owner.nextOperationId(), {key(), {2}},
+        descriptor, cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(write.isValid());
+    KisPageWriteIntent intent; intent.inputKind = KisPageWriteInputKind::MutableGuard;
+    intent.mode = KisPageWriteMode::PreserveContents;
+    int transfers = 0; f.provider->beforeTransfer = [&] { ++transfers; };
+    f.provider->mismatchTransferOperation = true;
+    const auto completion = coordinator.initializeFreshReplica(intent, false, f.initialReplicas.first(),
+        write.replica, descriptor, f.provider, KisPagePriority::Normal, write.completion, &f.error);
+    QVERIFY(!completion.isValid());
+    QVERIFY(f.error.contains(QStringLiteral("mismatched")));
+    QCOMPARE(transfers, 1);
+    QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+    QVERIFY(f.provider->retire(owner.nextOperationId(), write.replica, {}).isValid());
+    QVERIFY(f.store->closeSession());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::retirementPreparationRollsBackAtCapacity()

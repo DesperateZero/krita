@@ -307,6 +307,21 @@ bool buildPhysicalBackingDelta(
 class KisPageOwnerLedger::Private
 {
 public:
+    bool acceptsProviderResultLocked(KisPageOperationId operation,
+                                     const KisReplicaOperation &result, QString *error) const
+    {
+        if (!operation.isValid() || !result.isValid() || !(result.operation == operation)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("provider operation result is invalid or mismatched"));
+            return false;
+        }
+        if (!completions || operations.find(operation.value) != operations.end() ||
+            !providers.contains(providerKey(result.replica.provider, result.replica.providerEpoch))) {
+            KisPageStoreDetail::setError(error, QStringLiteral("provider operation is duplicate or foreign"));
+            return false;
+        }
+        return true;
+    }
+
     KisCompletionTicket operationCompletion(
         KisPageOperationId operation,
         QSharedPointer<KisCompletionRegistry> *registry) const
@@ -1644,16 +1659,23 @@ bool KisPageOwnerLedger::bindProviderOperation(
     return bindProviderOperationImpl(operation, result, false, error);
 }
 
-KisVerifiedCompletion KisPageOwnerLedger::consumeTerminalProviderOperation(
+KisVerifiedCompletion KisPageOwnerLedger::verifyTerminalProviderResult(
     KisPageOperationId operation,
     const KisReplicaOperation &result,
-    QString *error)
+    QString *error) const
 {
-    if (!bindProviderOperation(operation, result, error))
+    QSharedPointer<KisCompletionRegistry> completions;
+    {
+        QMutexLocker lock(&d->mutex);
+        if (!d->acceptsProviderResultLocked(operation, result, error)) return {};
+        completions = d->completions;
+    }
+    const auto verified = completions->verifyTerminal(result.completion);
+    if (!verified.isValid()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("provider operation is not terminal"));
         return {};
-    const KisVerifiedCompletion verified = verifyProviderOperation(operation, error);
-    if (!verified.isValid() || !releaseTerminalProviderOperation(operation, error))
-        return {};
+    }
+    KisPageStoreDetail::setError(error, {});
     return verified;
 }
 
@@ -1715,18 +1737,8 @@ bool KisPageOwnerLedger::bindProviderOperationImpl(
     bool detachedRetirement,
     QString *error)
 {
-    if (!operation.isValid() || !result.isValid() ||
-        !(result.operation == operation)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("provider operation result is invalid or mismatched"));
-        return false;
-    }
     QMutexLocker locker(&d->mutex);
-    if (!d->completions || d->operations.find(operation.value) != d->operations.end() ||
-        !d->providers.contains(providerKey(result.replica.provider,
-                                           result.replica.providerEpoch))) {
-        KisPageStoreDetail::setError(error, QStringLiteral("provider operation is duplicate or foreign"));
-        return false;
-    }
+    if (!d->acceptsProviderResultLocked(operation, result, error)) return false;
     try {
         if (d->operations.empty())
             d->operations = OperationIndex(std::less<quint64>{},

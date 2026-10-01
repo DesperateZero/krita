@@ -1106,6 +1106,7 @@ private Q_SLOTS:
     void cpuProviderPreserves4_8_16ByteFormats();
     void ownerLedgerSealsPreparedPageBeforeEpochCommit();
     void ownerLedgerSeparatesDetachedRetirement();
+    void ownerLedgerVerifiesTerminalProviderIdentity();
     void pageStoreCpuFacadeCommitsCowWithoutMixedEpoch();
     void pageStoreChainsRepeatedWritesWithinTransaction();
     void pageStoreLeaseOutlivesOwnerSafely();
@@ -7900,6 +7901,52 @@ void KisPageStoreReferenceTest::cpuProviderPreserves4_8_16ByteFormats()
         QVERIFY(retired.isValid());
     }
     QCOMPARE(provider.memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreReferenceTest::ownerLedgerVerifiesTerminalProviderIdentity()
+{
+    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    QVERIFY(provider->configure({{51}, {1}, 1024 * 1024}, completions));
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(completions));
+    QVERIFY(owner.registerProvider(provider));
+    auto descriptor = allocationDescriptor();
+    descriptor.initialization = KisPageInitialization::DefaultPixel;
+    const auto operation = owner.nextOperationId();
+    const auto result = provider->requestReplica(operation, pageVersion(30, 1), descriptor,
+        KisPageAccessDomain::CpuRam, KisPageAccessMode::Read, KisPagePriority::Normal);
+    QVERIFY(result.isValid());
+    QVERIFY(owner.verifyTerminalProviderResult(operation, result).succeeded());
+    QVERIFY(!owner.verifyTerminalProviderResult(owner.nextOperationId(), result).isValid());
+    auto foreign = result; foreign.replica.providerEpoch.value++;
+    QVERIFY(!owner.verifyTerminalProviderResult(operation, foreign).isValid());
+    auto unknown = result;
+    auto other = QSharedPointer<KisCompletionRegistry>::create();
+    unknown.completion = other->allocatePending(other->registerSource(KisCompletionDomain::CpuJob));
+    QVERIFY(other->complete(unknown.completion, KisCompletionStatus::Succeeded));
+    QVERIFY(!owner.verifyTerminalProviderResult(operation, unknown).isValid());
+
+    const auto source = completions->registerSource(KisCompletionDomain::CpuJob);
+    for (const auto status : {KisCompletionStatus::Succeeded, KisCompletionStatus::Failed, KisCompletionStatus::Cancelled}) {
+        auto pending = result;
+        pending.status = KisPageRequestStatus::Pending;
+        pending.completion = completions->allocatePending(source);
+        QVERIFY(!owner.verifyTerminalProviderResult(operation, pending).isValid());
+        QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+        QVERIFY(completions->complete(pending.completion, status));
+        const auto verified = owner.verifyTerminalProviderResult(operation, pending);
+        QVERIFY(verified.isValid());
+        QCOMPARE(verified.status(), status);
+        QCOMPARE(verified.succeeded(), status == KisCompletionStatus::Succeeded);
+    }
+    // Direct verification cannot consume a result already owned by binding.
+    QVERIFY(owner.bindProviderOperation(operation, result));
+    QVERIFY(!owner.verifyTerminalProviderResult(operation, result).isValid());
+    QCOMPARE(owner.providerOperationCount(), qsizetype(1));
+    QVERIFY(owner.releaseTerminalProviderOperation(operation));
+    QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+    QVERIFY(provider->retire(owner.nextOperationId(), result.replica, {}).isValid());
+    QCOMPARE(provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()

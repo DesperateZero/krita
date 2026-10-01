@@ -156,10 +156,12 @@ public:
     bool bindProviderOperation(KisPageOperationId operation,
                                const KisReplicaOperation &result,
                                QString *error = nullptr);
-    KisVerifiedCompletion consumeTerminalProviderOperation(
+    // Synchronous callers retain their result and activity until acceptance.
+    // Verification needs no operation node; pending work uses explicit binding.
+    KisVerifiedCompletion verifyTerminalProviderResult(
         KisPageOperationId operation,
         const KisReplicaOperation &result,
-        QString *error = nullptr);
+        QString *error = nullptr) const;
     // Owner-only classification: the replica has already been detached from
     // reachable metadata. A provider must not classify its own result here.
     bool bindRetirementOperation(KisPageOperationId operation,

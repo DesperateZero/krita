@@ -2445,8 +2445,8 @@ KisCompletionTicket KisPageWriteCoordinator::initializeFreshReplica(
             ? QStringLiteral("write generation initialization failed") : transfer.error);
         return {};
     }
-    const auto completion = ownerLedger->consumeTerminalProviderOperation(
-        transfer.operation, transfer, error);
+    const auto completion = ownerLedger->verifyTerminalProviderResult(
+        request.operation, transfer, error);
     return completion.succeeded() ? transfer.completion : KisCompletionTicket{};
 }
 

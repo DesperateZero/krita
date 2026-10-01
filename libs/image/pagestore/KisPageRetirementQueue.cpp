@@ -481,14 +481,12 @@ void KisPageRetirementQueue::retireOrDefer(
         // an unaccounted record after an external provider result.
         Q_ASSERT(!owned && !backing.reservation.isValid());
         if (!owned && !backing.reservation.isValid()) {
-            // This legacy foreign-handle path has no original record to retain.
-            // Keep its operation in the generic ledger, never a stack pointer.
+            // The synchronous foreign-handle path has no record to retain.
+            // Verify the returned terminal ticket without creating debt storage.
             const auto operation = m_owner.nextOperationId();
             const auto result = provider ? provider->retire(operation, replica, lastUse) : KisReplicaOperation{};
-            if (result.isValid() && result.replica == replica &&
-                m_owner.bindRetirementOperation(operation, result) &&
-                m_owner.verifyProviderOperation(operation).isValid())
-                m_owner.releaseTerminalProviderOperation(operation);
+            if (result.isValid() && result.replica == replica)
+                m_owner.verifyTerminalProviderResult(operation, result);
         }
         return;
     }
