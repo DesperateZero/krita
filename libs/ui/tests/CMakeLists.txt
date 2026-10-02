@@ -1,3 +1,6 @@
+kis_add_test(matched_freehand_baseline_test.cpp ../../../sdk/tests/stroke_testing_utils.cpp
+    TEST_NAME MatchedFreehandBaselineTest LINK_LIBRARIES kritaui kritatestsdk)
+
 kis_add_tests(
     kis_image_view_converter_test.cpp
     kis_shape_selection_test.cpp

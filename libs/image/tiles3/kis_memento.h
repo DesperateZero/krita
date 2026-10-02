@@ -64,6 +64,15 @@ public:
         return QRect(x, y, w, h);
     }
 
+    // Canonical history adapters publish the completed transaction's dirty
+    // bounds before this memento reaches the original undo/redo consumers.
+    void setExtent(const QRect &extent) {
+        m_extentMinX = extent.isEmpty() ? qint32_MAX : extent.left();
+        m_extentMinY = extent.isEmpty() ? qint32_MAX : extent.top();
+        m_extentMaxX = extent.isEmpty() ? qint32_MIN : extent.right();
+        m_extentMaxY = extent.isEmpty() ? qint32_MIN : extent.bottom();
+    }
+
     void saveOldDefaultPixel(const quint8* pixel, quint32 pixelSize) {
         m_oldDefaultPixel = new quint8[pixelSize];
         memcpy(m_oldDefaultPixel, pixel, pixelSize);

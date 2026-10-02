@@ -174,6 +174,36 @@ bool KisTiledDataManagerTest::checkTilesNotShared(KisTiledDataManager *srcDM,
     return true;
 }
 
+void KisTiledDataManagerTest::testPageStoreHistoryDirtyExtent()
+{
+    const quint8 blank = 0;
+    const quint8 paint = 0x81;
+    const QRect page(-64, 64, 64, 64);
+    KisTiledDataManager dm(1, &blank);
+    auto painted = dm.getMemento();
+    dm.clear(page, &paint);
+    QVERIFY(dm.tryCommit());
+    QCOMPARE(painted->extent(), page);
+    dm.rollback(painted);
+    QVERIFY(dm.extent().isEmpty());
+    QCOMPARE(painted->extent(), page);
+    dm.rollforward(painted);
+    QCOMPARE(dm.extent(), page);
+
+    auto removed = dm.getMemento();
+    dm.clear(page, &blank);
+    QVERIFY(dm.tryCommit());
+    QVERIFY(dm.extent().isEmpty());
+    QCOMPARE(removed->extent(), page); // removal must invalidate the old pixels
+    dm.rollback(removed);
+    QCOMPARE(dm.extent(), page);
+    dm.rollforward(removed);
+    QVERIFY(dm.extent().isEmpty());
+    auto empty = dm.getMemento();
+    QVERIFY(dm.tryCommit());
+    QVERIFY(empty->extent().isEmpty());
+}
+
 void KisTiledDataManagerTest::testUndoingNewTiles()
 {
     // "growing extent bug"

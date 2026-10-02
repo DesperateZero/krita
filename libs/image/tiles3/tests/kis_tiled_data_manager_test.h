@@ -31,6 +31,7 @@ private:
     void benchmarkCOWImpl();
 
 private Q_SLOTS:
+    void testPageStoreHistoryDirtyExtent();
     void testUndoingNewTiles();
     void testPurgedAndEmptyTransactions();
     void testUnversionedBitBlt();

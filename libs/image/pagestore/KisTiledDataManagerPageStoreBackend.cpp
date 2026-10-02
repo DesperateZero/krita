@@ -1680,7 +1680,8 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     // Refresh these original delta keys even if a later root commit rejects:
     // the session may already have sealed, so an old compatibility cache must
     // not continue advertising the pre-checkpoint bytes.
-    if (persistent && changed) *changed = historyChangedPages(transaction);
+    const auto pages = historyChangedPages(transaction);
+    if (persistent && changed) *changed = pages;
     if (!pruneDefaultPreparedPages(transaction, error)) {
         return false;
     }
@@ -1688,6 +1689,20 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     const KisPageStoreMemento committed =
         d->history->commit(d->activeHistory, error);
     if (!committed.isValid()) return false;
+    // Preserve the original transaction's undo/redo projection invalidation.
+    // The canonical delta includes removed pages; current extent alone would
+    // lose the dirty region when an undo removes the last painted pixels.
+    QRect dirtyExtent;
+    for (const auto &page : pages) {
+        const qint64 x = qint64(page.column) * KisTileData::WIDTH;
+        const qint64 y = qint64(page.row) * KisTileData::HEIGHT;
+        KIS_ASSERT(x >= std::numeric_limits<qint32>::min() &&
+                   y >= std::numeric_limits<qint32>::min() &&
+                   x + KisTileData::WIDTH - 1 <= std::numeric_limits<qint32>::max() &&
+                   y + KisTileData::HEIGHT - 1 <= std::numeric_limits<qint32>::max());
+        dirtyExtent |= QRect(int(x), int(y), KisTileData::WIDTH, KisTileData::HEIGHT);
+    }
+    d->currentMemento->setExtent(dirtyExtent);
     d->mementos.insert(d->currentMemento.data(), committed);
     d->activeHistory = {};
     d->currentMemento.clear();
