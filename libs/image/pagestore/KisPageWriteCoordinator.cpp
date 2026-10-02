@@ -2300,6 +2300,7 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
                 KisPageStoreDetail::setError(error, QStringLiteral("prepared backing retirement storage has changed"));
                 return {};
             }
+            (*preparedRetirement)->prepareBackingStorage();
             prepared.retirement = std::move(*preparedRetirement);
         } else prepared.retirement = kisPreparePageRetirementRecord(budget);
     } catch (const std::bad_alloc &) {

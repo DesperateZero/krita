@@ -622,10 +622,11 @@
         "KisPageOwnerLedger::registerBacking",
         "KisPageOwnerLedger::prepareBackingChanges",
         "KisPageOwnerLedger::prepareBackingHandoff",
-        "reserveBacking prepares the actual charged retirement node before a fresh provider call; the same node enters the original backing record only after registration succeeds; direct initial adoption prepares its complete node footprint outside the store gate before any partial registration",
+        "reserveBacking prepares the original charged retirement record and actual backing/physical map nodes before a fresh provider call; registration binds empty indexes to those prepared allocators without allocating, preserving cold limit/shared-budget configuration after attachment, and transfers the same stable nodes without growth; direct initial adoption prepares its complete footprint outside the store gate, and rollback refills only missing nodes on that original terminal record",
         "implicit default materialization revalidates original key deduplication and the 64-entry admission limit after cold backing preparation releases/reacquires the owner gate; accepted materialization observed after the wait returns without another provider request",
         "prepareBackingChangesImpl charges scratch classification/maps, slot/free-list capacity, exact change/physical/credit arrays and persistent claim nodes; storePreparedChange rolls back every inserted claim and reservation on actual storage refusal before publishing physical class claims",
-        "domain admission prepares the actual charged claim node and inactive return reservation before publishing domainClaim; charged pending-registration insertion refuses without a marker, and failed physical preparation leaves the original domain/revision available for retry",
+        "domain admission prepares the actual charged claim node and inactive return reservation before publishing domainClaim; each synchronous registerBacking owns its scoped pending marker through the existing authority gate, without an allocated pending index; failed physical preparation leaves the original domain/revision available for retry",
+        "stable original backing nodes embed physical membership links; the original physical record selects the representative and class references, replacing the separate sharedPhysicalMembers table; class/domain projections observe those links without mutating them",
         "synchronizeBackingDomains retains the immutable original provider registry cut and prepares charged changes plus one probe vector; acknowledgement flags remain in those probes and the whole cut validates before any exact revision acknowledgement"
       ],
       "current-writers": [
@@ -647,8 +648,8 @@
         "KisPageOwnerLedger::commitBackingChanges",
         "KisBackingHandoffReservation::release",
         "KisPageOwnerLedger::releaseRetiredBacking",
-        "takeRetirementRecord transfers the exact backing record node once to its original queue or close list; handoff extract/reinsert retains that same node across allocation generation changes; direct release frees unused terminal storage outside the ledger gate",
-        "domain claim cancel/commit extracts the original charged node and releases storage outside admission/ledger gates; detach clears original claim facts and swaps claims/registration storage to local release before the original budget dies; synchronization storage refusal acknowledges nothing and retains provider journal facts without replaying physical actions"
+        "takeRetirementRecord transfers the exact prepared retirement record once to its original queue or close list; handoff rekeys the same stable backing node and membership across generation changes; releaseRetiredBacking unlinks and extracts actual backing/last physical nodes, freeing them and unused terminal storage outside the ledger gate; successful alias registration returns its unused physical node outside that gate",
+        "domain claim cancel/commit extracts the original charged node and releases storage outside admission/ledger gates; detach clears original claim facts, drops scoped registration linkage and swaps claim storage to local release before the original budget dies; synchronization storage refusal acknowledges nothing and retains provider journal facts without replaying physical actions"
       ]
     },
     {

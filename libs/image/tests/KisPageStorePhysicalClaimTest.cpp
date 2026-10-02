@@ -70,7 +70,7 @@ struct Fixture
     }
 };
 
-quint64 retirementStorageBytes(KisBackingBudgetController &budget)
+quint64 retirementStorageBytes(KisBackingBudgetController &budget, bool lastPhysical = true)
 {
     const auto live = [&] {
         return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
@@ -79,6 +79,7 @@ quint64 retirementStorageBytes(KisBackingBudgetController &budget)
     { auto warm = kisPreparePageRetirementRecord(&budget); }
     const quint64 before = live();
     auto record = kisPreparePageRetirementRecord(&budget);
+    if (!lastPhysical) record->physicalStorage = {};
     return live() - before;
 }
 
@@ -124,6 +125,13 @@ private Q_SLOTS:
     void handoffDebtFollowsTerminal();
     void sharedHandoffDebt_data();
     void sharedHandoffDebt();
+    void ledgerAliasMembershipAtCapacity_data()
+    {
+        QTest::addColumn<bool>("reverse");
+        QTest::newRow("middle-representative-last") << false;
+        QTest::newRow("head-representative-last") << true;
+    }
+    void ledgerAliasMembershipAtCapacity();
 };
 
 void KisPageStorePhysicalClaimTest::retirementReadiness_data()
@@ -383,7 +391,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     const auto firstNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({621}, target, {}).isValid()); ledger.releaseRetiredBacking(target);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             firstNodeBytes - retirementStorageBytes(budget));
+             firstNodeBytes - retirementStorageBytes(budget, false));
     if (keepAlias) {
         QCOMPARE(ledger.backingClass(alias.replica), KisBackingBudgetClass::Current);
         const auto usage = budget.usage(); const auto &debt = usage.buckets[size_t(KisBackingBudgetClass::RetirementDebt)];
@@ -399,6 +407,80 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
         QCOMPARE(bucket.live.cpuRam, i == size_t(KisBackingBudgetClass::MetadataArena) ? retainedCache : quint64(0)); QCOMPARE(bucket.live.ssd, 0u);
         QCOMPARE(bucket.reserved.cpuRam, 0u); QCOMPARE(bucket.reserved.ssd, 0u);
     }
+}
+
+void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
+{
+    QFETCH(bool, reverse);
+    Fixture f; QVERIFY(f.init());
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger ledger; QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider));
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    std::array<KisBackingBudgetReservation, 3> warm;
+    for (auto &reservation : warm) { reservation = budget.reserve({}, &f.error); QVERIFY(reservation.isValid()); }
+    for (auto &reservation : warm) reservation.release();
+    const auto allNodeBytes = retirementStorageBytes(budget);
+    const auto logicalNodeBytes = retirementStorageBytes(budget, false);
+    const auto baseline = live();
+    const auto physicalNodeBytes = allNodeBytes - logicalNodeBytes;
+    std::array<KisReplicaHandle, 3> replicas{f.replica};
+    std::array<KisPageRetirementRecordPointer, 3> records;
+    std::array<KisBackingBudgetReservation, 3> reservations;
+    KisBackingBudgetDelta initial;
+    initial.buckets[size_t(KisBackingBudgetClass::Current)].cpuRam = qint64(f.replica.layout.byteSize);
+    auto source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source);
+    const auto committed = f.provider->memoryUsage().committedBytes;
+    for (size_t i = 0; i < records.size(); ++i) {
+        records[i] = kisPreparePageRetirementRecord(&budget);
+        reservations[i] = budget.reserve(initial, &f.error); QVERIFY(reservations[i].isValid());
+        if (i) {
+            auto result = f.provider->prepareSynchronousSource({700 + i}, source, {key(int(i)), {1}},
+                f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
+            QVERIFY(result.isValid()); replicas[i] = result.replica;
+        }
+    }
+    source.clear();
+    QCOMPARE(f.provider->memoryUsage().committedBytes, committed);
+    std::array<void *, 3> fillers{};
+    std::array<size_t, 3> fillerBytes{};
+    const auto release = qScopeGuard([&] {
+        for (size_t i = 0; i < fillers.size(); ++i)
+            kisFreeMutationStorage(&budget, fillers[i], fillerBytes[i], 1);
+    });
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        fillerBytes[i] = size_t(limits.metadataArenaBytes - live());
+        fillers[i] = kisAllocateMutationStorage(&budget, fillerBytes[i], 1);
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        QVERIFY2(ledger.registerBacking(replicas[i], reservations[i], KisBackingBudgetClass::Current,
+            &f.error, &records[i]), qPrintable(f.error));
+        QVERIFY(!records[i]);
+        QCOMPARE(live(), limits.metadataArenaBytes - (i ? physicalNodeBytes : 0));
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
+                 f.replica.layout.byteSize); // One charge, including every new foreground alias.
+    }
+    for (const auto &replica : replicas)
+        QVERIFY(ledger.reclassifyBacking(replica, KisBackingBudgetClass::RetirementDebt));
+    const std::array<size_t, 3> order = reverse ? std::array<size_t, 3>{2, 0, 1}
+                                             : std::array<size_t, 3>{1, 0, 2};
+    for (size_t n = 0; n < order.size(); ++n) {
+        const auto i = order[n];
+        const auto before = live();
+        QVERIFY(f.provider->retire({710 + n}, replicas[i], {}).isValid());
+        ledger.releaseRetiredBacking(replicas[i]);
+        QCOMPARE(live(), before - (n == 2 ? allNodeBytes : logicalNodeBytes));
+        for (size_t j = n + 1; j < order.size(); ++j) {
+            const auto &survivor = replicas[order[j]];
+            QCOMPARE(ledger.backingClass(survivor), KisBackingBudgetClass::RetirementDebt);
+            QVERIFY(f.provider->validate(survivor, f.desc));
+        }
+    }
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
+    for (size_t i = 0; i < fillers.size(); ++i)
+        kisFreeMutationStorage(&budget, std::exchange(fillers[i], nullptr), fillerBytes[i], 1);
+    QCOMPARE(live(), baseline);
 }
 
 void KisPageStorePhysicalClaimTest::backingHandoffAccounting_data()
