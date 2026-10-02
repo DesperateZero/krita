@@ -13,7 +13,6 @@
 
 #include <QAtomicInt>
 #include <QMutex>
-#include <QVector>
 #include <QWaitCondition>
 
 #include <array>

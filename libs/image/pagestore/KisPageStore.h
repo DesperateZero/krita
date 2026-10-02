@@ -551,12 +551,6 @@ public:
                                      const KisPageVersion &observed,
                                      QString *error = nullptr);
     KisPreparedPageSet preparedPages(const KisPageTransaction &transaction) const;
-    // Derived extent from the canonical sparse index plus this transaction's
-    // sealed delta. No complete manifest export; not a visibility publication.
-    bool preparedPageExtent(const KisPageTransaction &transaction,
-                            KisSurfaceId surface,
-                            QRect *extent,
-                            QString *error = nullptr) const;
     KisImageEpochCommitTicket commit(const KisPageTransaction &transaction,
                                      const KisPreparedPageSet &preparedPages,
                                      KisRetainedImageEpochSnapshot *retainedAfter = nullptr);

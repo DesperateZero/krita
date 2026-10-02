@@ -97,6 +97,7 @@ public:
     KRITAIMAGE_EXPORT KisPageRetirementQueueSnapshot snapshot() const;
 
 private:
+    KisPageRetirementRecordPointer takeEffectRecord(const KisPageTransitionEffect &effect) noexcept;
     bool admitOwnedRetirementDebt(KisPageRetirementRecord &record,
                                   KisBackingBudgetReservation *reservation,
                                   KisBackingBudgetClass currentClass);

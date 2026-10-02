@@ -143,9 +143,6 @@ public:
     // Freeze the selected current/oldData visibility boundary under the
     // publication gate, then release that gate for the whole pixel traversal.
     KisCapturedReadView captureReadView(bool oldData = false, QString *error = nullptr) const;
-    // Current published/overlay existence only, never an exact pixel view.
-    bool resolveCurrentPagePresence(const QVector<KisLogicalPageId> &pages,
-                                    QVector<quint8> *present, QString *error = nullptr) const;
     QSharedPointer<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
         bool writable, QString *error = nullptr,
         QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;

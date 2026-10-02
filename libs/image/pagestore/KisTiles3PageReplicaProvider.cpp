@@ -12,7 +12,6 @@
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
 
-#include <QHash>
 #include <QMutexLocker>
 #include <QScopeGuard>
 #include <QWaitCondition>

@@ -149,11 +149,6 @@ public:
                                 QString *error,
                                 QMutexLocker<QMutex> &ownerLock);
     KisPreparedPageSet preparedPagesLocked(const KisPageTransaction &transaction) const;
-    bool preparedPageExtentLocked(const KisPageTransaction &transaction,
-                                  KisSurfaceId surface,
-                                  QRect *extent,
-                                  QString *error,
-                                  QMutexLocker<QMutex> &ownerLock) const;
     KisImageEpochCommitTicket commitLocked(const KisPageTransaction &transaction,
                                            const KisPreparedPageSet &preparedPages,
                                            KisRetainedImageEpochSnapshot *retainedAfter,

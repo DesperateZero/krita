@@ -346,7 +346,7 @@ private:
 };
 
 // Metadata-owned immutable candidate; provider lookup is done once, outside
-// owner/shard locks. The allocation record itself is stable across QHash moves.
+// owner/shard locks. Provider allocation nodes stay stable until retirement.
 class KisCpuReadBindingLink
 {
 public:

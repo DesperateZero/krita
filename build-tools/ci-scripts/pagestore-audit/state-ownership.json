@@ -277,14 +277,15 @@
     {
       "creation-paths": [
         "KisPageRetirementQueue::retireEffects",
-        "KisPageRetirementQueue::acceptEffect infallibly transfers an already funded Debt node under the original metadata owner gate, without provider code or allocation; no post-detach effect recovery record remains",
+        "KisPageRetirementQueue::retireEffects and acceptEffect consume the same takeEffectRecord invariant: metadata detach/publication committed Debt and retained the exact original record before acceptance; missing Debt/record is not a business fallback or silent skip. History transfer invokes no provider code or allocation; batch/foreground scheduling retains its existing policy, with no post-detach effect recovery record",
         "KisPageRetirementQueue::retireOrDefer",
         "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
         "unadmitted owned records request actual budget reservation grants through their original ledger; an already detached single record uses the existing atomic reclassification without batch Debt scratch, including at metadata hard capacity; unowned orphans retain only their original reservation",
         "cold configuration admits the original queue pass, wake context, retry notification task and funded reusable deadline before physical adoption; per-record subscriptions keep distinct weak wait incarnations, and refusal falls back to the already admitted retry",
         "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node; retry arm/cancel retain that same storage and takeReady consumes only its current monitor-published generation",
         "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait",
-        "bindRetirementOperation fills only the original record's preinstalled operation node; its record pointer distinguishes queue retirement from generic explicit Pending binding, deleting the detachedRetirement flag and result-time allocation fallback"
+        "bindRetirementOperation fills only the original record's preinstalled operation node; its record pointer distinguishes queue retirement from generic explicit Pending binding, deleting the detachedRetirement flag and result-time allocation fallback",
+        "the original record's backgroundRetirement permission serves effect transfer, initial retirement, subscription/retry and close recovery; registered records use the ledger's registration fact, unregistered result records fix permission once on admission, and the duplicate wakeEligible field and retry-time capability query are deleted"
       ],
       "current-writers": [
         "KisPageRetirementQueue"

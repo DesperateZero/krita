@@ -15,7 +15,6 @@
 #include "KisPageRetirementQueue_p.h"
 
 #include <QAtomicInt>
-#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSharedPointer>
@@ -221,8 +220,7 @@ private:
     bool belongsToPreparedTransactionLocked(
         const KisPageVersion &version,
         KisPageTransactionId transaction) const;
-    void retireEffectsUnlocked(QVector<KisPageTransitionEffect> effects,
-                               QMutexLocker<QMutex> &ownerLock);
+    void processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock);
 
     friend class KisPageReadCleanup;
     KisPageMetadataCoordinator &m_metadata;

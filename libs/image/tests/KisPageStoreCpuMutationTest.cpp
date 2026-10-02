@@ -4703,7 +4703,10 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         }
     }
     f.provider->rejectRetire = true;
+    std::atomic<int> permissionQueries{0};
+    f.provider->beforeCapabilities = [&] { ++permissionQueries; };
     const auto cleanup = qScopeGuard([&] {
+        f.provider->beforeCapabilities = {};
         blockingDebt.release();
         f.provider->rejectRetire = false;
         queue.beginClose(); queue.waitForIdle();
@@ -4720,6 +4723,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         // Subscriber/Wait preparation has no capacity. The original admitted
         // timer must continue retrying without another process call or input.
         QTRY_VERIFY_WITH_TIMEOUT(queue.snapshot().retryWakeups >= 3, 5000);
+        QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
         QCOMPARE(live(), limits.metadataArenaBytes);
         QCOMPARE(queue.snapshot().pendingReplicas, qsizetype(1));
         QCOMPARE(budget.usage().waitingRequests, quint32(0));
@@ -4730,6 +4734,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         f.provider->rejectRetire = false;
         QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
         queue.waitForIdle(); kisDrainPageStoreReclamation();
+        QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
         QCOMPARE(live(), limits.metadataArenaBytes - recordBytes);
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, quint64(0));
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
@@ -4753,6 +4758,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
     QVERIFY(queue.isDrained());
     kisDrainPageStoreReclamation();
+    QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
     QCOMPARE(references.loadAcquire(), 1);
 }
 

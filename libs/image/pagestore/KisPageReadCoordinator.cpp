@@ -660,7 +660,7 @@ bool KisPageReadCoordinator::cancelLocked(
         pending.state = KisPagePendingReadRecord::State::Collecting;
         try {
             m_history.collectUnreachableLocked(&request.version.key, 1);
-            retireEffectsUnlocked({}, ownerLock);
+            processRetirementsUnlocked(ownerLock);
             requestIt = m_requests.find(request.id.value);
             Q_ASSERT(requestIt != m_requests.end());
             if (requestIt->second.cancelHook.is_linked())
@@ -776,7 +776,7 @@ bool KisPageReadCoordinator::finishHistoryReadLocked(
     try {
         const auto key = record->replica.version.key;
         m_history.collectUnreachableLocked(&key, 1);
-        retireEffectsUnlocked({}, ownerLock);
+        processRetirementsUnlocked(ownerLock);
     } catch (const std::bad_alloc &) {
         // Preserve the exact key in its original admitted read record. A
         // failed GC notification must not discard that obligation after ack.
@@ -953,18 +953,16 @@ bool KisPageReadCoordinator::cancelPreparedRequestsLocked(
     return true;
 }
 
-void KisPageReadCoordinator::retireEffectsUnlocked(
-    QVector<KisPageTransitionEffect> effects,
-    QMutexLocker<QMutex> &ownerLock)
+void KisPageReadCoordinator::processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock)
 {
-    if (effects.isEmpty() && m_backgroundReclamation) return;
+    if (m_backgroundReclamation) return;
     ++m_activeProviderCalls;
     ownerLock.unlock();
     const auto relock = qScopeGuard([&] {
         ownerLock.relock();
         --m_activeProviderCalls;
     });
-    m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
+    m_retirementQueue.process(std::numeric_limits<qsizetype>::max());
 }
 
 void KisPageReadCoordinator::noteCapturedViewCreatedLocked()
@@ -1046,7 +1044,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
             // Keep the exact key until history accepts it. Retrying a refused
             // handoff must not release the already removed metadata token again.
             m_history.collectUnreachableLocked(&version.key, 1);
-            retireEffectsUnlocked({}, lock);
+            processRetirementsUnlocked(lock);
             ++pending.next;
             pending.versionReleased = false;
         }
@@ -1066,7 +1064,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
             } else {
                 m_epochs.collectUnretainedRoots();
                 m_history.collectUnreachableLocked(nullptr, 0, true);
-                retireEffectsUnlocked({}, lock);
+                processRetirementsUnlocked(lock);
             }
             pending.historyPending = false;
         }
@@ -1115,7 +1113,7 @@ bool KisPageReadCoordinator::releaseSnapshotLocked(
     m_epochs.collectUnretainedRoots();
     m_history.collectUnreachableLocked(changedPages ? changedPages->constData() : nullptr,
         changedPages ? changedPages->size() : 0, !changedPages);
-    retireEffectsUnlocked({}, lock);
+    processRetirementsUnlocked(lock);
     return true;
 }
 

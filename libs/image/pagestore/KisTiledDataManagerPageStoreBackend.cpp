@@ -1268,27 +1268,6 @@ bool KisTiledDataManagerPageStoreBackend::preparePagePresence(
     return true;
 }
 
-bool KisTiledDataManagerPageStoreBackend::resolveCurrentPagePresence(
-    const QVector<KisLogicalPageId> &pages, QVector<quint8> *present, QString *error) const
-{
-    if (!present) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 page presence output is unavailable"));
-        return false;
-    }
-    QVector<quint8> candidate;
-    try {
-        candidate.reserve(pages.size());
-        if (candidate.capacity() < pages.size()) throw std::bad_alloc();
-        candidate.resize(pages.size());
-    } catch (const std::bad_alloc &) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 page presence storage is unavailable"));
-        return false;
-    }
-    if (!resolveCurrentPagePresenceInto(pages, candidate.data(), candidate.size(), error)) return false;
-    present->swap(candidate);
-    return true;
-}
-
 bool KisTiledDataManagerPageStoreBackend::resolveCurrentPagePresenceInto(
     const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity, QString *error) const
 {

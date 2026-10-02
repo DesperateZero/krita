@@ -784,9 +784,8 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
         return false;
     }
     if (!update.prepareSurfaceLocked(error) || !update.tryInstallLocked(&metadataCleanup, error)) return false;
-    QVector<KisPageTransitionEffect> retirementEffects;
     update.collectRetirementsLocked();
-    retireEffectsUnlocked(std::move(retirementEffects), ownerLock);
+    retireEffectsUnlocked({}, ownerLock);
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -799,35 +798,6 @@ KisPreparedPageSet KisPagePublicationCoordinator::preparedPagesLocked(const KisP
     }
     result = transactionDeltaLocked(transaction.id);
     return result.isValid() ? result : KisPreparedPageSet();
-}
-
-bool KisPagePublicationCoordinator::preparedPageExtentLocked(const KisPageTransaction &transaction,
-                                                             KisSurfaceId surface,
-                                                             QRect *extent,
-                                                             QString *error,
-                                                             QMutexLocker<QMutex> &ownerLock) const
-{
-    if (extent)
-        *extent = {};
-    const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
-    KisSurfaceEpochState state;
-    if (!extent || !hasActiveTransactionLocked(transaction)
-        || !resolveSurfaceLocked(surface, overlay, &state)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("prepared extent transaction/surface is unavailable"));
-        return false;
-    }
-    KisPreparedPageSet delta = transactionDeltaLocked(transaction.id);
-    delta.surfaceChanges.clear();
-    const auto root = m_epochs.captureCommittedRoot();
-    ownerLock.unlock();
-    const bool valid = root.contentExtentAfterDelta(surface, state.logicalPageExtent, delta, extent);
-    ownerLock.relock();
-    if (!valid) {
-        KisPageStoreDetail::setError(error, QStringLiteral("prepared extent exceeds QRect range"));
-        return false;
-    }
-    KisPageStoreDetail::setError(error, {});
-    return true;
 }
 
 KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisPageTransaction &transaction,

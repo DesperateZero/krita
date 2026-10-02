@@ -4561,15 +4561,6 @@ KisPreparedPageSet KisPageStore::preparedPages(const KisPageTransaction &transac
     return d->publicationCoordinator.preparedPagesLocked(transaction);
 }
 
-bool KisPageStore::preparedPageExtent(const KisPageTransaction &transaction,
-                                      KisSurfaceId surface,
-                                      QRect *extent,
-                                      QString *error) const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.preparedPageExtentLocked(transaction, surface, extent, error, locker);
-}
-
 KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transaction,
                                                const KisPreparedPageSet &preparedPages,
                                                KisRetainedImageEpochSnapshot *retainedAfter)

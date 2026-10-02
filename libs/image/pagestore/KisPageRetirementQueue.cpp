@@ -187,9 +187,7 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
 
 void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
 {
-    record.wakeEligible = record.provider &&
-        record.provider->capabilities().backgroundRetirement;
-    if (!record.wakeEligible) return;
+    if (!record.backgroundRetirement) return;
     const auto backingClass = m_owner.backingClass(record.replica);
     const bool needsBudget = backingClass != KisBackingBudgetClass::RetirementDebt &&
                              !record.orphanDebtAdmitted;
@@ -265,7 +263,7 @@ void KisPageRetirementQueue::enqueuePendingLocked(
         disarmLocked(record, true);
         m_ready.splice(m_ready.end(), source, entry);
         schedulePassLocked();
-    } else if (!record.wait && record.wakeEligible) {
+    } else if (!record.wait && record.backgroundRetirement) {
         m_retryPending.splice(m_retryPending.end(), source, entry);
         scheduleRetryLocked();
     } else {
@@ -491,6 +489,9 @@ void KisPageRetirementQueue::retireOrDefer(
         return;
     }
     record->replica = replica; record->provider = provider; record->lastUse = lastUse;
+    // Registered records already carry the registration-time permission.
+    // An unregistered result fixes it once on entry to this original owner.
+    if (!owned) record->backgroundRetirement = provider && provider->capabilities().backgroundRetirement;
     record->orphanReservation = std::move(backing.reservation);
     bool debtAdmitted = false;
     if (owned) {
@@ -504,7 +505,7 @@ void KisPageRetirementQueue::retireOrDefer(
         if (owned || record->orphanReservation.isValid()) defer(std::move(record));
         return;
     }
-    if (provider && provider->capabilities().backgroundRetirement) {
+    if (record->backgroundRetirement) {
         QMutexLocker lock(&m_mutex);
         m_pendingBytes += replica.layout.byteSize;
         m_ready.push_back(*record.release());
@@ -559,23 +560,11 @@ void KisPageRetirementQueue::retireEffects(
     KisPageRetirementRecords ready;
     quint64 bytes = 0;
     for (const KisPageTransitionEffect &effect : effects) {
-        m_metadata.removeCpuReadBinding(effect.replica);
-        const auto provider = m_owner.provider(
-            effect.replica.provider, effect.replica.providerEpoch);
-        const auto backingClass = m_owner.backingClass(effect.replica);
-        const bool debtAdmitted = backingClass == KisBackingBudgetClass::RetirementDebt;
-        Q_ASSERT(debtAdmitted);
-        if (provider && provider->capabilities().backgroundRetirement && debtAdmitted) {
-            auto record = m_owner.takeRetirementRecord(effect.replica);
-            Q_ASSERT(record); // Every registered backing admitted its node.
-            if (!record) continue;
-            record->provider = provider;
-            record->lastUse = effect.lastUse;
+        auto record = takeEffectRecord(effect);
+        if (record->backgroundRetirement) {
             ready.push_back(*record.release());
             bytes += effect.replica.layout.byteSize;
-        } else {
-            retireOrDefer(effect.replica, provider, effect.lastUse, {});
-        }
+        } else if (!retireRecord(*record)) defer(std::move(record));
     }
     if (ready.empty()) return;
     QMutexLocker lock(&m_mutex);
@@ -585,17 +574,27 @@ void KisPageRetirementQueue::retireEffects(
     schedulePassLocked();
 }
 
-void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect) noexcept
+KisPageRetirementRecordPointer KisPageRetirementQueue::takeEffectRecord(
+    const KisPageTransitionEffect &effect) noexcept
 {
+    // Every production effect was accepted with committed Debt and an exact
+    // original record before metadata detach/publication. Neither batch nor
+    // History handoff may turn a broken acceptance invariant into recovery.
     if (m_owner.backingClass(effect.replica) != KisBackingBudgetClass::RetirementDebt)
-        qFatal("Detached history effect has no committed retirement debt");
+        qFatal("Detached effect has no committed retirement debt");
     m_metadata.removeCpuReadBinding(effect.replica);
     auto record = m_owner.takeRetirementRecord(effect.replica);
-    if (!record) qFatal("Detached history effect has no original retirement record");
+    if (!record) qFatal("Detached effect has no original retirement record");
+    record->lastUse = effect.lastUse;
+    return record;
+}
+
+void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect) noexcept
+{
+    auto record = takeEffectRecord(effect);
     // Registration fixed this threading permission before any backing existed.
     // Transfer needs neither a provider callback nor additional storage.
     const bool background = record->backgroundRetirement;
-    record->lastUse = effect.lastUse;
     QMutexLocker lock(&m_mutex);
     m_pendingBytes += effect.replica.layout.byteSize;
     (background ? m_ready : m_pending).push_back(*record.release());
@@ -644,7 +643,7 @@ void KisPageRetirementQueue::cancelCloseAndSchedule()
     m_ready.splice(m_ready.end(), m_retryPending);
     for (auto it = m_pending.begin(); it != m_pending.end();) {
         const auto current = it++;
-        if (current->wakeEligible) {
+        if (current->backgroundRetirement) {
             disarmLocked(*current);
             m_ready.splice(m_ready.end(), m_pending, current);
         }
