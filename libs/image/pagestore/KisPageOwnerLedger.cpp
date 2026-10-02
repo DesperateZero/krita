@@ -1346,12 +1346,32 @@ KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
     QVector<KisBackingClassChange> changes,
     const QVector<KisPageTransitionEffect> &retirementEffects,
     QString *error)
+try {
+    KisBackingBudgetController *budget;
+    {
+        QMutexLocker lock(&d->mutex);
+        budget = d->backingBudget;
+    }
+    if (!budget) {
+        KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
+        return {};
+    }
+    return prepareBackingChangesImpl(BackingChanges(changes.begin(), changes.end(),
+        KisMutationStorageAllocator<KisBackingClassChange>(budget)),
+        retirementEffects.constData(), retirementEffects.size(), error);
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("backing change storage budget is exhausted"));
+    return {};
+}
+
+KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
+    BackingChanges changes, const KisPageTransitionEffect *effects, qsizetype count, QString *error)
 {
-    return prepareBackingChangesImpl(changes, retirementEffects.constData(), retirementEffects.size(), error);
+    return prepareBackingChangesImpl(std::move(changes), effects, count, error);
 }
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChangesImpl(
-    const QVector<KisBackingClassChange> &input,
+    BackingChanges changes,
     const KisPageTransitionEffect *retirementEffects, qsizetype count, QString *error)
 try {
     if (count < 0 || (count && !retirementEffects)) {
@@ -1365,8 +1385,12 @@ try {
         return {};
     }
 
-    ChargedVector<KisBackingClassChange> changes(input.begin(), input.end(),
-        KisMutationStorageAllocator<KisBackingClassChange>(d->backingBudget));
+    if (!changes.get_allocator().budget && changes.empty())
+        changes = BackingChanges(KisMutationStorageAllocator<KisBackingClassChange>(d->backingBudget));
+    if (changes.get_allocator().budget != d->backingBudget) {
+        KisPageStoreDetail::setError(error, QStringLiteral("backing change storage belongs to another budget"));
+        return {};
+    }
     ChargedMap<BackingKey, KisBackingBudgetClass> targetClasses{
         KisMutationStorageAllocator<std::pair<const BackingKey, KisBackingBudgetClass>>(d->backingBudget)};
     targetClasses.reserve(changes.size());

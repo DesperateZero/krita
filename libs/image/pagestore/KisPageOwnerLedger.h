@@ -9,6 +9,7 @@
 
 #include <QScopedPointer>
 #include <QSharedPointer>
+#include <vector>
 
 #include "KisCompletionRegistry.h"
 #include "KisPageRetirementStorage_p.h"
@@ -202,8 +203,14 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
+    using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
+    // Original publication storage moves into the prepared ledger slot. The
+    // allocator must belong to this ledger's backing budget.
+    KisBackingClassChangeReservation prepareBackingChanges(
+        BackingChanges changes, const KisPageTransitionEffect *effects,
+        qsizetype count, QString *error = nullptr);
     KisBackingClassChangeReservation prepareBackingChangesImpl(
-        const QVector<KisBackingClassChange> &changes,
+        BackingChanges changes,
         const KisPageTransitionEffect *effects, qsizetype count, QString *error);
     KisReplicaBackingFootprint observeBackingFootprint(
         const KisReplicaHandle &replica) const;
@@ -220,6 +227,8 @@ private:
     friend class KisPageOwnerDomainAdmission;
     friend class KisBackingClassChangeReservation;
     friend class KisPageRetirementQueue;
+    friend class KisPagePublicationCoordinator;
+    friend class KisPageStoreReferenceTest;
 };
 
 #endif // KIS_PAGE_OWNER_LEDGER_H

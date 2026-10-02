@@ -59,6 +59,9 @@ public:
                                  QRect *extent) const;
 
 private:
+    // The original publication candidate admits pageCount() elements first.
+    // Copy this immutable tree directly into that paid capacity.
+    void copyPageVersions(KisPageVersion *output) const;
     // Original publication owner supplies sorted removal keys and prepared
     // addition keys. No storage allocation occurs in this bounds query.
     bool contentExtentAfterPages(KisSurfaceId surface, QSize pageExtent,
@@ -239,6 +242,10 @@ private:
         friend class KisImageEpochReferenceModel;
     };
 
+    // Publication supplies the complete owner-validated write set. A refused
+    // candidate may be retried or replaced without replaying an incremental delta.
+    bool preparePublication(const KisPreparedPageSet &preparedPages, QString *error = nullptr);
+    bool prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure);
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);
     bool installReservedRoot(PreparedRootReservation &candidate, void *context,

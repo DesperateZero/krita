@@ -844,6 +844,22 @@ private Q_SLOTS:
     void surfaceRectPageWorkingSet_data();
     void surfaceRectPageWorkingSet();
     void commitValidatesOriginalDelta();
+    void publicationInputRefusalKeepsOriginalTransaction_data()
+    {
+        QTest::addColumn<bool>("late");
+        QTest::addColumn<bool>("advance");
+        QTest::newRow("descriptor-reference-array") << false << false;
+        QTest::newRow("backing-array-after-candidates") << true << false;
+        QTest::newRow("continue-after-refusal") << true << true;
+    }
+    void publicationInputRefusalKeepsOriginalTransaction();
+    void restorationUsesOriginalTargets_data()
+    {
+        QTest::addColumn<bool>("delta");
+        QTest::newRow("full-root") << false;
+        QTest::newRow("duplicate-delta") << true;
+    }
+    void restorationUsesOriginalTargets();
     void commitPreparationClaimsAndLateCapture();
     void publicationCleanupUsesBoundedBackgroundPasses();
     void hostLogicalCompletionIsPreparedOnce();
@@ -2509,6 +2525,97 @@ void KisPageStoreCpuMutationTest::commitValidatesOriginalDelta()
     QCOMPARE(quint8(f.pixel({}, 2)[0]), quint8(0x72));
     QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(0));
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::publicationInputRefusalKeepsOriginalTransaction()
+{
+    QFETCH(bool, late);
+    QFETCH(bool, advance);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    Fixture f; f.provider->disableBackgroundRetirement = true;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx);
+    for (int x : {0, 2}) {
+        auto write = mutation.beginWrite(key(x)); QVERIFY(write.isValid());
+        static_cast<quint8 *>(write.data())[0] = 0x72;
+    }
+    QVERIFY(mutation.seal()); mutation = {};
+    QVERIFY(f.remove(tx, key(1)));
+    QVERIFY(f.store->stageSurfaceDefaultPixel(tx, {1}, QByteArray(f.bpp, char(0x44)), &f.error));
+    const auto original = f.store->preparedPages(tx);
+    const auto preparations = f.store->publicationStatistics().preparedMutationCommits;
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    size_t fillerBytes = 0;
+    void *filler = nullptr;
+    const auto fillCapacity = [&] {
+        fillerBytes = size_t(limits.metadataArenaBytes - live());
+        filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+        QCOMPARE(live(), limits.metadataArenaBytes);
+    };
+    if (!late) fillCapacity();
+    bool validated = false;
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        validated |= phase == KisPageStoreDiagnosticPhase::CommitProviderValidation;
+        if (late && !filler && phase == KisPageStoreDiagnosticPhase::CommitCompletion)
+            fillCapacity(); // Metadata and epoch candidates already belong to the original Data.
+    });
+    {
+        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+        QVERIFY(!f.store->commit(tx, original).isValid());
+        QCOMPARE(validated, late);
+        QVERIFY(filler);
+        QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(1));
+        QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(2));
+        QCOMPARE(f.store->publicationStatistics().preparedMutationCommits, preparations);
+        if (late) QVERIFY(live() < limits.metadataArenaBytes); // Real prepared candidate capacity was freed.
+        else QCOMPARE(live(), limits.metadataArenaBytes);
+    }
+    if (!late) QCOMPARE(live(), before);
+    filler = nullptr; late = false; // Retry has the released capacity, with no new blocker.
+    auto continuation = f.begin(tx); QVERIFY(continuation.isActive()); QVERIFY(continuation.cancel());
+    auto retry = original;
+    if (advance) {
+        auto next = f.begin(tx);
+        auto write = next.beginWrite(key(0)); QVERIFY(write.isValid());
+        static_cast<quint8 *>(write.data())[0] = 0x73;
+        write = {}; QVERIFY(next.seal());
+        retry = f.store->preparedPages(tx);
+    }
+    QVERIFY(f.store->commit(tx, retry).isValid()); QVERIFY(validated);
+    QCOMPARE(quint8(f.pixel({}, 0)[0]), quint8(advance ? 0x73 : 0x72));
+    QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x44)));
+    QCOMPARE(quint8(f.pixel({}, 2)[0]), quint8(0x72));
+    QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::restorationUsesOriginalTargets()
+{
+    QFETCH(bool, delta);
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto retained = f.store->captureRetainedEpoch(); QVERIFY(retained.isValid());
+    QVERIFY(f.fill(0x72)); QVERIFY(f.setDefault(0x55));
+    for (int x : {2, 3}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x55)));
+    const auto before = f.store->publicationStatistics();
+    int attempts = 0;
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase == KisPageStoreDiagnosticPhase::RestorePublishOwnerWait && ++attempts == 1)
+            QCOMPARE(f.pixel({}, 4), QByteArray(f.bpp, char(0x55))); // New directory key, outside the original prefix.
+    });
+    const QVector<KisPageKey> changed{key(1), {}, key(0), key(1), key(0)};
+    const auto restored = delta ? f.store->restoreRetainedEpochDelta(retained, changed)
+                               : f.store->restoreRetainedEpoch(retained);
+    QVERIFY(restored.isValid()); QCOMPARE(attempts, 2);
+    QCOMPARE(f.store->publicationStatistics().restoreDirectoryRepreparations,
+             before.restoreDirectoryRepreparations + 1);
+    for (int x : {0, 1}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x31)));
+    for (int x : {2, 3, 4}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x2a)));
+    QVERIFY(f.store->releaseSnapshot(retained.token)); QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture()

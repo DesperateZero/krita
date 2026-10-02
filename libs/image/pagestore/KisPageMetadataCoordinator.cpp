@@ -2244,6 +2244,25 @@ KisPageMetadataCoordinator::prepareRestoration(KisImageEpochId minimumEpoch,
 }
 
 KisPageMetadataCoordinator::PreparedPublication
+KisPageMetadataCoordinator::preparePublication(const KisPageTransaction &transaction,
+                                               KisImageEpochId minimumEpoch,
+                                               const PublicationChange *changes, qsizetype count,
+                                               QString *error) const
+{
+    return preparePublicationImpl(transaction, minimumEpoch, nullptr, count, false, error,
+                                  PreparationKind::Publication, nullptr, changes);
+}
+
+KisPageMetadataCoordinator::PreparedPublication
+KisPageMetadataCoordinator::prepareRestoration(KisImageEpochId minimumEpoch,
+                                               const KisPageVersion *versions, qsizetype count,
+                                               QString *error) const
+{
+    return preparePublicationImpl({}, minimumEpoch, nullptr, count, true, error,
+                                  PreparationKind::Publication, versions);
+}
+
+KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transaction,
                                             const KisPageVersion *versions, qsizetype count,
                                             QString *error) const
@@ -2284,13 +2303,14 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
                                                    bool restoration,
                                                    QString *error,
                                                    PreparationKind kind,
-                                                   const KisPageVersion *detachedVersions) const
+                                                   const KisPageVersion *versions,
+                                                   const PublicationChange *changes) const
 try {
     const bool mutation = kind != PreparationKind::Publication;
     const bool detachment = kind == PreparationKind::Detachment;
     const bool recoverable = kind == PreparationKind::RecoverableWrite;
     PreparedPublication result;
-    if (!isOperational() || count < 0 || (count && (detachment ? !detachedVersions : !transitions))
+    if (!isOperational() || count < 0 || (count && !transitions && !versions && !changes)
         || (!restoration && !transaction.isValid())
         || (!mutation && (!minimumEpoch.isValid() || minimumEpoch.value <= transaction.baseEpoch.value))) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
@@ -2309,13 +2329,24 @@ try {
     data->entries.reserve(size_t(count));
     const KisPageStateMachine stateMachine;
     for (qsizetype i = 0; i < count; ++i) {
-        KisPageTransition detached;
-        if (detachment) {
-            detached.kind = KisPageTransitionKind::DetachPreparedVersion;
-            detached.version = detachedVersions[i];
-            detached.transaction = transaction.id;
+        KisPageTransition input;
+        if (versions) {
+            input.kind = detachment ? KisPageTransitionKind::DetachPreparedVersion
+                                    : KisPageTransitionKind::RestoreCommittedVersion;
+            input.version = versions[i];
+            input.transaction = detachment ? transaction.id : KisPageTransactionId{};
+            input.imageEpoch = minimumEpoch;
+        } else if (changes) {
+            input.kind = changes[i].kind;
+            input.version = changes[i].version;
+            input.target = changes[i].target;
+            input.imageEpoch = minimumEpoch;
+            if (input.kind == KisPageTransitionKind::CommitTransaction)
+                input.transaction = transaction.id;
         }
-        const auto &transition = detachment ? detached : transitions[i];
+        // Compact production inputs and the Qt oracle consume this same
+        // transition policy. Only one complete stack value is needed at a time.
+        const auto &transition = versions || changes ? input : transitions[i];
         const bool write = transition.kind == KisPageTransitionKind::CommitTransaction;
         if ((detachment && !transition.version.isValid())
             || (recoverable && (transition.kind != KisPageTransitionKind::AcquireRecoverableWrite
@@ -3150,29 +3181,26 @@ bool KisPageMetadataCoordinator::canAddTransientVersion(const KisPageVersion &ta
     return count < limit;
 }
 
-bool KisPageMetadataCoordinator::publicationSnapshot(const KisPageKey &key,
-                                                     const KisPageVersion &target,
-                                                     KisPageStateSnapshot *snapshot) const
+bool KisPageMetadataCoordinator::queryPublication(const KisPageKey &key,
+                                                  const KisPageVersion &target,
+                                                  PublicationInfo *info) const
 {
     auto *shard = d->shardFor(key);
-    if (!shard || !snapshot || (target.isValid() && !(target.key == key)))
+    if (!shard || !info || (target.isValid() && !(target.key == key)))
         return false;
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.constFind(key);
     if (page == shard->pages.cend())
         return false;
-    *snapshot = shard->header(key, page.value());
-    const KisPageVersion current{key, snapshot->publishedGeneration, snapshot->publishedDefaultPixelRevision};
-    KisPageVersionStateSnapshot version;
-    if (shard->records.snapshot(current, &version)) {
-        snapshot->versions.append(std::move(version));
-    }
-    if (target.isValid() && !(target == current)) {
-        if (shard->records.snapshot(target, &version)) {
-            snapshot->versions.append(std::move(version));
-        }
-    }
-    shard->publicationLookupVersionInputs += quint64(snapshot->versions.size());
+    const auto *head = shard->records.version(page->publishedVersion);
+    Q_ASSERT(head);
+    *info = {};
+    info->current = shard->records.versionInfo<VersionInfo>(head->version, head->version.generation);
+    if (target.isValid())
+        info->target = target == head->version ? info->current
+            : shard->records.versionInfo<VersionInfo>(target, head->version.generation);
+    shard->publicationLookupVersionInputs += quint64(info->current.version.isValid())
+        + quint64(info->target.version.isValid() && !(info->target.version == info->current.version));
     return true;
 }
 
@@ -3328,16 +3356,19 @@ bool KisPageMetadataCoordinator::discardHistory(
     }
 }
 
-QVector<KisPageStateSnapshot> KisPageMetadataCoordinator::publicationHeaders() const
+KisPageMetadataCoordinator::PublicationHeads KisPageMetadataCoordinator::publicationHeads() const
 {
     if (!d->operational.load(std::memory_order_acquire))
         return {};
-    QVector<KisPageStateSnapshot> result;
+    PublicationHeads result(d->budgetAuthority->storage<KisPageVersion>());
     for (const auto &shard : d->shards) {
         QMutexLocker lock(&shard->mutex);
         result.reserve(result.size() + shard->pages.size());
-        for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
-            result.append(shard->header(page.key(), page.value()));
+        for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page) {
+            const auto *head = shard->records.version(page->publishedVersion);
+            Q_ASSERT(head);
+            result.push_back(head->version);
+        }
         shard->publicationDirectoryHeaders += quint64(shard->pages.size());
     }
     return result;

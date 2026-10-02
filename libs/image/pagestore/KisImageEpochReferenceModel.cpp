@@ -280,13 +280,14 @@ bool resolvePageRoot(const PageRoot &root, const KisPageKey &key, KisPageVersion
     return false;
 }
 
-void appendPageRoot(const PageRoot &root, QVector<KisPageVersion> *manifest)
+template<class Append>
+void appendPageRoot(const PageRoot &root, const Append &append)
 {
     if (!root)
         return;
-    appendPageRoot(root->left, manifest);
-    manifest->append(root->version);
-    appendPageRoot(root->right, manifest);
+    appendPageRoot(root->left, append);
+    append(root->version);
+    appendPageRoot(root->right, append);
 }
 
 PageRoot buildPageRoot(const QVector<KisPageVersion> &manifest, qsizetype begin, qsizetype end)
@@ -398,8 +399,13 @@ QVector<KisPageVersion> KisImageEpochRootSnapshot::manifest() const
 {
     QVector<KisPageVersion> result;
     result.reserve(pageRootCount(m_pageRoot));
-    appendPageRoot(m_pageRoot, &result);
+    appendPageRoot(m_pageRoot, [&](const auto &version) { result.append(version); });
     return result;
+}
+
+void KisImageEpochRootSnapshot::copyPageVersions(KisPageVersion *output) const
+{
+    appendPageRoot(m_pageRoot, [&](const auto &version) { *output++ = version; });
 }
 
 qsizetype KisImageEpochRootSnapshot::pageCount() const
@@ -797,6 +803,16 @@ KisPageTransaction KisImageEpochReferenceModel::beginTransaction(KisImageEpochId
 
 bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPages, QString *error)
 {
+    return prepareImpl(preparedPages, false, error);
+}
+
+bool KisImageEpochReferenceModel::preparePublication(const KisPreparedPageSet &preparedPages, QString *error)
+{
+    return prepareImpl(preparedPages, true, error);
+}
+
+bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error)
+{
     if (!preparedPages.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page set is invalid"));
         return false;
@@ -817,7 +833,7 @@ bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPage
         return false;
     }
 
-    QVector<KisPageVersion> changes = transactionIt->snapshot.changes;
+    QVector<KisPageVersion> changes = complete ? QVector<KisPageVersion>{} : transactionIt->snapshot.changes;
     QHash<KisPageKey, qsizetype> changeIndexes;
     changeIndexes.reserve(changes.size() + preparedPages.proofs.size());
     for (qsizetype i = 0; i < changes.size(); ++i) {
@@ -849,7 +865,7 @@ bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPage
     std::sort(changes.begin(), changes.end(), [](const KisPageVersion &lhs, const KisPageVersion &rhs) {
         return pageKeyLess(lhs.key, rhs.key);
     });
-    QVector<KisSurfaceEpochChange> surfaceChanges = transactionIt->snapshot.surfaceChanges;
+    QVector<KisSurfaceEpochChange> surfaceChanges = complete ? QVector<KisSurfaceEpochChange>{} : transactionIt->snapshot.surfaceChanges;
     QHash<quint64, qsizetype> surfaceChangeIndexes;
     surfaceChangeIndexes.reserve(surfaceChanges.size() + preparedPages.surfaceChanges.size());
     for (qsizetype i = 0; i < surfaceChanges.size(); ++i) {
@@ -873,7 +889,7 @@ bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPage
             surfaceChangeIndexes.insert(change.after.surface.value, surfaceChanges.size() - 1);
         }
     }
-    QVector<KisPageKey> removedPages = transactionIt->snapshot.removedPages;
+    QVector<KisPageKey> removedPages = complete ? QVector<KisPageKey>{} : transactionIt->snapshot.removedPages;
     QSet<KisPageKey> removedPageSet(removedPages.begin(), removedPages.end());
     for (const KisPageKey &key : preparedPages.removedPages) {
         KisPageVersion removedVersion;

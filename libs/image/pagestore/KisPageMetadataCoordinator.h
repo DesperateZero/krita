@@ -205,12 +205,6 @@ public:
     KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion);
-    // Bounded owner/coordinator publication projection. This is not a caller
-    // capability and never exports the complete history.
-    bool publicationSnapshot(const KisPageKey &key,
-                             const KisPageVersion &target,
-                             KisPageStateSnapshot *snapshot) const;
-
     qsizetype pageCount() const;
     KisPageMetadataMetrics metrics() const;
     KisPageMetadataFootprint footprint() const;
@@ -279,10 +273,18 @@ private:
     // Admission guard only: exact target lookup plus mutable count and
     // Retiring witnesses. No whole-page version projection escapes the shard.
     bool canAddTransientVersion(const KisPageVersion &target, quint32 limit) const;
-    // Header + current head + optional exact target only. Directory headers
-    // contain NO version records and never constitute a coherent epoch view.
-    // Owner directory revision and per-page candidate revisions still apply.
-    QVector<KisPageStateSnapshot> publicationHeaders() const;
+    struct PublicationInfo {
+        VersionInfo current;
+        VersionInfo target;
+    };
+    // Current head and optional exact target share one shard cut. No replica
+    // or protection arrays escape this observation; preparation revalidates.
+    bool queryPublication(const KisPageKey &key, const KisPageVersion &target,
+                          PublicationInfo *info) const;
+    using PublicationHeads = std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>>;
+    // Paid directory identities, not a coherent epoch view. The owner's
+    // registration revision and per-page candidate revisions still apply.
+    PublicationHeads publicationHeads() const;
     struct HistorySlice {
         static constexpr qsizetype Limit = 32;
         std::array<KisPageVersion, Limit> versions{};
@@ -397,6 +399,18 @@ private:
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
                                            const QVector<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
+    struct PublicationChange {
+        KisPageTransitionKind kind;
+        KisPageVersion version;
+        KisReplicaHandle target;
+    };
+    PreparedPublication preparePublication(const KisPageTransaction &transaction,
+                                           KisImageEpochId minimumEpoch,
+                                           const PublicationChange *changes, qsizetype count,
+                                           QString *error = nullptr) const;
+    PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
+                                           const KisPageVersion *versions, qsizetype count,
+                                           QString *error = nullptr) const;
     enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
@@ -404,7 +418,8 @@ private:
                                                bool restoration,
                                                QString *error,
                                                PreparationKind kind = PreparationKind::Publication,
-                                               const KisPageVersion *detachedVersions = nullptr) const;
+                                               const KisPageVersion *versions = nullptr,
+                                               const PublicationChange *changes = nullptr) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.
