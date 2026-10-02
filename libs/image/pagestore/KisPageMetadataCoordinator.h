@@ -226,9 +226,6 @@ private:
     // witnesses. Unclassified transitions retain the full reference path.
     // Omitted history is NOT absence of logical/physical owners. These bounded
     // projections cannot establish an in-place permit or root reachability.
-    bool mutationBaseSnapshot(const KisPageVersion &base,
-                              const KisPageVersion &sealed,
-                              KisPageStateSnapshot *snapshot) const;
     // Original exact query: scalar facts only. Generic read selection supplies
     // its funded candidate array; leases/tokens are never exported here.
     struct VersionInfo {
@@ -255,6 +252,18 @@ private:
     using ReplicaCandidates = std::vector<ReplicaCandidate, KisMutationStorageAllocator<ReplicaCandidate>>;
     bool versionSnapshot(const KisPageVersion &version, VersionInfo *snapshot,
                          ReplicaCandidates *replicas = nullptr) const;
+    struct MutationBaseInfo {
+        bool baseExists = false;
+        bool hasWriter = false;
+        KisPageGeneration nextGeneration;
+        VersionInfo selected;
+        KisReplicaHandle recoverableBefore;
+    };
+    // One shard cut for the root base, sealed selection and Fresh candidate.
+    // This is a scalar observation; joint write preparation still revalidates
+    // eligibility and acquires the physical claim before touching any bytes.
+    bool queryMutationBase(const KisPageVersion &base, const KisPageVersion &sealed,
+                           bool discoverBefore, MutationBaseInfo *info) const;
     // Cold exact query for original read-release records. Completion may clear
     // multiple leases carrying the same ticket; this never grants write access.
     bool queryLastUsePending(const KisReplicaHandle &replica,

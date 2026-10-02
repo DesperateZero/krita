@@ -1387,6 +1387,24 @@ struct ShardRecordStore {
         return stored && owner ? replicaHandle(*stored, owner->version) : KisReplicaHandle{};
     }
 
+    template<class Info>
+    Info versionInfo(const KisPageVersion &identity, KisPageGeneration publishedGeneration) const
+    {
+        Info result;
+        result.publishedGeneration = publishedGeneration;
+        KisVersionSlotId slot;
+        if (!findVersion(identity, &slot)) return result;
+        const auto *stored = version(slot);
+        Q_ASSERT(stored);
+        result.version = stored->version;
+        result.publication = stored->publication;
+        result.preparedBy = stored->preparedBy;
+        result.authority = projectReplica(stored->authorityReplica);
+        result.replicaCount = stored->replicaCount;
+        result.captured = stored->capturedReadViews.isValid();
+        return result;
+    }
+
     KisPageStateSnapshot
     header(const KisPageKey &key, const MetadataPage &page, const MetadataPageActivity *activity) const
     {
@@ -3047,29 +3065,50 @@ bool KisPageMetadataCoordinator::pageSnapshot(const KisPageKey &key, KisPageStat
     return true;
 }
 
-bool KisPageMetadataCoordinator::mutationBaseSnapshot(const KisPageVersion &base,
-                                                      const KisPageVersion &sealed,
-                                                      KisPageStateSnapshot *snapshot) const
+bool KisPageMetadataCoordinator::queryMutationBase(const KisPageVersion &base,
+                                                   const KisPageVersion &sealed,
+                                                   bool discoverBefore, MutationBaseInfo *info) const
 {
     auto *shard = d->shardFor(base.key);
-    if (!shard || !snapshot || (sealed.isValid() && !(sealed.key == base.key)))
+    if (!shard || !info || (sealed.isValid() && !(sealed.key == base.key)))
         return false;
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.constFind(base.key);
     if (page == shard->pages.cend())
         return false;
-    *snapshot = shard->header(base.key, page.value());
-    for (const auto &identity : {base, sealed}) {
-        if (!identity.isValid() || (identity == sealed && sealed == base && !snapshot->versions.isEmpty()))
-            continue;
-        KisPageVersionStateSnapshot version;
-        if (shard->records.snapshot(identity, &version)) {
-            snapshot->versions.append(std::move(version));
+    MutationBaseInfo next;
+    next.baseExists = base.isValid() && shard->records.findVersion(base);
+    next.hasWriter = shard->hasWriter(base.key);
+    next.nextGeneration = page->nextGeneration;
+    const auto *published = shard->records.version(page->publishedVersion);
+    Q_ASSERT(published);
+    const auto selected = sealed.isValid() ? sealed : base;
+    next.selected = shard->records.versionInfo<VersionInfo>(selected, published->version.generation);
+    if (discoverBefore && next.selected.version.isValid() && !selected.isDefaultPixel()
+        && next.selected.replicaCount > 1) {
+        KisVersionSlotId slot;
+        const bool found = shard->records.findVersion(selected, &slot);
+        Q_ASSERT(found); Q_UNUSED(found);
+        const auto *version = shard->records.version(slot);
+        for (auto replicaSlot = version->firstReplica; replicaSlot.isValid();) {
+            const auto *replica = shard->records.replica(replicaSlot);
+            const auto handle = replicaHandle(*replica, selected);
+            if (replica->validity == KisReplicaValidity::Valid && !replica->activeOperation.isValid()
+                && handle.domain == KisPageAccessDomain::CpuRam
+                && handle.layout == next.selected.authority.layout
+                && !(handle.physicalSlotIdentity() == next.selected.authority.physicalSlotIdentity())) {
+                next.recoverableBefore = handle;
+                break;
+            }
+            replicaSlot = replica->nextReplica;
         }
     }
-    shard->mutationBaseVersionInputs += quint64(snapshot->versions.size());
+    const quint64 inputs = quint64(next.baseExists)
+        + quint64(sealed.isValid() && !(sealed == base) && next.selected.version.isValid());
+    shard->mutationBaseVersionInputs += inputs;
     if (kisOnPageStoreReclamationThread())
-        shard->backgroundMutationBaseVersionInputs += quint64(snapshot->versions.size());
+        shard->backgroundMutationBaseVersionInputs += inputs;
+    *info = next;
     return true;
 }
 
@@ -3082,19 +3121,13 @@ bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity,
         QMutexLocker lock(&shard->mutex);
         const auto page = shard->pages.constFind(identity.key);
         if (page == shard->pages.cend()) return false;
-        VersionInfo next;
         const auto *published = shard->records.version(page->publishedVersion);
         Q_ASSERT(published);
-        next.publishedGeneration = published ? published->version.generation : KisPageGeneration{};
+        auto next = shard->records.versionInfo<VersionInfo>(identity,
+            published ? published->version.generation : KisPageGeneration{});
         KisVersionSlotId slot;
         if (shard->records.findVersion(identity, &slot)) {
             const auto *version = shard->records.version(slot);
-            next.version = version->version;
-            next.publication = version->publication;
-            next.preparedBy = version->preparedBy;
-            next.authority = shard->records.projectReplica(version->authorityReplica);
-            next.replicaCount = version->replicaCount;
-            next.captured = version->capturedReadViews.isValid();
             if (replicas) {
                 if (replicas->capacity() < version->replicaCount) {
                     const auto count = version->replicaCount;

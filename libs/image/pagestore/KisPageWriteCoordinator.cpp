@@ -2059,26 +2059,27 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
         return fail(QStringLiteral("write base does not resolve"));
     const auto sealed = pending ? pending->baseVersion
         : publication.findPreparedProofLocked(transaction.id, intent.key).authority.version;
-    KisPageStateSnapshot snapshot;
-    if (!metadata->mutationBaseSnapshot(baseVersion, sealed, &snapshot)
-        || !snapshot.findVersion(baseVersion)) {
+    const bool removed = (intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval))
+        || publication.stagesRemovalLocked(transaction.id, intent.key);
+    const bool discoverBefore = recoverableBefore && !pending && !removed;
+    KisPageMetadataCoordinator::MutationBaseInfo baseInfo;
+    if (!metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo)
+        || !baseInfo.baseExists) {
         KisSurfaceEpochState before;
         if (!epoch->surfaceState(intent.key.surface, overlay, &before)
             || !publication.ensureVirtualDefaultLocked(baseVersion, before, error)
-            || !metadata->mutationBaseSnapshot(baseVersion, sealed, &snapshot))
+            || !metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo))
             return false;
     }
-    if (snapshot.writer.isValid())
+    if (baseInfo.hasWriter)
         return fail(QStringLiteral("write page already has a writer"));
     // Only a previously sealed overlay (or the exact base of a private target
     // being replaced) supersedes the transaction root. Never scan all history
     // for another Prepared version and accidentally expose unsealed work.
     if (sealed.isValid()) baseVersion = sealed;
-    const auto *base = snapshot.findVersion(baseVersion);
-    if (!base || (!base->isVirtualDefault() && !base->authority.isValid()))
+    const auto &base = baseInfo.selected;
+    if (!base.version.isValid() || (!base.isVirtualDefault() && !base.authority.isValid()))
         return fail(QStringLiteral("write base has no exact authority"));
-    const bool removed = (intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval))
-        || publication.stagesRemovalLocked(transaction.id, intent.key);
     if (removed || baseVersion.isDefaultPixel() || intent.inputKind == KisPageWriteInputKind::Semantic) {
         KisSurfaceEpochState surface;
         if (!publication.resolveSurfaceLocked(intent.key.surface, overlay, &surface))
@@ -2086,28 +2087,12 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
         *descriptor = surface.allocationDescriptor();
     } else if (!publication.descriptorLocked(baseVersion, descriptor))
         return fail(QStringLiteral("write base descriptor is unavailable"));
-    // Reuse the exact base snapshot already needed for every first write.
-    // The common single-replica Fresh path does no second snapshot/provider
-    // lookup. This is only a candidate; joint preparation revalidates it.
-    if (recoverableBefore) {
-        *recoverableBefore = {};
-        if (!pending && !removed && !baseVersion.isDefaultPixel() && base->replicas.size() > 1) {
-            for (const auto &replica : base->replicas) {
-                if (replica.validity == KisReplicaValidity::Valid && !replica.activeOperation.isValid()
-                    && replica.replica.domain == KisPageAccessDomain::CpuRam
-                    && replica.replica.layout == base->authority.layout
-                    && !(replica.replica.physicalSlotIdentity() == base->authority.physicalSlotIdentity())) {
-                    *recoverableBefore = replica.replica;
-                    break;
-                }
-            }
-        }
-    }
+    if (recoverableBefore) *recoverableBefore = baseInfo.recoverableBefore;
     *write = {};
     write->kind = KisPageTransitionKind::AcquireWrite;
     write->baseVersion = baseVersion;
-    write->version = pending ? pending->version : KisPageVersion{intent.key, snapshot.nextGeneration};
-    write->source = pending ? pending->target : base->authority;
+    write->version = pending ? pending->version : KisPageVersion{intent.key, baseInfo.nextGeneration};
+    write->source = pending ? pending->target : base.authority;
     write->transaction = transaction.id;
     write->operation = ownerLedger->nextOperationId();
     write->writer = ownerLedger->nextWriterToken();

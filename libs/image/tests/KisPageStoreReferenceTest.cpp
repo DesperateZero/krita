@@ -4664,6 +4664,20 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
     QFETCH(int, history);
     auto page = pageWithHistory(history);
     const auto base = page.versions.first().version;
+    KisCompletionRegistry completions;
+    const auto lastUse = completions.allocatePending(completions.registerSource(KisCompletionDomain::CpuJob));
+    auto beforeReplica = replica(base, 1, 1, 10000);
+    auto wrongDomain = beforeReplica; wrongDomain.allocation.slot = 10001;
+    wrongDomain.domain = KisPageAccessDomain::DiscreteVram;
+    auto wrongLayout = beforeReplica; wrongLayout.allocation.slot = 10002;
+    ++wrongLayout.layout.layoutRevision;
+    auto notReady = beforeReplica; notReady.allocation.slot = 10003;
+    auto &baseState = page.versions.first();
+    baseState.replicas.append({wrongDomain, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    baseState.replicas.append({wrongLayout, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    baseState.replicas.append({notReady, KisReplicaValidity::Allocated, {}, {}, 0, {}});
+    baseState.replicas.append({beforeReplica, KisReplicaValidity::Valid, {}, {{29}}, 2, {lastUse}});
+    baseState.capturedReadViews.append({20});
     const auto sealed = pageVersion(0, page.nextGeneration.value++);
     const auto authority = replica(sealed, 1, 1, sealed.generation.value);
     page.versions.append({sealed,
@@ -4672,25 +4686,77 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
                           authority,
                           {71},
                           {}});
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 16 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
     KisPageMetadataCoordinator coordinator;
+    coordinator.attachBackingBudget(budget);
     QVERIFY(coordinator.configure(1));
     QVERIFY(coordinator.registerPage(page));
     const auto before = coordinator.metrics();
-    KisPageStateSnapshot snapshot;
-    QVERIFY(coordinator.mutationBaseSnapshot(base, sealed, &snapshot));
-    QCOMPARE(snapshot.versions.size(), 2);
-    QCOMPARE(snapshot.versions.first().version, base);
-    QCOMPARE(snapshot.versions.last().version, sealed);
-    QCOMPARE(snapshot.nextGeneration, page.nextGeneration);
+    KisPageMetadataCoordinator::MutationBaseInfo info;
+    QVERIFY(coordinator.queryMutationBase(base, sealed, true, &info));
+    QVERIFY(info.baseExists && !info.hasWriter);
+    QCOMPARE(info.selected.version, sealed);
+    QCOMPARE(info.selected.authority, authority);
+    QVERIFY(!info.recoverableBefore.isValid());
+    QCOMPARE(info.nextGeneration, page.nextGeneration);
     KisPageMetadataCoordinator::VersionInfo exact;
     QVERIFY(coordinator.versionSnapshot(page.versions[history].version, &exact));
     QCOMPARE(exact.version, page.versions[history].version);
-    QVERIFY(coordinator.mutationBaseSnapshot(base, base, &snapshot));
-    QCOMPARE(snapshot.versions.size(), 1);
+    QVERIFY(coordinator.queryMutationBase(base, base, true, &info));
+    QCOMPARE(info.selected.version, base);
+    QCOMPARE(info.selected.authority, page.versions.first().authority);
+    QVERIFY(info.selected.captured);
+    QCOMPARE(info.recoverableBefore, beforeReplica);
     QCOMPARE(coordinator.metrics().mutationBaseVersionInputs - before.mutationBaseVersionInputs, quint64(3));
     auto foreign = sealed;
     ++foreign.key.surface.value;
-    QVERIFY(!coordinator.mutationBaseSnapshot(base, foreign, &snapshot));
+    QVERIFY(!coordinator.queryMutationBase(base, foreign, true, &info));
+    QCOMPARE(info.selected.version, base); // Refusal leaves caller output intact.
+
+    KisPageTransition write;
+    write.kind = KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = base; write.version = {base.key, page.nextGeneration};
+    write.source = page.versions.first().authority; write.target = replica(write.version, 1, 1, 30000);
+    write.transaction = {73}; write.operation = {74}; write.writer = {75};
+    const auto expected = KisPageStateMachine().apply(page, write); QVERIFY(expected.accepted);
+    QVERIFY(coordinator.applyOwner(page.key, write).accepted);
+    const KisPageVersion defaultVersion{pageKey(1), {1}, 7};
+    KisPageStateSnapshot defaultPage;
+    defaultPage.key = defaultVersion.key; defaultPage.publishedEpoch = {1};
+    defaultPage.publishedGeneration = {1}; defaultPage.publishedDefaultPixelRevision = 7;
+    defaultPage.nextGeneration = {2};
+    defaultPage.versions.append({defaultVersion, KisPagePublicationState::Published, {}, {}, {}, {}});
+    QVERIFY(coordinator.registerPage(defaultPage));
+    const auto live = [&] {
+        return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    const auto pressure = budget.usage().backpressureCount;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        QVERIFY(coordinator.queryMutationBase(base, {}, true, &info));
+        QVERIFY(info.baseExists && info.hasWriter);
+        QCOMPARE(info.nextGeneration, expected.next.nextGeneration);
+        QCOMPARE(info.selected.version, base);
+        QCOMPARE(info.recoverableBefore, beforeReplica);
+        QVERIFY(coordinator.queryMutationBase(base, {}, false, &info));
+        QVERIFY(!info.recoverableBefore.isValid());
+        auto missing = base; missing.generation = {50000};
+        QVERIFY(coordinator.queryMutationBase(missing, sealed, true, &info));
+        QVERIFY(!info.baseExists); QCOMPARE(info.selected.version, sealed);
+        QVERIFY(coordinator.queryMutationBase(base, missing, true, &info));
+        QVERIFY(info.baseExists && !info.selected.version.isValid());
+        QVERIFY(coordinator.queryMutationBase(defaultVersion, {}, true, &info));
+        QVERIFY(info.baseExists && info.selected.isVirtualDefault());
+        QVERIFY(!info.hasWriter && !info.recoverableBefore.isValid());
+    }
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    QCOMPARE(budget.usage().backpressureCount, pressure);
+    KisPageStateSnapshot actual;
+    QVERIFY(coordinator.pageSnapshot(page.key, &actual)); comparePageRecords(actual, expected.next);
 }
 
 void KisPageStoreReferenceTest::indexedMutationConcurrentProtection()

@@ -1558,7 +1558,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4022,
+      "lines": 4055,
       "member_fields": [
         "m_authority",
         "m_capacities",
@@ -1594,7 +1594,7 @@
         "Version",
         "VersionHash"
       ],
-      "sha256": "2860bade9e82b7fa8825bb780d9e9eb221833397c03bbdafda13974bf943cebe",
+      "sha256": "3d8c5e6a63c70d542f20c2de58a68314f250989f8433055878f791d08a728891",
       "synchronization_declarations": 4
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -1610,7 +1610,7 @@
         "array",
         "memory"
       ],
-      "lines": 450,
+      "lines": 459,
       "member_fields": [
         "m_conflicted"
       ],
@@ -1643,13 +1643,14 @@
         "KisPageReplicaProvider",
         "KisPageRetirementQueue",
         "KisPageStore",
+        "MutationBaseInfo",
         "PreparationKind",
         "PreparedPublication",
         "Private",
         "ReplicaCandidate",
         "VersionInfo"
       ],
-      "sha256": "44c6cfbcd2e5f782db564ab613c2e6c4f61f80aef903ff6e5851b817eee2680f",
+      "sha256": "f63dcec2d499542158b05bf8f5bb23e1703ed92ec411f4125ba4b38566b46c4f",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataCoordinator_p.h": {
@@ -2773,7 +2774,7 @@
         "cstring",
         "utility"
       ],
-      "lines": 2603,
+      "lines": 2588,
       "member_fields": [
         "m_usage"
       ],
@@ -2789,7 +2790,7 @@
         "KisBackingBudgetWaitStateDeleter",
         "Prepared"
       ],
-      "sha256": "4d2815733a5140cd77b7496d89f94a83bd6cc425676de709e7ebbeed91123989",
+      "sha256": "7cb5424f03f5d112d887253a2682603f742602128a87422e18b9fa52a6746201",
       "synchronization_declarations": 13
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -3490,7 +3491,7 @@
         "utility",
         "vector"
       ],
-      "lines": 10756,
+      "lines": 10822,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3550,7 +3551,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "52f0051e04640e0c633885a3e1c420c38d55080266e672764ea18e409bac7f95",
+      "sha256": "b6f422add3d22cb379eb4943fad9d579a36ce8b4d7fbe33d37eb07814af4dbd0",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6170,5 +6171,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "31dabb9789400c697851f553342f9051e4664c99"
+  "working_tree_head": "d9f15aa3ae0e29857873c1f3c7492a18694eb4e5"
 }
