@@ -1726,21 +1726,20 @@
         "KisPageRetirementRecord_p.h",
         "KisPageWriteCoordinator_p.h",
         "QEnableSharedFromThis",
-        "QHash",
         "QMutex",
         "QMutexLocker",
         "QPair",
         "QScopeGuard",
-        "QSet",
         "QWaitCondition",
         "algorithm",
         "atomic",
+        "boost/intrusive/set.hpp",
         "limits",
         "map",
         "unordered_map",
         "unordered_set"
       ],
-      "lines": 2040,
+      "lines": 2131,
       "member_fields": [
         "m_claims",
         "m_cookie",
@@ -1755,14 +1754,18 @@
         "Claim",
         "KisPageOwnerDomainAdmission",
         "KisPageOwnerLedger",
+        "LedgerIndex",
         "PreparedBackingChangeSlot",
         "PreparedRetirementCredit",
         "Probe",
+        "ProofLess",
+        "ProviderLess",
         "ProviderRegistration",
         "Registration",
-        "Reservation"
+        "Reservation",
+        "SealedProofRecord"
       ],
-      "sha256": "67911eb2cb8a443d40452834a19ce4cc6c14f4920bd326318cdfbc25c8f24c9d",
+      "sha256": "ab92d0d81c90367695d752572f5aecc8d51d5dff07165eec14e39a34e7b39a2c",
       "synchronization_declarations": 5
     },
     "libs/image/pagestore/KisPageOwnerLedger.h": {
@@ -3260,7 +3263,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreCpuMutationTest.cpp": {
-      "container_declarations": 72,
+      "container_declarations": 73,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisImageEpochReferenceModel.h",
@@ -3295,7 +3298,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 9256,
+      "lines": 9342,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3325,7 +3328,7 @@
         "Terminal",
         "TestProvider"
       ],
-      "sha256": "595439a4d94d17f979a983895422f856a2a98607e23a61fcc4e29b5269ed5df3",
+      "sha256": "d713ffbf5245d7cd10d13dd4563b50413d7dd04eab00d97d7f0cfa748d86b527",
       "synchronization_declarations": 1
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -3476,7 +3479,7 @@
         "utility",
         "vector"
       ],
-      "lines": 10476,
+      "lines": 10537,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3536,7 +3539,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "7b630fe1ca766bbfa49581e5327ecf1b03b598294909a008b45cccf67ab3d3b8",
+      "sha256": "d89861bd9369d4e07baa5a1e69bc80e7771071b208635a833b801ae182a4e7f3",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -3963,7 +3966,7 @@
         "memory",
         "new"
       ],
-      "lines": 305,
+      "lines": 306,
       "member_fields": [
         "m_bytes"
       ],
@@ -3974,7 +3977,7 @@
         "CpuResidentBinding",
         "KisCpuPageReplicaProvider"
       ],
-      "sha256": "72af5805e070e58ee58e7ee72d0e5237e918e1f45c831aaf1a617b466bff706f",
+      "sha256": "415cd7916dc7bb037ca5cb3dcb70204a7e291837ddf00192416cb3b8c16b6dd0",
       "synchronization_declarations": 0
     },
     "libs/image/tests/pagestore/KisCpuPageReplicaProvider.h": {
@@ -3983,16 +3986,17 @@
         "KisCompletionRegistry.h",
         "KisPageReplicaProvider.h",
         "QScopedPointer",
-        "QSharedPointer"
+        "QSharedPointer",
+        "functional"
       ],
-      "lines": 76,
+      "lines": 78,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [
         "KisCpuPageReplicaProvider",
         "Private"
       ],
-      "sha256": "81ce05d1d620af3cb923bf44afc3afbab39b7b8e58acd1b3630651b44974f594",
+      "sha256": "4ae78bc5541d825e8df2dfe8f0d50ff1a9f6226e1c6b2650a5d72ce541a5a92d",
       "synchronization_declarations": 0
     },
     "libs/image/tests/pagestore/KisPageStoreCheckpoint.cpp": {
@@ -6155,5 +6159,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "643965d644e6ed13d0437b2289b8abad0161ce05"
+  "working_tree_head": "64dd930babedfb71d9edabc7be97f11199cd5e6c"
 }

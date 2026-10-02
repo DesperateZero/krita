@@ -8044,8 +8044,12 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     QString error;
     QVERIFY2(provider->configure(providerConfig, completions, &error), qPrintable(error));
 
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
     KisPageOwnerLedger owner;
     QVERIFY2(owner.configure(completions, &error), qPrintable(error));
+    owner.attachBackingBudget(budget);
     KisPageOwnerLedger secondOwner;
     QVERIFY2(secondOwner.configure(completions, &error), qPrintable(error));
     QVERIFY(!(owner.nextLeaseId() == secondOwner.nextLeaseId()));
@@ -8133,10 +8137,66 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     transition = metadata.applyOwner(base.key, write);
     QVERIFY2(transition.accepted, qPrintable(transition.rejectionReason));
 
+    auto warmFirst = budget.reserve({}, nullptr), warmSecond = budget.reserve({}, nullptr);
+    QVERIFY(warmFirst.isValid() && warmSecond.isValid()); warmFirst.release(); warmSecond.release();
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
     KisPreparedPageProof proof;
+    proof.providerValidationStamp = 77; // Refusal must not change the caller's output.
+    {
+        const size_t bytes = size_t(limits.metadataArenaBytes - live());
+        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
+        const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, bytes, 1); });
+        QVERIFY(!owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor,
+                                       producerCompletion, &proof, &error));
+        QVERIFY(error.contains(QStringLiteral("proof storage")));
+        QCOMPARE(proof.providerValidationStamp, quint64(77));
+        QCOMPARE(owner.sealedProofCount(), qsizetype(0));
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        KisPageStateSnapshot unchanged;
+        QVERIFY(metadata.versionSnapshot(writeVersion, &unchanged));
+        const auto version = unchanged.findVersion(writeVersion);
+        QVERIFY(version && version->publication == KisPagePublicationState::Prepared);
+        QVERIFY(version->authority == writeAllocation.replica && version->preparedBy == transaction.id);
+    }
+    QCOMPARE(live(), baseline);
+    size_t sealFillerBytes = 0;
+    void *sealFiller = nullptr;
+    quint64 proofBytes = 0;
+    const auto clearValidationPressure = qScopeGuard([&] {
+        provider->beforeValidate = {};
+        kisFreeMutationStorage(&budget, sealFiller, sealFillerBytes, 1);
+    });
+    provider->beforeValidate = [&] {
+        proofBytes = live() - baseline;
+        sealFillerBytes = size_t(limits.metadataArenaBytes - live());
+        sealFiller = kisAllocateMutationStorage(&budget, sealFillerBytes, 1);
+    };
     QVERIFY2(
         owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor, producerCompletion, &proof, &error),
         qPrintable(error));
+    QCOMPARE(proof.providerValidationStamp, quint64(1)); // A refused node consumed no stamp.
+    QVERIFY(proofBytes > 0);
+    QCOMPARE(live(), limits.metadataArenaBytes); // Prepared node installs after provider validation at capacity.
+    provider->beforeValidate = {};
+    kisFreeMutationStorage(&budget, std::exchange(sealFiller, nullptr), sealFillerBytes, 1);
+    QCOMPARE(live(), baseline + proofBytes);
+    KisPreparedPageProof extra;
+    QVERIFY(owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor,
+                                  producerCompletion, &extra, &error));
+    QCOMPARE(extra.providerValidationStamp, quint64(2));
+    QCOMPARE(live(), baseline + 2 * proofBytes);
+    {
+        const size_t bytes = size_t(limits.metadataArenaBytes - live());
+        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
+        const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, bytes, 1); });
+        QVERIFY(owner.ownsPreparedPageProof(extra));
+        QVERIFY(owner.validatePreparedPage(metadata, extra, descriptor, &error));
+        QVERIFY(owner.revokePreparedPage(extra));
+        QCOMPARE(live(), limits.metadataArenaBytes - proofBytes);
+        QVERIFY(!owner.revokePreparedPage(extra));
+    }
+    QCOMPARE(live(), baseline + proofBytes);
     QVERIFY2(owner.validatePreparedPage(metadata, proof, descriptor, &error), qPrintable(error));
     KisPreparedPageProof forgedProof = proof;
     forgedProof.providerValidationStamp++;
@@ -8167,6 +8227,7 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     QCOMPARE(finalState.publishedGeneration.value, quint64(2));
     QVERIFY(!owner.validatePreparedPage(metadata, proof, descriptor, &error));
     QVERIFY(owner.revokePreparedPage(proof));
+    QCOMPARE(live(), baseline);
     QVERIFY(!owner.revokePreparedPage(proof));
     QCOMPARE(committed.root.snapshot().manifest.first().generation.value, quint64(2));
 

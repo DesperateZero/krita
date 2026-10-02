@@ -9,6 +9,7 @@
 
 #include <QScopedPointer>
 #include <QSharedPointer>
+#include <functional>
 
 #include "KisCompletionRegistry.h"
 #include "KisPageReplicaProvider.h"
@@ -26,6 +27,7 @@ class KisCpuPageReplicaProvider final
 public:
     KisCpuPageReplicaProvider();
     ~KisCpuPageReplicaProvider() override;
+    std::function<void()> beforeValidate;
 
     bool configure(const KisCpuResidentReplicaProviderConfig &config,
                    const QSharedPointer<KisCompletionRegistry> &completions,

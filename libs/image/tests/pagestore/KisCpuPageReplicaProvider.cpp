@@ -265,6 +265,7 @@ bool KisCpuPageReplicaProvider::validate(
     const KisReplicaHandle &replica,
     const KisPageAllocationDescriptor &descriptor) const
 {
+    if (beforeValidate) beforeValidate();
     QMutexLocker locker(&d->mutex);
     const auto allocationIt = d->findExactAllocation(replica);
     return descriptor.isValid() &&

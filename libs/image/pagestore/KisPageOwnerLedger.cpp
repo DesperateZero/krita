@@ -8,14 +8,14 @@
 #include "KisPageRetirementRecord_p.h"
 #include "KisPageWriteCoordinator_p.h"
 
-#include <QHash>
 #include <QEnableSharedFromThis>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPair>
 #include <QScopeGuard>
-#include <QSet>
 #include <QWaitCondition>
+
+#include <boost/intrusive/set.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -42,12 +42,66 @@ ProviderKey providerKey(KisReplicaProviderId provider,
 using ProviderOperationRecord = KisPageProviderOperationRecord;
 using OperationIndex = KisPageProviderOperationIndex;
 
-struct ProviderRegistration
+template<class T> struct DeleteLedgerNode
 {
+    void operator()(T *node) const noexcept
+    {
+        if (!node) return;
+        KisMutationStorageAllocator<T> allocator(node->budget);
+        std::destroy_at(node);
+        allocator.deallocate(node, 1);
+    }
+};
+template<class T> using LedgerNode = std::unique_ptr<T, DeleteLedgerNode<T>>;
+template<class T> LedgerNode<T> prepareLedgerNode(KisBackingBudgetController *budget)
+{
+    KisMutationStorageAllocator<T> allocator(budget);
+    T *node = allocator.allocate(1);
+    try {
+        std::allocator_traits<KisMutationStorageAllocator<T>>::construct(allocator, node);
+    } catch (...) {
+        allocator.deallocate(node, 1);
+        throw;
+    }
+    node->budget = budget;
+    return LedgerNode<T>(node);
+}
+template<class T, class Compare>
+class LedgerIndex : public boost::intrusive::set<T, boost::intrusive::compare<Compare>>
+{
+public:
+    ~LedgerIndex() { this->clear_and_dispose(DeleteLedgerNode<T>{}); }
+};
+
+struct ProviderRegistration : boost::intrusive::set_base_hook<>
+{
+    KisBackingBudgetController *budget = nullptr;
+    ProviderKey key;
     QSharedPointer<KisPageReplicaProvider> provider;
     bool backgroundRetirement = false;
+    quint64 acceptedRevision = 0; // zero: original registration is still pending
 };
-using ProviderIndex = QHash<ProviderKey, ProviderRegistration>;
+struct ProviderLess
+{
+    bool operator()(const ProviderRegistration &a, const ProviderRegistration &b) const { return a.key < b.key; }
+    bool operator()(const ProviderKey &a, const ProviderRegistration &b) const { return a < b.key; }
+    bool operator()(const ProviderRegistration &a, const ProviderKey &b) const { return a.key < b; }
+};
+using ProviderIndex = LedgerIndex<ProviderRegistration, ProviderLess>;
+
+struct SealedProofRecord : boost::intrusive::set_base_hook<>
+{
+    KisBackingBudgetController *budget = nullptr;
+    KisPreparedPageProof proof;
+};
+struct ProofLess
+{
+    bool operator()(const SealedProofRecord &a, const SealedProofRecord &b) const
+    { return a.proof.providerValidationStamp < b.proof.providerValidationStamp; }
+    bool operator()(quint64 a, const SealedProofRecord &b) const { return a < b.proof.providerValidationStamp; }
+    bool operator()(const SealedProofRecord &a, quint64 b) const { return a.proof.providerValidationStamp < b; }
+};
+using ProofIndex = LedgerIndex<SealedProofRecord, ProofLess>;
 
 using BackingKey = KisReplicaAllocationIdentity;
 using PhysicalBackingKey = KisReplicaPhysicalSlotIdentity;
@@ -282,6 +336,28 @@ bool buildPhysicalBackingDelta(
 class KisPageOwnerLedger::Private
 {
 public:
+    const ProviderRegistration *registeredProvider(const ProviderKey &key) const
+    {
+        const auto found = providers.find(key, ProviderLess{});
+        return found != providers.end() && found->acceptedRevision ? &*found : nullptr;
+    }
+
+    quint64 providerCut() const
+    {
+        QMutexLocker lock(&mutex);
+        return providerRevision;
+    }
+
+    QSharedPointer<KisPageReplicaProvider> nextProviderInCut(quint64 cut, ProviderKey *cursor) const
+    {
+        QMutexLocker lock(&mutex);
+        for (auto next = providers.upper_bound(*cursor, ProviderLess{}); next != providers.end(); ++next) {
+            *cursor = next->key;
+            if (next->acceptedRevision && next->acceptedRevision <= cut) return next->provider;
+        }
+        return {};
+    }
+
     bool acceptsProviderResultLocked(KisPageOperationId operation,
                                      const KisReplicaOperation &result, QString *error) const
     {
@@ -290,7 +366,7 @@ public:
             return false;
         }
         if (!completions || operations.find(operation.value) != operations.end() ||
-            !providers.contains(providerKey(result.replica.provider, result.replica.providerEpoch))) {
+            !registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch))) {
             KisPageStoreDetail::setError(error, QStringLiteral("provider operation is duplicate or foreign"));
             return false;
         }
@@ -446,9 +522,9 @@ public:
     QSharedPointer<KisCompletionRegistry> completions;
     quint64 nextValidationStamp = 1;
     ProviderIndex providers;
-    QSet<ProviderKey> pendingProviderRegistrations;
+    quint64 providerRevision = 0;
     OperationIndex operations;
-    QHash<quint64, KisPreparedPageProof> sealedProofs;
+    ProofIndex sealedProofs;
     KisBackingBudgetController *backingBudget = nullptr;
     BackingIndex backings;
     PhysicalBackingIndex physicalBackings;
@@ -813,8 +889,8 @@ KisReplicaBackingFootprint KisPageOwnerLedger::observeBackingFootprint(
     QSharedPointer<KisPageReplicaProvider> replicaProvider;
     {
         QMutexLocker locker(&d->mutex);
-        replicaProvider = d->providers.value(providerKey(replica.provider,
-                                                         replica.providerEpoch)).provider;
+        const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
+        if (registered) replicaProvider = registered->provider;
     }
     return replicaProvider ? replicaProvider->backingFootprint(replica)
                            : KisReplicaBackingFootprint{};
@@ -1018,10 +1094,11 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecord(const Ki
     if (found == d->backings.end() || !(found->second.replica == replica)) return {};
     auto record = std::move(found->second.retirement);
     if (record) {
-        const auto registered = d->providers.value(providerKey(replica.provider, replica.providerEpoch));
+        const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
+        Q_ASSERT(registered);
         record->replica = replica;
-        record->provider = registered.provider;
-        record->backgroundRetirement = registered.backgroundRetirement;
+        record->provider = registered ? registered->provider : QSharedPointer<KisPageReplicaProvider>{};
+        record->backgroundRetirement = registered && registered->backgroundRetirement;
     }
     return record;
 }
@@ -1179,10 +1256,10 @@ try
                     change.physicalSlot};
         }
     };
-    // QHash is implicitly shared: capture the existing registry without a
-    // values() allocation, then call providers outside the owner gate. A
-    // concurrent registration detaches its copy, preserving this iteration.
-    ProviderIndex providers;
+    // Accepted records are never removed while this ledger lives. A scalar
+    // cut excludes pending/later registrations; each iterator exists only
+    // under the gate and provider calls retain their own pointer outside it.
+    quint64 cut = 0;
     KisBackingBudgetController *budget = nullptr;
     {
         QMutexLocker locker(&d->mutex);
@@ -1191,12 +1268,12 @@ try
             KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
             return false;
         }
-        providers = d->providers;
+        cut = d->providerRevision;
     }
     ChargedVector<Probe> probes{KisMutationStorageAllocator<Probe>(budget)};
 
-    for (const auto &registered : std::as_const(providers)) {
-        const auto &provider = registered.provider;
+    ProviderKey cursor{};
+    while (const auto provider = d->nextProviderInCut(cut, &cursor)) {
         if (!provider->mayHaveBackingDomainChanges()) continue;
         const auto changes = provider->backingDomainChanges(budget);
         probes.reserve(probes.size() + changes.size());
@@ -1587,6 +1664,7 @@ void KisPageOwnerLedger::releaseRetiredBacking(const KisReplicaHandle &replica) 
 bool KisPageOwnerLedger::registerProvider(
     const QSharedPointer<KisPageReplicaProvider> &provider,
     QString *error)
+try
 {
     const auto capabilities = provider ? provider->capabilities() : KisReplicaCapabilities{};
     if (!provider || !provider->providerId().isValid() ||
@@ -1597,56 +1675,58 @@ bool KisPageOwnerLedger::registerProvider(
     const KisReplicaProviderId id = provider->providerId();
     const KisReplicaProviderEpoch epoch = provider->providerEpoch();
     const ProviderKey key = providerKey(id, epoch);
-    const auto validateRegistration = [&]() {
+    LedgerNode<ProviderRegistration> candidate;
+    {
+        QMutexLocker locker(&d->mutex);
         if (!d->completions) {
             KisPageStoreDetail::setError(error, QStringLiteral("owner ledger is not configured"));
             return false;
         }
-        if (d->providers.contains(key)
-            || d->pendingProviderRegistrations.contains(key)) {
+        if (d->providers.find(key, ProviderLess{}) != d->providers.end()) {
             KisPageStoreDetail::setError(error, QStringLiteral("replica provider identity is already registered"));
             return false;
         }
         // One active epoch per stable provider ID. Re-registration after
         // restart requires a new ledger so stale handles fail closed.
-        for (auto registered = d->providers.cbegin();
-             registered != d->providers.cend(); ++registered) {
-            if (registered.key().first == id.value) {
-                KisPageStoreDetail::setError(error, QStringLiteral("replica provider ID already has an active epoch"));
-                return false;
-            }
-        }
-        for (const ProviderKey &pending :
-             std::as_const(d->pendingProviderRegistrations)) {
-            if (pending.first == id.value) {
+        for (const auto &registered : std::as_const(d->providers)) {
+            if (registered.key.first == id.value) {
                 KisPageStoreDetail::setError(
-                    error,
-                    QStringLiteral("replica provider ID registration is already active"));
+                    error, registered.acceptedRevision
+                        ? QStringLiteral("replica provider ID already has an active epoch")
+                        : QStringLiteral("replica provider ID registration is already active"));
                 return false;
             }
         }
-        return true;
-    };
-    {
-        QMutexLocker locker(&d->mutex);
-        if (!validateRegistration())
+        // Size includes pending records, reserving acceptance revisions for
+        // every in-flight call before any external admission can succeed.
+        if (d->providers.size() >= std::numeric_limits<quint64>::max() - 1) {
+            KisPageStoreDetail::setError(error, QStringLiteral("provider registration identity is exhausted"));
             return false;
-        d->pendingProviderRegistrations.insert(key);
+        }
+        candidate = prepareLedgerNode<ProviderRegistration>(d->backingBudget);
+        candidate->key = key;
+        candidate->provider = provider;
+        candidate->backgroundRetirement = capabilities.backgroundRetirement;
+        d->providers.insert(*candidate);
     }
+    auto rollback = qScopeGuard([&] {
+        QMutexLocker lock(&d->mutex);
+        d->providers.erase(d->providers.iterator_to(*candidate));
+    });
     // Provider code remains outside the owner gate. Mutable-domain providers
     // retain only a weak reference to this ledger admission authority.
-    if (!provider->registerBackingDomainAdmission(d->domainAdmission, error)) {
-        QMutexLocker locker(&d->mutex);
-        d->pendingProviderRegistrations.remove(key);
-        return false;
-    }
+    if (!provider->registerBackingDomainAdmission(d->domainAdmission, error)) return false;
     QMutexLocker locker(&d->mutex);
-    const bool removed = d->pendingProviderRegistrations.remove(key);
-    Q_ASSERT(removed);
-    Q_UNUSED(removed);
-    d->providers.insert(key, {provider, capabilities.backgroundRetirement});
+    candidate->acceptedRevision = ++d->providerRevision;
+    rollback.dismiss();
+    candidate.release(); // The original index owns the already admitted node.
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("provider registration storage was refused"));
+    return false;
 }
 
 QSharedPointer<KisPageReplicaProvider> KisPageOwnerLedger::provider(
@@ -1654,21 +1734,18 @@ QSharedPointer<KisPageReplicaProvider> KisPageOwnerLedger::provider(
     KisReplicaProviderEpoch epoch) const
 {
     QMutexLocker locker(&d->mutex);
-    return d->providers.value(providerKey(providerId, epoch)).provider;
+    const auto registered = d->registeredProvider(providerKey(providerId, epoch));
+    return registered ? registered->provider : QSharedPointer<KisPageReplicaProvider>{};
 }
 
 QSharedPointer<KisPageReplicaProvider> KisPageOwnerLedger::providerFor(
     KisPageAccessRequirement access) const
 {
     if (!access.isValid()) return {};
-    QList<ProviderRegistration> providers;
-    {
-        QMutexLocker locker(&d->mutex);
-        providers = d->providers.values();
-    }
+    const auto cut = d->providerCut();
+    ProviderKey cursor{};
     QSharedPointer<KisPageReplicaProvider> selected;
-    for (const auto &registered : providers) {
-        const auto &candidate = registered.provider;
+    while (const auto candidate = d->nextProviderInCut(cut, &cursor)) {
         if (!candidate->capabilities().supports(access)) continue;
         if (selected) {
             // Route selection must be explicit when more than one provider
@@ -1759,7 +1836,7 @@ bool KisPageOwnerLedger::bindRetirementOperation(
     if (!d->completions || found == d->operations.end() ||
         !found->second.retirement || found->second.completion.isValid() ||
         !result.isValid() || !(result.operation == operation) ||
-        !d->providers.contains(providerKey(result.replica.provider, result.replica.providerEpoch))) {
+        !d->registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch))) {
         KisPageStoreDetail::setError(error, QStringLiteral("retirement operation was not prepared or result mismatched"));
         return false;
     }
@@ -1896,8 +1973,8 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
     if (!proof.isValid())
         return false;
     QMutexLocker locker(&d->mutex);
-    const auto found = d->sealedProofs.constFind(proof.providerValidationStamp);
-    return found != d->sealedProofs.cend() && found.value() == proof;
+    const auto found = d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
+    return found != d->sealedProofs.end() && found->proof == proof;
 }
 
 bool KisPageOwnerLedger::sealPreparedPage(
@@ -1908,6 +1985,7 @@ bool KisPageOwnerLedger::sealPreparedPage(
     const KisCompletionTicket &producerCompletion,
     KisPreparedPageProof *proof,
     QString *error)
+try
 {
     if (!proof || !version.isValid() || !transaction.isValid() ||
         !descriptor.isValid() || !producerCompletion.isValid()) {
@@ -1916,6 +1994,7 @@ bool KisPageOwnerLedger::sealPreparedPage(
     }
 
     QSharedPointer<KisCompletionRegistry> completions;
+    KisBackingBudgetController *budget = nullptr;
     {
         QMutexLocker locker(&d->mutex);
         if (!d->completions) {
@@ -1923,6 +2002,7 @@ bool KisPageOwnerLedger::sealPreparedPage(
             return false;
         }
         completions = d->completions;
+        budget = d->backingBudget;
     }
     const KisVerifiedCompletion verified =
         completions->verifyTerminal(producerCompletion);
@@ -1943,6 +2023,7 @@ bool KisPageOwnerLedger::sealPreparedPage(
         return false;
     }
 
+    auto record = prepareLedgerNode<SealedProofRecord>(budget);
     const QSharedPointer<KisPageReplicaProvider> authorityProvider =
         provider(prepared->authority.provider, prepared->authority.providerEpoch);
     if (!authorityProvider ||
@@ -1961,16 +2042,24 @@ bool KisPageOwnerLedger::sealPreparedPage(
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof could not be sealed"));
         return false;
     }
-    sealed.providerValidationStamp = d->nextValidationStamp++;
+    sealed.providerValidationStamp = d->nextValidationStamp;
     if (!sealed.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof could not be sealed"));
         return false;
     }
-    d->sealedProofs.insert(sealed.providerValidationStamp, sealed);
+    record->proof = sealed;
+    d->sealedProofs.insert(*record);
+    record.release();
+    ++d->nextValidationStamp;
     locker.unlock();
     *proof = sealed;
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof storage was refused"));
+    return false;
 }
 
 bool KisPageOwnerLedger::validatePreparedPage(
@@ -1988,9 +2077,9 @@ bool KisPageOwnerLedger::validatePreparedPage(
     {
         QMutexLocker locker(&d->mutex);
         const auto sealedIt =
-            d->sealedProofs.constFind(proof.providerValidationStamp);
-        if (!d->completions || sealedIt == d->sealedProofs.constEnd() ||
-            !(sealedIt.value() == proof)) {
+            d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
+        if (!d->completions || sealedIt == d->sealedProofs.end() ||
+            !(sealedIt->proof == proof)) {
             KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof was not sealed by this owner"));
             return false;
         }
@@ -2029,12 +2118,14 @@ bool KisPageOwnerLedger::validatePreparedPage(
 bool KisPageOwnerLedger::revokePreparedPage(const KisPreparedPageProof &proof)
 {
     if (!proof.isValid()) return false;
+    LedgerNode<SealedProofRecord> released;
     QMutexLocker locker(&d->mutex);
-    auto proofIt = d->sealedProofs.find(proof.providerValidationStamp);
+    auto proofIt = d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
     if (!d->completions || proofIt == d->sealedProofs.end() ||
-        !(proofIt.value() == proof)) {
+        !(proofIt->proof == proof)) {
         return false;
     }
+    released.reset(&*proofIt);
     d->sealedProofs.erase(proofIt);
     return true;
 }

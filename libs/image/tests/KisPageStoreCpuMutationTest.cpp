@@ -80,6 +80,9 @@ public:
     bool forwardDomainAdmission = true;
     bool rejectAdopt = false;
     std::function<void()> beforeValidate;
+    std::function<void()> beforeDomainAdmission;
+    std::atomic<int> domainAdmissionCalls{0};
+    bool rejectDomainAdmission = false;
     KisReplicaHandle lastTarget;
     QString name() const override { return p->name(); }
     KisReplicaProviderId providerId() const override { return p->providerId(); }
@@ -195,6 +198,12 @@ public:
         const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
         QString *error) override
     {
+        ++domainAdmissionCalls;
+        if (beforeDomainAdmission) beforeDomainAdmission();
+        if (rejectDomainAdmission) {
+            KisPageStoreDetail::setError(error, QStringLiteral("test provider refused domain admission"));
+            return false;
+        }
         if (forwardDomainAdmission)
             return p->registerBackingDomainAdmission(admission, error);
         KisPageStoreDetail::setError(error, {});
@@ -471,6 +480,7 @@ private Q_SLOTS:
     }
     void dirtyDomainJournalRetainsUnregistered();
     void domainProviderSnapshotSurvivesRegistration();
+    void ledgerProviderRegistrationPreparedBeforeAdmission();
     void domainJournalSynchronizationRejectsAtCapacity_data()
     {
         QTest::addColumn<bool>("snapshotFits");
@@ -8151,6 +8161,71 @@ void KisPageStoreCpuMutationTest::dirtyDomainJournalRetainsUnregistered()
     QVERIFY(f.store->closeSession());
 }
 
+void KisPageStoreCpuMutationTest::ledgerProviderRegistrationPreparedBeforeAdmission()
+{
+    Fixture f; QVERIFY(f.init());
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
+    auto ledger = std::make_unique<KisPageOwnerLedger>();
+    QVERIFY(ledger->configure(f.completions)); ledger->attachBackingBudget(budget);
+    auto first = budget.reserve({}, nullptr), second = budget.reserve({}, nullptr);
+    QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
+    size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline);
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto cleanup = qScopeGuard([&] {
+        f.provider->beforeDomainAdmission = {};
+        kisFreeMutationStorage(&budget, filler, fillerBytes, 1);
+    });
+    const auto calls = f.provider->domainAdmissionCalls.load();
+    QVERIFY(!ledger->registerProvider(f.provider, &f.error));
+    QVERIFY(f.error.contains(QStringLiteral("registration storage")));
+    QCOMPARE(f.provider->domainAdmissionCalls.load(), calls);
+    QVERIFY(!ledger->provider(f.provider->providerId(), f.provider->providerEpoch()));
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    kisFreeMutationStorage(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+
+    bool pendingHidden = false, duplicateRejected = false;
+    f.provider->beforeDomainAdmission = [&] {
+        pendingHidden = !ledger->provider(f.provider->providerId(), f.provider->providerEpoch())
+            && !ledger->providerFor(cpu);
+        duplicateRejected = !ledger->registerProvider(f.provider);
+    };
+    f.provider->rejectDomainAdmission = true;
+    QVERIFY(!ledger->registerProvider(f.provider, &f.error));
+    QVERIFY(pendingHidden && duplicateRejected);
+    QCOMPARE(live(), baseline); // The pending node was unlinked and freed.
+    f.provider->rejectDomainAdmission = false;
+    f.provider->beforeDomainAdmission = [] { throw std::bad_alloc(); };
+    QVERIFY(!ledger->registerProvider(f.provider, &f.error));
+    QCOMPARE(live(), baseline);
+    QVERIFY(!ledger->providerFor(cpu));
+
+    quint64 nodeBytes = 0;
+    f.provider->beforeDomainAdmission = [&] {
+        nodeBytes = live() - baseline;
+        pendingHidden = !ledger->providerFor(cpu);
+        fillerBytes = size_t(limits.metadataArenaBytes - live());
+        filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    };
+    QVERIFY2(ledger->registerProvider(f.provider, &f.error), qPrintable(f.error));
+    QVERIFY(nodeBytes > 0 && pendingHidden);
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    // Registration accepted the same prepared node. Routing needs no list
+    // allocation even with no remaining MetadataArena capacity.
+    QVERIFY(ledger->providerFor(cpu) == f.provider);
+    QVERIFY(ledger->provider(f.provider->providerId(), f.provider->providerEpoch()) == f.provider);
+    QVERIFY(!ledger->registerProvider(f.provider));
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    f.provider->beforeDomainAdmission = {};
+    ledger.reset();
+    QCOMPARE(live(), limits.metadataArenaBytes - nodeBytes);
+    kisFreeMutationStorage(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    QCOMPARE(live(), baseline);
+    QVERIFY(f.store->closeSession());
+}
+
 void KisPageStoreCpuMutationTest::domainProviderSnapshotSurvivesRegistration()
 {
     Fixture f;
@@ -8165,13 +8240,24 @@ void KisPageStoreCpuMutationTest::domainProviderSnapshotSurvivesRegistration()
     second->forceDomainJournalProbe = true;
     f.provider->forceDomainJournalProbe = true;
     bool registered = false;
-    f.provider->afterDomainSnapshot = [&] { registered = ledger.registerProvider(second, &f.error); };
+    f.provider->beforeCapabilities = [&] { registered = ledger.registerProvider(second, &f.error); };
+    QVERIFY(ledger.providerFor(cpu) == f.provider); // Later acceptance is outside this route cut.
+    QVERIFY(registered);
+    f.provider->beforeCapabilities = {};
+    QVERIFY(!ledger.providerFor(cpu)); // The next cut sees both and rejects ambiguity.
+    auto third = QSharedPointer<TestProvider>::create();
+    QVERIFY(third->p->configure({{192}, {1}, 1024 * 1024}, f.completions, &f.error));
+    third->forceDomainJournalProbe = true;
+    registered = false;
+    f.provider->afterDomainSnapshot = [&] { registered = ledger.registerProvider(third, &f.error); };
     QVERIFY(ledger.synchronizeBackingDomains(&f.error));
     QVERIFY(registered);
-    QCOMPARE(second->domainJournalCalls.load(), 0);
+    QCOMPARE(second->domainJournalCalls.load(), 1);
+    QCOMPARE(third->domainJournalCalls.load(), 0);
     f.provider->afterDomainSnapshot = {};
     QVERIFY(ledger.synchronizeBackingDomains(&f.error));
-    QCOMPARE(second->domainJournalCalls.load(), 1);
+    QCOMPARE(second->domainJournalCalls.load(), 2);
+    QCOMPARE(third->domainJournalCalls.load(), 1);
     QVERIFY(f.store->closeSession());
 }
 

@@ -201,12 +201,14 @@
       "creation-paths": [
         "synchronous Store allocation/adoption/write and WriteCoordinator transfer retain results in the original caller; verifyTerminalProviderResult checks identity and registry terminal evidence without registering an operation",
         "KisPageOwnerLedger::bindProviderOperation remains the explicit pending/reference binding seam, not a production synchronous-result consumer",
-        "original retirement admission prepares a charged operation-index node before physical allocation; prepareRetirementOperation inserts that node before retire, and bindRetirementOperation only fills its completion"
+        "original retirement admission prepares a charged operation-index node before physical allocation; prepareRetirementOperation inserts that node before retire, and bindRetirementOperation only fills its completion",
+        "provider registration prepares one actual charged index node before invoking admission; the same pending node becomes accepted by assigning its revision, eliminating the second pending set and post-acceptance insertion allocation. A scalar accepted cut plus gate-local lookup serves both routing and domain synchronization without a Qt registry copy/list; pending/later registrations are excluded",
+        "sealPreparedPage prepares its actual proof index node before provider validation and advances the validation stamp only after allocation-free insertion. Funded nodes retain their allocation budget; explicitly budgetless or pre-attachment bootstrap nodes preserve the existing standalone compatibility contract and are not retroactively claimed as funded"
       ],
       "current-writers": [
         "KisPageOwnerLedger"
       ],
-      "fact": "provider operation",
+      "fact": "provider registration/cut, operation identity and sealed proof",
       "id": "BR1-OWN-PROVIDER-OP",
       "lock-or-claim": "original Store request/activity and writer/adoption claim protect synchronous results through acceptance; owner ledger mutex and provider epoch token protect binding; a valid retirement result stays in its original record until binding succeeds",
       "read-only-observers": [
@@ -220,7 +222,9 @@
         "synchronous result identity and completion use the same acceptance policy as explicit binding, then verify the original registry ticket without creating an operation node; foreign synchronous retire uses this path too",
         "releaseTerminalProviderOperation for explicitly retained operations",
         "terminal extraction returns the operation node to its original retirement record; invalid provider refusal cancels the prepared slot without losing its storage",
-        "closeSession drain"
+        "closeSession drain",
+        "provider admission refusal or exception unlinks the same pending node before its gate-free disposal; accepted records remain stable until ledger destruction, with no external registration result queue",
+        "revokePreparedPage unlinks the exact original proof node and frees it after the ledger locker; destruction disposes provider/proof indexes at their original member lifetime order"
       ]
     },
     {
