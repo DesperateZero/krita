@@ -45,9 +45,9 @@ KisReplicaBackingFootprint KisPageReplicaProvider::backingFootprint(
         : KisReplicaBackingFootprint{};
 }
 
-QVector<KisReplicaBackingDomainChange> KisPageReplicaProvider::backingDomainChanges() const
+KisReplicaBackingDomainChanges KisPageReplicaProvider::backingDomainChanges(KisBackingBudgetController *budget) const
 {
-    return {};
+    return KisReplicaBackingDomainChanges(KisMutationStorageAllocator<KisReplicaBackingDomainChange>(budget));
 }
 
 bool KisPageReplicaProvider::mayHaveBackingDomainChanges() const noexcept

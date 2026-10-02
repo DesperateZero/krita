@@ -118,7 +118,9 @@
     {
       "creation-paths": [
         "KisTiles3PageReplicaProvider prepares allocation and retirement tickets before allocating payload or adopting an immutable/initial tile; test-only KisCpuPageReplicaProvider uses the same allocation-index lifecycle",
-        "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before"
+        "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before",
+        "Tiles3 ResidencyObserver prepares charged stable payload and slot nodes before tracking; original payload stores domain/revision and one intrusive dirty link, without a second journal record; observer storage and retained snapshots share the original process nonpayload root",
+        "prepareResidencyChange prepares charged admission snapshots and transition reservation capacity before publishing the original transition serial; any cold refusal cancels that same serial and earlier owner reservations before physical movement"
       ],
       "current-writers": [
         "provider-owned stable KisCpuResidentBinding; original allocation index retains its binding, physical key and private prepared retirement ticket"
@@ -137,7 +139,9 @@
         "provider retire preserves its original Pending retirement ticket on reader/transition refusal; physical detach/free completes that prepared ticket without new storage admission",
         "provider close revokes bindings and cancels unused private retirement tickets",
         "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
-        "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates"
+        "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates",
+        "physical residency commit updates and links only the original prepared payload; exact slot/revision acknowledgement unlinks it, stale acknowledgement preserves newer dirtiness, and untrack extracts actual payload/slot nodes for free outside the observer gate",
+        "backingDomainChanges prepares an actually charged immutable snapshot; the default retained allocator can outlive the provider facade, while Ledger supplies its original budget for its local validation cut; outer observer/transition Qt objects and bootstrap remain unqualified"
       ]
     },
     {
@@ -332,7 +336,7 @@
         "close drain",
         "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation",
         "foreground and background share collectPassLocked/collectSliceLocked; detach refusal retains the original key/cookie, accepted detach moves effects into that key and advances the effect cursor only after queue acceptance; accepted packet capacity is freed only after all effects cross the boundary",
-        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; generic transition projections, provider journal and complete permanent-pressure exits remain unqualified"
+        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; generic transition projections, remaining provider/core/fixed storage and complete permanent-pressure exits remain unqualified"
       ]
     },
     {
@@ -616,7 +620,9 @@
         "KisPageOwnerLedger::prepareBackingHandoff",
         "reserveBacking prepares the actual charged retirement node before a fresh provider call; the same node enters the original backing record only after registration succeeds; direct initial adoption prepares its complete node footprint outside the store gate before any partial registration",
         "implicit default materialization revalidates original key deduplication and the 64-entry admission limit after cold backing preparation releases/reacquires the owner gate; accepted materialization observed after the wait returns without another provider request",
-        "prepareBackingChangesImpl charges scratch classification/maps, slot/free-list capacity, exact change/physical/credit arrays and persistent claim nodes; storePreparedChange rolls back every inserted claim and reservation on actual storage refusal before publishing physical class claims"
+        "prepareBackingChangesImpl charges scratch classification/maps, slot/free-list capacity, exact change/physical/credit arrays and persistent claim nodes; storePreparedChange rolls back every inserted claim and reservation on actual storage refusal before publishing physical class claims",
+        "domain admission prepares the actual charged claim node and inactive return reservation before publishing domainClaim; charged pending-registration insertion refuses without a marker, and failed physical preparation leaves the original domain/revision available for retry",
+        "synchronizeBackingDomains retains the immutable original provider registry cut and prepares charged changes plus one probe vector; acknowledgement flags remain in those probes and the whole cut validates before any exact revision acknowledgement"
       ],
       "current-writers": [
         "KisPageOwnerLedger"
@@ -637,7 +643,8 @@
         "KisPageOwnerLedger::commitBackingChanges",
         "KisBackingHandoffReservation::release",
         "KisPageOwnerLedger::releaseRetiredBacking",
-        "takeRetirementRecord transfers the exact backing record node once to its original queue or close list; handoff extract/reinsert retains that same node across allocation generation changes; direct release frees unused terminal storage outside the ledger gate"
+        "takeRetirementRecord transfers the exact backing record node once to its original queue or close list; handoff extract/reinsert retains that same node across allocation generation changes; direct release frees unused terminal storage outside the ledger gate",
+        "domain claim cancel/commit extracts the original charged node and releases storage outside admission/ledger gates; detach clears original claim facts and swaps claims/registration storage to local release before the original budget dies; synchronization storage refusal acknowledges nothing and retains provider journal facts without replaying physical actions"
       ]
     },
     {

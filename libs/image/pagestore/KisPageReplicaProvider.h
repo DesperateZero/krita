@@ -12,6 +12,7 @@
 #include <QVector>
 
 #include "KisPageStoreTypes.h"
+#include "KisMutationStorage_p.h"
 
 class KisCpuResidentBinding;
 
@@ -327,6 +328,9 @@ struct KRITAIMAGE_EXPORT KisReplicaBackingDomainChange
     }
 };
 
+using KisReplicaBackingDomainChanges = std::vector<KisReplicaBackingDomainChange,
+    KisMutationStorageAllocator<KisReplicaBackingDomainChange>>;
+
 /** Move-independent owner claim prepared before a physical residency change.
  * Destruction cancels an uncommitted claim. commit() cannot perform capacity
  * admission; all fallible budget work happened in prepare(). */
@@ -403,7 +407,7 @@ public:
     // Mutable backing domains report only changed physical slots. Fixed-domain
     // providers keep the empty default. A change is retained until the owner
     // acknowledges its exact sequence after budget installation.
-    virtual QVector<KisReplicaBackingDomainChange> backingDomainChanges() const;
+    virtual KisReplicaBackingDomainChanges backingDomainChanges(KisBackingBudgetController *budget = nullptr) const;
     // Optional empty-journal hint, sampled independently on every sync. False
     // means the journal was empty at this observation; it is not a remembered
     // acknowledgement or permission to skip domain pre-admission. Unsupported

@@ -58,7 +58,8 @@ public:
 
     bool configure(const KisCpuResidentReplicaProviderConfig &config,
                    const QSharedPointer<KisCompletionRegistry> &completions,
-                   QString *error = nullptr);
+                   QString *error = nullptr,
+                   const QSharedPointer<KisBackingBudgetController> &processBudget = {});
 
     QString name() const override;
     KisReplicaProviderId providerId() const override;
@@ -100,7 +101,7 @@ public:
     KisReplicaMemoryUsage memoryUsage() const override;
     KisReplicaBackingFootprint backingFootprint(
         const KisReplicaHandle &replica) const override;
-    QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override;
+    KisReplicaBackingDomainChanges backingDomainChanges(KisBackingBudgetController *budget = nullptr) const override;
     bool mayHaveBackingDomainChanges() const noexcept override;
     void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                         quint64 revision) override;

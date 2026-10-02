@@ -325,7 +325,7 @@ public:
         providerConfig.budgetBytes = policy.providerBytes;
         store.reset(new KisPageStore);
         history.reset(new KisPageStoreMementoManager);
-        return provider->configure(providerConfig, completions, error) &&
+        return provider->configure(providerConfig, completions, error, sharedNonPayloadBudget) &&
                store->configureSharedNonPayloadBudget(sharedNonPayloadBudget, error) &&
                store->configureBackingLimits(policy.limits, error) &&
                store->configure(initial, completions, 64, error) &&

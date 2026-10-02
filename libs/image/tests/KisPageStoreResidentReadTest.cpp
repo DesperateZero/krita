@@ -96,8 +96,8 @@ public:
     KisReplicaMemoryUsage memoryUsage() const override { return p->memoryUsage(); }
     KisReplicaBackingFootprint backingFootprint(const KisReplicaHandle &r) const override
     { return p->backingFootprint(r); }
-    QVector<KisReplicaBackingDomainChange> backingDomainChanges() const override
-    { return p->backingDomainChanges(); }
+    KisReplicaBackingDomainChanges backingDomainChanges(KisBackingBudgetController *budget = nullptr) const override
+    { return p->backingDomainChanges(budget); }
     bool mayHaveBackingDomainChanges() const noexcept override
     { return p->mayHaveBackingDomainChanges(); }
     void acknowledgeBackingDomainChange(quint64 slot, quint64 revision) override
