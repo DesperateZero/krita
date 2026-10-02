@@ -63,16 +63,24 @@ KisPageHistoryCollector::~KisPageHistoryCollector()
     clearLocked();
 }
 
-void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
+void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key) noexcept
 {
-    auto [entry, inserted] = m_work.try_emplace(key);
-    auto &work = entry->second;
-    work.key = key;
-    // Protection can disappear between slices, when the root cookie is gone
-    // but the cursor has already passed versions that must now be revisited.
-    if (!inserted && work.scanning)
-        work.repeat = true;
-    if (!work.is_linked()) m_ready.push_back(work);
+    try {
+        auto [entry, inserted] = m_work.try_emplace(key);
+        auto &work = entry->second;
+        work.key = key;
+        // Protection can disappear between slices, when the root cookie is gone
+        // but the cursor has already passed versions that must now be revisited.
+        if (!inserted && work.scanning)
+            work.repeat = true;
+        if (!work.is_linked()) m_ready.push_back(work);
+    } catch (const std::bad_alloc &) {
+        // Metadata keeps every historical version until collection accepts
+        // its retirement. The original collector retains the missing-key scan,
+        // for both foreground and background entry points.
+        m_rescanRequested = true;
+        m_blocked = true;
+    }
 }
 
 void KisPageHistoryCollector::endScanLocked(Work &work, bool finished)
@@ -170,6 +178,12 @@ bool KisPageHistoryCollector::collectSliceLocked(
 
 bool KisPageHistoryCollector::collectPassLocked()
 {
+    if (m_rescanRequested) {
+        m_rescanRequested = false;
+        m_metadata.visitPageKeys(this, +[](void *p, const KisPageKey &key) {
+            static_cast<KisPageHistoryCollector *>(p)->requestKeyLocked(key);
+        });
+    }
     std::array<Work *, PageAdmissionBudget> keys{};
     qsizetype count = 0;
     for (auto &work : m_ready) {
@@ -178,7 +192,7 @@ bool KisPageHistoryCollector::collectPassLocked()
     }
     quint64 versions = 0;
     qsizetype rootsRemaining = RootVisitBudget;
-    bool blocked = false;
+    bool blocked = m_rescanRequested;
     for (qsizetype i = 0; i < count; ++i) {
         auto &work = *keys[size_t(i)];
         const auto key = work.key;
@@ -200,23 +214,14 @@ bool KisPageHistoryCollector::collectPassLocked()
 void KisPageHistoryCollector::collectUnreachableLocked(
     const KisPageKey *candidateKeys, qsizetype candidateCount, bool scanAll)
 {
-    try {
-        if (scanAll) {
-            // Every accepted key stays indexed while history remains. Do not
-            // visit unchanged pages merely because a retained root was released.
-            for (const auto &entry : m_work) requestKeyLocked(entry.first);
-        }
-        for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
-    } catch (const std::bad_alloc &) {
-        // Metadata still owns every undetached version; retry a complete enumeration.
-        m_rescanRequested = true;
-        m_blocked = true;
-        scheduleLocked();
-        if (!m_backgroundReclamation) throw;
-        return;
+    if (scanAll) {
+        // Every accepted key stays indexed while history remains. Do not
+        // visit unchanged pages merely because a retained root was released.
+        for (const auto &entry : m_work) requestKeyLocked(entry.first);
     }
+    for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
     if (!m_backgroundReclamation || m_closing || m_automaticWakeupsStopped) {
-        while (!m_ready.empty()) {
+        while (!m_ready.empty() || m_rescanRequested) {
             if (collectPassLocked()) {
                 m_blocked = true;
                 break;
@@ -230,8 +235,7 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
 {
     if (m_task) return;
     Q_ASSERT(m_work.empty());
-    m_work = WorkIndex(KeyLess{},
-        KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>(&budget));
+    m_work = WorkIndex(KeyLess{}, KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>(&budget));
     auto context = std::allocate_shared<KisPageHistoryWakeContext>(
         KisMutationStorageAllocator<KisPageHistoryWakeContext>::retained(&budget));
     context->collector = this;
@@ -243,14 +247,6 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
             if (!m_closing && m_operational && !m_automaticWakeupsStopped) {
                 m_epochs.collectFinishedTransactions(VersionScanBudget);
                 m_epochs.collectUnretainedRoots(VersionScanBudget);
-                if (m_rescanRequested) {
-                    try {
-                        m_metadata.visitPageKeys(this, +[](void *p, const KisPageKey &key) {
-                            static_cast<KisPageHistoryCollector *>(p)->requestKeyLocked(key);
-                        });
-                        m_rescanRequested = false;
-                    } catch (const std::bad_alloc &) { m_blocked = true; }
-                }
                 m_blocked = collectPassLocked() || m_blocked;
             }
         }

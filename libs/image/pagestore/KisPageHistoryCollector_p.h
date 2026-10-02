@@ -80,7 +80,7 @@ public:
         const KisPageKey *candidateKeys, qsizetype candidateCount,
         bool scanAll = false);
     void collectEpochBookkeepingLocked(bool rescanHistory = false);
-    void requestKeyLocked(const KisPageKey &key);
+    void requestKeyLocked(const KisPageKey &key) noexcept;
     void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();

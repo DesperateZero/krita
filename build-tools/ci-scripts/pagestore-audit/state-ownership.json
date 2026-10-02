@@ -486,7 +486,7 @@
         "Prepared -> Cancelled conflict or metadata rejection",
         "transaction abort",
         "move-from -> Empty",
-        "Overlay candidates retain the original PreparedTransactionState, never a second delta. Install consumes nodes and capacity; cancellation only releases capacity and replacement proofs. Ledger revocation/history collection and extracted-node disposal follow installation; necessary cleanup admission and outer joint publication remain open."
+        "Overlay Data/control, transaction index/state/control, proof/removal nodes and buckets, surface/version/change arrays and extracted-node holders use actual MetadataArena capacity. The original state is the only delta; overlapping candidates reserve all pending insertions. Surface preparation and exact revalidation precede metadata install; install transfers original nodes without growth. Superseded versions remain in metadata until retirement acceptance; missing History key capacity is retained by the original rescanRequested fact, with one foreground/background collection policy. Cancellation returns original capacity and replacement proofs; installed/collected storage tails remain charged through real deallocation after facade/controller destruction. Commit facade, descriptor/configuration indexes and complete fixed/bootstrap costs remain open."
       ]
     },
     {

@@ -252,6 +252,7 @@ public:
         , publicationCoordinator(epochs,
                                  metadata,
                                  owner,
+                                 backingBudget,
                                  retirementQueue,
                                  historyCollector,
                                  readyHostCompletion,
@@ -2411,33 +2412,38 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     lock.relock();
     phase.next(Phase::MutationSealInputs, pageWork);
     validateClaims("after proof preparation");
-    QVector<KisPagePublicationCoordinator::OverlayChange> overlayChanges;
-    overlayChanges.reserve(d->writes.size());
+    using OverlayChange = KisPagePublicationCoordinator::OverlayChange;
+    std::vector<OverlayChange, KisMutationStorageAllocator<OverlayChange>> overlayChanges{
+        KisMutationStorageAllocator<OverlayChange>(&owner->backingBudget)};
     quint64 sealedCpuWrites = 0;
     quint64 sealedRemovals = 0;
     quint64 sealedSources = 0;
-    if (success) {
+    if (success) try {
+        overlayChanges.reserve(d->writes.size());
         for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
             const auto index = slot.index;
             auto *entry = d->writes.at(index);
             auto *page = d->pageAtEntry(index);
             if (entry->isRemoval()) {
-                overlayChanges.append(
+                overlayChanges.push_back(
                     {entry->key(), {}, true});
                 ++sealedRemovals;
             } else if (page) {
-                overlayChanges.append(
+                overlayChanges.push_back(
                     {entry->key(), page->proof, false});
                 sealedCpuWrites += entry->isCpuWrite();
             }
             sealedSources += bool(entry->initializationSource());
         }
+    } catch (const std::bad_alloc &) {
+        success = false;
+        failure = QStringLiteral("overlay input storage preparation was refused");
     }
-    const bool hasOverlay = success && !overlayChanges.isEmpty();
+    const bool hasOverlay = success && !overlayChanges.empty();
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChanges.size()));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
-              d->transaction, std::move(overlayChanges), &failure)
+              d->transaction, overlayChanges.data(), overlayChanges.size(), &failure)
         : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
@@ -2456,6 +2462,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     }
     const qsizetype metadataChangeCount = overlay.metadataChangeCount();
     lock.unlock();
+    // The candidate owns these inputs now; free the producer's paid copy
+    // before admitting the metadata candidate in the same shared budget.
+    overlayChanges = decltype(overlayChanges){overlayChanges.get_allocator()};
     phase.next(Phase::MutationSealMetadataPrepare,
                quint64(metadataChangeCount));
     if (success && hasOverlay && !overlay.prepare(&failure)) {
@@ -4459,11 +4468,9 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
     if (success) {
         const auto transaction = d->epochs.transaction(request.transaction);
         if (transaction.isActive()) {
-            QVector<KisPagePublicationCoordinator::OverlayChange> changes;
-            changes.append(
-                {request.version.key, proof, false});
+            const KisPagePublicationCoordinator::OverlayChange change{request.version.key, proof, false};
             overlay = d->publicationCoordinator.prepareOverlayUpdateLocked(
-                transaction.transaction, std::move(changes), nullptr);
+                transaction.transaction, &change, 1, nullptr);
         }
         success = overlay.isValid();
         if (success)

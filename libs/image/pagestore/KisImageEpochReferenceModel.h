@@ -51,8 +51,7 @@ public:
     bool resolve(const KisPageKey &key, KisPageVersion *version) const;
     bool surfaceState(KisSurfaceId surface, KisSurfaceEpochState *state) const;
 
-    // Read-only derived index query. Applies only this delta to a temporary
-    // structurally shared tree; never exports/scans the complete manifest.
+    // Read-only bounds query; never builds a temporary tree or full manifest.
     // Does not publish or grant transaction authority.
     bool contentExtentAfterDelta(KisSurfaceId surface,
                                  QSize pageExtent,
@@ -60,6 +59,12 @@ public:
                                  QRect *extent) const;
 
 private:
+    // Original publication owner supplies sorted removal keys and prepared
+    // addition keys. No storage allocation occurs in this bounds query.
+    bool contentExtentAfterPages(KisSurfaceId surface, QSize pageExtent,
+                                const KisPageKey *removals, size_t removalCount,
+                                const KisPageKey *additions, size_t additionCount,
+                                QRect *extent) const;
     bool validate() const;
     // Issued only after complete construction-time validation by the model.
     bool m_validated = false;
@@ -74,6 +79,7 @@ private:
     QVector<KisSurfaceEpochState> m_surfaces;
 
     friend class KisImageEpochReferenceModel;
+    friend class KisPagePublicationCoordinator;
 };
 
 struct KRITAIMAGE_EXPORT KisPageTransactionSnapshot {

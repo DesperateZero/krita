@@ -400,17 +400,20 @@ private:
     enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
-                                               const QVector<KisPageTransition> &transitions,
+                                               const KisPageTransition *transitions, qsizetype count,
                                                bool restoration,
                                                QString *error,
-                                               PreparationKind kind = PreparationKind::Publication) const;
+                                               PreparationKind kind = PreparationKind::Publication,
+                                               const KisPageVersion *detachedVersions = nullptr) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.
     // Reader/pin/last-use changes are preserved, not overwritten or retried.
     // The committed epoch tag is unchanged. This is not a stale root merge.
+    // Versions are the complete private input; other transition kinds,
+    // operation IDs and epoch tags cannot enter this capability.
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
-                                        const QVector<KisPageTransition> &transitions,
+                                        const KisPageVersion *versions, qsizetype count,
                                         QString *error = nullptr) const;
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,

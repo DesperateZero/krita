@@ -20,6 +20,13 @@
 namespace
 {
 
+bool overlayKeyLess(const KisPageKey &a, const KisPageKey &b)
+{
+    if (a.surface.value != b.surface.value) return a.surface.value < b.surface.value;
+    if (a.page.row != b.page.row) return a.page.row < b.page.row;
+    return a.page.column < b.page.column;
+}
+
 template<typename PreparedPublication>
 bool appendPublicationBackingChanges(
                                      const PreparedPublication &publication,
@@ -139,16 +146,21 @@ public:
         bool wasRemoved = false;
     };
 
+    explicit Data(const KisMutationStorageAllocator<char> &storage)
+        : changes(storage), detachments(storage)
+        , proofNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+        , removalNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+        , oldProofNodes(storage), oldRemovalNodes(storage) {}
+
     KisPagePublicationCoordinator *owner = nullptr;
     KisPageTransaction transaction;
-    std::vector<Change> changes;
-    QVector<KisPageTransition> detachments;
-    QVector<KisPageKey> historical;
+    std::vector<Change, KisMutationStorageAllocator<Change>> changes;
+    std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> detachments;
     std::shared_ptr<PreparedTransactionState> state;
     ProofMap proofNodes;
     RemovalSet removalNodes;
-    std::vector<ProofMap::node_type> oldProofNodes;
-    std::vector<RemovalSet::node_type> oldRemovalNodes;
+    std::vector<ProofMap::node_type, KisMutationStorageAllocator<ProofMap::node_type>> oldProofNodes;
+    std::vector<RemovalSet::node_type, KisMutationStorageAllocator<RemovalSet::node_type>> oldRemovalNodes;
     size_t proofInsertions = 0;
     size_t removalInsertions = 0;
     KisPageMetadataCoordinator::PreparedPublication metadata;
@@ -158,6 +170,13 @@ public:
     bool prepared = false;
     bool installed = false;
     bool collected = false;
+
+    const Change *findChange(const KisPageKey &key) const
+    {
+        const auto found = std::lower_bound(changes.cbegin(), changes.cend(), key,
+            [](const Change &change, const KisPageKey &value) { return overlayKeyLess(change.replacement.key, value); });
+        return found != changes.cend() && found->replacement.key == key ? &*found : nullptr;
+    }
 
     void releaseCapacity() noexcept
     {
@@ -172,6 +191,14 @@ public:
     }
     ~Data() { releaseCapacity(); }
 };
+
+void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::DataDeleter::operator()(Data *value) const noexcept
+{
+    if (!value) return;
+    value->~Data();
+    auto allocator = storage;
+    allocator.deallocate(value, 1);
+}
 
 KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
     KisPreparedOverlayUpdate() = default;
@@ -216,9 +243,9 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
             error, QStringLiteral("overlay update cannot be prepared"));
         return false;
     }
-    if (!data->detachments.isEmpty()) {
+    if (!data->detachments.empty()) {
         data->metadata = data->owner->m_metadata.prepareMutation(
-            data->transaction, data->detachments, error);
+            data->transaction, data->detachments.data(), qsizetype(data->detachments.size()), error);
         if (!data->metadata.isValid())
             return false;
     }
@@ -247,21 +274,28 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepareSurfaceLock
         if (!owner.resolveSurfaceLocked(surface, overlay, &current)) return false;
         const auto base = owner.m_epochs.root(data->transaction.baseEpoch);
         QRect extent = current.contentExtent;
-        RemovalSet removals;
-        for (const auto &change : data->changes)
-            if (change.replacement.key.surface == surface && change.replacement.removal)
-                removals.insert(change.replacement.key);
-        if (!removals.empty()) {
+        if (std::any_of(data->changes.cbegin(), data->changes.cend(), [&](const auto &change) {
+            return change.replacement.key.surface == surface && change.replacement.removal;
+        })) {
             // Derive from the same base + overlay used by captured readers.
             // Persistent subtree bounds avoid exporting the document manifest.
-            auto delta = owner.transactionDeltaLocked(data->transaction.id);
-            delta.proofs.erase(std::remove_if(delta.proofs.begin(), delta.proofs.end(),
-                [&](const auto &proof) { return removals.count(proof.authority.version.key) != 0; }), delta.proofs.end());
-            for (const auto &change : data->changes) {
-                if (change.replacement.removal) delta.removedPages.append(change.replacement.key);
-                else delta.proofs.append(change.replacement.proof);
+            const auto storage = data->changes.get_allocator();
+            std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removals(storage), additions(storage);
+            removals.reserve(data->state->removals.size() + data->changes.size());
+            additions.reserve(data->state->proofs.size() + data->changes.size());
+            for (const auto &key : data->state->removals) removals.push_back(key);
+            for (const auto &proof : data->state->proofs) {
+                const auto changed = data->findChange(proof.first);
+                if (!changed || !changed->replacement.removal) additions.push_back(proof.first);
             }
-            if (!base.contentExtentAfterDelta(surface, current.logicalPageExtent, delta, &extent)) {
+            for (const auto &change : data->changes) {
+                if (change.replacement.removal) removals.push_back(change.replacement.key);
+                else additions.push_back(change.replacement.key);
+            }
+            std::sort(removals.begin(), removals.end(), overlayKeyLess);
+            removals.erase(std::unique(removals.begin(), removals.end()), removals.end());
+            if (!base.contentExtentAfterPages(surface, current.logicalPageExtent,
+                removals.data(), removals.size(), additions.data(), additions.size(), &extent)) {
                 KisPageStoreDetail::setError(error, QStringLiteral("derived surface extent exceeds QRect range"));
                 return false;
             }
@@ -306,17 +340,11 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepareSurfaceLock
                 return false;
             }
             auto &changes = data->state->surfaceChanges;
-            for (qsizetype i = 0; i < changes.size(); ++i)
-                if (changes.at(i).after.surface == surface) { data->surfaceIndex = i; break; }
-            // Captures may share the output vector. Detach/grow before the
-            // installation interval, without publishing the new surface yet.
-            changes.detach();
+            for (size_t i = 0; i < changes.size(); ++i)
+                if (changes.at(i).after.surface == surface) { data->surfaceIndex = qsizetype(i); break; }
+            // The authority array is never shared with a Qt export. Reserve
+            // its actual paid capacity before the installation interval.
             if (data->surfaceIndex < 0) changes.reserve(changes.size() + 1);
-            if ((!changes.isEmpty() && !changes.isDetached())
-                || (data->surfaceIndex < 0 && changes.capacity() <= changes.size())) {
-                KisPageStoreDetail::setError(error, QStringLiteral("overlay surface storage preparation was refused"));
-                return false;
-            }
             data->surfaceChange = std::move(change);
         }
         data->surfacePrepared = true;
@@ -339,10 +367,10 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
         return false;
     }
     KisPagePublicationCoordinator &owner = *data->owner;
-    const auto transaction = owner.m_preparedTransactions.constFind(
+    const auto transaction = owner.m_preparedTransactions.find(
         data->transaction.id.value);
     if (transaction == owner.m_preparedTransactions.cend()
-        || transaction.value() != data->state) {
+        || transaction->second != data->state) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay transaction storage changed"));
         return false;
     }
@@ -363,7 +391,7 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
         }
     }
 
-    if (!data->detachments.isEmpty()
+    if (!data->detachments.empty()
         && !owner.m_metadata.installMutation(
             std::move(data->metadata), data->transaction, error,
             metadataCleanup)) {
@@ -396,7 +424,7 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
     }
     if (data->surfaceChange.after.surface.isValid()) {
         if (data->surfaceIndex >= 0) state.surfaceChanges[data->surfaceIndex] = data->surfaceChange;
-        else state.surfaceChanges.append(data->surfaceChange);
+        else state.surfaceChanges.push_back(data->surfaceChange);
     }
     data->releaseCapacity();
     data->installed = true;
@@ -414,10 +442,10 @@ void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirements
         const bool revoked = data->owner->m_owner.revokePreparedPage(change.superseded);
         Q_ASSERT(revoked);
         Q_UNUSED(revoked);
+        data->owner->m_history.requestKeyLocked(change.replacement.key);
     }
-    if (!data->historical.isEmpty())
-        data->owner->m_history.collectUnreachableLocked(
-            data->historical.constData(), data->historical.size());
+    if (!data->detachments.empty())
+        data->owner->m_history.collectUnreachableLocked(nullptr, 0);
     data->collected = true;
 }
 
@@ -520,6 +548,7 @@ KisPagePublicationCoordinator::KisPagePublicationCoordinator(
     KisImageEpochReferenceModel &epochs,
     KisPageMetadataCoordinator &metadata,
     KisPageOwnerLedger &owner,
+    KisBackingBudgetController &budget,
     KisPageRetirementQueue &retirementQueue,
     KisPageHistoryCollector &history,
     KisCompletionTicket &readyHostCompletion,
@@ -537,6 +566,7 @@ KisPagePublicationCoordinator::KisPagePublicationCoordinator(
     : m_epochs(epochs)
     , m_metadata(metadata)
     , m_owner(owner)
+    , m_budget(budget)
     , m_retirementQueue(retirementQueue)
     , m_history(history)
     , m_readyHostCompletion(readyHostCompletion)
@@ -551,6 +581,7 @@ KisPagePublicationCoordinator::KisPagePublicationCoordinator(
     , m_disposeMetadataCleanup(disposeMetadataCleanup)
     , m_restoreIsIdle(restoreIsIdle)
     , m_prepareAbort(prepareAbort)
+    , m_preparedTransactions(KisMutationStorageAllocator<TransactionMap::value_type>(&budget))
 {
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_transactionHasMutationActivity);
@@ -579,9 +610,9 @@ bool KisPagePublicationCoordinator::resolveSurfaceLocked(KisSurfaceId surface,
         return false;
     }
     if (view.kind == KisPageReadViewKind::TransactionOverlay) {
-        const auto prepared = m_preparedTransactions.constFind(view.transaction.value);
-        if (prepared != m_preparedTransactions.constEnd()) {
-            for (const KisSurfaceEpochChange &change : (*prepared)->surfaceChanges) {
+        const auto prepared = m_preparedTransactions.find(view.transaction.value);
+        if (prepared != m_preparedTransactions.cend()) {
+            for (const KisSurfaceEpochChange &change : prepared->second->surfaceChanges) {
                 if (change.after.surface == surface) {
                     *state = change.after;
                     break;
@@ -620,16 +651,16 @@ bool KisPagePublicationCoordinator::resolveVersionLocked(const KisPageKey &key,
     }
     if (view.kind != KisPageReadViewKind::TransactionOverlay)
         return true;
-    const auto prepared = m_preparedTransactions.constFind(view.transaction.value);
-    if (prepared != m_preparedTransactions.constEnd()) {
-        const auto proof = (*prepared)->proofs.find(key);
-        if (proof != (*prepared)->proofs.cend()) {
+    const auto prepared = m_preparedTransactions.find(view.transaction.value);
+    if (prepared != m_preparedTransactions.cend()) {
+        const auto proof = prepared->second->proofs.find(key);
+        if (proof != prepared->second->proofs.cend()) {
             *version = proof->second.authority.version;
             return true;
         }
     }
     if (version->isDefaultPixel()
-        || (prepared != m_preparedTransactions.constEnd() && (*prepared)->removals.count(key))) {
+        || (prepared != m_preparedTransactions.cend() && prepared->second->removals.count(key))) {
         KisSurfaceEpochState surface;
         if (!resolveSurfaceLocked(key.surface, view, &surface))
             return false;
@@ -663,7 +694,7 @@ bool KisPagePublicationCoordinator::stageSurfaceDefaultPixelLocked(const KisPage
 
 bool KisPagePublicationCoordinator::stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
                                                                const KisSurfaceEpochState &after,
-                                                               QString *error)
+                                                               QString *error) try
 {
     if (m_transactionHasMutationActivity(m_ownerContext, transaction.id) || isPreparingCommitLocked(transaction.id)) {
         KisPageStoreDetail::setError(error,
@@ -696,8 +727,7 @@ bool KisPagePublicationCoordinator::stageSurfaceMetadataLocked(const KisPageTran
         return false;
     }
 
-    QVector<KisSurfaceEpochChange> &changes =
-        preparedStateLocked(transaction.id)->surfaceChanges;
+    auto &changes = preparedStateLocked(transaction.id)->surfaceChanges;
     KisSurfaceEpochChange *existing = nullptr;
     for (KisSurfaceEpochChange &candidate : changes) {
         if (!(candidate.after.surface == after.surface))
@@ -717,6 +747,7 @@ bool KisPagePublicationCoordinator::stageSurfaceMetadataLocked(const KisPageTran
         break;
     }
     const auto &previous = existing ? existing->after : before;
+    if (!existing) changes.reserve(changes.size() + 1);
     if (previous.defaultPixelRevision != after.defaultPixelRevision) {
         if (!reserveDefaultRevisionLocked(after.surface, after.defaultPixelRevision, error))
             return false;
@@ -724,9 +755,13 @@ bool KisPagePublicationCoordinator::stageSurfaceMetadataLocked(const KisPageTran
     if (existing)
         existing->after = after;
     else
-        changes.append(change);
+        changes.push_back(change);
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("surface metadata storage preparation was refused"));
+    return false;
 }
 
 bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransaction &transaction,
@@ -762,7 +797,8 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
 
     // Removal consumes the same prepared overlay protocol as seal and generic
     // publication. It must not detach a proof before its removal node exists.
-    auto update = prepareOverlayUpdateLocked(transaction, {{key, {}, true}}, error);
+    const OverlayChange removal{key, {}, true};
+    auto update = prepareOverlayUpdateLocked(transaction, &removal, 1, error);
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     const auto dispose = qScopeGuard([&] {
         ownerLock.unlock();
@@ -833,14 +869,14 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
     QVector<KisPageAllocationDescriptor> proofDescriptors;
     proofDescriptors.reserve(preparedPages.proofs.size());
     {
-        const auto found = m_preparedTransactions.constFind(transaction.id.value);
+        const auto found = m_preparedTransactions.find(transaction.id.value);
         // Storage preparation may leave an empty original transaction record
         // after refusal or an implicit-default removal. It is not a delta.
-        if (found == m_preparedTransactions.constEnd() || (*found)->isEmpty())
+        if (found == m_preparedTransactions.cend() || found->second->isEmpty())
             return {};
-        const PreparedTransactionState &owned = *found.value();
+        const PreparedTransactionState &owned = *found->second;
         if (owned.proofs.size() != size_t(preparedPages.proofs.size())
-            || owned.surfaceChanges.size() != preparedPages.surfaceChanges.size()
+            || owned.surfaceChanges.size() != size_t(preparedPages.surfaceChanges.size())
             || owned.removals.size() != size_t(preparedPages.removedPages.size())) {
             return {};
         }
@@ -1090,7 +1126,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
             Q_ASSERT(revoked);
             Q_UNUSED(revoked);
         }
-        m_preparedTransactions.remove(transaction.id.value);
+        auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
         m_history.collectEpochBookkeepingLocked(!(transaction.baseEpoch == currentRoot.epoch()));
         QVector<KisPageKey> historyCandidates;
         historyCandidates.reserve(preparedPages.proofs.size() + preparedCommit.data->descriptorChanges.size());
@@ -1107,6 +1143,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         ++m_committedTransactions;
         const KisImageEpochCommitTicket ticket{committed.root.epoch(), preparedCommit.data->completion};
         ownerLock.unlock();
+        releasedOverlay = {};
         preparedCommit = {};
         ownerLock.relock();
         return ticket;
@@ -1346,9 +1383,14 @@ bool KisPagePublicationCoordinator::abortLocked(
         if (!revokePreparedProofLocked(proof))
             return false;
     }
-    m_preparedTransactions.remove(transaction.id.value);
     if (!m_epochs.abort(transaction))
         return false;
+    auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
+    const auto disposeOverlay = qScopeGuard([&] {
+        ownerLock.unlock();
+        releasedOverlay = {};
+        ownerLock.relock();
+    });
     m_history.collectEpochBookkeepingLocked(!(transaction.baseEpoch == m_epochs.captureCommittedRoot().epoch()));
     return true;
 }
@@ -1362,17 +1404,18 @@ std::shared_ptr<KisPagePublicationCoordinator::PreparedTransactionState>
 KisPagePublicationCoordinator::preparedStateLocked(KisPageTransactionId transaction)
 {
     auto found = m_preparedTransactions.find(transaction.value);
-    if (found != m_preparedTransactions.end()) return found.value();
-    auto state = std::make_shared<PreparedTransactionState>();
-    m_preparedTransactions.insert(transaction.value, state);
+    if (found != m_preparedTransactions.end()) return found->second;
+    const auto storage = KisMutationStorageAllocator<PreparedTransactionState>::retained(&m_budget);
+    auto state = std::allocate_shared<PreparedTransactionState>(storage, storage);
+    m_preparedTransactions.emplace(transaction.value, state);
     return state;
 }
 
 const KisPagePublicationCoordinator::ProofMap *
 KisPagePublicationCoordinator::findProofsLocked(KisPageTransactionId transaction) const
 {
-    const auto found = m_preparedTransactions.constFind(transaction.value);
-    return found == m_preparedTransactions.constEnd() || (*found)->proofs.empty() ? nullptr : &(*found)->proofs;
+    const auto found = m_preparedTransactions.find(transaction.value);
+    return found == m_preparedTransactions.cend() || found->second->proofs.empty() ? nullptr : &found->second->proofs;
 }
 
 KisPreparedPageProof KisPagePublicationCoordinator::findPreparedProofLocked(
@@ -1389,13 +1432,14 @@ KisPagePublicationCoordinator::transactionDeltaLocked(KisPageTransactionId trans
 {
     KisPreparedPageSet result;
     result.transaction = transaction;
-    const auto found = m_preparedTransactions.constFind(transaction.value);
-    if (found != m_preparedTransactions.constEnd()) {
-        result.proofs.reserve(qsizetype((*found)->proofs.size()));
-        for (const auto &proof : (*found)->proofs) result.proofs.append(proof.second);
-        result.surfaceChanges = (*found)->surfaceChanges;
-        result.removedPages.reserve(qsizetype((*found)->removals.size()));
-        for (const auto &key : (*found)->removals) result.removedPages.append(key);
+    const auto found = m_preparedTransactions.find(transaction.value);
+    if (found != m_preparedTransactions.cend()) {
+        result.proofs.reserve(qsizetype(found->second->proofs.size()));
+        for (const auto &proof : found->second->proofs) result.proofs.append(proof.second);
+        result.surfaceChanges.reserve(qsizetype(found->second->surfaceChanges.size()));
+        for (const auto &change : found->second->surfaceChanges) result.surfaceChanges.append(change);
+        result.removedPages.reserve(qsizetype(found->second->removals.size()));
+        for (const auto &key : found->second->removals) result.removedPages.append(key);
     }
     return result;
 }
@@ -1404,8 +1448,8 @@ bool KisPagePublicationCoordinator::captureDeltaLocked(
     KisPageTransactionId transaction, KisPageCapturedRelease &capture,
     size_t *versions, size_t *removals, size_t *surfaces) const
 {
-    const auto found = m_preparedTransactions.constFind(transaction.value);
-    const auto *state = found == m_preparedTransactions.cend() ? nullptr : found->get();
+    const auto found = m_preparedTransactions.find(transaction.value);
+    const auto *state = found == m_preparedTransactions.cend() ? nullptr : found->second.get();
     *versions = state ? state->proofs.size() : 0;
     *removals = state ? state->removals.size() : 0;
     *surfaces = state ? size_t(state->surfaceChanges.size()) : 0;
@@ -1423,38 +1467,47 @@ bool KisPagePublicationCoordinator::captureDeltaLocked(
 bool KisPagePublicationCoordinator::stagesRemovalLocked(
     KisPageTransactionId transaction, const KisPageKey &key) const
 {
-    const auto found = m_preparedTransactions.constFind(transaction.value);
-    return found != m_preparedTransactions.constEnd() && (*found)->removals.count(key);
+    const auto found = m_preparedTransactions.find(transaction.value);
+    return found != m_preparedTransactions.cend() && found->second->removals.count(key);
 }
 
 KisPagePublicationCoordinator::KisPreparedOverlayUpdate
 KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
     const KisPageTransaction &transaction,
-    QVector<OverlayChange> changes,
+    const OverlayChange *changes, size_t count,
     QString *error)
 {
-    if (!hasActiveTransactionLocked(transaction) || changes.isEmpty()) {
+    if (!hasActiveTransactionLocked(transaction) || !changes || !count) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
         return {};
     }
 
     try {
-        auto candidate = std::make_unique<KisPreparedOverlayUpdate::Data>();
+        using Data = KisPreparedOverlayUpdate::Data;
+        auto storage = KisMutationStorageAllocator<Data>::retained(&m_budget);
+        std::unique_ptr<Data, KisPreparedOverlayUpdate::DataDeleter> candidate(nullptr, {storage});
+        auto *raw = storage.allocate(1);
+        try { std::allocator_traits<decltype(storage)>::construct(storage, raw, storage); }
+        catch (...) { auto allocator = storage; allocator.deallocate(raw, 1); throw; }
+        candidate.reset(raw);
         candidate->owner = this;
         candidate->transaction = transaction;
-        candidate->changes.reserve(changes.size());
-        candidate->detachments.reserve(changes.size());
-        if (candidate->detachments.capacity() < changes.size()) throw std::bad_alloc();
-        RemovalSet keys;
+        candidate->changes.reserve(count);
+        for (size_t i = 0; i < count; ++i) candidate->changes.push_back({changes[i], {}, false, false});
+        std::sort(candidate->changes.begin(), candidate->changes.end(), [](const auto &a, const auto &b) {
+            return overlayKeyLess(a.replacement.key, b.replacement.key);
+        });
         size_t oldProofNodes = 0, oldRemovalNodes = 0;
-        keys.reserve(changes.size());
         const auto base = m_epochs.root(transaction.baseEpoch);
         candidate->state = preparedStateLocked(transaction.id);
         auto &state = *candidate->state;
-        for (OverlayChange &change : changes) {
+        candidate->detachments.reserve(std::min(count, state.proofs.size()));
+        KisPageKey previous;
+        for (auto &entry : candidate->changes) {
+            const auto &change = entry.replacement;
             const bool hasProof = change.proof.isValid();
             if (!change.key.isValid() || change.removal == hasProof
-                || keys.count(change.key)
+                || previous == change.key
                 || (hasProof
                     && (!(change.proof.transaction == transaction.id)
                         || !(change.proof.authority.version.key == change.key)
@@ -1462,7 +1515,7 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
                 KisPageStoreDetail::setError(error, QStringLiteral("overlay update change is invalid"));
                 return {};
             }
-            keys.insert(change.key);
+            previous = change.key;
             const auto superseded = findPreparedProofLocked(transaction.id, change.key);
             if (superseded.isValid()) {
                 if (!m_owner.ownsPreparedPageProof(superseded)
@@ -1472,11 +1525,7 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
                     KisPageStoreDetail::setError(error, QStringLiteral("overlay update does not replace its current proof"));
                     return {};
                 }
-                KisPageTransition detach;
-                detach.kind = KisPageTransitionKind::DetachPreparedVersion;
-                detach.version = superseded.authority.version;
-                detach.transaction = transaction.id;
-                candidate->detachments.append(detach);
+                candidate->detachments.push_back(superseded.authority.version);
             }
             const bool removalWasInBase = change.removal && base.containsPage(change.key);
             const bool wasRemoved = state.removals.count(change.key) != 0;
@@ -1486,15 +1535,13 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
                 candidate->removalNodes.insert(change.key);
             oldProofNodes += change.removal && superseded.isValid();
             oldRemovalNodes += wasRemoved && (hasProof || !removalWasInBase);
-            candidate->changes.push_back({std::move(change), superseded, removalWasInBase, wasRemoved});
+            entry.superseded = superseded;
+            entry.removalWasInBase = removalWasInBase;
+            entry.wasRemoved = wasRemoved;
         }
 
         candidate->oldProofNodes.reserve(oldProofNodes);
         candidate->oldRemovalNodes.reserve(oldRemovalNodes);
-        candidate->historical.reserve(candidate->detachments.size());
-        if (candidate->historical.capacity() < candidate->detachments.size()) throw std::bad_alloc();
-        for (const auto &detach : std::as_const(candidate->detachments))
-            candidate->historical.append(detach.version.key);
 
         // Node transfer alone is not enough: a sibling may install while this
         // candidate prepares metadata. Include every outstanding insertion,
@@ -1530,13 +1577,14 @@ bool KisPagePublicationCoordinator::revokePreparedProofLocked(
     auto transaction = m_preparedTransactions.find(proof.transaction.value);
     Q_ASSERT(transaction != m_preparedTransactions.end());
     if (transaction == m_preparedTransactions.end()) return false;
-    auto &state = **transaction;
+    auto &state = *transaction->second;
     auto stored = state.proofs.find(proof.authority.version.key);
     Q_ASSERT(stored != state.proofs.end() && stored->second == proof);
     if (stored == state.proofs.end() || !(stored->second == proof)) return false;
     if (!m_owner.revokePreparedPage(proof)) return false;
     state.proofs.erase(stored);
-    if (state.isEmpty()) m_preparedTransactions.erase(transaction);
+    // Keep the original state/index until commit or abort has fully changed
+    // visibility. Their final exit disposes its aggregate outside the gate.
     return true;
 }
 
@@ -1647,9 +1695,9 @@ KisPagePublicationCoordinatorSnapshot KisPagePublicationCoordinator::snapshotLoc
 {
     KisPagePublicationCoordinatorSnapshot result;
     for (const auto &prepared : m_preparedTransactions) {
-        result.preparedProofs += qsizetype(prepared->proofs.size());
-        result.preparedSurfaceChanges += prepared->surfaceChanges.size();
-        result.stagedPageRemovals += qsizetype(prepared->removals.size());
+        result.preparedProofs += qsizetype(prepared.second->proofs.size());
+        result.preparedSurfaceChanges += qsizetype(prepared.second->surfaceChanges.size());
+        result.stagedPageRemovals += qsizetype(prepared.second->removals.size());
     }
     result.committedTransactions = m_committedTransactions;
     return result;

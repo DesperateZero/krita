@@ -5440,7 +5440,9 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
             transition.imageEpoch = {2};
         transitions.append(transition);
     }
-    auto candidate = mutation ? coordinator->prepareMutation(tx, transitions)
+    QVector<KisPageVersion> detachments;
+    for (const auto &transition : transitions) detachments.append(transition.version);
+    auto candidate = mutation ? coordinator->prepareMutation(tx, detachments.constData(), detachments.size())
                               : coordinator->preparePublication(tx, {2}, transitions);
     QVERIFY(candidate.isValid());
     const auto reservedFootprint = coordinator->footprint();
@@ -5653,7 +5655,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     QVERIFY(metadata->registerPage(page));
     const auto prepare = [&] {
         return kind == 1 ? metadata->prepareRecoverableWrite(tx, transition)
-             : kind == 3 ? metadata->prepareMutation(tx, {transition})
+             : kind == 3 ? metadata->prepareMutation(tx, &transition.version, 1)
                          : metadata->preparePublication(tx, {2}, {transition});
     };
     // Warm only the original reusable activity/index capacity, then discard
@@ -5803,7 +5805,7 @@ void KisPageStoreReferenceTest::preparedPublicationMatchesFullReferenceTransitio
             QVERIFY(KisPageStateMachine().validateInvariants(page));
             QVERIFY(coordinator.registerPage(page));
             const bool mutation = kind == KisPageTransitionKind::DetachPreparedVersion;
-            auto batch = mutation ? coordinator.prepareMutation(transaction, {transition})
+            auto batch = mutation ? coordinator.prepareMutation(transaction, &transition.version, 1)
                                   : coordinator.preparePublication(transaction, KisImageEpochId{2}, {transition});
             QCOMPARE(batch.isValid(), expected.accepted);
             if (!expected.accepted)
@@ -7186,7 +7188,7 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(4));
     QVERIFY(foreign.configure(4));
-    QVector<KisPageTransition> changes;
+    QVector<KisPageVersion> changes;
     for (int x = 0; x < 2; ++x) {
         auto state = initialPageState(pageVersion(x, 1), replica(pageVersion(x, 1), 1, 1, 1));
         const auto authority = replica(pageVersion(x, 2), 1, 1, 2);
@@ -7198,14 +7200,10 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
         state.nextGeneration = {3};
         QVERIFY(coordinator.registerPage(state));
         QVERIFY(foreign.registerPage(state));
-        KisPageTransition detach;
-        detach.kind = KisPageTransitionKind::DetachPreparedVersion;
-        detach.version = pageVersion(x, 2);
-        detach.transaction = tx.id;
-        changes.append(detach);
+        changes.append(pageVersion(x, 2));
     }
     const auto make = [&] {
-        return coordinator.prepareMutation(tx, changes);
+        return coordinator.prepareMutation(tx, changes.constData(), changes.size());
     };
     auto batch = make();
     QVERIFY(batch.isValid());
@@ -7223,25 +7221,27 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     QVERIFY(!coordinator.installPublication(std::move(batch), tx, {2}));
     auto invalid = changes;
     invalid.append(changes.first());
-    QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
+    QVERIFY(!coordinator.prepareMutation(tx, invalid.constData(), invalid.size()).isValid());
+    // This private entry accepts only versions, so foreign transition kinds,
+    // operation IDs and epoch tags are no longer representable inputs.
+    QVERIFY(!coordinator.prepareMutation(tx, nullptr, 1).isValid());
+    QVERIFY(!coordinator.prepareMutation(tx, changes.constData(), -1).isValid());
+    wrong = tx;
+    ++wrong.id.value;
+    QVERIFY(!coordinator.prepareMutation(wrong, changes.constData(), changes.size()).isValid());
     invalid = changes;
-    invalid.last().kind = KisPageTransitionKind::AbortTransaction;
-    QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
-    invalid = changes;
-    invalid.last().imageEpoch = {2};
-    QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
-    invalid = changes;
-    invalid.last().operation = {71};
-    QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
-    invalid = changes;
-    invalid.last().version.generation = {};
-    QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
-    invalid = changes;
-    for (auto &t : invalid) {
+    invalid.last().generation = {};
+    QVERIFY(!coordinator.prepareMutation(tx, invalid.constData(), invalid.size()).isValid());
+    QVector<KisPageTransition> publication;
+    for (const auto &version : changes) {
+        KisPageTransition t;
         t.kind = KisPageTransitionKind::CommitTransaction;
+        t.version = version;
+        t.transaction = tx.id;
         t.imageEpoch = {2};
+        publication.append(t);
     }
-    batch = coordinator.preparePublication(tx, {2}, invalid);
+    batch = coordinator.preparePublication(tx, {2}, publication);
     QVERIFY(batch.isValid());
     QVERIFY(!coordinator.installMutation(std::move(batch), tx));
     batch = make();
@@ -7311,7 +7311,7 @@ void KisPageStoreReferenceTest::preparedMutationPreservesLateProtection()
     detach.kind = KisPageTransitionKind::DetachPreparedVersion;
     detach.version = version;
     detach.transaction = tx.id;
-    auto candidate = coordinator.prepareMutation(tx, {detach});
+    auto candidate = coordinator.prepareMutation(tx, &detach.version, 1);
     QVERIFY(candidate.isValid());
     KisCompletionRegistry completions;
     const KisCompletionDomain source = KisCompletionDomain::HostLogical;

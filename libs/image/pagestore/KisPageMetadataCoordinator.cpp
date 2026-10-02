@@ -2232,7 +2232,7 @@ KisPageMetadataCoordinator::preparePublication(const KisPageTransaction &transac
                                                const QVector<KisPageTransition> &transitions,
                                                QString *error) const
 {
-    return preparePublicationImpl(transaction, minimumEpoch, transitions, false, error);
+    return preparePublicationImpl(transaction, minimumEpoch, transitions.constData(), transitions.size(), false, error);
 }
 
 KisPageMetadataCoordinator::PreparedPublication
@@ -2240,15 +2240,15 @@ KisPageMetadataCoordinator::prepareRestoration(KisImageEpochId minimumEpoch,
                                                const QVector<KisPageTransition> &transitions,
                                                QString *error) const
 {
-    return preparePublicationImpl({}, minimumEpoch, transitions, true, error);
+    return preparePublicationImpl({}, minimumEpoch, transitions.constData(), transitions.size(), true, error);
 }
 
 KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transaction,
-                                            const QVector<KisPageTransition> &transitions,
+                                            const KisPageVersion *versions, qsizetype count,
                                             QString *error) const
 {
-    return preparePublicationImpl(transaction, {}, transitions, false, error, PreparationKind::Detachment);
+    return preparePublicationImpl(transaction, {}, nullptr, count, false, error, PreparationKind::Detachment, versions);
 }
 
 bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
@@ -2265,7 +2265,7 @@ KisPageMetadataCoordinator::prepareRecoverableWrite(const KisPageTransaction &tr
                                                    const KisPageTransition &transition,
                                                    QString *error) const
 {
-    return preparePublicationImpl(transaction, {}, {transition}, false, error, PreparationKind::RecoverableWrite);
+    return preparePublicationImpl(transaction, {}, &transition, 1, false, error, PreparationKind::RecoverableWrite);
 }
 
 bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&prepared,
@@ -2280,16 +2280,18 @@ bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&p
 KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &transaction,
                                                    KisImageEpochId minimumEpoch,
-                                                   const QVector<KisPageTransition> &transitions,
+                                                   const KisPageTransition *transitions, qsizetype count,
                                                    bool restoration,
                                                    QString *error,
-                                                   PreparationKind kind) const
+                                                   PreparationKind kind,
+                                                   const KisPageVersion *detachedVersions) const
 try {
     const bool mutation = kind != PreparationKind::Publication;
     const bool detachment = kind == PreparationKind::Detachment;
     const bool recoverable = kind == PreparationKind::RecoverableWrite;
     PreparedPublication result;
-    if (!isOperational() || (!restoration && !transaction.isValid())
+    if (!isOperational() || count < 0 || (count && (detachment ? !detachedVersions : !transitions))
+        || (!restoration && !transaction.isValid())
         || (!mutation && (!minimumEpoch.isValid() || minimumEpoch.value <= transaction.baseEpoch.value))) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
         return result;
@@ -2304,15 +2306,18 @@ try {
     data->transaction = transaction;
     data->minimumEpoch = minimumEpoch;
     data->kind = kind;
-    data->entries.reserve(transitions.size());
+    data->entries.reserve(size_t(count));
     const KisPageStateMachine stateMachine;
-    for (const KisPageTransition &transition : transitions) {
+    for (qsizetype i = 0; i < count; ++i) {
+        KisPageTransition detached;
+        if (detachment) {
+            detached.kind = KisPageTransitionKind::DetachPreparedVersion;
+            detached.version = detachedVersions[i];
+            detached.transaction = transaction.id;
+        }
+        const auto &transition = detachment ? detached : transitions[i];
         const bool write = transition.kind == KisPageTransitionKind::CommitTransaction;
-        const bool invalidMutation = detachment
-            && (transition.kind != KisPageTransitionKind::DetachPreparedVersion
-                || !(transition.transaction == transaction.id) || transition.imageEpoch.isValid()
-                || transition.operation.isValid() || !transition.version.isValid());
-        if (invalidMutation
+        if ((detachment && !transition.version.isValid())
             || (recoverable && (transition.kind != KisPageTransitionKind::AcquireRecoverableWrite
                 || !(transition.transaction == transaction.id) || transition.imageEpoch.isValid()))
             || (!mutation

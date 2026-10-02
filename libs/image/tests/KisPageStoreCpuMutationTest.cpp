@@ -24,6 +24,7 @@
 #include "KisPageRetirementQueue_p.h"
 #include "KisPageReadCoordinator_p.h"
 #include "KisPageHistoryCollector_p.h"
+#include "KisPagePublicationCoordinator_p.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
@@ -442,6 +443,14 @@ class KisPageStoreCpuMutationTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void overlayStorageAtCapacity_data()
+    {
+        QTest::addColumn<int>("refusal");
+        QTest::newRow("candidate-refusal") << 0;
+        QTest::newRow("surface-refusal") << 1;
+        QTest::newRow("prepared-install-and-history") << 2;
+    }
+    void overlayStorageAtCapacity();
     void initialReplicaImportFailure_data();
     void initialReplicaImportFailure();
     void productionRecoverableHandoff_data();
@@ -4840,6 +4849,199 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     kisDrainPageStoreReclamation();
     QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
     QCOMPARE(references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
+{
+    QFETCH(int, refusal);
+    KisPageBackingLimits processLimits;
+    processLimits.metadataArenaBytes = 512 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(processLimits);
+    // Keep the parent's reusable reservation slots in their original owner;
+    // only this child's actual storage must vanish after its final tail.
+    std::array<KisBackingBudgetReservation, 16> warm;
+    KisBackingBudgetDelta warmDelta;
+    warmDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = 1;
+    for (auto &reservation : warm) {
+        reservation = parent->reserve(warmDelta, nullptr);
+        QVERIFY(reservation.isValid());
+    }
+    for (auto &reservation : warm) reservation.release();
+    const auto parentBaseline = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    auto fixture = std::make_unique<ReadTerminalFixture>(256 * 1024, 4 * 64 * 64 * 4);
+    auto &f = *fixture;
+    QVERIFY(f.budget.configureSharedNonPayloadBudget(parent));
+    f.background = false; // Explicit execution fixes the hard-capacity cut.
+    f.metadata.attachBackingBudget(f.budget);
+    f.metadata.attachRetirementDebtOwner(&f,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<ReadTerminalFixture *>(p)->owner.prepareRetirementDebt(effects, count, cookie, error);
+        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
+            auto &fixture = *static_cast<ReadTerminalFixture *>(p);
+            fixture.owner.commitRetirementDebt(cookie);
+            for (qsizetype i = 0; i < count; ++i) fixture.retirement.acceptEffect(effects[i]);
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<ReadTerminalFixture *>(p)->owner.cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(), qPrintable(f.error));
+    auto publication = std::make_unique<KisPagePublicationCoordinator>(f.epochs, f.metadata, f.owner,
+        f.budget, f.retirement, f.history, f.ready, f.activeCalls, f.operational, f.background, &f,
+        +[](void *, KisPageTransactionId) { return false; },
+        +[](void *, const KisPageKey &) { return false; },
+        +[](void *, KisPageTransactionId, QMutexLocker<QMutex> &, QString *) { return true; },
+        +[](void *, KisPageTransactionId) {},
+        +[](void *, KisPageMetadataCoordinator::DeferredPublicationCleanup) {},
+        +[](void *) { return true; },
+        +[](void *, KisPageTransactionId, KisPageReadCleanup &) { return true; });
+    f.operational = false;
+    QVERIFY(publication->configureDerivedExtentLocked({1}));
+    f.operational = true;
+    const auto tx = f.epochs.beginTransaction({1}, &f.error);
+    QVERIFY(tx.isValid());
+    KisSurfaceEpochState surface;
+    QVERIFY(f.epochs.root({1}).surfaceState({1}, &surface));
+    std::array<KisPreparedPageProof, 2> proofs;
+    KisPageWriteCoordinator write(f.metadata, f.epochs, f.budget, f.owner);
+    for (size_t i = 0; i < proofs.size(); ++i) {
+        const KisPageVersion version{key(int(i + 1)), {2}};
+        auto backing = write.reserveBacking(surface.allocationDescriptor(), cpu.domain,
+            KisBackingBudgetClass::ActivePending, &f.error, version);
+        QVERIFY2(backing.reservation.isValid(), qPrintable(f.error));
+        const auto result = f.physical.provider->prepareWrite(f.owner.nextOperationId(), version,
+            surface.allocationDescriptor(), cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+        QVERIFY(result.isValid());
+        QVERIFY(f.owner.registerBacking(result.replica, backing.reservation,
+            KisBackingBudgetClass::ActivePending, &f.error, &backing.retirement));
+        KisPageVersionStateSnapshot implicit;
+        implicit.version = {version.key, {1}, 1}; implicit.publication = KisPagePublicationState::Published;
+        KisPageVersionStateSnapshot prepared;
+        prepared.version = version; prepared.publication = KisPagePublicationState::Prepared;
+        prepared.preparedBy = tx.id; prepared.authority = result.replica;
+        KisReplicaStateSnapshot resident;
+        resident.replica = result.replica; resident.validity = KisReplicaValidity::Valid;
+        prepared.replicas = {resident};
+        KisPageStateSnapshot page;
+        page.key = version.key; page.publishedEpoch = {1}; page.publishedGeneration = {1};
+        page.publishedDefaultPixelRevision = 1; page.nextGeneration = {3}; page.versions = {implicit, prepared};
+        QVERIFY2(f.metadata.registerPage(page, &f.error), qPrintable(f.error));
+        QVERIFY2(f.owner.sealPreparedPage(f.metadata, version, tx.id, surface.allocationDescriptor(),
+            result.completion, &proofs[i], &f.error), qPrintable(f.error));
+    }
+    using Overlay = KisPagePublicationCoordinator::KisPreparedOverlayUpdate;
+    using Change = KisPagePublicationCoordinator::OverlayChange;
+    QMutexLocker lock(&f.mutex);
+    const Change first{key(1), proofs[0], false}, second{key(2), proofs[1], false};
+    // Two original candidates coexist: bucket preparation includes both
+    // outstanding insertions, while the visible authority is still empty.
+    auto a = publication->prepareOverlayUpdateLocked(tx, &first, 1, &f.error);
+    auto b = publication->prepareOverlayUpdateLocked(tx, &second, 1, &f.error);
+    QVERIFY2(a.isValid() && b.isValid(), qPrintable(f.error));
+    auto state = publication->m_preparedTransactions.at(tx.id.value);
+    QCOMPARE(state->proofInsertions.load(), size_t(2));
+    QVERIFY(state->proofs.empty());
+    const Change baseRemoval{key(), {}, true};
+    auto cancelled = publication->prepareOverlayUpdateLocked(tx, &baseRemoval, 1, &f.error);
+    QVERIFY(cancelled.isValid());
+    QCOMPARE(state->removalInsertions.load(), size_t(1));
+    QVERIFY(state->removals.empty());
+    const auto beforeCancellation = f.live();
+    lock.unlock(); cancelled = {}; lock.relock();
+    QCOMPARE(state->removalInsertions.load(), size_t(0));
+    QVERIFY(state->removals.empty());
+    QVERIFY(f.live() < beforeCancellation);
+    QVERIFY(a.prepare(&f.error)); QVERIFY(a.prepareSurfaceLocked(&f.error));
+    void *filler = nullptr;
+    size_t fillerBytes = 0;
+    const auto fill = [&] {
+        fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
+        filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+    };
+    const auto freeFiller = [&] {
+        kisFreeMutationStorage(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    };
+    const auto cleanupFiller = qScopeGuard([&] { if (filler) freeFiller(); });
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    fill();
+    QVERIFY2(a.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
+    a.collectRetirementsLocked();
+    QVERIFY(b.prepare(&f.error)); QVERIFY(b.prepareSurfaceLocked(&f.error));
+    QVERIFY2(b.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
+    b.collectRetirementsLocked();
+    QCOMPARE(state->proofs.size(), size_t(2));
+    QCOMPARE(state->proofInsertions.load(), size_t(0));
+    freeFiller();
+    lock.unlock(); a = {}; b = {}; lock.relock();
+
+    const std::array<Change, 3> removals{{{key(2), {}, true}, {key(1), {}, true}, {key(), {}, true}}};
+    Overlay removal;
+    if (refusal == 0) {
+        const auto before = f.live();
+        fill();
+        removal = publication->prepareOverlayUpdateLocked(tx, removals.data(), removals.size(), &f.error);
+        QVERIFY(!removal.isValid());
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        QCOMPARE(state->proofs.size(), size_t(2));
+        for (const auto &proof : proofs) QVERIFY(f.owner.ownsPreparedPageProof(proof));
+        freeFiller(); QCOMPARE(f.live(), before);
+    }
+    removal = publication->prepareOverlayUpdateLocked(tx, removals.data(), removals.size(), &f.error);
+    QVERIFY2(removal.isValid(), qPrintable(f.error));
+    lock.unlock(); const bool prepared = removal.prepare(&f.error); lock.relock();
+    QVERIFY2(prepared, qPrintable(f.error));
+    if (refusal == 1) {
+        fill();
+        QVERIFY(!removal.prepareSurfaceLocked(&f.error));
+        QCOMPARE(state->proofs.size(), size_t(2));
+        for (const auto &proof : proofs) {
+            QVERIFY(f.owner.ownsPreparedPageProof(proof));
+            KisPageMetadataCoordinator::VersionInfo selected;
+            QVERIFY(f.metadata.versionSnapshot(proof.authority.version, &selected));
+            QCOMPARE(selected.publication, KisPagePublicationState::Prepared);
+            QCOMPARE(selected.preparedBy, tx.id);
+        }
+        freeFiller(); // The same candidate may retry before its acceptance.
+    }
+    QVERIFY2(removal.prepareSurfaceLocked(&f.error), qPrintable(f.error));
+    fill();
+    QVERIFY2(removal.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
+    const auto beforeCollection = f.budget.usage().backpressureCount;
+    removal.collectRetirementsLocked(); // Original History retains refused keys at hard capacity.
+    QVERIFY(f.budget.usage().backpressureCount > beforeCollection);
+    QCOMPARE(f.history.snapshotLocked().pendingPages, qsizetype(0)); // No key node could be allocated.
+    QVERIFY(state->proofs.empty());
+    QCOMPARE(state->removals.size(), size_t(1));
+    QVERIFY(state->removals.count(key()));
+    QCOMPARE(state->surfaceChanges.front().after.contentExtent, QRect());
+    for (const auto &proof : proofs) QVERIFY(!f.owner.ownsPreparedPageProof(proof));
+    for (const auto &proof : proofs) {
+        KisPageMetadataCoordinator::VersionInfo historical;
+        QVERIFY(f.metadata.versionSnapshot(proof.authority.version, &historical));
+        QCOMPARE(historical.publication, KisPagePublicationState::Historical);
+    }
+    QCOMPARE(f.physical.provider->retireCalls.load(), 0);
+    freeFiller();
+    lock.unlock(); cleanup = {}; lock.relock();
+    f.history.collectUnreachableLocked(nullptr, 0); // Resume the original scan without replaying installation.
+    lock.unlock();
+    f.retirement.process(std::numeric_limits<qsizetype>::max());
+    f.retirement.waitForIdle(); // Registered provider permission retains its original worker dispatch.
+    lock.relock();
+    QCOMPARE(f.physical.provider->retireCalls.load(), 2);
+    QVERIFY(f.retirement.isDrained());
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    // Installed candidate/state tails contain only storage; destroying the
+    // publication facade first cannot release their actual capacity early.
+    const auto withFacade = f.live();
+    publication.reset();
+    QVERIFY(f.live() < withFacade); // Only the original transaction index node.
+    QVERIFY(f.epochs.abort(tx));
+    lock.unlock(); state.reset(); fixture.reset();
+    const auto parentLive = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    QVERIFY(parentLive() > parentBaseline); // Controller is gone; the candidate still owns actual storage.
+    removal = {};
+    QCOMPARE(parentLive(), parentBaseline);
+    QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()

@@ -160,8 +160,7 @@ void collectPageBounds(const PageRoot &root, quint64 surface, PageBounds *bounds
 
 void collectPageBoundsExcluding(
     const PageRoot &root, quint64 surface,
-    std::vector<KisPageKey>::const_iterator first,
-    std::vector<KisPageKey>::const_iterator last, PageBounds *bounds)
+    const KisPageKey *first, const KisPageKey *last, PageBounds *bounds)
 {
     if (!root || surface < root->firstSurface || surface > root->lastSurface)
         return;
@@ -489,14 +488,32 @@ bool KisImageEpochRootSnapshot::contentExtentAfterDelta(KisSurfaceId surface,
     }
     std::sort(removals.begin(), removals.end(), pageKeyLess);
     removals.erase(std::unique(removals.begin(), removals.end()), removals.end());
-    PageBounds bounds;
-    collectPageBoundsExcluding(m_pageRoot, surface.value, removals.cbegin(), removals.cend(), &bounds);
+    std::vector<KisPageKey> additions;
+    additions.reserve(size_t(delta.proofs.size()));
     for (const auto &proof : delta.proofs) {
         const auto &version = proof.authority.version;
         if (!version.isValid())
             return false;
-        if (version.key.surface == surface) {
-            const auto page = version.key.page;
+        additions.push_back(version.key);
+    }
+    return contentExtentAfterPages(surface, pageExtent, removals.data(), removals.size(),
+                                   additions.data(), additions.size(), extent);
+}
+
+bool KisImageEpochRootSnapshot::contentExtentAfterPages(
+    KisSurfaceId surface, QSize pageExtent, const KisPageKey *removals, size_t removalCount,
+    const KisPageKey *additions, size_t additionCount, QRect *extent) const
+{
+    if (extent) *extent = {};
+    if (!extent || !m_epoch.isValid() || !surface.isValid()
+        || pageExtent.width() <= 0 || pageExtent.height() <= 0) return false;
+    PageBounds bounds;
+    // Avoid pointer arithmetic on an empty array's null data().
+    collectPageBoundsExcluding(m_pageRoot, surface.value, removals,
+                               removalCount ? removals + removalCount : removals, &bounds);
+    for (size_t i = 0; i < additionCount; ++i) {
+        if (additions[i].surface == surface) {
+            const auto page = additions[i].page;
             bounds.include(page.column, page.column, page.row, page.row);
         }
     }

@@ -21,6 +21,7 @@
 #include <QVector>
 
 #include <memory>
+#include <map>
 #include <atomic>
 #include <unordered_map>
 #include <unordered_set>
@@ -45,12 +46,15 @@ struct KisPageCapturedRelease;
 class KisPagePublicationCoordinator final
 {
     friend class KisPageWriteCoordinator;
+    friend class KisPageStoreCpuMutationTest;
     struct PageHash {
         size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
         size_t seed = QHashSeed::globalSeed();
     };
-    using ProofMap = std::unordered_map<KisPageKey, KisPreparedPageProof, PageHash>;
-    using RemovalSet = std::unordered_set<KisPageKey, PageHash>;
+    using ProofMap = std::unordered_map<KisPageKey, KisPreparedPageProof, PageHash,
+        std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, KisPreparedPageProof>>>;
+    using RemovalSet = std::unordered_set<KisPageKey, PageHash,
+        std::equal_to<KisPageKey>, KisMutationStorageAllocator<KisPageKey>>;
     struct DescriptorHash {
         size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version, seed); }
         size_t seed = QHashSeed::globalSeed();
@@ -67,7 +71,7 @@ public:
         bool removal = false;
     };
 
-    class KisPreparedOverlayUpdate final
+    class KRITAIMAGE_EXPORT KisPreparedOverlayUpdate final
     {
     public:
         KisPreparedOverlayUpdate();
@@ -90,7 +94,11 @@ public:
 
     private:
         class Data;
-        std::unique_ptr<Data> data;
+        struct DataDeleter {
+            KisMutationStorageAllocator<Data> storage;
+            void operator()(Data *) const noexcept;
+        };
+        std::unique_ptr<Data, DataDeleter> data;
         void cancel() noexcept;
         friend class KisPagePublicationCoordinator;
     };
@@ -107,9 +115,10 @@ public:
                                   KisPageTransactionId transaction,
                                   KisPageReadCleanup &cleanup);
 
-    KisPagePublicationCoordinator(KisImageEpochReferenceModel &epochs,
+    KRITAIMAGE_EXPORT KisPagePublicationCoordinator(KisImageEpochReferenceModel &epochs,
                                   KisPageMetadataCoordinator &metadata,
                                   KisPageOwnerLedger &owner,
+                                  KisBackingBudgetController &budget,
                                   KisPageRetirementQueue &retirementQueue,
                                   KisPageHistoryCollector &history,
                                   KisCompletionTicket &readyHostCompletion,
@@ -135,7 +144,7 @@ public:
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
     bool importDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
-    bool configureDerivedExtentLocked(KisSurfaceId surface);
+    KRITAIMAGE_EXPORT bool configureDerivedExtentLocked(KisSurfaceId surface);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
                                     const KisSurfaceEpochState &after,
@@ -169,11 +178,10 @@ public:
     bool captureDeltaLocked(KisPageTransactionId transaction, KisPageCapturedRelease &capture,
                             size_t *versions, size_t *removals, size_t *surfaces) const;
     bool stagesRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
-    KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
+    KRITAIMAGE_EXPORT KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
         const KisPageTransaction &transaction,
-        QVector<OverlayChange> changes,
+        const OverlayChange *changes, size_t count,
         QString *error);
-    bool revokePreparedProofLocked(const KisPreparedPageProof &proof);
 
     void putDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
@@ -185,9 +193,14 @@ public:
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
 
 private:
+    bool revokePreparedProofLocked(const KisPreparedPageProof &proof);
     struct PreparedTransactionState {
+        explicit PreparedTransactionState(const KisMutationStorageAllocator<char> &storage)
+            : proofs(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+            , surfaceChanges(storage)
+            , removals(0, PageHash{}, std::equal_to<KisPageKey>{}, storage) {}
         ProofMap proofs;
-        QVector<KisSurfaceEpochChange> surfaceChanges;
+        std::vector<KisSurfaceEpochChange, KisMutationStorageAllocator<KisSurfaceEpochChange>> surfaceChanges;
         RemovalSet removals;
         // Storage only: overlapping candidates must reserve enough buckets
         // for every constructed node. Cancellation may run outside the owner
@@ -197,7 +210,7 @@ private:
 
         bool isEmpty() const
         {
-            return proofs.empty() && surfaceChanges.isEmpty() && removals.empty()
+            return proofs.empty() && surfaceChanges.empty() && removals.empty()
                 && !proofInsertions.load() && !removalInsertions.load();
         }
     };
@@ -231,6 +244,7 @@ private:
     KisImageEpochReferenceModel &m_epochs;
     KisPageMetadataCoordinator &m_metadata;
     KisPageOwnerLedger &m_owner;
+    KisBackingBudgetController &m_budget;
     KisPageRetirementQueue &m_retirementQueue;
     KisPageHistoryCollector &m_history;
     KisCompletionTicket &m_readyHostCompletion;
@@ -247,7 +261,9 @@ private:
     PrepareAbort m_prepareAbort = nullptr;
 
     QSet<quint64> m_preparingCommits;
-    QHash<quint64, std::shared_ptr<PreparedTransactionState>> m_preparedTransactions;
+    using TransactionMap = std::map<quint64, std::shared_ptr<PreparedTransactionState>,
+        std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, std::shared_ptr<PreparedTransactionState>>>>;
+    TransactionMap m_preparedTransactions;
     // Immutable Tiles3 surface policy, not a second extent or page registry.
     KisSurfaceId m_derivedExtentSurface;
     QHash<quint64, quint64> m_defaultRevisionHighWater;
