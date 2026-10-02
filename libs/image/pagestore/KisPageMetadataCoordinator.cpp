@@ -182,23 +182,13 @@ struct MetadataArenas {
     static constexpr quint64 ReplicaBudget = 8 * 1024 * 1024;
     static constexpr quint64 OverflowBudget = 4 * 1024 * 1024;
 
-    VersionArena versions{VersionBudget};
-    ReplicaArena replicas{ReplicaBudget};
-    OverflowArena overflow{OverflowBudget};
+    explicit MetadataArenas(KisMutationStorageAllocator<char> storage)
+        : versions(VersionBudget, storage), replicas(ReplicaBudget, storage)
+        , overflow(OverflowBudget, storage) {}
 
-    static constexpr quint64 maximumDirectoryBytes()
-    {
-        return VersionArena::directoryBytesForLimit(VersionBudget)
-            + ReplicaArena::directoryBytesForLimit(ReplicaBudget)
-            + OverflowArena::directoryBytesForLimit(OverflowBudget);
-    }
-
-    quint64 allocatedDirectoryBytes() const
-    {
-        return versions.allocatedDirectoryBytes()
-            + replicas.allocatedDirectoryBytes()
-            + overflow.allocatedDirectoryBytes();
-    }
+    VersionArena versions;
+    ReplicaArena replicas;
+    OverflowArena overflow;
 
     struct ReleasedBlocks {
         // Members are destroyed in reverse order: payloads first, accounting
@@ -1732,10 +1722,11 @@ struct ShardRecordStore {
 
 struct MetadataShard : KisPageMetadataShardMetrics {
     explicit MetadataShard(std::shared_ptr<MetadataBudgetAuthority> authority,
-                           quint64 directoryBytes)
+                           KisMutationStorageAllocator<char> storage)
         : budgetAuthority(std::move(authority))
-        , budgetCharge(budgetAuthority, directoryBytes)
+        , budgetCharge(budgetAuthority, 0)
         , ownedCapacity(budgetAuthority, &budgetCharge)
+        , arenas(storage)
         , records(&arenas, &ownedCapacity) {}
 
     mutable QMutex mutex;
@@ -2033,7 +2024,6 @@ public:
     {
         operational.store(false, std::memory_order_release);
         shards.clear();
-        directoryCharge.release();
         budgetAuthority->detach();
     }
 
@@ -2059,10 +2049,9 @@ public:
     std::atomic<bool> operational{false};
     KisBackingBudgetController standaloneBudget;
     std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
-    // Declared before shards so the directory allocation is destroyed before
-    // its final live charge is released.
-    MetadataBudgetRelease directoryCharge;
-    std::vector<std::shared_ptr<MetadataShard>> shards;
+    using Shards = std::vector<std::shared_ptr<MetadataShard>,
+        KisMutationStorageAllocator<std::shared_ptr<MetadataShard>>>;
+    Shards shards;
     QAtomicInteger<quint64> registeredPages{0};
     void *retirementDebtContext = nullptr;
     PrepareRetirementDebt prepareRetirementDebt = nullptr;
@@ -2070,7 +2059,7 @@ public:
     FinalizeRetirementDebt cancelRetirementDebt = nullptr;
     // Shared identity prevents a capability surviving destruction from being
     // accepted by another coordinator constructed at the same address.
-    const std::shared_ptr<const quint8> publicationOwner = std::make_shared<const quint8>(0);
+    std::shared_ptr<const quint8> publicationOwner;
 };
 
 class KisPageMetadataCoordinator::PreparedPublication::Data
@@ -2672,7 +2661,8 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         if (canDeferCleanup && data)
             deferredCleanup->data = std::move(data);
     });
-    if ((deferredCleanup && !canDeferCleanup) || !data || data->owner != d->publicationOwner || data->kind != kind
+    if ((deferredCleanup && !canDeferCleanup) || !data || !isOperational()
+        || data->owner != d->publicationOwner || data->kind != kind
         || data->minimumEpoch.isValid() == mutation
         || !(data->transaction == transaction)
         || (!mutation && (!epoch.isValid() || epoch.value < data->minimumEpoch.value))
@@ -2936,55 +2926,24 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         KisPageStoreDetail::setError(error, QStringLiteral("metadata coordinator is already configured"));
         return false;
     }
-    const quint64 count = quint64(shardCount);
-    const quint64 shardObjectBytes = quint64(sizeof(MetadataShard))
-        + 2 * quint64(sizeof(void *)); // make_shared control block/alignment allowance
-    const quint64 perShardMaximum = MetadataArenas::maximumDirectoryBytes()
-        + shardObjectBytes;
-    const quint64 shardPointers = count * quint64(sizeof(std::shared_ptr<MetadataShard>));
-    if (perShardMaximum > (quint64(std::numeric_limits<qint64>::max()) - shardPointers) / count) {
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata directory budget overflows"));
-        return false;
-    }
-    KisBackingBudgetDelta directoryReservation;
-    directoryReservation.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
-        qint64(perShardMaximum * count + shardPointers);
-    auto budget = d->budgetAuthority->reserve(directoryReservation, error);
-    if (!budget.isValid())
-        return false;
-
     try {
-        d->shards.reserve(size_t(shardCount));
+        const auto storage = d->budgetAuthority->storage<char>();
+        Private::Shards shards(storage);
+        shards.reserve(size_t(shardCount));
         for (qsizetype i = 0; i < shardCount; ++i) {
-            d->shards.push_back(std::make_shared<MetadataShard>(
-                d->budgetAuthority, quint64(0)));
+            shards.push_back(std::allocate_shared<MetadataShard>(
+                storage, d->budgetAuthority, storage));
         }
+        auto owner = std::allocate_shared<const quint8>(storage, 0);
+        // Publish the original immutable directory and capability identity
+        // only after every actual allocation has succeeded. Refusal destroys
+        // this local candidate; a retry has no residual directory capacity.
+        d->shards = std::move(shards);
+        d->publicationOwner = std::move(owner);
     } catch (const std::bad_alloc &) {
-        d->shards.clear();
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata shard directory allocation failed"));
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata shard directory storage budget was refused"));
         return false;
     }
-    quint64 actualBytes = quint64(d->shards.capacity())
-        * quint64(sizeof(std::shared_ptr<MetadataShard>));
-    for (const auto &shard : d->shards)
-        actualBytes += shard->arenas.allocatedDirectoryBytes()
-            + shardObjectBytes;
-    if (actualBytes > quint64(directoryReservation
-            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam)) {
-        d->shards.clear();
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata directory allocation exceeded its reservation"));
-        return false;
-    }
-    KisBackingBudgetDelta installed;
-    installed.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
-        qint64(actualBytes);
-    d->budgetAuthority->commitReservation(std::move(budget), installed);
-    const quint64 pointerBytes = quint64(d->shards.capacity())
-        * quint64(sizeof(std::shared_ptr<MetadataShard>));
-    d->directoryCharge = MetadataBudgetRelease(d->budgetAuthority, pointerBytes);
-    for (const auto &shard : d->shards)
-        shard->budgetCharge.add(shard->arenas.allocatedDirectoryBytes()
-                                + shardObjectBytes);
     d->operational.store(true, std::memory_order_release);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -4013,7 +3972,7 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
         result.exactVersionIndex += shard->records.exactVersions.statistics();
         result.physicalSlotIndex += shard->records.physicalSlots.statistics();
         result.owningCapacityBytes += shard->ownedCapacity.chargedBytes()
-            + quint64(sizeof(MetadataShard)) + 2 * quint64(sizeof(void *));
+            + quint64(sizeof(MetadataShard));
         result.pages += quint64(shard->pages.size());
         result.pageActivities += quint64(shard->activities.size());
         const quint64 pageBytes = quint64(shard->pages.size()) * sizeof(MetadataPage);

@@ -20,6 +20,7 @@
 
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageMetadataReservation_p.h"
+#include "KisMutationStorage_p.h"
 
 template<class Tag>
 struct KisGenerationalSlotId {
@@ -243,8 +244,10 @@ public:
         qsizetype m_blockCount = 0;
     };
 
-    explicit KisShardSlotArena(quint64 maximumBytes = std::numeric_limits<quint64>::max())
+    explicit KisShardSlotArena(quint64 maximumBytes = std::numeric_limits<quint64>::max(),
+                              KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>())
         : m_maximumBytes(maximumBytes)
+        , m_directory(storage)
     {
         // A finite budget also bounds directory growth. Reserve that small
         // directory once, outside any later shard mutation critical section.
@@ -274,18 +277,6 @@ public:
     static constexpr quint64 blockByteSize()
     {
         return quint64(BlockBytes);
-    }
-
-    static constexpr quint64 directoryBytesForLimit(quint64 maximumBytes)
-    {
-        return maximumBytes == std::numeric_limits<quint64>::max()
-            ? 0
-            : (maximumBytes / quint64(BlockBytes)) * quint64(sizeof(DirectoryEntry));
-    }
-
-    quint64 allocatedDirectoryBytes() const
-    {
-        return quint64(m_directory.capacity()) * quint64(sizeof(DirectoryEntry));
     }
 
     bool canAttachBlocks(quint64 count) const
@@ -621,7 +612,7 @@ private:
     }
 
     const quint64 m_maximumBytes;
-    std::vector<DirectoryEntry> m_directory;
+    std::vector<DirectoryEntry, KisMutationStorageAllocator<DirectoryEntry>> m_directory;
     Statistics m_statistics;
     quint64 m_outstandingReservations = 0;
     quint32 m_freeBlockHint = 0;

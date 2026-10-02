@@ -1498,6 +1498,7 @@
     "libs/image/pagestore/KisPageMetadataArena_p.h": {
       "container_declarations": 7,
       "include_edges": [
+        "KisMutationStorage_p.h",
         "KisPageMetadataCoordinator.h",
         "KisPageMetadataReservation_p.h",
         "QHashFunctions",
@@ -1510,7 +1511,7 @@
         "utility",
         "vector"
       ],
-      "lines": 631,
+      "lines": 622,
       "member_fields": [
         "m_block",
         "m_blockCount",
@@ -1540,11 +1541,11 @@
         "Slot",
         "State"
       ],
-      "sha256": "71fe337aeabe6c30ad25084f65e273192d26d453c141cdcb1ba8b488d643d371",
+      "sha256": "b16f9f45ee4ef6d1972c6bae1ae38e09712506007a7d5b5b7f8421fcc91baaa6",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.cpp": {
-      "container_declarations": 47,
+      "container_declarations": 45,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisPageMetadataCoordinator.h",
@@ -1567,7 +1568,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4071,
+      "lines": 4030,
       "member_fields": [
         "m_authority",
         "m_capacities",
@@ -1603,7 +1604,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "a41562abd2cf6144eb80a583214cafc9d45b8afead136a5d47a3db59b3db3637",
+      "sha256": "4f1a49e305dd14fcf86c635a0a5f6fcf9ba7179ef05a964b394409648902f0ac",
       "synchronization_declarations": 4
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -1662,7 +1663,7 @@
         "ReplicaCandidate",
         "VersionInfo"
       ],
-      "sha256": "235f7f9eca34b09defd9ca5605fe451ae7fbc94d381d9a2dcb270eebc230da56",
+      "sha256": "baa24d788c6693eab1bf1e7152e7535632ee5bbe41ecee53cd7f5c318df0f727",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataCoordinator_p.h": {
@@ -3480,7 +3481,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 172,
+      "container_declarations": 174,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -3533,7 +3534,7 @@
         "utility",
         "vector"
       ],
-      "lines": 11603,
+      "lines": 11731,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3595,7 +3596,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "b93a841b3e25208de2fdbea2cd5eba564a7d916d591a343ec676a9ad49eea55b",
+      "sha256": "e9505457bce79be0bfac84c3d532fce3cbb4faa2e5a7ad6303e5cbec403eb4d6",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6216,5 +6217,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "50304c3da6881c535e790b3b64dd0f02a812469c"
+  "working_tree_head": "c8de106aacba42a9b4e5fbaafc6fa4d358bddbfa"
 }

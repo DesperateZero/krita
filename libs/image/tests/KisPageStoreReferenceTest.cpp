@@ -974,6 +974,23 @@ private Q_SLOTS:
     void metadataShardSlotIndexReservations();
     void metadataShardSlotIndexGrowthAndErasure();
     void metadataOwningCapacityIsBudgeted();
+    void metadataConfigurationStorageRefusal_data()
+    {
+        QTest::addColumn<int>("shards");
+        for (int count : {1, 4, 64})
+            QTest::newRow(qPrintable(QString::number(count))) << count;
+    }
+    void metadataConfigurationStorageRefusal();
+    void metadataConfigurationLateCandidate_data()
+    {
+        QTest::addColumn<int>("shards");
+        QTest::addColumn<bool>("install");
+        for (int count : {1, 64})
+            for (bool install : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("shards%1-install%2").arg(count).arg(install)))
+                    << count << install;
+    }
+    void metadataConfigurationLateCandidate();
     void metadataReadProtectionAtCapacity_data();
     void metadataReadProtectionAtCapacity();
     void metadataReadProtectionMatchesReference_data();
@@ -1975,6 +1992,12 @@ void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
     auto make = [&]() {
         return coordinator.preparePublication(transaction, KisImageEpochId{2}, transitions);
     };
+    KisPageMetadataCoordinator unconfigured;
+    auto cold = make();
+    QVERIFY(cold.isValid());
+    QVERIFY(!unconfigured.installPublication(std::move(cold), transaction, KisImageEpochId{2}));
+    QVERIFY(!cold.isValid());
+    QVERIFY(unconfigured.configure(8));
     auto batch = make();
     QVERIFY(batch.isValid());
     Batch moved(std::move(batch));
@@ -4632,6 +4655,111 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
     QCOMPARE(budget.usage()
                  .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
              controllerStorage);
+}
+
+void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
+{
+    QFETCH(int, shards);
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget(limits);
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    auto storage = KisMutationStorageAllocator<char>::retained(&budget);
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = budget.reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    quint64 requiredBytes = 0;
+    {
+        KisPageMetadataCoordinator measured;
+        measured.attachBackingBudget(budget);
+        QVERIFY(measured.configure(shards));
+        requiredBytes = live() - baseline;
+        QCOMPARE(measured.shardCount(), qsizetype(shards));
+        QCOMPARE(measured.pageCount(), qsizetype(0));
+    }
+    QCOMPARE(live(), baseline);
+    QVERIFY(requiredBytes > 1 && requiredBytes < limits.metadataArenaBytes - baseline);
+    qInfo() << "BR1_METADATA_CONFIGURATION_BYTES" << shards << requiredBytes;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline - requiredBytes + 1);
+    char *filler = storage.allocate(fillerBytes);
+    auto releaseFiller = qScopeGuard([&] { storage.deallocate(filler, fillerBytes); });
+    const auto filled = live();
+    KisPageMetadataCoordinator metadata;
+    metadata.attachBackingBudget(budget);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QString error;
+        QVERIFY(!metadata.configure(shards, &error));
+        QVERIFY(error.contains(QStringLiteral("budget")));
+        QVERIFY(!metadata.isOperational());
+        QCOMPARE(metadata.shardCount(), qsizetype(0));
+        QCOMPARE(metadata.pageCount(), qsizetype(0));
+        QCOMPARE(metadata.footprint().owningCapacityBytes, quint64(0));
+        QCOMPARE(live(), filled);
+        for (const auto &bucket : parent->usage().buckets)
+            QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+    }
+    releaseFiller.dismiss();
+    storage.deallocate(filler, fillerBytes);
+    QCOMPARE(live(), baseline);
+    QVERIFY(metadata.configure(shards));
+    QCOMPARE(live(), baseline + requiredBytes);
+    QCOMPARE(metadata.shardCount(), qsizetype(shards));
+    QVERIFY(!metadata.configure(shards));
+    const auto version = pageVersion(0, 1);
+    QVERIFY(metadata.registerPage(initialPageState(version, replica(version, 1, 1, 1))));
+}
+
+void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
+{
+    QFETCH(int, shards);
+    QFETCH(bool, install);
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    auto budget = std::make_unique<KisBackingBudgetController>(limits);
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent));
+    auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+    metadata->attachBackingBudget(*budget);
+    QVERIFY(metadata->configure(shards));
+    const KisPageTransaction transaction{{74}, {1}};
+    auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
+    const auto target = replica(pageVersion(0, 2), 1, 1, 2);
+    page.versions.append({target.version, KisPagePublicationState::Prepared,
+        {{target, KisReplicaValidity::Valid, {}, {}, 0, {}}}, target, transaction.id, {}});
+    page.nextGeneration = {3};
+    QVERIFY(metadata->registerPage(page));
+    auto candidate = metadata->prepareMutation(transaction, &target.version, 1);
+    QVERIFY(candidate.isValid());
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    if (install) QVERIFY(metadata->installMutation(std::move(candidate), transaction, nullptr, &cleanup));
+    metadata.reset();
+    budget.reset();
+    QVERIFY(live() > baseline);
+    const auto retained = live();
+    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    parent.reset();
+    QVERIFY(!lifetime.isNull());
+    parent = lifetime.toStrongRef();
+    QVERIFY(parent);
+    if (install) QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
+    else candidate = {};
+    QVERIFY(retained > baseline);
+    QCOMPARE(live(), baseline);
+    QVERIFY(cleanup.isEmpty());
+    parent.reset();
+    QVERIFY(lifetime.isNull());
 }
 
 void KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership()
