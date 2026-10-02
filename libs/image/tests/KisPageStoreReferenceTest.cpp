@@ -1106,6 +1106,26 @@ private Q_SLOTS:
                 QTest::newRow(qPrintable(QStringLiteral("removed%1-complete%2").arg(removed).arg(full))) << removed << full;
     }
     void epochTransactionRejectsOpposingIncrementalChanges();
+    void epochInitializationStorageRefusal_data()
+    {
+        QTest::addColumn<int>("kind");
+        for (int i = 0; i < 4; ++i) QTest::newRow(qPrintable(QString::number(i))) << i;
+    }
+    void epochInitializationStorageRefusal();
+    void epochInitializationPublishesOnce();
+    void epochRootStorageRefusal_data()
+    {
+        QTest::addColumn<int>("kind");
+        for (int i = 0; i < 6; ++i) QTest::newRow(qPrintable(QString::number(i))) << i;
+    }
+    void epochRootStorageRefusal();
+    void epochTreeTailAtCapacity_data()
+    {
+        QTest::addColumn<bool>("controllerGone");
+        QTest::newRow("live-controller") << false;
+        QTest::newRow("detached-accounting") << true;
+    }
+    void epochTreeTailAtCapacity();
     void persistentExtentIndexMatchesManifestOracle();
     void rootCollectionTracksReferencesIncrementally();
     void retirementQueuesPreserveBudgetAndIdentity_data()
@@ -1210,6 +1230,217 @@ private Q_SLOTS:
     void tiles3BackendsShareProcessResidentLimit();
 };
 
+void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
+{
+    QFETCH(int, kind);
+    kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget; QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    const auto warm = KisMutationStorageAllocator<KisPageVersion>::retained(&budget);
+    Q_UNUSED(warm);
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    KisImageEpochReferenceModel model; model.attachBackingBudget(budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    if (kind == 1 || kind == 3)
+        for (int i = 0; i < 4096; ++i) initial.manifest.append(pageVersion(i, 1));
+    if (kind == 2)
+        for (int i = 1; i <= 4096; ++i) initial.surfaces.append(surfaceEpochState({quint64(i)}));
+    const auto before = live();
+    const quint64 headroom = kind == 0 ? 0 : kind == 3
+        ? quint64(initial.manifest.size()) * sizeof(KisPageVersion) + 16384 : 8192;
+    const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
+    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    QString error;
+    QVERIFY(!model.initialize(initial, &error));
+    QVERIFY(error.contains(QStringLiteral("storage admission")));
+    QCOMPARE(model.rootCount(), qsizetype(0));
+    QVERIFY(!model.captureCommittedRoot().isValid());
+    QVERIFY(!model.beginTransaction({1}).isValid());
+    kisDrainPageStoreReclamation(); // Partial paid tree drains even under the same pressure.
+    QCOMPARE(live(), before + bytes);
+    kisFreeMutationStorage(parent.data(), filler, bytes, 1); filler = nullptr;
+    QVERIFY2(model.initialize(initial, &error), qPrintable(error));
+    const auto root = model.captureCommittedRoot();
+    QCOMPARE(root.pageCount(), initial.manifest.size());
+    QCOMPARE(root.surfaces(), initial.surfaces);
+}
+
+void KisPageStoreReferenceTest::epochInitializationPublishesOnce()
+{
+    kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 8 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
+    KisBackingBudgetController budget; QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    const auto warm = KisMutationStorageAllocator<KisPageVersion>::retained(&budget);
+    Q_UNUSED(warm);
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    auto model = std::make_unique<KisImageEpochReferenceModel>(); model->attachBackingBudget(budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    for (int i = 0; i < 4096; ++i) initial.manifest.append(pageVersion(i, 1));
+    std::atomic<bool> start{false};
+    std::array<bool, 2> accepted{};
+    std::array<QString, 2> errors;
+    const auto initialize = [&](int i) {
+        while (!start.load()) std::this_thread::yield();
+        accepted[size_t(i)] = model->initialize(initial, &errors[size_t(i)]);
+    };
+    std::thread first(initialize, 0), second(initialize, 1);
+    start = true; first.join(); second.join();
+    QCOMPARE(int(accepted[0]) + int(accepted[1]), 1);
+    QVERIFY(!errors[accepted[0] ? 1 : 0].isEmpty());
+    QCOMPARE(model->rootCount(), qsizetype(1));
+    QCOMPARE(model->captureCommittedRoot().pageCount(), qsizetype(4096));
+    kisDrainPageStoreReclamation();
+    model.reset(); kisDrainPageStoreReclamation();
+    QCOMPARE(live(), before);
+}
+
+void KisPageStoreReferenceTest::epochRootStorageRefusal()
+{
+    QFETCH(int, kind);
+    kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget; QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    KisImageEpochReferenceModel model; model.attachBackingBudget(budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.surfaces = {surfaceEpochState()};
+    const int pages = kind == 3 ? 512 : kind == 4 ? 64 : 0;
+    for (int i = 0; i < pages; ++i) initial.manifest.append(pageVersion(i, 1));
+    if (kind == 5)
+        for (int i = 2; i <= 4096; ++i) initial.surfaces.append(surfaceEpochState({quint64(i)}));
+    QVERIFY(model.initialize(initial));
+    KisRetainedImageEpochSnapshot retained;
+    KisPageTransaction tx;
+    if (kind == 1 || kind == 2) { retained = model.captureRetainedRoot(); QVERIFY(retained.isValid()); }
+    if (kind == 0 || kind >= 3) { tx = model.beginTransaction({1}); QVERIFY(tx.isValid()); }
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    if (kind >= 3) {
+        KisPreparedPageSet delta; delta.transaction = tx.id;
+        if (kind == 5) delta.surfaceChanges = {{initial.surfaces[0], surfaceEpochState({1}, 2, 0x17)}};
+        else for (int i = 0; i < (kind == 4 ? pages : 1); ++i)
+            delta.proofs.append(preparedProof(pageVersion(i, 2), tx.id, ticket, quint64(i + 1)));
+        QVERIFY(model.prepare(delta));
+    }
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    const quint64 headroom = kind == 4 ? quint64(2 * pages) * sizeof(KisPageVersion) + 4096 : kind == 5 ? 2048 : 0;
+    const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
+    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    QString error;
+    if (kind == 0) QVERIFY(!model.beginTransaction({1}, &error).isValid());
+    else if (kind == 1) { QVERIFY(!model.captureRetainedRoot().isValid()); QVERIFY(model.validateRetainedSnapshot(retained)); }
+    else {
+        KisImageEpochCommitResult failure;
+        if (kind == 2) QVERIFY(!model.prepareRestore(retained, &failure).isValid());
+        else QVERIFY(!model.prepareCommit(tx, &failure).isValid());
+        error = failure.error;
+    }
+    if (kind != 1) QVERIFY(error.contains(QStringLiteral("storage admission")));
+    QCOMPARE(model.rootCount(), qsizetype(1));
+    QCOMPARE(model.captureCommittedRoot().epoch().value, quint64(1));
+    if (tx.isValid()) QCOMPARE(model.activeTransaction(tx.id), tx);
+    kisDrainPageStoreReclamation();
+    QCOMPARE(live(), before + bytes);
+    kisFreeMutationStorage(parent.data(), filler, bytes, 1); filler = nullptr;
+    if (kind == 0) {
+        const auto next = model.beginTransaction({1}); QVERIFY(next.isValid());
+        QVERIFY(model.abort(tx)); QVERIFY(model.abort(next));
+        QCOMPARE(model.collectFinishedTransactions(), qsizetype(2));
+    } else if (kind == 1) {
+        const auto next = model.captureRetainedRoot(); QVERIFY(next.isValid());
+        QVERIFY(model.releaseSnapshot(retained.token)); QVERIFY(model.releaseSnapshot(next.token));
+        QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
+    } else {
+        KisImageEpochReferenceModel::PreparedRootReservation restore;
+        KisImageEpochReferenceModel::PreparedCommit commit;
+        if (kind == 2) { restore = model.prepareRestore(retained, nullptr); QVERIFY(restore.isValid()); }
+        else { commit = model.prepareCommit(tx, nullptr); QVERIFY(commit.isValid()); }
+        const size_t installBytes = size_t(limits.metadataArenaBytes - live());
+        void *installPressure = kisAllocateMutationStorage(parent.data(), installBytes, 1);
+        const auto unfill = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), installPressure, installBytes, 1); });
+        const auto result = kind == 2 ? model.installRestore(std::move(restore), nullptr, nullptr)
+                                     : model.installCommit(std::move(commit), nullptr, nullptr);
+        QVERIFY(result.isCommitted());
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        if (kind == 2) QVERIFY(model.releaseSnapshot(retained.token));
+        model.collectFinishedTransactions(); model.collectUnretainedRoots();
+    }
+}
+
+void KisPageStoreReferenceTest::epochTreeTailAtCapacity()
+{
+    QFETCH(bool, controllerGone);
+    kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto parentBaseline = live();
+    auto budget = std::make_unique<KisBackingBudgetController>();
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent));
+    { const auto warm = KisMutationStorageAllocator<KisPageVersion>::retained(budget.get()); Q_UNUSED(warm); }
+    const auto attachedBaseline = live();
+    KisImageEpochRootSnapshot root;
+    constexpr int count = 8192;
+    {
+        KisImageEpochReferenceModel model; model.attachBackingBudget(*budget);
+        KisImageEpochSnapshot initial;
+        initial.epoch = {1};
+        initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+        for (int i = 0; i < count; ++i) initial.manifest.append(pageVersion(i, 1));
+        QVERIFY(model.initialize(initial)); root = model.captureCommittedRoot();
+    }
+    if (controllerGone) budget.reset();
+    KisPageVersion version;
+    QVERIFY(root.resolve(pageKey(count - 1), &version)); QCOMPARE(version, pageVersion(count - 1, 1));
+    QSemaphore entered, resume;
+    quint64 observed = 0;
+    const auto before = kisPageTreeReclamationStatistics();
+    auto blocker = kisPreparePageStoreReclamation([&] { entered.release(); resume.acquire(); });
+    auto probe = kisPreparePageStoreReclamation([&] {
+        observed = kisPageTreeReclamationStatistics().backgroundNodeDestructions - before.backgroundNodeDestructions;
+    });
+    blocker->reusable = probe->reusable = false;
+    kisEnqueuePageStoreReclamation(blocker.release());
+    bool paused = true;
+    const auto finish = qScopeGuard([&] { if (paused) resume.release(); kisDrainPageStoreReclamation(); });
+    QVERIFY(entered.tryAcquire(1, 5000));
+    const size_t bytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
+    const auto free = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    root = {};
+    QCOMPARE(kisPageTreeReclamationStatistics().foregroundNodeDestructions, before.foregroundNodeDestructions);
+    QVERIFY(live() - bytes >= quint64(count) * sizeof(KisPageVersion)); // Actual nodes remain charged while blocked.
+    kisEnqueuePageStoreReclamation(probe.release());
+    resume.release(); paused = false;
+    kisDrainPageStoreReclamation();
+    QCOMPARE(observed, quint64(128)); // The next pre-existing job runs between original tree passes.
+    const auto after = kisPageTreeReclamationStatistics();
+    QCOMPARE(after.backgroundNodeDestructions - before.backgroundNodeDestructions, quint64(count));
+    QVERIFY(after.maximumReferenceDropsPerPass <= 128);
+    QCOMPARE(live() - bytes, controllerGone ? parentBaseline : attachedBaseline);
+    budget.reset();
+    QCOMPARE(live() - bytes, parentBaseline);
+}
+
 void KisPageStoreReferenceTest::lastRootDestructionIsIncrementalAndOffThread()
 {
     kisDrainPageStoreReclamation();
@@ -1234,10 +1465,10 @@ void KisPageStoreReferenceTest::lastRootDestructionIsIncrementalAndOffThread()
     const auto before = kisPageTreeReclamationStatistics();
     root = {};
     const auto foreground = kisPageTreeReclamationStatistics().foregroundNodeDestructions;
-    QCOMPARE(foreground - before.foregroundNodeDestructions, quint64(1));
+    QCOMPARE(foreground - before.foregroundNodeDestructions, quint64(0));
     kisDrainPageStoreReclamation();
     const auto after = kisPageTreeReclamationStatistics();
-    QCOMPARE(after.backgroundNodeDestructions - before.backgroundNodeDestructions, quint64(count - 1));
+    QCOMPARE(after.backgroundNodeDestructions - before.backgroundNodeDestructions, quint64(count));
     QVERIFY(after.passes > before.passes);
     QVERIFY(after.maximumReferenceDropsPerPass <= 128);
 }
@@ -2138,6 +2369,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageRetainsOriginalOwner()
     model.reset(); budget.reset();
     QVERIFY(live() > baseline); // Original immutable value/control retains its accounting owner.
     orphan = {};
+    kisDrainPageStoreReclamation();
     QCOMPARE(live(), baseline);
 }
 
@@ -2152,6 +2384,7 @@ void KisPageStoreReferenceTest::epochTransactionPreparationRevalidatesConcurrent
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
     initial.surfaces = {surfaceEpochState()};
     QVERIFY(model.initialize(initial));
+    const auto baseline = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     const auto tx = model.beginTransaction({1});
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto before = live();
@@ -2177,7 +2410,7 @@ void KisPageStoreReferenceTest::epochTransactionPreparationRevalidatesConcurrent
     QCOMPARE(model.transaction(tx.id).changes.size(), input.proofs.size());
     QVERIFY(model.abort(tx));
     QCOMPARE(model.collectFinishedTransactions(), qsizetype(1));
-    QCOMPARE(live(), before); // Losing work and accepted data both physically freed.
+    QCOMPARE(live(), baseline); // Original record, losing work and accepted data physically freed.
 }
 
 void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChanges()

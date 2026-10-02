@@ -443,6 +443,12 @@ class KisPageStoreCpuMutationTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void epochNativeConfigurationResumes_data()
+    {
+        QTest::addColumn<int>("kind");
+        for (int i = 0; i < 3; ++i) QTest::newRow(qPrintable(QString::number(i))) << i;
+    }
+    void epochNativeConfigurationResumes();
     void publicationDescriptorStorageAtCapacity();
     void overlayStorageAtCapacity_data()
     {
@@ -997,6 +1003,69 @@ private Q_SLOTS:
     void sealPreservesReaderChanges();
     void blockedSealValidationAllowsParallelWork();
 };
+
+void KisPageStoreCpuMutationTest::epochNativeConfigurationResumes()
+{
+    QFETCH(int, kind);
+    kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisPageBackingLimits registryLimits; registryLimits.metadataArenaBytes = 64 * 1024;
+    auto registryBudget = QSharedPointer<KisBackingBudgetController>::create(registryLimits);
+    auto completions = QSharedPointer<KisCompletionRegistry>::create(registryBudget);
+    const auto registryLive = [&] { return registryBudget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    quint64 sourceCost = 0;
+    if (kind == 2) {
+        const auto before = registryLive();
+        QCOMPARE(completions->registerSource(KisCompletionDomain::HostLogical), quint64(1));
+        sourceCost = registryLive() - before;
+        QVERIFY(sourceCost > 0);
+    }
+    KisPageStore store;
+    QString error;
+    QVERIFY(store.configureSharedNonPayloadBudget(parent, &error));
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    KisSurfaceEpochState surface;
+    surface.surface = {1}; surface.logicalPageExtent = QSize(64, 64);
+    surface.layoutRevision = surface.rowAlignment = surface.defaultPixelRevision = surface.extentRevision = 1;
+    auto &format = surface.format;
+    format.formatId = 191; format.colorModelId = "RGBA"; format.colorDepthId = "U8";
+    format.profileFingerprint = "epoch-config-test"; format.channelOrder = "test-channels";
+    format.packing = "interleaved"; format.defaultPixel = QByteArray(4, char(0x2a));
+    format.channelCount = format.pixelStride = 4; format.pixelAlignment = 1; format.hasAlpha = true;
+    format.alphaSemantic = KisSurfaceAlphaSemantic::Premultiplied;
+    format.endianness = KisSurfaceEndianness::NativeEndian; format.codecVersion = 1;
+    initial.surfaces = {surface};
+    auto *pressure = kind == 0 ? parent.data() : registryBudget.data();
+    const quint64 maximum = kind == 0 ? limits.metadataArenaBytes : registryLimits.metadataArenaBytes;
+    const quint64 used = pressure->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    const size_t bytes = size_t(maximum - used - (kind == 0 ? 8192 : sourceCost));
+    void *filler = kisAllocateMutationStorage(pressure, bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(pressure, filler, bytes, 1); });
+    QVERIFY(!store.configure(initial, completions, 4, &error));
+    QVERIFY(!error.isEmpty());
+    QVERIFY(!store.sessionStats().configured);
+    QCOMPARE(store.sessionStats().immutableRoots, qsizetype(0));
+    if (kind == 2) {
+        QVERIFY(completions->sourceStatistics(2).knownSource);
+        QCOMPARE(completions->sourceStatistics(2).allocatedTickets, quint64(0));
+        auto foreign = QSharedPointer<KisCompletionRegistry>::create();
+        QVERIFY(!store.configure(initial, foreign, 4, &error));
+    }
+    kisFreeMutationStorage(pressure, filler, bytes, 1); filler = nullptr;
+    kisDrainPageStoreReclamation();
+    QVERIFY2(store.configure(initial, completions, 4, &error), qPrintable(error));
+    QVERIFY(store.sessionStats().configured);
+    QCOMPARE(store.sessionStats().immutableRoots, qsizetype(1));
+    QVERIFY2(store.finalizeInitialization(&error), qPrintable(error));
+    if (kind == 2) {
+        QCOMPARE(completions->sourceStatistics(2).allocatedTickets, quint64(1));
+        QCOMPARE(completions->sourceStatistics(2).terminalTickets, quint64(1));
+        QVERIFY(!completions->sourceStatistics(3).knownSource);
+    }
+}
 
 void KisPageStoreCpuMutationTest::sealPreparationClaimsAndSibling()
 {
@@ -6998,17 +7067,20 @@ void KisPageStoreCpuMutationTest::mutationStorageBudgetRejection()
 {
     QFETCH(int, bpp);
     quint64 directoryBytes = 0;
-    quint64 scopeBytes = 0;
+    quint64 transactionBytes = 0, scopeBytes = 0;
     {
         Fixture probe; QVERIFY(probe.init(bpp));
         directoryBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
-        auto scope = probe.begin(probe.store->beginCurrentTransaction());
+        const auto tx = probe.store->beginCurrentTransaction();
+        transactionBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - directoryBytes;
+        QVERIFY(transactionBytes > 0);
+        auto scope = probe.begin(tx);
         QVERIFY(scope.isActive());
-        scopeBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - directoryBytes;
+        scopeBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - directoryBytes - transactionBytes;
         QVERIFY(scopeBytes > 0);
     }
     Fixture f;
-    KisPageBackingLimits limits; limits.metadataArenaBytes = directoryBytes + scopeBytes;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = directoryBytes + transactionBytes + scopeBytes;
     QVERIFY(f.store->configureBackingLimits(limits)); QVERIFY(f.init(bpp));
     const auto tx = f.store->beginCurrentTransaction();
     auto mutation = f.begin(tx); QVERIFY(mutation.isActive());
@@ -7018,14 +7090,16 @@ void KisPageStoreCpuMutationTest::mutationStorageBudgetRejection()
     QVERIFY(mutation.cancel());
     QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(0));
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             directoryBytes + scopeBytes);
+             directoryBytes + transactionBytes + scopeBytes);
     mutation = {};
-    QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, directoryBytes);
+    QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, directoryBytes + transactionBytes);
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam,
              quint64(0));
     // The failed second claim cannot prevent a subsequent inline operation.
     auto retry = f.begin(tx); QVERIFY(retry.removePage(key(1), &f.error));
     QVERIFY(retry.cancel()); QVERIFY(f.store->abort(tx));
+    retry = {}; QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, directoryBytes);
     QVERIFY(f.store->closeSession(&f.error));
 }
 
@@ -7294,21 +7368,25 @@ void KisPageStoreCpuMutationTest::executionBorrowLateGuard()
 void KisPageStoreCpuMutationTest::mutationScopeAdmissionBudgetRejection()
 {
     QFETCH(int, bpp);
-    quint64 baseBytes = 0, scopeBytes = 0;
+    quint64 baseBytes = 0, transactionBytes = 0, scopeBytes = 0;
     {
         Fixture probe; QVERIFY(probe.init(bpp));
         baseBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
         const auto tx = probe.store->beginCurrentTransaction();
+        transactionBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - baseBytes;
+        QVERIFY(transactionBytes > 0);
         auto scope = probe.begin(tx); QVERIFY(scope.isActive());
-        scopeBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - baseBytes;
+        scopeBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - baseBytes - transactionBytes;
         QVERIFY(scopeBytes > 0);
         QVERIFY(scope.cancel()); scope = {};
-        QCOMPARE(probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, baseBytes);
+        QCOMPARE(probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, baseBytes + transactionBytes);
         QVERIFY(probe.store->abort(tx)); QVERIFY(probe.store->closeSession());
     }
     for (int availableScopes : {0, 5}) {
         Fixture f;
-        KisPageBackingLimits limits; limits.metadataArenaBytes = baseBytes + quint64(availableScopes) * scopeBytes;
+        KisPageBackingLimits limits;
+        limits.metadataArenaBytes = baseBytes + (availableScopes
+            ? quint64(availableScopes) * (transactionBytes + scopeBytes) : transactionBytes);
         QVERIFY(f.store->configureBackingLimits(limits)); QVERIFY(f.init(bpp));
         std::vector<KisPageTransaction> transactions;
         std::vector<KisPageMutationSession> scopes;
@@ -7319,6 +7397,7 @@ void KisPageStoreCpuMutationTest::mutationScopeAdmissionBudgetRejection()
             QVERIFY(scopes.back().isActive());
         }
         const auto rejectedTransaction = f.store->beginCurrentTransaction();
+        QVERIFY(rejectedTransaction.isValid());
         auto rejected = f.store->beginMutation(rejectedTransaction, &f.error);
         QVERIFY(!rejected.isActive()); QVERIFY(!f.error.isEmpty());
         // With room for five scope/control blocks, the fifth transaction is
@@ -7326,11 +7405,12 @@ void KisPageStoreCpuMutationTest::mutationScopeAdmissionBudgetRejection()
         if (availableScopes) QVERIFY(f.error.contains(QStringLiteral("admission")));
         QCOMPARE(f.store->mutationStatistics().operationSessionsCreated, quint64(admitted));
         QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-                 baseBytes + quint64(admitted) * scopeBytes);
+                 baseBytes + quint64(admitted) * (transactionBytes + scopeBytes) + transactionBytes);
         QVERIFY(f.store->abort(rejectedTransaction)); // no phantom activity
         for (auto &scope : scopes) QVERIFY(scope.cancel());
         scopes.clear();
         for (const auto &transaction : transactions) QVERIFY(f.store->abort(transaction));
+        QVERIFY(f.store->waitForRetirementIdle());
         QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, baseBytes);
         QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
         QVERIFY(f.store->closeSession(&f.error));
@@ -9289,6 +9369,7 @@ void KisPageStoreCpuMutationTest::metadataArenaBudgetTracksAllocator()
         QVERIFY(mutation.cancel());
         mutation = {}; // scope/control-block charge lasts through actual free
         QVERIFY(f.store->abort(tx));
+        QVERIFY(f.store->waitForRetirementIdle()); // The original finished record frees in collection.
         const auto usage = f.store->backingUsage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         QCOMPARE(usage.live.cpuRam, directoryBytes);

@@ -739,6 +739,10 @@ public:
     qsizetype activeProviderCalls = 0;
     QString closeFailure;
     QSharedPointer<KisCompletionRegistry> completions;
+    // A source accepted during cold configuration cannot be registered again
+    // when its first ticket refuses. Retain that original receipt until ready.
+    QSharedPointer<KisCompletionRegistry> configurationSourceOwner;
+    quint64 configurationSource = 0;
     // Reused terminal evidence for successful synchronous host work; this is
     // not an operation sequence number and never mutates the registry.
     KisCompletionTicket readyHostCompletion;
@@ -3287,11 +3291,18 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore is already configured"));
         return false;
     }
+    if ((d->configurationSourceOwner && d->configurationSourceOwner != completions)
+        || (d->metadata.isOperational() && d->metadata.shardCount() != metadataShardCount)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore configuration changed accepted preparation"));
+        return false;
+    }
     // A root with physical state must already own its terminal and recurring
     // task storage. Prepare outside the owner gate, before initialization can
     // adopt any backing; concurrent configuration cannot enter this interval.
     ++d->activeProviderCalls;
     locker.unlock();
+    std::shared_ptr<KisImageEpochReferenceModel::Private> epoch;
+    QString failure;
     try {
         if (!d->terminalCleanup) {
             d->terminalCleanup = kisPreparePageStoreReclamation(
@@ -3301,6 +3312,7 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
         d->retirementQueue.prepareTask();
         d->historyCollector.prepareTask(d->backingBudget);
         d->readCoordinator.prepareTask();
+        epoch = d->epochs.prepareInitialization(initialEpoch, &failure);
     } catch (const std::bad_alloc &) {
         locker.relock();
         --d->activeProviderCalls;
@@ -3309,22 +3321,35 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     }
     locker.relock();
     --d->activeProviderCalls;
-    QString failure;
-    if (!d->publicationCoordinator.prepareDefaultRevisionsLocked(initialEpoch.surfaces, &failure)
-        || !d->owner.configure(completions, &failure) || !d->metadata.configure(metadataShardCount, &failure)
-        || !d->epochs.initialize(initialEpoch, &failure)) {
+    if (!epoch || !d->publicationCoordinator.prepareDefaultRevisionsLocked(initialEpoch.surfaces, &failure)
+        || (d->metadata.isOperational() ? d->metadata.shardCount() != metadataShardCount
+                                      : !d->metadata.configure(metadataShardCount, &failure))) {
+        locker.unlock();
         KisPageStoreDetail::setError(error, failure);
         return false;
     }
-    const quint64 source = completions->registerSource(KisCompletionDomain::HostLogical);
-    const KisCompletionTicket ready = source != 0 ? completions->allocatePending(source) : KisCompletionTicket();
+    if (!d->configurationSource) {
+        d->configurationSource = completions->registerSource(KisCompletionDomain::HostLogical);
+        if (d->configurationSource) d->configurationSourceOwner = completions;
+    }
+    const KisCompletionTicket ready = d->configurationSource != 0
+        ? completions->allocatePending(d->configurationSource) : KisCompletionTicket();
     if (!ready.isValid()) {
+        locker.unlock();
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore host completion source registration failed"));
         return false;
     }
     completions->completePrepared(ready, KisCompletionStatus::Succeeded);
+    const bool ownerConfigured = d->owner.configure(completions, &failure);
+    Q_ASSERT(ownerConfigured);
+    Q_UNUSED(ownerConfigured);
+    const bool epochInstalled = d->epochs.installInitialization(std::move(epoch));
+    Q_ASSERT(epochInstalled);
+    Q_UNUSED(epochInstalled);
     d->completions = completions;
     d->readyHostCompletion = ready;
+    d->configurationSourceOwner.clear();
+    d->configurationSource = 0;
     KisPageStoreDetail::setError(error, {});
     return true;
 }

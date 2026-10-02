@@ -8,14 +8,16 @@
 #define KIS_IMAGE_EPOCH_REFERENCE_MODEL_H
 
 #include <array>
-#include <QScopedPointer>
+#include <memory>
+#include <QMutex>
+#include <QMutexLocker>
 #include <QSet>
-#include <QSharedPointer>
 #include <QString>
 #include <QVector>
 #include "KisPageStoreTypes.h"
 
 class KisImageEpochPageRoot;
+class KisImageEpochSurfaces;
 class KisBackingBudgetController;
 
 enum class KisPageTransactionState : quint8 {
@@ -47,7 +49,7 @@ public:
     qsizetype pageCount() const;
     qint32 pageTreeHeight() const;
     bool containsPage(const KisPageKey &key, KisPageVersion *version = nullptr) const;
-    QVector<KisSurfaceEpochState> surfaces() const { return m_surfaces; }
+    QVector<KisSurfaceEpochState> surfaces() const;
     KisImageEpochSnapshot snapshot() const;
     bool resolve(const KisPageKey &key, KisPageVersion *version) const;
     bool surfaceState(KisSurfaceId surface, KisSurfaceEpochState *state) const;
@@ -60,6 +62,8 @@ public:
                                  QRect *extent) const;
 
 private:
+    size_t surfaceCount() const;
+    const KisSurfaceEpochState &surfaceAt(size_t index) const;
     // The original publication candidate admits pageCount() elements first.
     // Copy this immutable tree directly into that paid capacity.
     void copyPageVersions(KisPageVersion *output) const;
@@ -69,7 +73,6 @@ private:
                                 const KisPageKey *removals, size_t removalCount,
                                 const KisPageKey *additions, size_t additionCount,
                                 QRect *extent) const;
-    bool validate() const;
     // Issued only after complete construction-time validation by the model.
     bool m_validated = false;
     KisImageEpochId m_epoch;
@@ -79,8 +82,8 @@ private:
     quint64 m_defaultPixelRevision = 0;
     quint64 m_extentRevision = 0;
     quint64 m_propertyRevision = 0;
-    QSharedPointer<const KisImageEpochPageRoot> m_pageRoot;
-    QVector<KisSurfaceEpochState> m_surfaces;
+    std::shared_ptr<const KisImageEpochPageRoot> m_pageRoot;
+    std::shared_ptr<const KisImageEpochSurfaces> m_surfaces;
 
     friend class KisImageEpochReferenceModel;
     friend class KisPagePublicationCoordinator;
@@ -206,8 +209,12 @@ private:
     friend class KisPageHistoryCollector;
 
     class Private;
+    std::shared_ptr<Private> prepareInitialization(const KisImageEpochSnapshot &, QString *);
+    bool installInitialization(std::shared_ptr<Private> &&);
+    static bool matchesRetainedRootMetadata(const KisImageEpochRootSnapshot &,
+                                            const KisRetainedImageEpochSnapshot &);
     KisRetainedImageEpochSnapshot retainRootLocked(const KisImageEpochRootSnapshot &,
-                                                    bool completeManifest);
+                                                    bool completeManifest, QMutexLocker<QMutex> &);
     KisRetainedImageEpochSnapshot captureCurrentRetainedRootLocked(bool completeManifest);
     // Owner-only, single-use candidate. It reserves an unpublished index slot
     // so install performs no root-tree construction or root-index allocation.
@@ -226,7 +233,7 @@ private:
 
     private:
         void cancel();
-        QSharedPointer<Private> m_owner;
+        std::shared_ptr<Private> m_owner;
         KisImageEpochRootSnapshot m_root;
         friend class KisImageEpochReferenceModel;
     };
@@ -271,7 +278,9 @@ private:
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
     // A cancelled candidate can safely outlive this facade.
-    QSharedPointer<Private> d;
+    std::shared_ptr<Private> m_core;
+    mutable QMutex m_initializationMutex;
+    KisBackingBudgetController *m_budget = nullptr;
 };
 
 #endif // KIS_IMAGE_EPOCH_REFERENCE_MODEL_H

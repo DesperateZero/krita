@@ -9,7 +9,7 @@
       ],
       "fact": "transaction identity, base-root retention and terminal lifetime",
       "id": "BR1-OWN-TRANSACTION",
-      "lock-or-claim": "epoch model mutex and retained base-root token",
+      "lock-or-claim": "epoch model mutex and original root record protection counts; cold actual storage is prepared outside the gate and admission is revalidated before installation",
       "read-only-observers": [
         "KisPagePublicationCoordinator",
         "KisPageMutationSession",
@@ -21,7 +21,8 @@
       "terminal-paths": [
         "KisPagePublicationCoordinator commit through epoch model",
         "KisPagePublicationCoordinator abort through epoch model",
-        "closeSession"
+        "closeSession",
+        "Original immutable transaction delta/value/control, lazy epoch core/control, three ordered registry node sets, root surfaces/value/control and tree nodes/control use retained actual storage. Snapshot and transaction protection counts are fields of the same root records; the former counted Qt indices are removed. Each tree storage owner prepares one charged reusable task before creating nodes; final shared deleters splice the actual nodes, each pass frees at most 128 and completion pins end after invocation. No final-release batch, deque, TLS context or task allocation remains. Raw immutable roots and cancelled candidates can retain these inert charges after facade/controller exit without granting logical admission."
       ]
     },
     {

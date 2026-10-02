@@ -1203,7 +1203,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     const auto retainedRoot = m_epochs.root(source.snapshot.epoch);
     const auto currentRoot = m_epochs.captureCommittedRoot();
     bool changesDefaults = false;
-    for (const auto &surface : retainedRoot.surfaces()) {
+    for (size_t i = 0; i < retainedRoot.surfaceCount(); ++i) {
+        const auto &surface = retainedRoot.surfaceAt(i);
         KisSurfaceEpochState currentSurface;
         if (!currentRoot.surfaceState(surface.surface, &currentSurface)) {
             return {};
@@ -1630,6 +1631,16 @@ void KisPagePublicationCoordinator::revokePreparedProofLocked(
 bool KisPagePublicationCoordinator::prepareDefaultRevisionsLocked(
     const QVector<KisSurfaceEpochState> &surfaces, QString *error) try
 {
+    if (!m_operational && !m_defaultRevisionHighWater.empty()
+        && m_defaultRevisionHighWater.size() == size_t(surfaces.size())
+        && std::all_of(m_defaultRevisionHighWater.begin(), m_defaultRevisionHighWater.end(), [&](const auto &entry) {
+            return std::count_if(surfaces.begin(), surfaces.end(), [&](const auto &surface) {
+                return surface.surface.value == entry.first && surface.defaultPixelRevision == entry.second;
+            }) == 1;
+        })) {
+        KisPageStoreDetail::setError(error, {});
+        return true;
+    }
     if (!m_defaultRevisionHighWater.empty() || m_operational) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("default pixel revisions are already configured"));
