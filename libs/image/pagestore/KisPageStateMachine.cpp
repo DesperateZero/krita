@@ -4,7 +4,7 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#include "KisPageStateMachine.h"
+#include "KisPageStateMachine_p.h"
 
 #include <QSet>
 
@@ -13,9 +13,10 @@
 
 namespace {
 
-bool physicalSlotInUse(const KisPageStateSnapshot &state,
+template<class State>
+bool physicalSlotInUse(const State &state,
                        const KisReplicaHandle &target,
-                       const KisPageVersionStateSnapshot *ignoredVersion = nullptr)
+                       const typename decltype(state.versions)::value_type *ignoredVersion = nullptr)
 {
     for (const auto &version : state.versions) {
         if (&version == ignoredVersion) continue;
@@ -26,7 +27,8 @@ bool physicalSlotInUse(const KisPageStateSnapshot &state,
     return false;
 }
 
-bool logicalDefaultBeforeImage(const KisPageVersionStateSnapshot *base,
+template<class Version>
+bool logicalDefaultBeforeImage(const Version *base,
                               const KisPageWriterStateSnapshot &writer)
 {
     // A reader may materialize this immutable default after the writer started.
@@ -36,7 +38,8 @@ bool logicalDefaultBeforeImage(const KisPageVersionStateSnapshot *base,
            writer.mode == KisPageWriteMode::DiscardContents;
 }
 
-bool releaseWriterBeforeImage(KisPageStateSnapshot &state,
+template<class State>
+bool releaseWriterBeforeImage(State &state,
                               const KisPageWriterStateSnapshot &writer)
 {
     auto *base = state.findVersion(writer.baseVersion);
@@ -49,7 +52,8 @@ bool releaseWriterBeforeImage(KisPageStateSnapshot &state,
     return true;
 }
 
-void removeVersion(QVector<KisPageVersionStateSnapshot> *versions,
+template<class Versions>
+void removeVersion(Versions *versions,
                    const KisPageVersion &identity)
 {
     const auto found = std::find_if(versions->begin(), versions->end(),
@@ -91,14 +95,16 @@ bool matchesHandoff(const KisAuthorityHandoffStateSnapshot &handoff,
            handoff.source.version == transition.version;
 }
 
-bool canPublishWriteReplica(const KisReplicaStateSnapshot *replica)
+template<class Replica>
+bool canPublishWriteReplica(const Replica *replica)
 {
     return replica && !replica->activeOperation.isValid() &&
            (replica->validity == KisReplicaValidity::Allocated ||
             replica->validity == KisReplicaValidity::Valid);
 }
 
-bool hasMutableVersion(const KisPageStateSnapshot &state)
+template<class State>
+bool hasMutableVersion(const State &state)
 {
     return std::any_of(state.versions.cbegin(), state.versions.cend(), [](const auto &version) {
         return version.publication == KisPagePublicationState::Prepared ||
@@ -106,7 +112,8 @@ bool hasMutableVersion(const KisPageStateSnapshot &state)
     });
 }
 
-bool isVisibleToTransaction(const KisPageVersionStateSnapshot *version,
+template<class Version>
+bool isVisibleToTransaction(const Version *version,
                             KisPageTransactionId transaction)
 {
     return version && (version->publication == KisPagePublicationState::Published ||
@@ -114,61 +121,92 @@ bool isVisibleToTransaction(const KisPageVersionStateSnapshot *version,
                         version->preparedBy == transaction));
 }
 
-bool appendIdleReplicaRetirements(const KisPageVersionStateSnapshot &version,
-                                  QVector<KisPageTransitionEffect> *effects)
+template<class Version, class Effects>
+bool appendIdleReplicaRetirements(const Version &version, Effects *effects)
 {
     for (const auto &replica : version.replicas) {
-        if (replica.activeOperation.isValid() || !replica.readLeases.isEmpty() ||
-            !replica.pendingLastUses.isEmpty() || replica.pinCount != 0)
+        if (replica.activeOperation.isValid() || !replica.readLeases.empty() ||
+            !replica.pendingLastUses.empty() || replica.pinCount != 0)
             return false;
     }
     for (const auto &replica : version.replicas)
-        effects->append({replica.replica, {}});
+        effects->push_back({replica.replica, {}});
     return true;
 }
 
-}
-
-KisPageTransitionResult KisPageStateMachine::apply(
-    const KisPageStateSnapshot &current,
-    const KisPageTransition &transition) const
+template<class Values, class Value>
+bool contains(const Values &values, const Value &value)
 {
-    return applyImpl(current, transition, true);
+    return std::find(values.cbegin(), values.cend(), value) != values.cend();
 }
 
-KisPageTransitionResult KisPageStateMachine::applyKnownValid(
-    const KisPageStateSnapshot &current,
-    const KisPageTransition &transition) const
+template<class Values, class Value>
+bool eraseOne(Values &values, const Value &value)
 {
-    return applyImpl(current, transition, false);
+    const auto found = std::find(values.begin(), values.end(), value);
+    if (found == values.end()) return false;
+    values.erase(found);
+    return true;
 }
 
-KisPageTransitionResult KisPageStateMachine::applyImpl(
-    const KisPageStateSnapshot &current,
-    const KisPageTransition &transition,
-    bool validateBoundaryInvariants) const
+template<class Values, class Value>
+qsizetype eraseAll(Values &values, const Value &value)
+{
+    const auto before = values.size();
+    values.erase(std::remove(values.begin(), values.end(), value), values.end());
+    return qsizetype(before - values.size());
+}
+
+template<class Version>
+void appendReplica(Version &version, const KisReplicaHandle &handle,
+                   KisReplicaValidity validity, KisPageOperationId operation = {})
+{
+    auto value = kisPageReplicaValue(version);
+    value.replica = handle;
+    value.validity = validity;
+    value.activeOperation = operation;
+    version.replicas.push_back(std::move(value));
+}
+
+KisPageTransitionResult transitionResult(const KisPageStateSnapshot &current)
 {
     KisPageTransitionResult result;
     result.next = current;
+    return result;
+}
+KisPageWorkingResult transitionResult(KisPageWorkingState &current)
+{
+    return KisPageWorkingResult(std::move(current));
+}
+
+template<class State, class Validate>
+auto applyPolicy(State current, const KisPageTransition &transition,
+                 bool validateBoundaryInvariants, Validate validate)
+{
+    auto result = transitionResult(current);
+    using Version = typename decltype(current.versions)::value_type;
+    using Replica = typename decltype(std::declval<Version>().replicas)::value_type;
 
     if (validateBoundaryInvariants) {
         QString currentFailure;
-        if (!validateInvariants(current, &currentFailure)) {
+        if (!validate(current, &currentFailure)) {
             result.rejectionReason = QStringLiteral("invalid current state: %1").arg(currentFailure);
             return result;
         }
     }
 
-    auto reject = [&result, &current](const QString &reason) {
+    auto reject = [&result, &current, validateBoundaryInvariants](const QString &reason) {
         result.accepted = false;
-        result.next = current;
+        // The public oracle returns the original snapshot on rejection. The
+        // private consumed work has no consumer until the whole sequence accepts.
+        if (validateBoundaryInvariants) result.next = current;
         result.effects.clear();
         result.rejectionReason = reason;
-        return result;
+        return std::move(result);
     };
 
     auto requireVersion = [&result](const KisPageVersion &version)
-        -> KisPageVersionStateSnapshot * {
+        -> Version * {
         return result.next.findVersion(version);
     };
 
@@ -184,11 +222,11 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (transition.kind == KisPageTransitionKind::RetainCapturedVersion) {
             if (version->publication != KisPagePublicationState::Prepared ||
                 !(version->preparedBy == transition.transaction) ||
-                version->capturedReadViews.contains(transition.readView)) {
+                contains(version->capturedReadViews, transition.readView)) {
                 return reject(QStringLiteral("captured private version is foreign or already retained"));
             }
-            version->capturedReadViews.append(transition.readView);
-        } else if (!version->capturedReadViews.removeOne(transition.readView)) {
+            version->capturedReadViews.push_back(transition.readView);
+        } else if (!eraseOne(version->capturedReadViews, transition.readView)) {
             return reject(QStringLiteral("captured version token is stale or foreign"));
         }
         break;
@@ -197,7 +235,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (!transition.lease.isValid()) {
             return reject(QStringLiteral("read lease identity is invalid"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
+        Version *version = requireVersion(transition.version);
         if (!version || version->publication == KisPagePublicationState::Unpublished ||
             version->publication == KisPagePublicationState::Retiring) {
             return reject(QStringLiteral("requested page version is not readable"));
@@ -206,32 +244,32 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !(version->preparedBy == transition.transaction)) {
             return reject(QStringLiteral("prepared page is private to another transaction"));
         }
-        KisReplicaStateSnapshot *replica = version->findReplica(transition.target);
+        Replica *replica = version->findReplica(transition.target);
         if (!replica || replica->validity != KisReplicaValidity::Valid) {
             return reject(QStringLiteral("requested replica is not valid"));
         }
-        for (const KisPageVersionStateSnapshot &candidateVersion : result.next.versions) {
-            for (const KisReplicaStateSnapshot &candidateReplica : candidateVersion.replicas) {
-                if (candidateReplica.readLeases.contains(transition.lease)) {
+        for (const Version &candidateVersion : result.next.versions) {
+            for (const Replica &candidateReplica : candidateVersion.replicas) {
+                if (contains(candidateReplica.readLeases, transition.lease)) {
                     return reject(QStringLiteral("read lease identity is already active"));
                 }
             }
         }
-        replica->readLeases.append(transition.lease);
+        replica->readLeases.push_back(transition.lease);
         break;
     }
     case KisPageTransitionKind::ReleaseRead: {
         if (!transition.lease.isValid()) {
             return reject(QStringLiteral("read lease identity is invalid"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *replica = version
+        Version *version = requireVersion(transition.version);
+        Replica *replica = version
             ? version->findReplica(transition.target) : nullptr;
-        if (!replica || !replica->readLeases.removeOne(transition.lease)) {
+        if (!replica || !eraseOne(replica->readLeases, transition.lease)) {
             return reject(QStringLiteral("read lease is stale or belongs to another replica"));
         }
         if (transition.completion.isValid()) {
-            replica->pendingLastUses.append(transition.completion);
+            replica->pendingLastUses.push_back(transition.completion);
         }
         break;
     }
@@ -239,10 +277,10 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (!transition.completion.isValid()) {
             return reject(QStringLiteral("last-use completion is invalid"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *replica = version
+        Version *version = requireVersion(transition.version);
+        Replica *replica = version
             ? version->findReplica(transition.target) : nullptr;
-        if (!replica || replica->pendingLastUses.removeAll(transition.completion) == 0) {
+        if (!replica || eraseAll(replica->pendingLastUses, transition.completion) == 0) {
             return reject(QStringLiteral("last-use completion is stale or belongs to another replica"));
         }
         break;
@@ -264,12 +302,12 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !(transition.target.version == transition.version)) {
             return reject(QStringLiteral("write reservation targets another page"));
         }
-        KisPageVersionStateSnapshot *base =
+        Version *base =
             result.next.findVersion(transition.baseVersion);
         if (!isVisibleToTransaction(base, transition.transaction)) {
             return reject(QStringLiteral("write base is not visible to the transaction"));
         }
-        KisReplicaStateSnapshot *baseAuthority = base->findReplica(transition.source);
+        Replica *baseAuthority = base->findReplica(transition.source);
         const bool virtualBase = base->isVirtualDefault() &&
             !transition.source.isValid() &&
             transition.writeMode == KisPageWriteMode::DiscardContents;
@@ -293,7 +331,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             if (!old || !baseAuthority || old == baseAuthority ||
                 !isHandoffEmpty(result.next.authorityHandoff) ||
                 old->validity != KisReplicaValidity::Valid || old->activeOperation.isValid() ||
-                old->pinCount || !old->readLeases.isEmpty() || !old->pendingLastUses.isEmpty() ||
+                old->pinCount || !old->readLeases.empty() || !old->pendingLastUses.empty() ||
                 baseAuthority->activeOperation.isValid() ||
                 !(old->replica.layout == baseAuthority->replica.layout) ||
                 !(old->replica.layout == transition.target.layout) ||
@@ -318,19 +356,14 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral("write allocation token is already in use"));
 
-        KisPageVersionStateSnapshot writeVersion;
+        auto writeVersion = kisPageVersionValue(result.next);
         writeVersion.version = transition.version;
         writeVersion.publication = KisPagePublicationState::Unpublished;
-        writeVersion.replicas.append({transition.target,
-                                      KisReplicaValidity::Allocated,
-                                      {},
-                                      {},
-                                      0,
-                                      {}});
+        appendReplica(writeVersion, transition.target, KisReplicaValidity::Allocated, {});
         // A virtual default has no bytes to pin. The writer reservation keeps
         // its exact logical before-version alive; only the target is physical.
         if (baseAuthority) baseAuthority->pinCount++;
-        result.next.versions.append(writeVersion);
+        result.next.versions.push_back(std::move(writeVersion));
         result.next.writer.token = transition.writer;
         result.next.writer.operation = transition.operation;
         result.next.writer.transaction = transition.transaction;
@@ -361,13 +394,13 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             return reject(QStringLiteral(
                 "prepared write adoption targets another page"));
         }
-        const KisPageVersionStateSnapshot *base =
+        const Version *base =
             result.next.findVersion(transition.baseVersion);
         if (!isVisibleToTransaction(base, transition.transaction)) {
             return reject(QStringLiteral(
                 "prepared write adoption base is not transaction-visible"));
         }
-        const KisReplicaStateSnapshot *baseAuthority =
+        const Replica *baseAuthority =
             base->findReplica(transition.source);
         if (!(base->authority == transition.source) ||
             (!base->isVirtualDefault() &&
@@ -389,14 +422,13 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             return reject(QStringLiteral(
                 "prepared write adoption token is already in use"));
 
-        KisPageVersionStateSnapshot writeVersion;
+        auto writeVersion = kisPageVersionValue(result.next);
         writeVersion.version = transition.version;
         writeVersion.publication = KisPagePublicationState::Prepared;
-        writeVersion.replicas.append(
-            {transition.target, KisReplicaValidity::Valid, {}, {}, 0, {}});
+        appendReplica(writeVersion, transition.target, KisReplicaValidity::Valid, {});
         writeVersion.authority = transition.target;
         writeVersion.preparedBy = transition.transaction;
-        result.next.versions.append(writeVersion);
+        result.next.versions.push_back(std::move(writeVersion));
         result.next.nextGeneration.value++;
         break;
     }
@@ -406,8 +438,8 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !matchesWriter(writer, transition)) {
             return reject(QStringLiteral("write preparation does not match the reservation"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(writer.target.version);
-        KisReplicaStateSnapshot *replica = version ? version->findReplica(writer.target) : nullptr;
+        Version *version = requireVersion(writer.target.version);
+        Replica *replica = version ? version->findReplica(writer.target) : nullptr;
         if (!replica || replica->validity == KisReplicaValidity::Failed ||
             replica->validity == KisReplicaValidity::Retiring ||
             replica->activeOperation.isValid()) {
@@ -422,8 +454,8 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !matchesWriter(writer, transition)) {
             return reject(QStringLiteral("publish request is stale or mismatched"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(writer.target.version);
-        KisReplicaStateSnapshot *replica = version ? version->findReplica(writer.target) : nullptr;
+        Version *version = requireVersion(writer.target.version);
+        Replica *replica = version ? version->findReplica(writer.target) : nullptr;
         if (!canPublishWriteReplica(replica)) {
             return reject(QStringLiteral("write replica cannot begin publishing"));
         }
@@ -437,8 +469,8 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !matchesWriter(writer, transition)) {
             return reject(QStringLiteral("publish completion is stale or mismatched"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(writer.target.version);
-        KisReplicaStateSnapshot *replica = version ? version->findReplica(writer.target) : nullptr;
+        Version *version = requireVersion(writer.target.version);
+        Replica *replica = version ? version->findReplica(writer.target) : nullptr;
         if (!canPublishWriteReplica(replica)) {
             return reject(QStringLiteral("write replica cannot complete publishing"));
         }
@@ -448,7 +480,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
 
         if (writer.phase == KisPageWriterPhase::CancelPending) {
             const KisPageVersion writeVersion = writer.target.version;
-            result.effects.append({writer.target, {}});
+            result.effects.push_back({writer.target, {}});
             writer = {};
             removeVersion(&result.next.versions, writeVersion);
             break;
@@ -468,16 +500,16 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !matchesWriter(writer, transition)) {
             return reject(QStringLiteral("write failure completion is stale or mismatched"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(writer.target.version);
-        KisReplicaStateSnapshot *target = version
+        Version *version = requireVersion(writer.target.version);
+        Replica *target = version
             ? version->findReplica(writer.target) : nullptr;
         if (!version || !target || target->activeOperation.isValid() ||
-            !target->readLeases.isEmpty() ||
-            !target->pendingLastUses.isEmpty() || target->pinCount != 0 ||
+            !target->readLeases.empty() ||
+            !target->pendingLastUses.empty() || target->pinCount != 0 ||
             !releaseWriterBeforeImage(result.next, writer)) {
             return reject(QStringLiteral("failed write still has in-flight state"));
         }
-        result.effects.append({writer.target, {}});
+        result.effects.push_back({writer.target, {}});
         result.next.writer = {};
         removeVersion(&result.next.versions, writer.target.version);
         break;
@@ -487,7 +519,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (!matchesWriter(writer, transition)) {
             return reject(QStringLiteral("write cancellation is stale or mismatched"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(writer.target.version);
+        Version *version = requireVersion(writer.target.version);
         if (!version) {
             return reject(QStringLiteral("reserved write generation is missing"));
         }
@@ -514,8 +546,8 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             transition.source == transition.target) {
             return reject(QStringLiteral("materialization identity is incomplete"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *source = version
+        Version *version = requireVersion(transition.version);
+        Replica *source = version
             ? version->findReplica(transition.source) : nullptr;
         if (!source || source->validity != KisReplicaValidity::Valid ||
             version->findReplica(transition.target)) {
@@ -527,20 +559,15 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral("materialization allocation token is already in use"));
         source->pinCount++;
-        version->replicas.append({transition.target,
-                                  KisReplicaValidity::Materializing,
-                                  transition.operation,
-                                  {},
-                                  0,
-                                  {}});
+        appendReplica(*version, transition.target, KisReplicaValidity::Materializing, transition.operation);
         break;
     }
     case KisPageTransitionKind::CompleteMaterialize:
     case KisPageTransitionKind::FailMaterialize: {
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *source = version
+        Version *version = requireVersion(transition.version);
+        Replica *source = version
             ? version->findReplica(transition.source) : nullptr;
-        KisReplicaStateSnapshot *target = version
+        Replica *target = version
             ? version->findReplica(transition.target) : nullptr;
         if (!transition.operation.isValid() || !source || !target ||
             source->pinCount == 0 ||
@@ -559,10 +586,10 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             !transition.operation.isValid()) {
             return reject(QStringLiteral("authority handoff is already active or invalid"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *source = version
+        Version *version = requireVersion(transition.version);
+        Replica *source = version
             ? version->findReplica(transition.source) : nullptr;
-        KisReplicaStateSnapshot *target = version
+        Replica *target = version
             ? version->findReplica(transition.target) : nullptr;
         if (!version || !source || !target ||
             !(version->authority == transition.source) ||
@@ -591,10 +618,10 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
                 ? QStringLiteral("authority handoff completion is stale or mismatched")
                 : QStringLiteral("authority handoff failure is stale or mismatched"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *source = version
+        Version *version = requireVersion(transition.version);
+        Replica *source = version
             ? version->findReplica(handoff.source) : nullptr;
-        KisReplicaStateSnapshot *target = version
+        Replica *target = version
             ? version->findReplica(handoff.target) : nullptr;
         if (!version || !source || !target || source->pinCount == 0 ||
             target->pinCount == 0 || (commit
@@ -614,16 +641,16 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (!transition.operation.isValid() || !transition.target.isValid()) {
             return reject(QStringLiteral("retirement identity is incomplete"));
         }
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *target = version
+        Version *version = requireVersion(transition.version);
+        Replica *target = version
             ? version->findReplica(transition.target) : nullptr;
         if (!version || !target || version->authority == transition.target ||
             (result.next.writer.isValid() &&
              result.next.writer.target == transition.target) ||
             (target->validity != KisReplicaValidity::Valid &&
              target->validity != KisReplicaValidity::Failed) ||
-            !target->readLeases.isEmpty() || target->pinCount != 0 ||
-            !target->pendingLastUses.isEmpty() || target->activeOperation.isValid()) {
+            !target->readLeases.empty() || target->pinCount != 0 ||
+            !target->pendingLastUses.empty() || target->activeOperation.isValid()) {
             return reject(QStringLiteral("replica is not eligible for retirement"));
         }
         target->validity = KisReplicaValidity::Retiring;
@@ -631,17 +658,17 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         break;
     }
     case KisPageTransitionKind::CompleteRetire: {
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
+        Version *version = requireVersion(transition.version);
         if (!version) return reject(QStringLiteral("retired page version is missing"));
         bool removed = false;
-        for (qsizetype i = 0; i < version->replicas.size(); ++i) {
-            const KisReplicaStateSnapshot &target = version->replicas.at(i);
+        for (auto it = version->replicas.begin(); it != version->replicas.end(); ++it) {
+            const Replica &target = *it;
             if (target.replica == transition.target &&
                 target.validity == KisReplicaValidity::Retiring &&
                 target.activeOperation == transition.operation &&
-                target.readLeases.isEmpty() &&
-                target.pendingLastUses.isEmpty() && target.pinCount == 0) {
-                version->replicas.removeAt(i);
+                target.readLeases.empty() &&
+                target.pendingLastUses.empty() && target.pinCount == 0) {
+                version->replicas.erase(it);
                 removed = true;
                 break;
             }
@@ -652,14 +679,14 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         break;
     }
     case KisPageTransitionKind::FailRetire: {
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
-        KisReplicaStateSnapshot *target = version
+        Version *version = requireVersion(transition.version);
+        Replica *target = version
             ? version->findReplica(transition.target) : nullptr;
         if (!transition.operation.isValid() || !target ||
             target->validity != KisReplicaValidity::Retiring ||
             !(target->activeOperation == transition.operation) ||
-            !target->readLeases.isEmpty() ||
-            !target->pendingLastUses.isEmpty() || target->pinCount != 0) {
+            !target->readLeases.empty() ||
+            !target->pendingLastUses.empty() || target->pinCount != 0) {
             return reject(QStringLiteral("retirement failure is stale or mismatched"));
         }
         target->validity = KisReplicaValidity::Failed;
@@ -671,12 +698,12 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             transition.imageEpoch.value <= result.next.publishedEpoch.value) {
             return reject(QStringLiteral("transaction identity is invalid"));
         }
-        KisPageVersionStateSnapshot *prepared = requireVersion(transition.version);
+        Version *prepared = requireVersion(transition.version);
         if (!prepared || prepared->publication != KisPagePublicationState::Prepared ||
             !(prepared->preparedBy == transition.transaction)) {
             return reject(QStringLiteral("transaction page is not prepared"));
         }
-        for (const KisPageVersionStateSnapshot &candidate : result.next.versions) {
+        for (const Version &candidate : result.next.versions) {
             if (candidate.publication == KisPagePublicationState::Prepared &&
                 candidate.preparedBy == transition.transaction &&
                 candidate.version.generation.value >
@@ -684,13 +711,13 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
                 return reject(QStringLiteral("transaction commit does not select its latest prepared generation"));
             }
         }
-        KisPageVersionStateSnapshot *published = result.next.publishedVersion();
+        Version *published = result.next.publishedVersion();
         if (!published || prepared->version.generation.value <=
                               published->version.generation.value) {
             return reject(QStringLiteral("transaction would not advance the published generation"));
         }
         published->publication = KisPagePublicationState::Historical;
-        for (KisPageVersionStateSnapshot &candidate : result.next.versions) {
+        for (Version &candidate : result.next.versions) {
             if (candidate.publication == KisPagePublicationState::Prepared &&
                 candidate.preparedBy == transition.transaction &&
                 !(candidate.version == prepared->version)) {
@@ -724,19 +751,18 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral(
                 "historical default allocation token is already in use"));
-        KisPageVersionStateSnapshot historical;
+        auto historical = kisPageVersionValue(result.next);
         historical.version = transition.version;
         historical.publication = KisPagePublicationState::Historical;
         if (transition.target.isValid()) {
-            historical.replicas.append(
-                {transition.target, KisReplicaValidity::Valid, {}, {}, 0, {}});
+            appendReplica(historical, transition.target, KisReplicaValidity::Valid, {});
         }
         historical.authority = transition.target;
-        result.next.versions.append(historical);
+        result.next.versions.push_back(std::move(historical));
         break;
     }
     case KisPageTransitionKind::MaterializeDefault: {
-        KisPageVersionStateSnapshot *version = requireVersion(transition.version);
+        Version *version = requireVersion(transition.version);
         if (!version || !version->isVirtualDefault() ||
             !transition.target.isValid() ||
             !(transition.target.version == transition.version) ||
@@ -745,13 +771,12 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         }
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral("default allocation token is already in use"));
-        version->replicas.append(
-            {transition.target, KisReplicaValidity::Valid, {}, {}, 0, {}});
+        appendReplica(*version, transition.target, KisReplicaValidity::Valid, {});
         version->authority = transition.target;
         break;
     }
     case KisPageTransitionKind::ReplaceDefaultPixel: {
-        KisPageVersionStateSnapshot *existingReplacement =
+        Version *existingReplacement =
             result.next.findVersion(transition.version);
         if (!transition.imageEpoch.isValid() ||
             transition.imageEpoch.value <= result.next.publishedEpoch.value ||
@@ -771,7 +796,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (physicalSlotInUse(result.next, transition.target, existingReplacement))
             return reject(QStringLiteral(
                 "default replacement allocation token is already in use"));
-        KisPageVersionStateSnapshot *published = result.next.publishedVersion();
+        Version *published = result.next.publishedVersion();
         if (!published || !published->version.isDefaultPixel()) {
             return reject(QStringLiteral(
                 "default replacement source is not an implicit default"));
@@ -780,15 +805,14 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (existingReplacement) {
             existingReplacement->publication = KisPagePublicationState::Published;
         } else {
-            KisPageVersionStateSnapshot replacement;
+            auto replacement = kisPageVersionValue(result.next);
             replacement.version = transition.version;
             replacement.publication = KisPagePublicationState::Published;
             if (transition.target.isValid()) {
-                replacement.replicas.append(
-                    {transition.target, KisReplicaValidity::Valid, {}, {}, 0, {}});
+                appendReplica(replacement, transition.target, KisReplicaValidity::Valid, {});
             }
             replacement.authority = transition.target;
-            result.next.versions.append(replacement);
+            result.next.versions.push_back(std::move(replacement));
         }
         result.next.publishedEpoch = transition.imageEpoch;
         result.next.publishedGeneration = transition.version.generation;
@@ -810,19 +834,19 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (transition.version.isValid() && transition.version.isDefaultPixel() &&
             transition.version.key == result.next.key &&
             !result.next.findVersion(transition.version)) {
-            KisPageVersionStateSnapshot implicit;
+            auto implicit = kisPageVersionValue(result.next);
             implicit.version = transition.version;
             implicit.publication = KisPagePublicationState::Historical;
-            result.next.versions.append(implicit);
+            result.next.versions.push_back(std::move(implicit));
         }
-        KisPageVersionStateSnapshot *target = requireVersion(transition.version);
+        Version *target = requireVersion(transition.version);
         if (!target ||
             (target->publication != KisPagePublicationState::Historical &&
              target->publication != KisPagePublicationState::Published) ||
             (!target->authority.isValid() && !target->isVirtualDefault())) {
             return reject(QStringLiteral("historical restore target is unavailable"));
         }
-        KisPageVersionStateSnapshot *published = result.next.publishedVersion();
+        Version *published = result.next.publishedVersion();
         if (!published) {
             return reject(QStringLiteral("historical restore has no published source"));
         }
@@ -837,33 +861,32 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         break;
     }
     case KisPageTransitionKind::DiscardHistoricalVersions: {
-        if (transition.versions.isEmpty() || transition.transaction.isValid() ||
+        if (transition.versions.empty() || transition.transaction.isValid() ||
             transition.operation.isValid()) {
             return reject(QStringLiteral(
                 "historical discard identity is invalid"));
         }
-        QSet<KisPageVersion> discarded;
-        for (const KisPageVersion &version : transition.versions) {
+        for (auto it = transition.versions.cbegin(); it != transition.versions.cend(); ++it) {
+            const auto &version = *it;
             if (!version.isValid() || !(version.key == result.next.key) ||
-                discarded.contains(version)) {
+                std::find(transition.versions.cbegin(), it, version) != it) {
                 return reject(QStringLiteral(
                     "historical discard set is invalid"));
             }
-            discarded.insert(version);
-            const KisPageVersionStateSnapshot *candidate =
+            const Version *candidate =
                 result.next.findVersion(version);
             if (!candidate ||
                 candidate->publication != KisPagePublicationState::Historical ||
-                !candidate->capturedReadViews.isEmpty() ||
+                !candidate->capturedReadViews.empty() ||
                 (!candidate->authority.isValid() && !candidate->isVirtualDefault())) {
                 return reject(QStringLiteral(
                     "historical discard target is unavailable"));
             }
-            for (const KisReplicaStateSnapshot &replica : candidate->replicas) {
+            for (const Replica &replica : candidate->replicas) {
                 if ((replica.validity != KisReplicaValidity::Valid &&
                      replica.validity != KisReplicaValidity::Failed) ||
-                    !replica.readLeases.isEmpty() || replica.pinCount != 0 ||
-                    !replica.pendingLastUses.isEmpty() ||
+                    !replica.readLeases.empty() || replica.pinCount != 0 ||
+                    !replica.pendingLastUses.empty() ||
                     replica.activeOperation.isValid()) {
                     return reject(QStringLiteral(
                         "historical discard target is still in use"));
@@ -871,13 +894,13 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
             }
         }
         for (qsizetype i = result.next.versions.size(); i > 0; --i) {
-            const KisPageVersionStateSnapshot &candidate =
+            const Version &candidate =
                 result.next.versions.at(i - 1);
-            if (!discarded.contains(candidate.version)) continue;
-            for (const KisReplicaStateSnapshot &replica : candidate.replicas) {
-                result.effects.append({replica.replica, {}});
+            if (!contains(transition.versions, candidate.version)) continue;
+            for (const Replica &replica : candidate.replicas) {
+                result.effects.push_back({replica.replica, {}});
             }
-            result.next.versions.removeAt(i - 1);
+            result.next.versions.erase(result.next.versions.begin() + i - 1);
         }
         break;
     }
@@ -886,18 +909,19 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         if (!transition.transaction.isValid() || !version ||
             version->publication != KisPagePublicationState::Prepared ||
             !(version->preparedBy == transition.transaction) || result.next.writer.isValid() ||
-            !version->capturedReadViews.isEmpty() || version->replicas.size() != 1 ||
+            !version->capturedReadViews.empty() || version->replicas.size() != 1 ||
             !(version->authority == transition.source) || !transition.target.isValid() ||
             !(transition.target.version == version->version))
             return reject(QStringLiteral("private backing replacement identity is invalid"));
-        const auto &old = version->replicas.first();
-        if (old.activeOperation.isValid() || !old.readLeases.isEmpty() || old.pinCount ||
-            !old.pendingLastUses.isEmpty() || old.validity != KisReplicaValidity::Valid)
+        const auto &old = version->replicas.front();
+        if (old.activeOperation.isValid() || !old.readLeases.empty() || old.pinCount ||
+            !old.pendingLastUses.empty() || old.validity != KisReplicaValidity::Valid)
             return reject(QStringLiteral("private backing replacement still has consumers"));
         if (physicalSlotInUse(result.next, transition.target))
             return reject(QStringLiteral("private replacement allocation is already used"));
-        result.effects.append({old.replica, {}});
-        version->replicas = {{transition.target, KisReplicaValidity::Valid, {}, {}, 0, {}}};
+        result.effects.push_back({old.replica, {}});
+        version->replicas.clear();
+        appendReplica(*version, transition.target, KisReplicaValidity::Valid);
         version->authority = transition.target;
         break;
     }
@@ -926,14 +950,14 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
         }
         bool found = false;
         for (qsizetype i = result.next.versions.size(); i > 0; --i) {
-            KisPageVersionStateSnapshot &version = result.next.versions[i - 1];
+            Version &version = result.next.versions[i - 1];
             if (version.publication == KisPagePublicationState::Prepared &&
                 version.preparedBy == transition.transaction &&
                 (!exact || version.version == transition.version)) {
                 // Abort removes transaction visibility, not an issued read
                 // capability. Retained sealed bytes become detached history;
                 // the owner collects them after view/pin/last-use release.
-                if (!version.capturedReadViews.isEmpty()) {
+                if (!version.capturedReadViews.empty()) {
                     version.publication = KisPagePublicationState::Historical;
                     version.preparedBy = {};
                     found = true;
@@ -941,7 +965,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
                 }
                 if (!appendIdleReplicaRetirements(version, &result.effects))
                     return reject(QStringLiteral("prepared page still has in-flight users"));
-                result.next.versions.removeAt(i - 1);
+                result.next.versions.erase(result.next.versions.begin() + i - 1);
                 found = true;
             }
         }
@@ -954,7 +978,7 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
 
     if (validateBoundaryInvariants) {
         QString nextFailure;
-        if (!validateInvariants(result.next, &nextFailure)) {
+        if (!validate(result.next, &nextFailure)) {
             return reject(QStringLiteral("transition violates invariant: %1").arg(nextFailure));
         }
     }
@@ -967,6 +991,22 @@ KisPageTransitionResult KisPageStateMachine::applyImpl(
     result.accepted = true;
     result.rejectionReason.clear();
     return result;
+}
+
+} // namespace
+
+KisPageTransitionResult KisPageStateMachine::apply(
+    const KisPageStateSnapshot &current, const KisPageTransition &transition) const
+{
+    return applyPolicy(current, transition, true,
+        [this](const KisPageStateSnapshot &state, QString *reason) { return validateInvariants(state, reason); });
+}
+
+KisPageWorkingResult KisPageStateMachine::applyKnownValid(
+    KisPageWorkingState current, const KisPageTransition &transition) const
+{
+    return applyPolicy(std::move(current), transition, false,
+        [](const KisPageWorkingState &, QString *) { return true; });
 }
 
 bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,

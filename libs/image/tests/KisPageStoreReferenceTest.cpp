@@ -970,6 +970,14 @@ private Q_SLOTS:
     void indexedHistoricalDiscard();
     void indexedMutationTransitions_data();
     void indexedMutationTransitions();
+    void genericWorkingStorageRefusalIsAtomic_data()
+    {
+        QTest::addColumn<int>("variant");
+        QTest::newRow("read-release") << 0;
+        QTest::newRow("private-replacement") << 1;
+        QTest::newRow("write-prepare-cancel") << 2;
+    }
+    void genericWorkingStorageRefusalIsAtomic();
     void indexedMutationBaseLookup_data()
     {
         QTest::addColumn<int>("history");
@@ -4590,6 +4598,121 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
         capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
         run({capture});
     }
+}
+
+void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
+{
+    QFETCH(int, variant);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    struct Debt {
+        KisBackingBudgetController *budget;
+        quint64 limit;
+        bool fill = true;
+        void *filler = nullptr;
+        size_t bytes = 0;
+        int prepared = 0, committed = 0, cancelled = 0;
+    } debt{&budget, limits.metadataArenaBytes};
+    KisPageMetadataCoordinator coordinator;
+    coordinator.attachBackingBudget(budget);
+    // Synthetic metadata oracle: this receiver owns its effect contract.
+    // Actual provider/backing transfer remains in the ledger/queue tests.
+    coordinator.attachRetirementDebtOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *, qsizetype count, quint64 *cookie, QString *) {
+            auto &d = *static_cast<Debt *>(p);
+            ++d.prepared; *cookie = quint64(count);
+            if (d.fill) {
+                const auto live = d.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+                d.bytes = size_t(d.limit - live);
+                d.filler = kisAllocateMutationStorage(d.budget, d.bytes, 1);
+            }
+            return true;
+        }, +[](void *p, quint64) noexcept { ++static_cast<Debt *>(p)->committed; },
+        +[](void *p, quint64) noexcept { ++static_cast<Debt *>(p)->cancelled; });
+    QVERIFY(coordinator.configure(1));
+    auto initial = pageWithHistory(17);
+    auto &current = initial.versions.first();
+    KisCompletionRegistry completions;
+    const auto lastUse = completions.allocatePending(completions.registerSource(KisCompletionDomain::CpuJob));
+    for (quint64 i = 1; i <= 64; ++i) current.replicas.first().readLeases.append({i});
+    current.replicas.first().pendingLastUses.append(lastUse);
+    current.capturedReadViews.append({200});
+    QVector<KisPageTransition> transitions;
+    if (variant == 0) {
+        KisPageTransition read;
+        read.kind = KisPageTransitionKind::AcquireRead;
+        read.version = current.version; read.target = current.authority; read.lease = {1000};
+        auto release = read; release.kind = KisPageTransitionKind::ReleaseRead;
+        transitions = {read, release};
+    } else {
+        KisPageTransition write;
+        write.kind = KisPageTransitionKind::AcquireWrite;
+        write.baseVersion = current.version; write.source = current.authority;
+        write.version = pageVersion(0, initial.nextGeneration.value);
+        write.target = replica(write.version, 1, 1, 100000);
+        write.transaction = {71}; write.writer = {72}; write.operation = {73};
+        if (variant == 1) {
+            ++initial.nextGeneration.value;
+            auto prepared = initialPageState(write.version, write.target).versions.first();
+            prepared.publication = KisPagePublicationState::Prepared;
+            prepared.preparedBy = write.transaction;
+            initial.versions.append(prepared);
+            auto replacement = write;
+            replacement.kind = KisPageTransitionKind::ReplacePrivatePreparedBacking;
+            replacement.source = write.target;
+            replacement.target.allocation.slot++;
+            transitions = {replacement};
+        } else {
+            auto prepare = write; prepare.kind = KisPageTransitionKind::PrepareWrite;
+            auto cancel = write; cancel.kind = KisPageTransitionKind::CancelWrite;
+            transitions = {write, prepare, cancel};
+        }
+    }
+    QVERIFY(KisPageStateMachine().validateInvariants(initial));
+    QVERIFY(coordinator.registerPage(initial));
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const quint64 baseline = live();
+    bool accepted = false;
+    for (size_t headroom : {size_t(0), size_t(512), size_t(2048), size_t(8192), size_t(65536)}) {
+        const size_t bytes = size_t(limits.metadataArenaBytes - live()) - headroom;
+        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
+        const auto free = qScopeGuard([&] {
+            kisFreeMutationStorage(&budget, filler, bytes, 1);
+            kisFreeMutationStorage(&budget, std::exchange(debt.filler, nullptr), debt.bytes, 1);
+        });
+        const auto before = coordinator.metrics();
+        const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
+        accepted = result.accepted;
+        if (headroom == 0 || variant != 0) {
+            QVERIFY(!result.accepted);
+            QVERIFY(!result.rejectionReason.isEmpty());
+            QVERIFY(result.effects.isEmpty());
+            QCOMPARE(coordinator.metrics().localVersionInstalls, before.localVersionInstalls);
+            KisPageStateSnapshot actual; QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
+            comparePageRecords(actual, initial);
+        }
+        if (accepted) break;
+    }
+    if (variant == 0) QVERIFY(accepted);
+    else {
+        QVERIFY(debt.prepared > 0);
+        QCOMPARE(debt.cancelled, debt.prepared); QCOMPARE(debt.committed, 0);
+    }
+    QCOMPARE(live(), baseline); // Every failed working value returned its actual fee.
+    debt.fill = false;
+    auto expected = initial;
+    QVector<KisPageTransitionEffect> effects;
+    for (const auto &transition : transitions) {
+        const auto step = KisPageStateMachine().apply(expected, transition);
+        QVERIFY(step.accepted); expected = step.next; effects += step.effects;
+    }
+    const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
+    QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
+    QCOMPARE(result.effects.size(), effects.size());
+    for (qsizetype i = 0; i < effects.size(); ++i) QCOMPARE(result.effects[i].replica, effects[i].replica);
+    KisPageStateSnapshot actual; QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
+    comparePageRecords(actual, expected);
+    if (variant != 0) QCOMPARE(debt.committed, 1);
 }
 
 void KisPageStoreReferenceTest::capturedProtectionAndExactQueryAtCapacity()

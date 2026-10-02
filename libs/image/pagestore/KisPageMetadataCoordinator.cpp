@@ -9,6 +9,7 @@
 #include "KisPageMetadataCoordinator_p.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPageStateMachine_p.h"
 
 #include <QAtomicInteger>
 #include <QHash>
@@ -23,6 +24,7 @@
 #include <memory>
 #include <utility>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace KisPageStoreDetail {
@@ -1202,9 +1204,9 @@ struct ShardRecordStore {
         Q_ASSERT(!snapshot.authority.isValid() || record->authorityReplica.isValid());
     }
 
-    KisPageVersionStateSnapshot project(const KisVersionRecord &record) const
+    template<class Version>
+    Version project(const KisVersionRecord &record, Version result) const
     {
-        KisPageVersionStateSnapshot result;
         result.version = record.version;
         result.publication = record.publication;
         result.preparedBy = record.preparedBy;
@@ -1213,7 +1215,7 @@ struct ShardRecordStore {
             Q_ASSERT(node && node->kind == KisMetadataOverflowKind::CapturedReadView);
             if (!node)
                 break;
-            result.capturedReadViews.append(KisImageEpochSnapshotToken{node->value});
+            result.capturedReadViews.push_back(KisImageEpochSnapshotToken{node->value});
             slot = node->next;
         }
         result.replicas.reserve(qsizetype(record.replicaCount));
@@ -1222,7 +1224,7 @@ struct ShardRecordStore {
             Q_ASSERT(stored);
             if (!stored)
                 break;
-            KisReplicaStateSnapshot projected;
+            auto projected = kisPageReplicaValue(result);
             projected.replica = replicaHandle(*stored, record.version);
             projected.validity = stored->validity;
             projected.activeOperation = stored->activeOperation;
@@ -1233,22 +1235,23 @@ struct ShardRecordStore {
                 if (!node)
                     break;
                 if (node->kind == KisMetadataOverflowKind::ReadLease) {
-                    projected.readLeases.append(KisPageLeaseId{node->value});
+                    projected.readLeases.push_back(KisPageLeaseId{node->value});
                 } else if (node->kind == KisMetadataOverflowKind::PendingLastUse) {
-                    projected.pendingLastUses.append(node->completion);
+                    projected.pendingLastUses.push_back(node->completion);
                 }
                 overflowSlot = node->next;
             }
             if (slot == record.authorityReplica) {
                 result.authority = projected.replica;
             }
-            result.replicas.append(std::move(projected));
+            result.replicas.push_back(std::move(projected));
             slot = stored->nextReplica;
         }
         return result;
     }
 
-    bool snapshot(const KisPageVersion &identity, KisPageVersionStateSnapshot *snapshot) const
+    template<class Version>
+    bool snapshot(const KisPageVersion &identity, Version *snapshot) const
     {
         KisVersionSlotId slot;
         if (!snapshot || !findVersion(identity, &slot))
@@ -1256,7 +1259,7 @@ struct ShardRecordStore {
         const KisVersionRecord *record = version(slot);
         if (!record)
             return false;
-        *snapshot = project(*record);
+        *snapshot = project(*record, kisPageVersionValue(*snapshot));
         return true;
     }
 
@@ -1450,7 +1453,7 @@ struct ShardRecordStore {
             Q_ASSERT(record);
             if (!record)
                 break;
-            result.versions.append(project(*record));
+            result.versions.append(project(*record, KisPageVersionStateSnapshot{}));
             slot = record->nextVersion;
         }
         return result;
@@ -1513,16 +1516,12 @@ struct ShardRecordStore {
 
     template<class Snapshot>
     bool canInstallPhysical(const Snapshot &snapshot,
-                            KisVersionSlotId replacing,
-                            QSet<PhysicalSlot> *batch = nullptr) const
+                            KisVersionSlotId replacing) const
     {
         for (auto candidate = snapshot.replicas.cbegin(); candidate != snapshot.replicas.cend(); ++candidate) {
             const auto &replicaState = *candidate;
             const PhysicalSlot key = replicaState.replica.physicalSlotIdentity();
-            if (batch) {
-                if (batch->contains(key)) return false;
-                batch->insert(key);
-            } else if (std::any_of(snapshot.replicas.cbegin(), candidate, [&](const auto &other) {
+            if (std::any_of(snapshot.replicas.cbegin(), candidate, [&](const auto &other) {
                            return other.replica.physicalSlotIdentity() == key;
                        })) {
                 return false;
@@ -1585,17 +1584,25 @@ struct ShardRecordStore {
     }
 
     template<class Snapshots>
-    bool putBatch(MetadataPage *page, const Snapshots &snapshots)
+    bool putBatch(MetadataPage *page, const Snapshots &snapshots, KisPageWorkingStorage storage)
     {
         qsizetype newVersions = 0;
         qsizetype replicaCount = 0;
-        QSet<PhysicalSlot> batchPhysicalSlots;
+        struct PhysicalHash {
+            size_t operator()(const PhysicalSlot &value) const noexcept { return qHash(value); }
+        };
+        std::unordered_set<PhysicalSlot, PhysicalHash, std::equal_to<PhysicalSlot>,
+            KisMutationStorageAllocator<PhysicalSlot>> batchPhysicalSlots(0, PhysicalHash{}, {}, storage);
         batchPhysicalSlots.reserve(snapshots.size());
         for (auto snapshotIt = snapshots.cbegin(); snapshotIt != snapshots.cend(); ++snapshotIt) {
             KisVersionSlotId existing;
             if (!findVersion(snapshotIt->version, &existing))
                 ++newVersions;
-            if (!canInstallPhysical(*snapshotIt, existing, &batchPhysicalSlots))
+            for (const auto &replica : snapshotIt->replicas) {
+                if (!batchPhysicalSlots.insert(replica.replica.physicalSlotIdentity()).second)
+                    return false;
+            }
+            if (!canInstallPhysical(*snapshotIt, existing))
                 return false;
             replicaCount += snapshotIt->replicas.size();
         }
@@ -2072,37 +2079,9 @@ public:
     using Storage = KisMutationStorageAllocator<char>;
     template<class T> using Array = std::vector<T, KisMutationStorageAllocator<T>>;
 
-    // Installation values own actual paid arrays. They have no publication
-    // authority; the existing claims and reserved arenas still decide install.
-    struct Replica {
-        Replica(const KisReplicaStateSnapshot &source, Storage storage)
-            : replica(source.replica), validity(source.validity), activeOperation(source.activeOperation)
-            , readLeases(source.readLeases.cbegin(), source.readLeases.cend(), storage)
-            , pinCount(source.pinCount)
-            , pendingLastUses(source.pendingLastUses.cbegin(), source.pendingLastUses.cend(), storage) {}
-        KisReplicaHandle replica;
-        KisReplicaValidity validity;
-        KisPageOperationId activeOperation;
-        Array<KisPageLeaseId> readLeases;
-        quint32 pinCount;
-        Array<KisCompletionTicket> pendingLastUses;
-    };
-    struct Version {
-        Version(const KisPageVersionStateSnapshot &source, Storage storage)
-            : version(source.version), publication(source.publication), replicas(storage)
-            , authority(source.authority), preparedBy(source.preparedBy)
-            , capturedReadViews(source.capturedReadViews.cbegin(), source.capturedReadViews.cend(), storage)
-        {
-            replicas.reserve(source.replicas.size());
-            for (const auto &replica : source.replicas) replicas.emplace_back(replica, storage);
-        }
-        KisPageVersion version;
-        KisPagePublicationState publication;
-        Array<Replica> replicas;
-        KisReplicaHandle authority;
-        KisPageTransactionId preparedBy;
-        Array<KisImageEpochSnapshotToken> capturedReadViews;
-    };
+    // The same paid values serve the transition and installation, without a
+    // second Qt-to-install copy or independent representation of protection.
+    using Version = KisPageWorkingVersion;
     struct VersionHash {
         size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version); }
     };
@@ -2326,7 +2305,6 @@ try {
     data->minimumEpoch = minimumEpoch;
     data->kind = kind;
     data->entries.reserve(transitions.size());
-    QSet<KisPageKey> seen;
     const KisPageStateMachine stateMachine;
     for (const KisPageTransition &transition : transitions) {
         const bool write = transition.kind == KisPageTransitionKind::CommitTransaction;
@@ -2343,18 +2321,19 @@ try {
                         && transition.kind != KisPageTransitionKind::RestoreCommittedVersion)
                     || (write && !(transition.transaction == transaction.id))
                     || (!write && transition.transaction.isValid()) || !(transition.imageEpoch == minimumEpoch)))
-            || seen.contains(transition.version.key)) {
+            || std::any_of(data->entries.cbegin(), data->entries.cend(), [&](const auto &entry) {
+                return entry.key() == transition.version.key;
+            })) {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata publication transition is invalid or repeated"));
             return result;
         }
-        seen.insert(transition.version.key);
         std::shared_ptr<MetadataShard> shardOwner = d->sharedShardFor(transition.version.key);
         MetadataShard *shard = shardOwner.get();
         if (!shard)
             return result;
         PreparedPublication::Data::Entry entry(storage);
         entry.shardOwner = std::move(shardOwner);
-        KisPageStateSnapshot before;
+        KisPageWorkingState before(storage);
         {
             QMutexLocker locker(&shard->mutex);
             const auto page = shard->pages.constFind(transition.version.key);
@@ -2373,15 +2352,13 @@ try {
                 entry.detachedVersion = transition.version;
             } else {
                 entry.revision = page->revision;
-                before = shard->header(transition.version.key, page.value());
-                QSet<KisPageVersion> included;
+                before.setHeader(shard->header(transition.version.key, page.value()));
                 const auto include = [&](const KisPageVersion &identity) {
-                    if (included.contains(identity))
+                    if (before.findVersion(identity))
                         return;
-                    KisPageVersionStateSnapshot v;
+                    KisPageWorkingVersion v(storage);
                     if (shard->records.snapshot(identity, &v)) {
-                        included.insert(identity);
-                        before.versions.append(std::move(v));
+                        before.versions.push_back(std::move(v));
                     }
                 };
                 include({before.key, before.publishedGeneration, before.publishedDefaultPixelRevision});
@@ -2431,7 +2408,7 @@ try {
         // enters through registerPage()'s full validation. The reference test
         // compares every supported publication kind with full apply().
         // Indexed inputs deliberately omit unrelated versions.
-        KisPageTransitionResult step = stateMachine.applyKnownValid(before, transition);
+        auto step = stateMachine.applyKnownValid(before, transition);
         if (!step.accepted) {
             KisPageStoreDetail::setError(error, step.rejectionReason);
             return result;
@@ -2439,17 +2416,17 @@ try {
         if (recoverable) {
             auto ready = transition;
             ready.kind = KisPageTransitionKind::PrepareWrite;
-            step = stateMachine.applyKnownValid(step.next, ready);
+            step = stateMachine.applyKnownValid(std::move(step.next), ready);
             if (!step.accepted) {
                 KisPageStoreDetail::setError(error, step.rejectionReason);
                 return result;
             }
         }
-        for (const KisPageVersionStateSnapshot &version : std::as_const(before.versions)) {
+        for (const auto &version : std::as_const(before.versions)) {
             if (version.authority.isValid())
                 data->backingAuthorities.insert_or_assign(version.version, version.authority);
         }
-        for (const KisPageVersionStateSnapshot &version : std::as_const(step.next.versions)) {
+        for (const auto &version : std::as_const(step.next.versions)) {
             if (version.authority.isValid())
                 data->backingAuthorities.insert_or_assign(version.version, version.authority);
         }
@@ -2459,25 +2436,22 @@ try {
             // that order, so the old physical slot is unbound before target
             // insertion. Unrelated history is never replaced. This branch is
             // inaccessible through ordinary immediate owner transitions.
-            entry.installRecords.emplace_back(*step.next.findVersion(transition.baseVersion), storage);
-            entry.installRecords.emplace_back(*step.next.findVersion(transition.version), storage);
+            entry.installRecords.push_back(std::move(*step.next.findVersion(transition.baseVersion)));
+            entry.installRecords.push_back(std::move(*step.next.findVersion(transition.version)));
         } else {
-            QHash<KisPageVersion, const KisPageVersionStateSnapshot *> previous;
-            for (const auto &version : std::as_const(before.versions))
-                previous.insert(version.version, &version);
-            for (const auto &version : std::as_const(step.next.versions)) {
-                const auto found = previous.constFind(version.version);
-                if (found == previous.cend()) {
+            for (auto &version : step.next.versions) {
+                const auto *previous = before.findVersion(version.version);
+                if (!previous) {
                     if (version.publication == KisPagePublicationState::Prepared
                         || version.publication == KisPagePublicationState::Unpublished) {
                         KisPageStoreDetail::setError(error, QStringLiteral("publication candidate introduced mutable metadata"));
                         return result;
                     }
-                    entry.installRecords.emplace_back(version, storage);
                     if (version.publication == KisPagePublicationState::Historical)
                         ++entryHistoryNodesPrepared;
-                } else if (found.value()->publication != version.publication
-                           || !(found.value()->preparedBy == version.preparedBy)) {
+                    entry.installRecords.push_back(std::move(version));
+                } else if (previous->publication != version.publication
+                           || !(previous->preparedBy == version.preparedBy)) {
                     entry.deltas.push_back({version.version, version.publication, version.preparedBy});
                     if (version.publication == KisPagePublicationState::Historical)
                         ++entryHistoryNodesPrepared;
@@ -2489,8 +2463,7 @@ try {
         // any intervening reader/pin/last-use change rejects that candidate.
         entryAdditionRecordsPrepared += quint64(entry.installRecords.size()) - (recoverable ? 1 : 0);
         // Headers never own version records at install.
-        step.next.versions = {};
-        entry.next = std::move(step.next);
+        entry.next = step.next.header();
         {
             QMutexLocker locker(&entry.shardOwner->mutex);
             const auto page = entry.shardOwner->pages.find(entry.key());
@@ -2520,7 +2493,7 @@ try {
             shardGrowth->physicalInsertions += record.replicas.size();
         // Publication preserves replicas as history; GC owns their eventual
         // retirement. Recoverable write transfers the backing to its target.
-        Q_ASSERT(step.effects.isEmpty());
+        Q_ASSERT(step.effects.empty());
         data->entries.push_back(std::move(entry));
     }
     // One candidate batch per shard avoids reserving a 16/32 KiB block for
@@ -3620,7 +3593,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
 
 KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
     const KisPageKey &key, const QVector<KisPageTransition> &transitions)
-{
+try {
     KisPageTransitionResult result;
     auto *shard = d->shardFor(key);
     if (!shard) {
@@ -3628,22 +3601,23 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         return result;
     }
     for (;;) {
-        MetadataArenaGrowth growth(shard->budgetAuthority->storage<char>());
+        const auto workingStorage = shard->budgetAuthority->storage<char>();
+        MetadataArenaGrowth growth(workingStorage);
+        KisPageWorkingArray<KisPageTransitionEffect> effects(workingStorage);
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
         if (page == shard->pages.end() || !shard->canMutate(key, page.value())) {
             result.rejectionReason = QStringLiteral("page is missing or reserved for publication");
             return result;
         }
-        auto input = shard->header(key, page.value());
-        QSet<KisPageVersion> included;
+        KisPageWorkingState input(workingStorage);
+        input.setHeader(shard->header(key, page.value()));
         const auto add = [&](const KisPageVersion &identity) {
-            if (!identity.isValid() || included.contains(identity))
+            if (!identity.isValid() || input.findVersion(identity))
                 return;
-            included.insert(identity);
-            KisPageVersionStateSnapshot version;
+            KisPageWorkingVersion version(workingStorage);
             if (shard->records.snapshot(identity, &version)) {
-                input.versions.append(std::move(version));
+                input.versions.push_back(std::move(version));
             }
         };
         add(input.writer.baseVersion);
@@ -3682,7 +3656,7 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         auto next = input;
         const KisPageStateMachine machine;
         for (const auto &transition : transitions) {
-            auto step = machine.applyKnownValid(next, transition);
+            auto step = machine.applyKnownValid(std::move(next), transition);
             if (!step.accepted) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = step.rejectionReason;
@@ -3690,8 +3664,11 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
                 return result; // no authoritative record has changed
             }
             next = std::move(step.next);
-            result.effects += step.effects;
+            effects.insert(effects.end(), step.effects.cbegin(), step.effects.cend());
         }
+        // This is the existing caller-owned output contract. Construct it
+        // before Debt preparation or the first authoritative record change.
+        result.effects = QVector<KisPageTransitionEffect>(effects.cbegin(), effects.cend());
         // Only projected records are installed/removed. Unrelated history and its
         // reader/pin/last-use state are neither copied nor overwritten.
         const quint64 expectedRevision = page->revision;
@@ -3757,19 +3734,15 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
             result.effects.clear();
             return result;
         }
-        if (!shard->ensureActivityCapacity(key, &next, &result.rejectionReason)) {
+        const auto nextHeader = next.header();
+        if (!shard->ensureActivityCapacity(key, &nextHeader, &result.rejectionReason)) {
             result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
             result.effects.clear();
             return result;
         }
-        // Prepare the removal witness before installing any authoritative
-        // record. Capture retain/release callers must be able to distinguish
-        // refusal from an accepted token mutation without replaying it.
-        QSet<KisPageVersion> retained;
-        for (const auto &version : std::as_const(next.versions)) {
-            retained.insert(version.version);
-        }
-        if (!shard->records.putBatch(&page.value(), next.versions)) {
+        // The next values already witness retention. No second removal set
+        // may allocate after installation starts.
+        if (!shard->records.putBatch(&page.value(), next.versions, workingStorage)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             result.effects.clear();
@@ -3777,12 +3750,12 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         }
         quint64 removed = 0;
         for (const auto &version : std::as_const(input.versions)) {
-            if (!retained.contains(version.version)) {
+            if (!next.findVersion(version.version)) {
                 shard->records.remove(&page.value(), version.version);
                 ++removed;
             }
         }
-        const bool headerInstalled = shard->installHeader(key, &page.value(), next);
+        const bool headerInstalled = shard->installHeader(key, &page.value(), nextHeader);
         Q_ASSERT(headerInstalled);
         Q_UNUSED(headerInstalled);
         ++page->revision;
@@ -3804,6 +3777,11 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
         Q_UNUSED(releasedBlocks);
         return result;
     }
+}
+catch (const std::bad_alloc &) {
+    KisPageTransitionResult refused;
+    refused.rejectionReason = QStringLiteral("metadata transition working storage was refused");
+    return refused;
 }
 
 QVector<KisPageKey> KisPageMetadataCoordinator::pageKeys() const

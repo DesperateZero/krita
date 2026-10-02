@@ -246,28 +246,26 @@ struct KRITAIMAGE_EXPORT KisPageTransitionResult
  * Shared deterministic transition function for reference and production
  * providers. BR1 must implement it before PageStore can become operational.
  */
+struct KisPageWorkingState;
+struct KisPageWorkingResult;
+class KisPageMetadataCoordinator;
+
 class KRITAIMAGE_EXPORT KisPageStateMachine
 {
 public:
     KisPageTransitionResult apply(const KisPageStateSnapshot &current,
                                   const KisPageTransition &transition) const;
-    /**
-     * Applies a transition to state already owned and previously validated by
-     * KisPageMetadataCoordinator. Transition-local guards remain mandatory;
-     * only the two allocation-heavy whole-snapshot invariant scans are
-     * omitted. External/reference callers must continue to use apply().
-     */
-    KisPageTransitionResult applyKnownValid(
-        const KisPageStateSnapshot &current,
-        const KisPageTransition &transition) const;
     bool validateInvariants(const KisPageStateSnapshot &state,
                             QString *failureReason = nullptr) const;
 
 private:
-    KisPageTransitionResult applyImpl(
-        const KisPageStateSnapshot &current,
-        const KisPageTransition &transition,
-        bool validateBoundaryInvariants) const;
+    // Only indexed coordinator-owned values may omit the full boundary scans.
+    // Both entry points use the same transition-local policy. The working value
+    // is consumed; on rejection the coordinator discards it without installation.
+    KisPageWorkingResult applyKnownValid(
+        KisPageWorkingState current,
+        const KisPageTransition &transition) const;
+    friend class KisPageMetadataCoordinator;
 };
 
 #endif // KIS_PAGE_STATE_MACHINE_H
