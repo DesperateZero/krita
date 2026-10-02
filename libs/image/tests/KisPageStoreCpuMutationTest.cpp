@@ -898,6 +898,8 @@ private Q_SLOTS:
     void concurrentWritePreparationClaims();
     void guardReleaseParksPendingBacking_data();
     void guardReleaseParksPendingBacking();
+    void executionPreparationReusesParkedBacking_data() { pixelRows(); }
+    void executionPreparationReusesParkedBacking();
     void pinFootprintTracksGuards_data();
     void pinFootprintTracksGuards();
     void mutablePreparationDoesNotAliasSource_data();
@@ -3564,6 +3566,55 @@ void KisPageStoreCpuMutationTest::concurrentWritePreparationClaims()
     QVERIFY(f.store->abort(tx));
     QVERIFY(f.store->closeSession());
     QVERIFY(!f.store->sessionStats().hasOutstandingCapabilities());
+}
+
+void KisPageStoreCpuMutationTest::executionPreparationReusesParkedBacking()
+{
+    QFETCH(int, bpp);
+    Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    const auto baseline = f.store->mutationStatistics();
+    auto mutation = f.begin(tx);
+    auto execution = mutation.borrowExecution({1}, {{0, 0}});
+    QCOMPARE(execution.prepareWrites(&f.error), KisPageMutationExecution::PreparationResult::Ready);
+    auto guard = execution.beginWrite(key()); QVERIFY(guard.isValid());
+    const auto version = guard.version();
+    auto *tile = f.provider->p->tileDataForCpuWriteGuard(guard); QVERIFY(tile);
+    QVERIFY(tile->ref());
+    const auto releaseTile = qScopeGuard([&] { tile->deref(); });
+    std::memset(guard.data(), 0x71, size_t(guard.byteSize()));
+    guard = {};
+    QVERIFY(execution.finish());
+    QVERIFY(KisTileDataStore::instance()->trySwapTileData(tile));
+
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    const auto work = [&](KisPageStoreDiagnosticPhase phase) {
+        return recorder.metrics()[size_t(phase)].workItems;
+    };
+    f.provider->rejectWrite = true; // existing backing needs no new allocation
+    execution = mutation.borrowExecution({1}, {{0, 0}});
+    QCOMPARE(execution.prepareWrites(&f.error), KisPageMutationExecution::PreparationResult::Ready);
+    QCOMPARE(work(KisPageStoreDiagnosticPhase::WriteWritablePin), quint64(0));
+    QCOMPARE(work(KisPageStoreDiagnosticPhase::WritePendingMaterialize), quint64(0));
+    guard = execution.beginWrite(key()); QVERIFY2(guard.isValid(), qPrintable(f.error));
+    QCOMPARE(work(KisPageStoreDiagnosticPhase::WriteWritablePin), quint64(1));
+    QCOMPARE(work(KisPageStoreDiagnosticPhase::WritePendingMaterialize), quint64(1));
+    QCOMPARE(guard.version(), version);
+    QCOMPARE(QByteArray(static_cast<const char *>(guard.data()), int(guard.byteSize())),
+             QByteArray(int(guard.byteSize()), char(0x71)));
+    std::memset(guard.data(), 0x72, size_t(bpp));
+    guard = {};
+    QVERIFY(execution.finish());
+    f.provider->rejectWrite = false;
+    QVERIFY(mutation.seal());
+    const auto after = f.store->mutationStatistics();
+    QCOMPARE(after.generationsReserved - baseline.generationsReserved, quint64(1));
+    QCOMPARE(after.writablePinsAcquired - baseline.writablePinsAcquired, quint64(3));
+    QCOMPARE(after.writablePinsReleased - baseline.writablePinsReleased, quint64(3));
+    QCOMPARE(after.maximumPinnedPagesPerExecution, quint64(1));
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    QCOMPARE(f.pixel(), QByteArray(bpp, char(0x72)));
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::guardReleaseParksPendingBacking_data()

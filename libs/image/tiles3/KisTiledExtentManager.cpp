@@ -206,10 +206,16 @@ KisTiledExtentManager::Data::Growth KisTiledExtentManager::Data::planGrowth(
 {
     Growth growth;
     if (covers(first, last)) return growth;
-    const qint64 low = std::min(-qint64(m_offset), qint64(first));
+    qint64 low = std::min(-qint64(m_offset), qint64(first));
     const qint64 high = std::max(qint64(m_capacity) - m_offset - 1, qint64(last));
+    const qint64 required = high - low + 1;
     qint64 capacity = m_capacity;
-    while (capacity < high - low + 1) capacity *= 2;
+    while (capacity < required) capacity *= 2;
+    // Leave the new slack on the side that grew. Otherwise every small
+    // negative-coordinate insertion shifts the full old buffer and doubles
+    // capacity again, even when the declared range remains small.
+    if (first < -qint64(m_offset))
+        low = std::max(-qint64(std::numeric_limits<qint32>::max()), low - (capacity - required));
     if (capacity > std::numeric_limits<qint32>::max() ||
         -low > std::numeric_limits<qint32>::max() ||
         quint64(capacity) > std::numeric_limits<size_t>::max() / sizeof(QAtomicInt))

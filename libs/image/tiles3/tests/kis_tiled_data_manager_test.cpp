@@ -174,6 +174,30 @@ bool KisTiledDataManagerTest::checkTilesNotShared(KisTiledDataManager *srcDM,
     return true;
 }
 
+void KisTiledDataManagerTest::testExtentGrowthReusesNegativeCapacity()
+{
+    KisTiledExtentManager extent;
+    constexpr int tiles = 257;
+    for (int i = 1; i <= tiles; ++i) {
+        extent.notifyTileAdded(-2 * i, -3 * i);
+        QCOMPARE(extent.extent(), QRect(QPoint(-2 * i * 64, -3 * i * 64), QPoint(-65, -129)));
+        // Capacity is amortized by coordinate span, not insertion count.
+        QVERIFY(extent.m_colsData.m_capacity <= 2 * (256 + 2 * i));
+        QVERIFY(extent.m_rowsData.m_capacity <= 2 * (256 + 3 * i));
+    }
+    extent.notifyTileAdded(-2, -3);
+    extent.notifyTileRemoved(-2, -3); // preserve the remaining original count
+    for (int i = tiles; i >= 1; --i) {
+        extent.notifyTileRemoved(-2 * i, -3 * i);
+        QCOMPARE(extent.extent(), i == 1 ? QRect{} :
+                 QRect(QPoint(-2 * (i - 1) * 64, -3 * (i - 1) * 64), QPoint(-65, -129)));
+    }
+    extent.notifyTileAdded(800, 1200);
+    QCOMPARE(extent.extent(), QRect(800 * 64, 1200 * 64, 64, 64));
+    extent.notifyTileRemoved(800, 1200);
+    QVERIFY(extent.extent().isEmpty());
+}
+
 void KisTiledDataManagerTest::testPageStoreHistoryDirtyExtent()
 {
     const quint8 blank = 0;
@@ -1663,8 +1687,11 @@ void KisTiledDataManagerTest::testPageStoreHistoryMutation()
     QCOMPARE(QByteArray(static_cast<const char *>(old.data()), bpp), QByteArray(bpp, char(0x51)));
     QCOMPARE(store->mutationStatistics().operationSessionsCreated - baseline.operationSessionsCreated, quint64(1));
     QCOMPARE(store->mutationStatistics().generationsReserved - baseline.generationsReserved, quint64(3));
-    QCOMPARE(store->mutationStatistics().writablePinsAcquired - baseline.writablePinsAcquired, quint64(repeats * 2 + 1));
-    QCOMPARE(store->mutationStatistics().writablePinsReleased - baseline.writablePinsReleased, quint64(repeats * 2 + 1));
+    // Three cold generations each require one preflight pin. Warm callbacks
+    // reuse admitted backing; preparation must not add one pin per dab.
+    const quint64 expectedPins = quint64(repeats * 2 + 1) + 3;
+    QCOMPARE(store->mutationStatistics().writablePinsAcquired - baseline.writablePinsAcquired, expectedPins);
+    QCOMPARE(store->mutationStatistics().writablePinsReleased - baseline.writablePinsReleased, expectedPins);
     if (!abort) {
         dm.rollback(memento); dm.readBytes(reinterpret_cast<quint8 *>(pixel.data()), 0, 0, 1, 1); QCOMPARE(pixel, initial);
         dm.rollforward(memento); dm.readBytes(reinterpret_cast<quint8 *>(pixel.data()), 0, 0, 1, 1); QCOMPARE(pixel, QByteArray(bpp, char(0x71)));
@@ -2909,8 +2936,15 @@ void KisTiledDataManagerTest::testPageStorePixelOperationConcurrent()
     quint8 actual[128]; dm.readBytes(actual,0,0,128,1);
     QCOMPARE(actual[0], quint8(secondKind == 2 ? initial : 0x72));
     QCOMPARE(actual[64], quint8(cancelFirst ? initial : 0x51));
-    QCOMPARE(store->mutationStatistics().generationsReserved - counts.generationsReserved,
-             quint64(secondKind == 2 && cancelFirst ? 2 : 3));
+    // Cursor preflight prepares both declared pages, then cancels the second
+    // callback's untouched page. Packed input prepares only its actual write.
+    const quint64 secondWrites = secondKind == 2 && cancelFirst ? 0 : 1;
+    const auto after = store->mutationStatistics();
+    QCOMPARE(after.generationsReserved - counts.generationsReserved,
+             quint64(2) + (secondKind == 0 ? 2 : secondWrites));
+    QCOMPARE(after.pagesSealed - counts.pagesSealed, (cancelFirst ? 0 : 2) + secondWrites);
+    QCOMPARE(after.pagesCancelled - counts.pagesCancelled, quint64(cancelFirst ? 2 : 0) + (secondKind == 0 ? 1 : 0));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
 }
 
 void KisTiledDataManagerTest::testPageStorePlanarWriteMutation_data()

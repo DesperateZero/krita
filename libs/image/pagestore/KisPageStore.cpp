@@ -1587,9 +1587,13 @@ KisPageMutationExecution::prepareWrites(QString *error)
                 break;
             }
             const auto &bound = d->entries()[i];
+            // The original linked entry already owns its admitted backing.
+            // PreserveContents needs no new capacity for a parked pending page;
+            // its actual guard still re-pins/restores through beginWriteImpl.
+            if (bound.page)
+                continue;
             key = bound.entry->key();
-            if (!bound.page)
-                d->markPrepared(i);
+            d->markPrepared(i);
         }
         auto guard = session.beginWriteImpl(key, KisPageWriteMode::PreserveContents,
                                             nullptr, error, d, true);
