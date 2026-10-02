@@ -2205,10 +2205,9 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     locker.relock();
     if (!prepared->metadata.isValid()) return fallback;
 
-    // No owner unlock between descriptor capacity preparation and consumption.
     // All fallible storage exists before taking the physical claim. Metadata
     // install strictly rechecks the page revision and exact recovery identity.
-    prepared->descriptors = publication.prepareDescriptorAdditionsLocked({{write.version, descriptor}});
+    prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor);
     const auto plan = select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
     if (plan != KisPageWritePlanKind::RecoverableHandoff || !prepared->physical.tryClaim()) return fallback;

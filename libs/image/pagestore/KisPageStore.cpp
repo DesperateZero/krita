@@ -570,6 +570,17 @@ public:
         }
         KisBackingBudgetClass backingClass = currentVersion == version
             ? KisBackingBudgetClass::Current : KisBackingBudgetClass::RetainedHistory;
+        decltype(publicationCoordinator.prepareDescriptorLocked(version, descriptor)) descriptors;
+        const auto discardDescriptors = qScopeGuard([&] {
+            if (locker->isLocked()) locker->unlock();
+            descriptors = {};
+            locker->relock();
+        });
+        try { descriptors = publicationCoordinator.prepareDescriptorLocked(version, descriptor); }
+        catch (const std::bad_alloc &) {
+            KisPageStoreDetail::setError(error, QStringLiteral("implicit default descriptor storage budget was refused"));
+            return false;
+        }
         KisPageBackingPreparation backing;
         ++activeProviderCalls;
         {
@@ -674,7 +685,7 @@ public:
                 return false;
             }
         }
-        publicationCoordinator.putDescriptorLocked(version, descriptor);
+        publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
         KisPageStoreDetail::setError(error, {});
         return true;
     }
@@ -762,12 +773,12 @@ public:
     struct Page {
         KisReplicaHandle source;
         KisReplicaHandle target;
-        KisPageAllocationDescriptor descriptor;
+        const KisPageAllocationDescriptor *descriptor = nullptr;
         KisCpuWriteBindingReservation writable;
         QByteArray resetPixel;
         KisPreparedPageProof proof;
     };
-    static_assert(sizeof(Page) <= 688);
+    static_assert(sizeof(Page) <= 512);
     struct ColdPageSet {
         std::optional<Page> inlinePage;
         KisMutationStorage<Page, 2> overflow;
@@ -1177,6 +1188,19 @@ public:
             KisPageStoreDetail::setError(error, QStringLiteral("mutation cold storage is unavailable"));
             return false;
         }
+        decltype(owner->publicationCoordinator.prepareDescriptorLocked(adoption.version, descriptor)) descriptors;
+        const auto discardDescriptors = qScopeGuard([&] {
+            if (lock.isLocked()) lock.unlock();
+            descriptors = {};
+            lock.relock();
+        });
+        if (!page) {
+            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(adoption.version, descriptor); }
+            catch (const std::bad_alloc &) {
+                KisPageStoreDetail::setError(error, QStringLiteral("alias descriptor storage budget was refused"));
+                return false;
+            }
+        }
         KisPageBackingPreparation backing;
         ++owner->activeProviderCalls;
         {
@@ -1234,8 +1258,9 @@ public:
             page->source = adoption.source;
             page->target = adoption.target;
             owner->writeCoordinator.recordPrepared(*entry, intent, adoption);
-            page->descriptor = descriptor;
-            owner->publicationCoordinator.putDescriptorLocked(adoption.version, page->descriptor);
+            owner->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
+            page->descriptor = owner->publicationCoordinator.descriptorLocked(adoption.version);
+            Q_ASSERT(page->descriptor);
             ++owner->mutationStats.aliasGenerationsReserved;
         } else {
             page->writable.reset();
@@ -2067,6 +2092,17 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
             owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic);
         if (plan != KisPageWritePlanKind::RecoverableHandoff) {
+            decltype(owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor)) descriptors;
+            const auto discardDescriptors = qScopeGuard([&] {
+                if (lock.isLocked()) lock.unlock();
+                descriptors = {};
+                lock.relock();
+            });
+            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor); }
+            catch (const std::bad_alloc &) {
+                fail(QStringLiteral("mutation descriptor storage budget was refused"));
+                return result;
+            }
             KisPageBackingPreparation backing;
             ++owner->activeProviderCalls;
             {
@@ -2128,13 +2164,14 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                 fail(prepared.rejectionReason);
                 return result;
             }
-            owner->publicationCoordinator.putDescriptorLocked(target, descriptor);
+            owner->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
             payloadInitialized = directPayload;
         }
         page = resources;
         page->source = acquire.source;
         page->target = acquire.target;
-        page->descriptor = descriptor;
+        page->descriptor = owner->publicationCoordinator.descriptorLocked(target);
+        Q_ASSERT(page->descriptor);
         page->writable = std::move(writable);
         owner->writeCoordinator.recordPrepared(*entry, intent, acquire);
         discardUnprepared.dismiss();
@@ -2144,7 +2181,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             initialization.clear();
         }
     }
-    if (payload && !payload->isValidFor(page->descriptor)) {
+    if (payload && !payload->isValidFor(*page->descriptor)) {
         if (!preparationOnly)
             d->state = Private::State::Failed;
         KisPageStoreDetail::setError(error, QStringLiteral("complete CPU payload layout is invalid"));
@@ -2161,7 +2198,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     if (initialization) {
         KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationSourceInitialize, 1);
         if (!d->provider->copySynchronousSourceToCpu(initialization,
-                                                     page->descriptor,
+                                                     *page->descriptor,
                                                      data,
                                                      page->target.layout.rowStride,
                                                      page->target.layout.byteSize)) {
@@ -2176,8 +2213,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     if (payload) {
         if (!payloadInitialized) {
             KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto rowBytes = page->descriptor.minimumRowBytes();
-            const int rows = page->descriptor.pageExtent.height();
+            const auto rowBytes = page->descriptor->minimumRowBytes();
+            const int rows = page->descriptor->pageExtent.height();
             for (int row = 0; row < rows; ++row)
                 std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target.layout.rowStride,
                             static_cast<const quint8 *>(payload->data) + row * payload->rowStride,
@@ -2187,7 +2224,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         // Full input supersedes a staged semantic default, without a redundant fill.
         page->resetPixel.clear();
     } else if (!page->resetPixel.isEmpty()) {
-        const auto &rect = page->descriptor.validRect;
+        const auto &rect = page->descriptor->validRect;
         const auto &pixel = page->resetPixel;
         auto *pixels = static_cast<quint8 *>(data);
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
@@ -2393,7 +2430,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             if (!owner->owner.sealPreparedPage(owner->metadata,
                                                page->target.version,
                                                d->transaction.id,
-                                               page->descriptor,
+                                               *page->descriptor,
                                                completion,
                                                &page->proof,
                                                &failure)) {
@@ -3279,7 +3316,8 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     locker.relock();
     --d->activeProviderCalls;
     QString failure;
-    if (!d->owner.configure(completions, &failure) || !d->metadata.configure(metadataShardCount, &failure)
+    if (!d->publicationCoordinator.prepareDefaultRevisionsLocked(initialEpoch.surfaces, &failure)
+        || !d->owner.configure(completions, &failure) || !d->metadata.configure(metadataShardCount, &failure)
         || !d->epochs.initialize(initialEpoch, &failure)) {
         KisPageStoreDetail::setError(error, failure);
         return false;
@@ -3293,13 +3331,6 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     completions->completePrepared(ready, KisCompletionStatus::Succeeded);
     d->completions = completions;
     d->readyHostCompletion = ready;
-    for (const auto &surface : initialEpoch.surfaces) {
-        if (!d->publicationCoordinator.importDefaultRevisionLocked(
-                surface.surface, surface.defaultPixelRevision, &failure)) {
-            KisPageStoreDetail::setError(error, failure);
-            return false;
-        }
-    }
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -3401,6 +3432,17 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
         KisPageStoreDetail::setError(error, QStringLiteral("initial page replicas failed provider validation"));
         return false;
     }
+    decltype(d->publicationCoordinator.prepareDescriptorLocked(version, descriptor)) descriptors;
+    const auto discardDescriptors = qScopeGuard([&] {
+        if (locker.isLocked()) locker.unlock();
+        descriptors = {};
+        locker.relock();
+    });
+    try { descriptors = d->publicationCoordinator.prepareDescriptorLocked(version, descriptor); }
+    catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("initial descriptor storage budget was refused"));
+        return false;
+    }
     using TerminalNodes = std::vector<KisPageRetirementRecordPointer,
         KisMutationStorageAllocator<KisPageRetirementRecordPointer>>;
     TerminalNodes terminals{KisMutationStorageAllocator<KisPageRetirementRecordPointer>(&d->backingBudget)};
@@ -3478,8 +3520,8 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
         KisPageStoreDetail::setError(error, failure);
         return false;
     }
+    d->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
     undoRegistration.dismiss();
-    d->publicationCoordinator.putDescriptorLocked(version, descriptor);
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -3958,6 +4000,17 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         locker.relock();
         return request;
     }
+    decltype(d->publicationCoordinator.prepareDescriptorLocked(writeVersion, descriptor)) descriptors;
+    const auto discardDescriptors = qScopeGuard([&] {
+        if (locker.isLocked()) locker.unlock();
+        descriptors = {};
+        locker.relock();
+    });
+    try { descriptors = d->publicationCoordinator.prepareDescriptorLocked(writeVersion, descriptor); }
+    catch (const std::bad_alloc &) {
+        d->writeRequests.erase(requestId.value);
+        return fail(QStringLiteral("write descriptor storage budget was refused"));
+    }
     KisPageBackingPreparation backing;
     ++d->activeProviderCalls;
     {
@@ -4031,7 +4084,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         return request;
     }
 
-    d->publicationCoordinator.putDescriptorLocked(writeVersion, descriptor);
+    d->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
     pendingIt->second.source = transition.source;
     pendingIt->second.readiness = allocation.completion;
     const auto rejectPrepared = [&](const QString &message) {

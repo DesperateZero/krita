@@ -443,6 +443,7 @@ class KisPageStoreCpuMutationTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void publicationDescriptorStorageAtCapacity();
     void overlayStorageAtCapacity_data()
     {
         QTest::addColumn<int>("refusal");
@@ -3726,7 +3727,7 @@ void KisPageStoreCpuMutationTest::defaultPublicationRevalidatesDescriptorStorage
     QVERIFY(f.setDefault(0x55)); QCOMPARE(attempts, 2);
     const auto after = f.store->publicationStatistics();
     QCOMPARE(after.descriptorRepreparations - before.descriptorRepreparations, quint64(1));
-    QCOMPARE(after.descriptorCapacityPreparations - before.descriptorCapacityPreparations, quint64(2));
+    QCOMPARE(after.descriptorCapacityPreparations - before.descriptorCapacityPreparations, quint64(3));
     QCOMPARE(after.descriptorInstallations - before.descriptorInstallations, quint64(1));
     QCOMPARE(after.directoryRepreparations, before.directoryRepreparations);
     QCOMPARE(f.pixel({}, 3), QByteArray(f.bpp, char(0x55)));
@@ -4849,6 +4850,107 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     kisDrainPageStoreReclamation();
     QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
     QCOMPARE(references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
+{
+    KisPageBackingLimits processLimits;
+    processLimits.metadataArenaBytes = 512 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(processLimits);
+    std::array<KisBackingBudgetReservation, 16> warm;
+    KisBackingBudgetDelta delta;
+    delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = 1;
+    for (auto &reservation : warm) {
+        reservation = parent->reserve(delta, nullptr);
+        QVERIFY(reservation.isValid());
+    }
+    for (auto &reservation : warm) reservation.release();
+    const auto parentBaseline = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    auto fixture = std::make_unique<ReadTerminalFixture>(256 * 1024);
+    auto &f = *fixture;
+    QVERIFY(f.budget.configureSharedNonPayloadBudget(parent));
+    f.background = false;
+    f.metadata.attachBackingBudget(f.budget);
+    QVERIFY2(f.init(), qPrintable(f.error));
+    auto publication = std::make_unique<KisPagePublicationCoordinator>(f.epochs, f.metadata, f.owner,
+        f.budget, f.retirement, f.history, f.ready, f.activeCalls, f.operational, f.background, &f,
+        +[](void *, KisPageTransactionId) { return false; },
+        +[](void *, const KisPageKey &) { return false; },
+        +[](void *, KisPageTransactionId, QMutexLocker<QMutex> &, QString *) { return true; },
+        +[](void *, KisPageTransactionId) {},
+        +[](void *, KisPageMetadataCoordinator::DeferredPublicationCleanup) {},
+        +[](void *) { return true; },
+        +[](void *, KisPageTransactionId, KisPageReadCleanup &) { return true; });
+    KisSurfaceEpochState surface;
+    QVERIFY(f.epochs.root({1}).surfaceState({1}, &surface));
+    const auto descriptor = surface.allocationDescriptor();
+    using Commit = KisPagePublicationCoordinator::KisPreparedMutationCommit;
+    std::optional<Commit> facade;
+    std::optional<KisPagePublicationCoordinator::DescriptorMap> tail;
+    {
+        QMutexLocker lock(&f.mutex);
+        auto first = publication->prepareDescriptorLocked({key(1), {2}}, descriptor);
+        auto second = publication->prepareDescriptorLocked({key(2), {2}}, descriptor);
+        QVERIFY(!first.empty() && !second.empty());
+        QVERIFY(publication->m_descriptors.empty());
+        const auto beforeFull = f.live();
+        const auto fillerBytes = size_t(f.limits.metadataArenaBytes - beforeFull);
+        void *filler = kisAllocateMutationStorage(&f.budget, fillerBytes, 1);
+        const auto cleanupFiller = qScopeGuard([&] {
+            if (filler) kisFreeMutationStorage(&f.budget, filler, fillerBytes, 1);
+        });
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        bool refused = false;
+        try { auto candidate = publication->prepareDescriptorLocked({key(3), {2}}, descriptor); }
+        catch (const std::bad_alloc &) { refused = true; }
+        QVERIFY(refused);
+        const auto registrations = f.metadata.pageRegistrationCount();
+        const KisPageVersion implicit{key(3), {1}, surface.defaultPixelRevision};
+        QVERIFY(!publication->ensureVirtualDefaultLocked(implicit, surface, &f.error));
+        QCOMPARE(f.metadata.pageRegistrationCount(), registrations);
+        QVERIFY(publication->m_descriptors.empty());
+        refused = false;
+        try { facade.emplace(f.budget); }
+        catch (const std::bad_alloc &) { refused = true; }
+        QVERIFY(refused);
+        QVERIFY(!facade);
+        publication->installDescriptorAdditionsLocked(&second);
+        publication->installDescriptorAdditionsLocked(&first);
+        QCOMPARE(publication->m_descriptors.size(), size_t(2));
+        QVERIFY(first.empty() && second.empty());
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        auto unchanged = publication->prepareDescriptorLocked({key(1), {2}}, descriptor);
+        QVERIFY(unchanged.empty()); // Existing identical policy requires no node.
+        f.operational = false;
+        QVERIFY(!publication->prepareDefaultRevisionsLocked({surface}, &f.error));
+        QVERIFY(publication->m_defaultRevisionHighWater.empty());
+        kisFreeMutationStorage(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
+        QCOMPARE(f.live(), beforeFull);
+        auto duplicate = surface;
+        QVERIFY(!publication->prepareDefaultRevisionsLocked({surface, duplicate}, &f.error));
+        QVERIFY(publication->m_defaultRevisionHighWater.empty());
+        duplicate.surface = {2};
+        QVERIFY(publication->prepareDefaultRevisionsLocked({surface, duplicate}, &f.error));
+        QCOMPARE(publication->m_defaultRevisionHighWater.size(), size_t(2));
+        QVERIFY(publication->ensureVirtualDefaultLocked(implicit, surface, &f.error));
+        QCOMPARE(f.metadata.pageRegistrationCount(), registrations + 1);
+        QCOMPARE(*publication->m_descriptors.at(implicit), descriptor);
+        QCOMPARE(publication->m_descriptors.at(implicit).get(), publication->m_descriptors.at({key(1), {2}}).get());
+        facade.emplace(f.budget);
+        tail.emplace(publication->prepareDescriptorLocked({key(4), {2}}, descriptor));
+        lock.unlock();
+    } // Empty candidate maps also release their retained allocator references.
+    publication.reset(); fixture.reset();
+    const auto parentLive = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    QVERIFY(parentLive() > parentBaseline);
+    const auto withFacade = parentLive();
+    facade.reset();
+    QVERIFY(parentLive() < withFacade);
+    QVERIFY(parentLive() > parentBaseline); // Inert descriptor node still owns actual capacity.
+    tail.reset();
+    QCOMPARE(parentLive(), parentBaseline);
 }
 
 void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()

@@ -1146,7 +1146,10 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         required_contracts = (
             "class KisPagePublicationCoordinator final",
             "class KisPreparedMutationCommit final",
-            "std::unique_ptr<Data> data",
+            "std::unique_ptr<Data, DataDeleter> data",
+            "using DescriptorMap = std::map",
+            "using DefaultRevisionMap = std::map",
+            "boost::intrusive::list<CommitPreparation> m_preparingCommits",
             "struct PreparedTransactionState",
             "using TransactionMap = std::map",
             "TransactionMap m_preparedTransactions",
@@ -1520,8 +1523,10 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:
                 errors.append(f"mutation cold resources regained duplicate state: {forbidden}")
-        if "static_assert(sizeof(Page) <= 688)" not in cold_page:
-            errors.append("mutation cold resource layout lost its 688-byte ceiling")
+        if "static_assert(sizeof(Page) <= 512)" not in cold_page:
+            errors.append("mutation cold resource layout lost its 512-byte ceiling")
+        if "const KisPageAllocationDescriptor *descriptor" not in cold_page:
+            errors.append("mutation cold resources regained a duplicate descriptor value")
         for contract in (
             "KisPageWriteAdmission writeAdmission",
             "KisBackingBudgetController backingBudget",

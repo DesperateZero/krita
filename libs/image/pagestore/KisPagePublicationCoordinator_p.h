@@ -14,11 +14,10 @@
 #include "KisPageRetirementQueue_p.h"
 #include "KisPageStore.h"
 
-#include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
-#include <QSet>
 #include <QVector>
+#include <boost/intrusive/list.hpp>
 
 #include <memory>
 #include <map>
@@ -55,11 +54,17 @@ class KisPagePublicationCoordinator final
         std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, KisPreparedPageProof>>>;
     using RemovalSet = std::unordered_set<KisPageKey, PageHash,
         std::equal_to<KisPageKey>, KisMutationStorageAllocator<KisPageKey>>;
-    struct DescriptorHash {
-        size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version, seed); }
-        size_t seed = QHashSeed::globalSeed();
+    struct VersionLess {
+        bool operator()(const KisPageVersion &a, const KisPageVersion &b) const noexcept {
+            if (a.key.surface.value != b.key.surface.value) return a.key.surface.value < b.key.surface.value;
+            if (a.key.page.row != b.key.page.row) return a.key.page.row < b.key.page.row;
+            if (a.key.page.column != b.key.page.column) return a.key.page.column < b.key.page.column;
+            if (a.generation.value != b.generation.value) return a.generation.value < b.generation.value;
+            return a.defaultPixelRevision < b.defaultPixelRevision;
+        }
     };
-    using DescriptorMap = std::unordered_map<KisPageVersion, KisPageAllocationDescriptor, DescriptorHash>;
+    using DescriptorMap = std::map<KisPageVersion, std::shared_ptr<const KisPageAllocationDescriptor>, VersionLess,
+        KisMutationStorageAllocator<std::pair<const KisPageVersion, std::shared_ptr<const KisPageAllocationDescriptor>>>>;
     struct PreparedDescriptorChange {
         KisPageVersion version;
         KisPageAllocationDescriptor descriptor;
@@ -142,8 +147,8 @@ public:
 
     bool resolveSurfaceLocked(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
-    bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
-    bool importDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
+    KRITAIMAGE_EXPORT bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
+    KRITAIMAGE_EXPORT bool prepareDefaultRevisionsLocked(const QVector<KisSurfaceEpochState> &surfaces, QString *error);
     KRITAIMAGE_EXPORT bool configureDerivedExtentLocked(KisSurfaceId surface);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
@@ -183,11 +188,14 @@ public:
         const OverlayChange *changes, size_t count,
         QString *error);
 
-    void putDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
+    KRITAIMAGE_EXPORT DescriptorMap prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
-    bool descriptorLocked(const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
-    DescriptorMap prepareDescriptorAdditionsLocked(const QVector<PreparedDescriptorChange> &changes);
-    void installDescriptorAdditionsLocked(DescriptorMap *prepared);
+    // A borrow lasts until its version's descriptor is replaced or removed.
+    // The native page's original claim/session excludes both during its use.
+    const KisPageAllocationDescriptor *descriptorLocked(
+        const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
+    DescriptorMap prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count);
+    KRITAIMAGE_EXPORT void installDescriptorAdditionsLocked(DescriptorMap *prepared);
 
     KisPageStorePublicationStatistics statisticsLocked() const;
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
@@ -226,7 +234,8 @@ private:
     {
     public:
         KisPreparedMutationCommit();
-        ~KisPreparedMutationCommit();
+        KRITAIMAGE_EXPORT explicit KisPreparedMutationCommit(KisBackingBudgetController &budget);
+        KRITAIMAGE_EXPORT ~KisPreparedMutationCommit();
         KisPreparedMutationCommit(KisPreparedMutationCommit &&) noexcept;
         KisPreparedMutationCommit &operator=(KisPreparedMutationCommit &&) noexcept;
         KisPreparedMutationCommit(const KisPreparedMutationCommit &) = delete;
@@ -236,7 +245,11 @@ private:
 
     private:
         class Data;
-        std::unique_ptr<Data> data;
+        struct DataDeleter {
+            KisMutationStorageAllocator<Data> storage;
+            void operator()(Data *) const noexcept;
+        };
+        std::unique_ptr<Data, DataDeleter> data;
         void cancel() noexcept;
         friend class KisPagePublicationCoordinator;
     };
@@ -260,13 +273,21 @@ private:
     RestoreIsIdle m_restoreIsIdle = nullptr;
     PrepareAbort m_prepareAbort = nullptr;
 
-    QSet<quint64> m_preparingCommits;
+    struct CommitPreparation : boost::intrusive::list_base_hook<> {
+        explicit CommitPreparation(KisPageTransactionId value) : transaction(value) {}
+        KisPageTransactionId transaction;
+    };
+    // The synchronous call owns the claim record through every owner unlock.
+    // Publication/abort admission never allocates a container node.
+    boost::intrusive::list<CommitPreparation> m_preparingCommits;
     using TransactionMap = std::map<quint64, std::shared_ptr<PreparedTransactionState>,
         std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, std::shared_ptr<PreparedTransactionState>>>>;
     TransactionMap m_preparedTransactions;
     // Immutable Tiles3 surface policy, not a second extent or page registry.
     KisSurfaceId m_derivedExtentSurface;
-    QHash<quint64, quint64> m_defaultRevisionHighWater;
+    using DefaultRevisionMap = std::map<quint64, quint64, std::less<quint64>,
+        KisMutationStorageAllocator<std::pair<const quint64, quint64>>>;
+    DefaultRevisionMap m_defaultRevisionHighWater;
     DescriptorMap m_descriptors;
     quint64 m_descriptorRevision = 1;
     KisPageStorePublicationStatistics m_statistics;
