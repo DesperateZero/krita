@@ -339,7 +339,6 @@ private:
         // Revision/capacity races are retryable; invalid input and exhausted
         // budgets are not. This is an outcome, never an install capability.
         bool needsReprepare() const { return m_conflicted; }
-        const QVector<KisPageTransitionEffect> &retirementEffects() const;
         KisReplicaHandle backingAuthority(const KisPageVersion &version) const;
 
     private:
@@ -412,16 +411,16 @@ private:
                                  const KisPageTransaction &transaction,
                                  QString *error = nullptr,
                                  DeferredPublicationCleanup *deferredCleanup = nullptr);
+    // Publication keeps superseded replicas in history; retirement effects
+    // are produced later by history GC or an explicit abort/discard.
     bool installPublication(PreparedPublication &&prepared,
                             const KisPageTransaction &transaction,
                             KisImageEpochId epoch,
-                            QVector<KisPageTransitionEffect> *effects,
                             QString *error = nullptr,
                             DeferredPublicationCleanup *deferredCleanup = nullptr);
     bool installPublicationImpl(PreparedPublication &&prepared,
                                 const KisPageTransaction &transaction,
                                 KisImageEpochId epoch,
-                                QVector<KisPageTransitionEffect> *effects,
                                 QString *error,
                                 PreparationKind kind,
                                 DeferredPublicationCleanup *deferredCleanup);

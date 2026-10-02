@@ -2064,7 +2064,6 @@ public:
     PreparationKind kind = PreparationKind::Publication;
     std::vector<Entry> entries;
     std::vector<ShardArenaGrowth> arenaGrowth;
-    QVector<KisPageTransitionEffect> effects;
     QHash<KisPageVersion, KisReplicaHandle> backingAuthorities;
 };
 
@@ -2103,13 +2102,6 @@ KisPageMetadataCoordinator::PreparedPublication::operator=(PreparedPublication &
 bool KisPageMetadataCoordinator::PreparedPublication::isValid() const
 {
     return data && data->owner;
-}
-
-const QVector<KisPageTransitionEffect> &
-KisPageMetadataCoordinator::PreparedPublication::retirementEffects() const
-{
-    static const QVector<KisPageTransitionEffect> empty;
-    return data ? data->effects : empty;
 }
 
 KisReplicaHandle
@@ -2183,7 +2175,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
                                                  QString *error,
                                                  DeferredPublicationCleanup *deferredCleanup)
 {
-    return installPublicationImpl(std::move(prepared), transaction, {}, nullptr, error,
+    return installPublicationImpl(std::move(prepared), transaction, {}, error,
                                   PreparationKind::Detachment, deferredCleanup);
 }
 
@@ -2200,7 +2192,7 @@ bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&p
                                                         QString *error,
                                                         DeferredPublicationCleanup *deferredCleanup)
 {
-    return installPublicationImpl(std::move(prepared), transaction, {}, nullptr, error,
+    return installPublicationImpl(std::move(prepared), transaction, {}, error,
                                   PreparationKind::RecoverableWrite, deferredCleanup);
 }
 
@@ -2266,10 +2258,8 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
             if (detachment) {
                 // Match DetachPreparedVersion's semantic guards without
                 // cloning all versions/protection lists into a stale image.
-                KisPageVersionStateSnapshot version;
-                if (shard->hasWriter(transition.version.key) || !shard->records.snapshot(transition.version, &version)
-                    || version.publication != KisPagePublicationState::Prepared
-                    || !(version.preparedBy == transaction.id)) {
+                if (shard->hasWriter(transition.version.key)
+                    || !shard->records.isPreparedBy(transition.version, transaction.id)) {
                     KisPageStoreDetail::setError(error, QStringLiteral("prepared detachment identity is invalid or still writable"));
                     return result;
                 }
@@ -2421,7 +2411,9 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         shardGrowth->exactInsertions += qsizetype(entry.installRecords.size()) - (recoverable ? 1 : 0);
         for (const auto &record : entry.installRecords)
             shardGrowth->physicalInsertions += record.replicas.size();
-        data->effects += step.effects;
+        // Publication preserves replicas as history; GC owns their eventual
+        // retirement. Recoverable write transfers the backing to its target.
+        Q_ASSERT(step.effects.isEmpty());
         data->entries.push_back(std::move(entry));
     }
     // One candidate batch per shard avoids reserving a 16/32 KiB block for
@@ -2496,10 +2488,8 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
         const auto page = entry.shardOwner->pages.constFind(entry.key());
         bool stillValid = page != entry.shardOwner->pages.constEnd() && entry.shardOwner->canMutate(entry.key(), page.value());
         if (stillValid && detachment) {
-            KisPageVersionStateSnapshot version;
             stillValid = !entry.shardOwner->hasWriter(entry.key())
-                && entry.shardOwner->records.snapshot(entry.detachedVersion, &version)
-                && version.publication == KisPagePublicationState::Prepared && version.preparedBy == transaction.id;
+                && entry.shardOwner->records.isPreparedBy(entry.detachedVersion, transaction.id);
         } else if (stillValid) {
             stillValid = page->revision == entry.revision;
         }
@@ -2523,14 +2513,12 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
 bool KisPageMetadataCoordinator::installPublication(PreparedPublication &&prepared,
                                                     const KisPageTransaction &transaction,
                                                     KisImageEpochId epoch,
-                                                    QVector<KisPageTransitionEffect> *effects,
                                                     QString *error,
                                                     DeferredPublicationCleanup *deferredCleanup)
 {
     return installPublicationImpl(std::move(prepared),
                                   transaction,
                                   epoch,
-                                  effects,
                                   error,
                                   PreparationKind::Publication,
                                   deferredCleanup);
@@ -2539,7 +2527,6 @@ bool KisPageMetadataCoordinator::installPublication(PreparedPublication &&prepar
 bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&prepared,
                                                         const KisPageTransaction &transaction,
                                                         KisImageEpochId epoch,
-                                                        QVector<KisPageTransitionEffect> *effects,
                                                         QString *error,
                                                         PreparationKind kind,
                                                         DeferredPublicationCleanup *deferredCleanup)
@@ -2688,8 +2675,6 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             &growth.shardOwner->budgetCharge);
     }
     data->owner.reset();
-    if (effects)
-        *effects = std::move(data->effects);
     KisPageStoreDetail::setError(error, {});
     return true;
 }

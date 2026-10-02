@@ -1665,18 +1665,18 @@ void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
     QVERIFY(batch.isValid());
     Batch moved(std::move(batch));
     QVERIFY(!batch.isValid());
-    QVERIFY(!foreign.installPublication(std::move(moved), transaction, KisImageEpochId{2}, nullptr));
+    QVERIFY(!foreign.installPublication(std::move(moved), transaction, KisImageEpochId{2}));
     QVERIFY(!moved.isValid());
     batch = make();
     auto wrong = transaction;
     wrong.id.value++;
-    QVERIFY(!coordinator.installPublication(std::move(batch), wrong, KisImageEpochId{2}, nullptr));
+    QVERIFY(!coordinator.installPublication(std::move(batch), wrong, KisImageEpochId{2}));
     batch = make();
     wrong = transaction;
     wrong.baseEpoch.value++;
-    QVERIFY(!coordinator.installPublication(std::move(batch), wrong, KisImageEpochId{2}, nullptr));
+    QVERIFY(!coordinator.installPublication(std::move(batch), wrong, KisImageEpochId{2}));
     batch = make();
-    QVERIFY(!coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{1}, nullptr));
+    QVERIFY(!coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{1}));
     auto duplicate = transitions;
     duplicate.append(transitions.first());
     QVERIFY(!coordinator.preparePublication(transaction, KisImageEpochId{2}, duplicate).isValid());
@@ -1699,8 +1699,8 @@ void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
     read.target = replica(read.version, 1, 1, 1);
     read.lease = KisPageLeaseId{9};
     QVERIFY(coordinator.applyOwner(read.version.key, read).accepted);
-    QVERIFY(coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{7}, nullptr));
-    QVERIFY(!coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{8}, nullptr));
+    QVERIFY(coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{7}));
+    QVERIFY(!coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{8}));
     for (int i = 0; i < 2; ++i) {
         KisPageStateSnapshot page;
         QVERIFY(coordinator.pageSnapshot(pageKey(i), &page));
@@ -1739,7 +1739,7 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
     auto batch = make();
     auto reject = [&]() {
         const bool rejected =
-            !coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2}, nullptr);
+            !coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2});
         KisPageStateSnapshot first, second;
         return rejected && !batch.isValid() && coordinator.pageSnapshot(pageKey(0), &first)
             && coordinator.pageSnapshot(pageKey(1), &second) && first.publishedGeneration.value == 1
@@ -1842,7 +1842,7 @@ void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomic
     read.lease = KisPageLeaseId{20};
     QVERIFY(coordinator.applyOwner(read.version.key, read).accepted);
     auto install = [&](KisImageEpochId epoch) {
-        return coordinator.installPublication(std::move(batch), transaction, epoch, nullptr);
+        return coordinator.installPublication(std::move(batch), transaction, epoch);
     };
     auto candidate = model.prepareCommit(transaction, nullptr);
     QVERIFY(candidate.isValid());
@@ -1907,7 +1907,7 @@ void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomic
     QVERIFY(coordinator.applyOwner(read.version.key, read).accepted);
     bool completeMetadataInstalled = false;
     auto installRestore = [&](KisImageEpochId epoch) {
-        if (!coordinator.installPublication(std::move(restoration), {}, epoch, nullptr))
+        if (!coordinator.installPublication(std::move(restoration), {}, epoch))
             return false;
         completeMetadataInstalled = true;
         for (int i = 0; i < 2; ++i) {
@@ -2813,7 +2813,7 @@ void KisPageStoreReferenceTest::preparedMetadataClaimsDoNotLoseConcurrentReaders
     start.store(true);
     bool installed = false;
     for (int attempt = 0; attempt < 32 && !installed; ++attempt) {
-        installed = coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2}, nullptr);
+        installed = coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2});
         if (!installed)
             batch = coordinator.preparePublication(transaction, KisImageEpochId{2}, transitions);
     }
@@ -2822,7 +2822,7 @@ void KisPageStoreReferenceTest::preparedMetadataClaimsDoNotLoseConcurrentReaders
     QCOMPARE(failures.load(), 0);
     if (!installed) {
         batch = coordinator.preparePublication(transaction, KisImageEpochId{2}, transitions);
-        QVERIFY(coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2}, nullptr));
+        QVERIFY(coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2}));
     }
     for (int i = 0; i < pages; ++i) {
         KisPageStateSnapshot page;
@@ -2918,12 +2918,12 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
     restore.imageEpoch = {2};
     auto batch = coordinator.prepareRestoration({2}, {restore});
     QVERIFY(batch.isValid());
-    QVERIFY(coordinator.installPublication(std::move(batch), {}, {2}, nullptr));
+    QVERIFY(coordinator.installPublication(std::move(batch), {}, {2}));
     restore.version.defaultPixelRevision = 12;
     restore.imageEpoch = {3};
     batch = coordinator.prepareRestoration({3}, {restore});
     QVERIFY(batch.isValid());
-    QVERIFY(coordinator.installPublication(std::move(batch), {}, {3}, nullptr));
+    QVERIFY(coordinator.installPublication(std::move(batch), {}, {3}));
     const auto restarted = coordinator.historySlice(expected.key, {}, 32);
     QCOMPARE(restarted.count, qsizetype(2));
     QCOMPARE(restarted.total, qsizetype(2));
@@ -4428,7 +4428,7 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
             const KisPageTransaction tx{transitions.first().transaction, {1}};
             auto publication = coordinator.preparePublication(tx, transitions.first().imageEpoch, transitions);
             result.accepted = publication.isValid()
-                && coordinator.installPublication(std::move(publication), tx, transitions.first().imageEpoch, nullptr);
+                && coordinator.installPublication(std::move(publication), tx, transitions.first().imageEpoch);
         } else {
             result = coordinator.applyOwnerSequence(expected.key, transitions);
         }
@@ -4823,7 +4823,7 @@ void KisPageStoreReferenceTest::indexedCompetingPreparedTransactions()
     const KisPageTransaction committedTx{commit.transaction, {1}};
     auto publication = coordinator.preparePublication(committedTx, commit.imageEpoch, {commit});
     QVERIFY(publication.isValid());
-    QVERIFY(coordinator.installPublication(std::move(publication), committedTx, commit.imageEpoch, nullptr));
+    QVERIFY(coordinator.installPublication(std::move(publication), committedTx, commit.imageEpoch));
     expected = step.next;
     commit = writes.first();
     commit.kind = KisPageTransitionKind::CommitTransaction;
@@ -5083,10 +5083,9 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
     QCOMPARE(metrics.publicationAdditionRecordsPrepared, additionRecords);
     QCOMPARE(metrics.publicationAdditionRecordsTransferred, quint64(0));
     if (expected.accepted) {
-        QVector<KisPageTransitionEffect> effects;
-        QVERIFY2(coordinator.installPublication(std::move(candidate), tx, {2}, &effects, &error),
+        QVERIFY(expected.effects.isEmpty()); // Publication leaves replicas for history GC.
+        QVERIFY2(coordinator.installPublication(std::move(candidate), tx, {2}, &error),
                  qPrintable(error));
-        QVERIFY(effects.isEmpty());
         QVERIFY(coordinator.metrics().publicationVersionInstalls <= 3);
     }
     KisPageStateSnapshot actual;
@@ -5140,9 +5139,8 @@ void KisPageStoreReferenceTest::indexedPublicationIgnoresRetainedHistory()
     QCOMPARE(ready.publicationHistoryNodesTransferred, quint64(0));
     QCOMPARE(ready.publicationAdditionRecordsPrepared, quint64(0));
     QCOMPARE(ready.publicationAdditionRecordsTransferred, quint64(0));
-    QVector<KisPageTransitionEffect> effects;
-    QVERIFY(coordinator.installPublication(std::move(candidate), tx, {2}, &effects));
-    QVERIFY(effects.isEmpty());
+    QVERIFY(expected.effects.isEmpty());
+    QVERIFY(coordinator.installPublication(std::move(candidate), tx, {2}));
     QCOMPARE(coordinator.metrics().publicationHistoryNodesTransferred, ready.publicationHistoryNodesPrepared);
     QCOMPARE(coordinator.metrics().fullSnapshotExports, quint64(0));
     KisPageStateSnapshot actual;
@@ -5240,7 +5238,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     }
     const auto install = [&](KisPageMetadataCoordinator &owner) {
         return mutation ? owner.installMutation(std::move(candidate), tx)
-                        : owner.installPublication(std::move(candidate), tx, {2}, nullptr);
+                        : owner.installPublication(std::move(candidate), tx, {2});
     };
     if (outcome == 5) {
         coordinator.reset(); // Candidate storage must not borrow the dead shards.
@@ -5337,9 +5335,8 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
         page = expectedChange.next;
     }
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-    QVector<KisPageTransitionEffect> effects;
     const bool installed =
-        coordinator->installPublication(std::move(candidate), tx, {2}, &effects, nullptr, &cleanup);
+        coordinator->installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup);
     QCOMPARE(installed, !reject);
     QVERIFY(!cleanup.isEmpty());
     QCOMPARE(cleanup.pendingWorkUnits(), qsizetype(1));
@@ -5347,11 +5344,7 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     KisPageStateSnapshot actual;
     QVERIFY(coordinator->pageSnapshot(page.key, &actual));
     comparePageRecords(actual, reject ? page : expected.next);
-    if (!reject) {
-        QVERIFY(effects.isEmpty());
-    } else {
-        QVERIFY(effects.isEmpty());
-    }
+    QVERIFY(expected.effects.isEmpty());
     coordinator.reset(); // Cleanup owns no dereferenced shard/coordinator state.
     QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
     QVERIFY(cleanup.isEmpty());
@@ -5426,13 +5419,11 @@ void KisPageStoreReferenceTest::preparedPublicationMatchesFullReferenceTransitio
             QCOMPARE(batch.isValid(), expected.accepted);
             if (!expected.accepted)
                 continue;
-            QVector<KisPageTransitionEffect> effects;
+            QVERIFY(expected.effects.isEmpty());
             QVERIFY(mutation ? coordinator.installMutation(std::move(batch), transaction)
                              : coordinator.installPublication(std::move(batch),
                                                               transaction,
-                                                              KisImageEpochId{2},
-                                                              &effects,
-                                                              nullptr));
+                                                              KisImageEpochId{2}));
             KisPageStateSnapshot actual;
             QVERIFY(coordinator.pageSnapshot(pageKey(0), &actual));
             QVERIFY(KisPageStateMachine().validateInvariants(actual));
@@ -5464,11 +5455,6 @@ void KisPageStoreReferenceTest::preparedPublicationMatchesFullReferenceTransitio
                     QCOMPARE(ar.pinCount, br.pinCount);
                     QCOMPARE(ar.pendingLastUses, br.pendingLastUses);
                 }
-            }
-            QCOMPARE(effects.size(), expected.effects.size());
-            for (qsizetype i = 0; i < effects.size(); ++i) {
-                QCOMPARE(effects.at(i).replica, expected.effects.at(i).replica);
-                QCOMPARE(effects.at(i).lastUse, expected.effects.at(i).lastUse);
             }
         }
     }
@@ -5579,10 +5565,12 @@ void KisPageStoreReferenceTest::recoverableWriteGuards()
     auto prepared = metadata.prepareRecoverableWrite(tx, write, &error);
     QCOMPARE(prepared.isValid(), variant == 0);
     if (prepared.isValid()) {
+        QVERIFY(expected.effects.isEmpty()); // The old backing is transferred.
         QVERIFY(metadata.installRecoverableWrite(std::move(prepared), tx));
         auto ready = write; ready.kind = KisPageTransitionKind::PrepareWrite;
         const auto writable = machine.apply(expected.next, ready);
         QVERIFY(writable.accepted);
+        QVERIFY(writable.effects.isEmpty());
         KisPageStateSnapshot actual;
         QVERIFY(metadata.pageSnapshot(page.key, &actual));
         comparePageRecords(actual, writable.next);
@@ -5666,7 +5654,6 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     QVERIFY(reserved.overflowArena.outstandingReservations > 0);
     QCOMPARE(reserved.exactVersionIndex.outstandingReservations, quint64(1));
     QVERIFY(reserved.physicalSlotIndex.outstandingReservations > 0);
-    QVERIFY(prepared.retirementEffects().isEmpty()); // A is transferred, not retired.
     QCOMPARE(prepared.backingAuthority(baseVersion), before);
     KisPageStateSnapshot actual;
     QVERIFY(metadata->pageSnapshot(page.key, &actual));
@@ -5764,7 +5751,7 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
         QVERIFY(oracle.accepted);
         auto publication = metadata->preparePublication(tx, {2}, {commit});
         QVERIFY(publication.isValid());
-        QVERIFY(metadata->installPublication(std::move(publication), tx, {2}, nullptr));
+        QVERIFY(metadata->installPublication(std::move(publication), tx, {2}));
         expected = oracle.next;
     }
     QVERIFY(metadata->pageSnapshot(page.key, &actual));
@@ -6831,7 +6818,7 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     ++wrong.baseEpoch.value;
     QVERIFY(!coordinator.installMutation(std::move(batch), wrong));
     batch = make();
-    QVERIFY(!coordinator.installPublication(std::move(batch), tx, {2}, nullptr));
+    QVERIFY(!coordinator.installPublication(std::move(batch), tx, {2}));
     auto invalid = changes;
     invalid.append(changes.first());
     QVERIFY(!coordinator.prepareMutation(tx, invalid).isValid());
@@ -7296,7 +7283,7 @@ void KisPageStoreReferenceTest::materializationOracleAndPublicationGuards()
     publish.imageEpoch = KisImageEpochId{2};
     auto publication = coordinator.preparePublication(transaction, publish.imageEpoch, {publish});
     QVERIFY(publication.isValid());
-    QVERIFY(coordinator.installPublication(std::move(publication), transaction, publish.imageEpoch, nullptr));
+    QVERIFY(coordinator.installPublication(std::move(publication), transaction, publish.imageEpoch));
     KisPageStateSnapshot published;
     QVERIFY(coordinator.pageSnapshot(version.key, &published));
     QCOMPARE(published.versions.first().replicas.first().pinCount, quint32(1));
@@ -8287,7 +8274,7 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
         transaction, commit.imageEpoch, {commit}, &error);
     QVERIFY2(metadataCommit.isValid(), qPrintable(error));
     QVERIFY2(metadata.installPublication(std::move(metadataCommit), transaction,
-                                         commit.imageEpoch, nullptr, &error),
+                                         commit.imageEpoch, &error),
              qPrintable(error));
 
     KisPageStateSnapshot finalState;

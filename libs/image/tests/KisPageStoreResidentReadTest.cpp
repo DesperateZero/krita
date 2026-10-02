@@ -669,7 +669,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
         finish.kind = KisPageTransitionKind::CommitTransaction; finish.imageEpoch = {2};
         auto publication = metadata.preparePublication(tx, {2}, {finish});
         QVERIFY(publication.isValid());
-        QVERIFY(metadata.installPublication(std::move(publication), tx, {2}, nullptr));
+        QVERIFY(metadata.installPublication(std::move(publication), tx, {2}));
     } else {
         auto cancel = write; cancel.kind = KisPageTransitionKind::CancelWrite;
         QVERIFY(metadata.applyOwner(version.key, cancel).accepted);
