@@ -1223,6 +1223,7 @@
         "QHash",
         "QMutex",
         "QMutexLocker",
+        "QScopeGuard",
         "QSet",
         "algorithm",
         "atomic",
@@ -1232,7 +1233,7 @@
         "utility",
         "vector"
       ],
-      "lines": 1608,
+      "lines": 1595,
       "member_fields": [
         "m_validated"
       ],
@@ -1248,7 +1249,7 @@
         "ReachabilityScan",
         "TreeReleaseBatch"
       ],
-      "sha256": "aa1472d6d7c261327f1ab26a852465bbd96526cb0d69989db03a9314885d9793",
+      "sha256": "9c28e6d419dbb4d4396561e68fe44a4b25e74cbe38047a68d3338793be434aae",
       "synchronization_declarations": 2
     },
     "libs/image/pagestore/KisImageEpochReferenceModel.h": {
@@ -3523,7 +3524,7 @@
         "utility",
         "vector"
       ],
-      "lines": 11081,
+      "lines": 11108,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3585,7 +3586,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "3fe0c272b3e09be89c73e82bacaee05d711674120d35c18acb24141398a1d4d4",
+      "sha256": "0db38f3d7e6118bad60807de95be11e7c797120a216184c6877346485d1537a2",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6206,5 +6207,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "1427f464d57e54e9a16245ef4dfd7163d47cdb06"
+  "working_tree_head": "36189cb3b1bc91d77ea565894bb1fd51f9b6056a"
 }

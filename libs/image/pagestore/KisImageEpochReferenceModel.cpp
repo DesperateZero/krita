@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QScopeGuard>
 #include <QSet>
 
 #include <algorithm>
@@ -574,6 +575,15 @@ public:
                 || transactionBaseCounts.contains(epoch));
     }
 
+    const KisImageEpochRootSnapshot &protectedRoot(quint64 epoch) const
+    {
+        // Admission, token ownership and active transactions are checked under
+        // this same mutex. Collection cannot remove their published roots.
+        const auto it = roots.constFind(epoch);
+        Q_ASSERT(admitsRoot(epoch) && it != roots.constEnd() && it->root.isValid());
+        return it->root;
+    }
+
     struct ReachabilityScan {
         quint64 cookie = 0;
         KisPageKey key;
@@ -764,8 +774,8 @@ bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initia
         return false;
     }
 
-    d->current = root;
     d->roots.insert(root.epoch().value, EpochRootRecord{root});
+    d->current = root;
     d->linkProtected(root.epoch().value);
     d->nextEpoch = root.epoch().value + 1;
     KisPageStoreDetail::setError(error, {});
@@ -775,8 +785,7 @@ bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initia
 KisPageTransaction KisImageEpochReferenceModel::beginTransaction(KisImageEpochId baseEpoch, QString *error)
 {
     QMutexLocker locker(&d->mutex);
-    if (!d->operational() || !baseEpoch.isValid() || !d->admitsRoot(baseEpoch.value)
-        || !d->roots.value(baseEpoch.value).root.epoch().isValid()) {
+    if (!d->operational() || !baseEpoch.isValid() || !d->admitsRoot(baseEpoch.value)) {
         KisPageStoreDetail::setError(error,
                  QStringLiteral(
                      "transaction base epoch is no longer protected, unavailable, or identity space is exhausted"));
@@ -794,8 +803,12 @@ KisPageTransaction KisImageEpochReferenceModel::beginTransaction(KisImageEpochId
     EpochTransactionRecord record;
     record.snapshot.transaction = transaction;
     record.snapshot.state = KisPageTransactionState::Open;
+    auto &baseCount = d->transactionBaseCounts[transaction.baseEpoch.value];
+    const auto cancelEmptyCount = qScopeGuard([&] {
+        if (!baseCount) d->transactionBaseCounts.remove(transaction.baseEpoch.value);
+    });
     d->transactions.insert(transaction.id.value, record);
-    ++d->transactionBaseCounts[transaction.baseEpoch.value];
+    ++baseCount;
     ++d->activeTransactions;
     KisPageStoreDetail::setError(error, {});
     return transaction;
@@ -827,11 +840,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
         return false;
     }
 
-    const KisImageEpochRootSnapshot base = d->roots.value(transactionIt->snapshot.transaction.baseEpoch.value).root;
-    if (!base.isValid()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("transaction base epoch has been lost"));
-        return false;
-    }
+    const auto &base = d->protectedRoot(transactionIt->snapshot.transaction.baseEpoch.value);
 
     QVector<KisPageVersion> changes = complete ? QVector<KisPageVersion>{} : transactionIt->snapshot.changes;
     QHash<KisPageKey, qsizetype> changeIndexes;
@@ -937,11 +946,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
         return {};
     }
 
-    const KisImageEpochRootSnapshot base = d->roots.value(transaction.baseEpoch.value).root;
-    if (!base.isValid()) {
-        result.error = QStringLiteral("transaction base epoch has been lost");
-        return {};
-    }
+    const KisImageEpochRootSnapshot base = d->protectedRoot(transaction.baseEpoch.value);
 
     if (d->nextEpoch == 0 || d->nextEpoch == std::numeric_limits<quint64>::max()
         || d->current.commitSequence() == std::numeric_limits<quint64>::max()) {
@@ -1142,10 +1147,9 @@ KisImageEpochReferenceModel::prepareRestore(const KisRetainedImageEpochSnapshot 
     result = {};
     QMutexLocker locker(&d->mutex);
     const auto retainedIt = d->retainedSnapshots.constFind(retained.token.value);
-    const auto rootIt = retained.isValid() ? d->roots.constFind(retained.snapshot.epoch.value) : d->roots.constEnd();
     if (!d->operational() || !retained.isValid() || retainedIt == d->retainedSnapshots.constEnd()
-        || !(retainedIt.value() == retained.snapshot.epoch) || rootIt == d->roots.constEnd()
-        || !matchesRetainedRootMetadata(rootIt.value().root, retained)) {
+        || !(retainedIt.value() == retained.snapshot.epoch)
+        || !matchesRetainedRootMetadata(d->protectedRoot(retained.snapshot.epoch.value), retained)) {
         result.error = QStringLiteral("retained image epoch is not owned by this model");
         return {};
     }
@@ -1159,24 +1163,12 @@ KisImageEpochReferenceModel::prepareRestore(const KisRetainedImageEpochSnapshot 
         return {};
     }
 
-    KisImageEpochRootSnapshot restored;
+    // The token owns this already validated immutable content. Only the new
+    // publication identity changes, after the exhaustion checks above.
+    KisImageEpochRootSnapshot restored = d->protectedRoot(retained.snapshot.epoch.value);
     restored.m_epoch = KisImageEpochId{d->nextEpoch++};
     restored.m_previousEpoch = d->current.epoch();
     restored.m_commitSequence = d->current.commitSequence() + 1;
-    restored.m_graphRevision = rootIt->root.graphRevision();
-    restored.m_defaultPixelRevision = rootIt->root.defaultPixelRevision();
-    restored.m_extentRevision = rootIt->root.extentRevision();
-    restored.m_propertyRevision = rootIt->root.propertyRevision();
-    restored.m_surfaces = rootIt->root.surfaces();
-    // The retained immutable tree is already validated and owned by this
-    // model. Undo/redo publishes a new epoch identity over the same root
-    // instead of exporting, sorting, and rebuilding an O(N) manifest.
-    restored.m_pageRoot = rootIt->root.m_pageRoot;
-    restored.m_validated = restored.validate();
-    if (!restored.isValid()) {
-        result.error = QStringLiteral("restored image epoch root failed validation");
-        return {};
-    }
     // Reserve the index node before installation can change live metadata.
     // The model gate excludes captures through the complete restore batch.
     d->roots.insert(restored.epoch().value, {});
@@ -1252,8 +1244,12 @@ KisRetainedImageEpochSnapshot KisImageEpochReferenceModel::retainRootLocked(
     }
     if (!completeManifest)
         retained.pageCount = root.pageCount();
+    auto &rootCount = d->retainedRootCounts[root.epoch().value];
+    const auto cancelEmptyCount = qScopeGuard([&] {
+        if (!rootCount) d->retainedRootCounts.remove(root.epoch().value);
+    });
     d->retainedSnapshots.insert(retained.token.value, root.epoch());
-    ++d->retainedRootCounts[root.epoch().value];
+    ++rootCount;
     return retained;
 }
 
@@ -1274,22 +1270,16 @@ KisRetainedImageEpochSnapshot KisImageEpochReferenceModel::captureCurrentRetaine
 {
     if (!d->operational())
         return {};
-    const KisImageEpochId epoch = d->current.epoch();
-    const auto rootIt = d->roots.constFind(epoch.value);
-    if (rootIt == d->roots.constEnd())
-        return {};
-    return retainRootLocked(rootIt->root, completeManifest);
+    return retainRootLocked(d->protectedRoot(d->current.epoch().value), completeManifest);
 }
 
 KisRetainedImageEpochSnapshot KisImageEpochReferenceModel::retainSnapshot(KisImageEpochId epoch)
 {
     QMutexLocker locker(&d->mutex);
-    const auto rootIt = d->roots.constFind(epoch.value);
-    if (!d->operational() || !epoch.isValid() || rootIt == d->roots.constEnd() || !d->admitsRoot(epoch.value)
-        || !rootIt->root.epoch().isValid()) {
+    if (!d->operational() || !epoch.isValid() || !d->admitsRoot(epoch.value)) {
         return {};
     }
-    return retainRootLocked(rootIt->root, false);
+    return retainRootLocked(d->protectedRoot(epoch.value), false);
 }
 
 bool KisImageEpochReferenceModel::validateRetainedSnapshot(const KisRetainedImageEpochSnapshot &retained) const
@@ -1302,8 +1292,7 @@ bool KisImageEpochReferenceModel::validateRetainedSnapshot(const KisRetainedImag
         || !(retainedIt.value() == retained.snapshot.epoch)) {
         return false;
     }
-    const auto rootIt = d->roots.constFind(retained.snapshot.epoch.value);
-    return rootIt != d->roots.constEnd() && matchesRetainedRootMetadata(rootIt.value().root, retained);
+    return matchesRetainedRootMetadata(d->protectedRoot(retained.snapshot.epoch.value), retained);
 }
 
 bool KisImageEpochReferenceModel::releaseSnapshot(KisImageEpochSnapshotToken token,
@@ -1321,17 +1310,15 @@ bool KisImageEpochReferenceModel::releaseSnapshot(KisImageEpochSnapshotToken tok
     const quint64 epoch = snapshotIt->value;
     d->retainedSnapshots.erase(snapshotIt);
     auto countIt = d->retainedRootCounts.find(epoch);
-    if (countIt != d->retainedRootCounts.end()) {
-        if (countIt.value() <= 1) {
-            d->retainedRootCounts.erase(countIt);
-            d->unlinkUnprotected(epoch);
-            if (epoch != d->current.epoch().value && !d->transactionBaseCounts.contains(epoch)) {
-                d->queueRoot(epoch);
-                if (rootBecameUnretained)
-                    *rootBecameUnretained = true;
-            }
-        } else
-            --countIt.value();
+    Q_ASSERT(countIt != d->retainedRootCounts.end() && countIt.value() > 0);
+    if (--countIt.value() == 0) {
+        d->retainedRootCounts.erase(countIt);
+        d->unlinkUnprotected(epoch);
+        if (epoch != d->current.epoch().value && !d->transactionBaseCounts.contains(epoch)) {
+            d->queueRoot(epoch);
+            if (rootBecameUnretained)
+                *rootBecameUnretained = true;
+        }
     }
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -1501,7 +1488,7 @@ QSet<KisPageVersion> KisImageEpochReferenceModel::reachablePageVersions(const QV
 KisImageEpochRootSnapshot KisImageEpochReferenceModel::root(KisImageEpochId epoch) const
 {
     QMutexLocker locker(&d->mutex);
-    return d->operational() && d->admitsRoot(epoch.value) ? d->roots.value(epoch.value).root
+    return d->operational() && d->admitsRoot(epoch.value) ? d->protectedRoot(epoch.value)
                                                         : KisImageEpochRootSnapshot();
 }
 
@@ -1511,7 +1498,7 @@ KisImageEpochRootSnapshot KisImageEpochReferenceModel::retainedRoot(KisImageEpoc
     QMutexLocker locker(&d->mutex);
     if (!d->operational() || !token.isValid() || !epoch.isValid() || !(d->retainedSnapshots.value(token.value) == epoch))
         return {};
-    return d->roots.value(epoch.value).root;
+    return d->protectedRoot(epoch.value);
 }
 
 KisPageTransactionSnapshot KisImageEpochReferenceModel::transaction(KisPageTransactionId id) const
@@ -1541,12 +1528,12 @@ bool KisImageEpochReferenceModel::resolve(const KisPageKey &key,
     case KisPageReadViewKind::CommittedEpoch:
         if (!(d->retainedSnapshots.value(view.retention.value) == view.epoch))
             return fail();
-        return d->roots.value(view.epoch.value).root.resolve(key, version);
+        return d->protectedRoot(view.epoch.value).resolve(key, version);
     case KisPageReadViewKind::TransactionBaseEpoch: {
         const auto *transaction = d->activeTransaction(view.transaction);
         if (!transaction)
             return fail();
-        return d->roots.value(transaction->snapshot.transaction.baseEpoch.value).root.resolve(key, version);
+        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).resolve(key, version);
     }
     case KisPageReadViewKind::TransactionOverlay: {
         const auto *transaction = d->activeTransaction(view.transaction);
@@ -1558,13 +1545,13 @@ bool KisImageEpochReferenceModel::resolve(const KisPageKey &key,
                 *version = transaction->snapshot.changes.at(changeIndex);
             return true;
         }
-        return d->roots.value(transaction->snapshot.transaction.baseEpoch.value).root.resolve(key, version);
+        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).resolve(key, version);
     }
     case KisPageReadViewKind::ExactVersion: {
         if (!(d->retainedSnapshots.value(view.retention.value) == view.epoch))
             return fail();
         KisPageVersion retainedVersion;
-        if (!d->roots.value(view.epoch.value).root.resolve(key, &retainedVersion)
+        if (!d->protectedRoot(view.epoch.value).resolve(key, &retainedVersion)
             || !(retainedVersion == view.exactVersion))
             return fail();
         if (version)
@@ -1591,17 +1578,17 @@ bool KisImageEpochReferenceModel::surfaceState(KisSurfaceId surface,
         return d->current.surfaceState(surface, state);
     case KisPageReadViewKind::CommittedEpoch:
     case KisPageReadViewKind::ExactVersion:
-        if (!(d->retainedSnapshots.value(view.retention.value) == view.epoch)) {
+        if (!view.epoch.isValid() || !(d->retainedSnapshots.value(view.retention.value) == view.epoch)) {
             return false;
         }
-        return d->roots.value(view.epoch.value).root.surfaceState(surface, state);
+        return d->protectedRoot(view.epoch.value).surfaceState(surface, state);
     case KisPageReadViewKind::TransactionBaseEpoch:
     case KisPageReadViewKind::TransactionOverlay: {
         const auto *transaction = d->activeTransaction(view.transaction);
         if (!transaction) {
             return false;
         }
-        return d->roots.value(transaction->snapshot.transaction.baseEpoch.value).root.surfaceState(surface, state);
+        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).surfaceState(surface, state);
     }
     }
     return false;
