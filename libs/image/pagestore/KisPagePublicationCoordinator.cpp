@@ -657,8 +657,7 @@ bool KisPagePublicationCoordinator::hasActiveTransactionLocked(
 {
     if (!m_operational || !transaction.isValid())
         return false;
-    const auto snapshot = m_epochs.transaction(transaction.id);
-    return snapshot.transaction == transaction && snapshot.isActive();
+    return m_epochs.activeTransaction(transaction.id) == transaction;
 }
 
 void KisPagePublicationCoordinator::processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock)

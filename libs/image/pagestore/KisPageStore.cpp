@@ -288,6 +288,7 @@ public:
         kisEnqueuePageStoreReclamation(nullptr);
         owner.attachBackingBudget(backingBudget);
         metadata.attachBackingBudget(backingBudget);
+        epochs.attachBackingBudget(backingBudget);
         metadata.attachRetirementDebtOwner(this,
                                            &Private::prepareRetirementDebt,
                                            &Private::commitRetirementDebt,
@@ -1733,10 +1734,10 @@ KisPageMutationSession KisPageStore::beginMutation(const KisPageTransaction &tra
     std::shared_ptr<KisPageMutationSession::Private> candidate;
     QMutexLocker lock(&d->mutex);
     const auto available = [&] {
-        const auto state = d->epochs.transaction(transaction.id);
+        const auto state = d->epochs.activeTransaction(transaction.id);
         return d->operational && transaction.isValid()
             && !d->publicationCoordinator.isPreparingCommitLocked(transaction.id)
-            && state.transaction == transaction && state.isActive();
+            && state == transaction;
     };
     if (!available()) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation transaction is unavailable"));
@@ -2950,9 +2951,9 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
             break;
         case KisPageReadViewKind::TransactionOverlay:
         case KisPageReadViewKind::TransactionBaseEpoch: {
-            const auto transaction = d->epochs.transaction(selector.transaction);
-            if (transaction.isActive())
-                root = d->epochs.root(transaction.transaction.baseEpoch);
+            const auto transaction = d->epochs.activeTransaction(selector.transaction);
+            if (transaction.isValid())
+                root = d->epochs.root(transaction.baseEpoch);
             break;
         }
         }
@@ -3768,7 +3769,7 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
         } else if (view.kind == KisPageReadViewKind::CommittedEpoch || view.kind == KisPageReadViewKind::ExactVersion) {
             publishedEpoch = view.epoch;
         } else {
-            publishedEpoch = d->epochs.transaction(view.transaction).transaction.baseEpoch;
+            publishedEpoch = d->epochs.activeTransaction(view.transaction).baseEpoch;
         }
         QString failure;
         if (!(captured ? captured->resolveSurfaceState(key.surface, &surface)
@@ -3867,11 +3868,10 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         request.error = QStringLiteral("page or transaction is already claimed for mutation");
         return request;
     }
-    const KisPageTransactionSnapshot transactionSnapshot = d->epochs.transaction(transaction.id);
+    const auto activeTransaction = d->epochs.activeTransaction(transaction.id);
     if (!d->operational || !transaction.isValid() || !key.isValid() || !access.isValid()
         || (mode != KisPageWriteMode::PreserveContents && mode != KisPageWriteMode::DiscardContents)
-        || !(transactionSnapshot.transaction == transaction)
-        || !transactionSnapshot.isActive()) {
+        || !(activeTransaction == transaction)) {
         request.error = QStringLiteral("PageStore write transaction is invalid or unavailable");
         return request;
     }
@@ -3888,8 +3888,8 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     const auto preparationClaim = qScopeGuard([&] {
         d->writeCoordinator.endPreparationActivity(transaction.id);
     });
-    const auto currentTransaction = d->epochs.transaction(transaction.id);
-    if (!d->operational || !(currentTransaction.transaction == transaction) || !currentTransaction.isActive()
+    const auto currentTransaction = d->epochs.activeTransaction(transaction.id);
+    if (!d->operational || !(currentTransaction == transaction)
         || d->publicationCoordinator.isPreparingCommitLocked(transaction.id))
         return fail(QStringLiteral("write transaction changed during admission"));
     const bool claimed = d->writeAdmission.claimDirectLocked(key, transaction.id.value, locker, &request.error);
@@ -4512,11 +4512,11 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
     }
     KisPagePublicationCoordinator::KisPreparedOverlayUpdate overlay;
     if (success) {
-        const auto transaction = d->epochs.transaction(request.transaction);
-        if (transaction.isActive()) {
+        const auto transaction = d->epochs.activeTransaction(request.transaction);
+        if (transaction.isValid()) {
             const KisPagePublicationCoordinator::OverlayChange change{request.version.key, proof, false};
             overlay = d->publicationCoordinator.prepareOverlayUpdateLocked(
-                transaction.transaction, &change, 1, nullptr);
+                transaction, &change, 1, nullptr);
         }
         success = overlay.isValid();
         if (success)

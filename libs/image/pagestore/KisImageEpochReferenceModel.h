@@ -16,6 +16,7 @@
 #include "KisPageStoreTypes.h"
 
 class KisImageEpochPageRoot;
+class KisBackingBudgetController;
 
 enum class KisPageTransactionState : quint8 {
     Invalid,
@@ -176,11 +177,14 @@ public:
     // Structural metadata only, and only while admitted. Holding the returned
     // copy does not retain pixel versions or authorize later epoch admission.
     KisImageEpochRootSnapshot root(KisImageEpochId epoch) const;
+    // Explicit cold oracle export. Native callers query active identity only.
     KisPageTransactionSnapshot transaction(KisPageTransactionId id) const;
     bool resolve(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     bool surfaceState(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
 
 private:
+    void attachBackingBudget(KisBackingBudgetController &budget);
+    KisPageTransaction activeTransaction(KisPageTransactionId id) const;
     // Collector-only enumerators over the existing protection records. They
     // retain no roots and cannot grant logical/pixel admission. Slots and
     // outputs are bounded independently of history depth.

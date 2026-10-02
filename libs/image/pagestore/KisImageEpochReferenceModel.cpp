@@ -6,6 +6,7 @@
 
 #include "KisImageEpochReferenceModel.h"
 #include "KisPageStoreReclamation_p.h"
+#include "KisPageWriteCoordinator_p.h"
 
 #include <QHash>
 #include <QMutex>
@@ -291,7 +292,8 @@ void appendPageRoot(const PageRoot &root, const Append &append)
     appendPageRoot(root->right, append);
 }
 
-PageRoot buildPageRoot(const QVector<KisPageVersion> &manifest, qsizetype begin, qsizetype end)
+template<class Versions>
+PageRoot buildPageRoot(const Versions &manifest, qsizetype begin, qsizetype end)
 {
     if (begin >= end)
         return {};
@@ -313,15 +315,6 @@ bool resolveSurface(const QVector<KisSurfaceEpochState> &surfaces, KisSurfaceId 
     if (state)
         *state = {};
     return false;
-}
-
-qsizetype findChange(const QVector<KisPageVersion> &changes, const KisPageKey &key)
-{
-    for (qsizetype i = 0; i < changes.size(); ++i) {
-        if (changes.at(i).key == key)
-            return i;
-    }
-    return -1;
 }
 
 bool matchesRetainedRootMetadata(const KisImageEpochRootSnapshot &root, const KisRetainedImageEpochSnapshot &retained)
@@ -540,10 +533,43 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
     return true;
 }
 
+template<class T>
+using EpochArray = std::vector<T, KisMutationStorageAllocator<T>>;
+
+struct EpochTransactionChanges {
+    explicit EpochTransactionChanges(const KisMutationStorageAllocator<EpochTransactionChanges> &storage)
+        : changes(storage), surfaceChanges(storage), removedPages(storage) {}
+    EpochArray<KisPageVersion> changes;
+    EpochArray<KisSurfaceEpochChange> surfaceChanges;
+    EpochArray<KisPageKey> removedPages;
+    bool empty() const { return changes.empty() && surfaceChanges.empty() && removedPages.empty(); }
+    bool matches(const KisPreparedPageSet &input) const
+    {
+        if (changes.size() != size_t(input.proofs.size()) || surfaceChanges.size() != size_t(input.surfaceChanges.size())
+            || removedPages.size() != size_t(input.removedPages.size())) return false;
+        for (const auto &proof : input.proofs) {
+            const auto &version = proof.authority.version;
+            const auto found = std::lower_bound(changes.begin(), changes.end(), version.key,
+                [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
+            if (found == changes.end() || !(*found == version)) return false;
+        }
+        for (const auto &surface : input.surfaceChanges)
+            if (std::find(surfaceChanges.begin(), surfaceChanges.end(), surface) == surfaceChanges.end()) return false;
+        return std::all_of(input.removedPages.begin(), input.removedPages.end(),
+            [&](const auto &key) { return std::binary_search(removedPages.begin(), removedPages.end(), key, pageKeyLess); });
+    }
+};
+
 struct EpochTransactionRecord {
-    KisPageTransactionSnapshot snapshot;
+    KisPageTransaction transaction;
+    KisPageTransactionState state = KisPageTransactionState::Invalid;
+    std::shared_ptr<const EpochTransactionChanges> delta;
     quint64 revision = 0;
     quint64 nextFinished = 0;
+    bool isActive() const
+    {
+        return state == KisPageTransactionState::Open || state == KisPageTransactionState::Prepared;
+    }
 };
 
 struct EpochRootRecord {
@@ -561,7 +587,7 @@ public:
     const EpochTransactionRecord *activeTransaction(KisPageTransactionId transaction) const
     {
         const auto it = transactions.constFind(transaction.value);
-        return it != transactions.constEnd() && it->snapshot.isActive() ? &it.value() : nullptr;
+        return it != transactions.constEnd() && it->isActive() ? &it.value() : nullptr;
     }
 
     // Logical admission is independent of deferred physical root destruction.
@@ -664,7 +690,7 @@ public:
         }
         --activeTransactions;
         auto record = transactions.find(transaction.id.value);
-        Q_ASSERT(record != transactions.end() && !record->snapshot.isActive()
+        Q_ASSERT(record != transactions.end() && !record->isActive()
                  && record->nextFinished == 0);
         if (finishedTransactionsTail)
             transactions.find(finishedTransactionsTail)->nextFinished = transaction.id.value;
@@ -674,6 +700,10 @@ public:
         ++finishedTransactionCount;
     }
     mutable QMutex mutex;
+    // Native stores attach before initialization; standalone oracle models use
+    // their own controller. Core/Qt registry bootstrap remains separate debt.
+    std::unique_ptr<KisBackingBudgetController> standaloneBudget;
+    KisBackingBudgetController *budget = nullptr;
     quint64 nextEpoch = 1;
     KisImageEpochRootSnapshot current;
     // Registry values own their retirement links. Queuing needs neither an
@@ -738,6 +768,13 @@ KisImageEpochReferenceModel::KisImageEpochReferenceModel()
 
 KisImageEpochReferenceModel::~KisImageEpochReferenceModel() = default;
 
+void KisImageEpochReferenceModel::attachBackingBudget(KisBackingBudgetController &budget)
+{
+    QMutexLocker lock(&d->mutex);
+    Q_ASSERT(!d->operational() && !d->budget);
+    d->budget = &budget;
+}
+
 bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initial, QString *error)
 {
     if (!initial.isValid() || initial.epoch.value == std::numeric_limits<quint64>::max()) {
@@ -749,6 +786,11 @@ bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initia
     if (d->operational()) {
         KisPageStoreDetail::setError(error, QStringLiteral("image epoch model is already initialized"));
         return false;
+    }
+
+    if (!d->budget) {
+        d->standaloneBudget = std::make_unique<KisBackingBudgetController>();
+        d->budget = d->standaloneBudget.get();
     }
 
     KisImageEpochRootSnapshot root;
@@ -801,8 +843,8 @@ KisPageTransaction KisImageEpochReferenceModel::beginTransaction(KisImageEpochId
     transaction.baseEpoch = baseEpoch;
 
     EpochTransactionRecord record;
-    record.snapshot.transaction = transaction;
-    record.snapshot.state = KisPageTransactionState::Open;
+    record.transaction = transaction;
+    record.state = KisPageTransactionState::Open;
     auto &baseCount = d->transactionBaseCounts[transaction.baseEpoch.value];
     const auto cancelEmptyCount = qScopeGuard([&] {
         if (!baseCount) d->transactionBaseCounts.remove(transaction.baseEpoch.value);
@@ -824,29 +866,51 @@ bool KisImageEpochReferenceModel::preparePublication(const KisPreparedPageSet &p
     return prepareImpl(preparedPages, true, error);
 }
 
-bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error)
+bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error) try
 {
     if (!preparedPages.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page set is invalid"));
         return false;
     }
 
+    // Working and superseded storage outlive the locker, so actual deallocation
+    // and budget observers run outside the epoch gate on every exit.
+    std::shared_ptr<const EpochTransactionChanges> previous;
+    std::shared_ptr<EpochTransactionChanges> next;
     QMutexLocker locker(&d->mutex);
     auto transactionIt = d->transactions.find(preparedPages.transaction.value);
     if (!d->operational() || transactionIt == d->transactions.end()
-        || !transactionIt->snapshot.isActive()
-        || transactionIt->revision == std::numeric_limits<quint64>::max()) {
+        || !transactionIt->isActive()) {
         KisPageStoreDetail::setError(error, QStringLiteral("transaction is not open for preparation"));
         return false;
     }
+    // A complete retry with identical facts reuses the accepted immutable
+    // value and revision; it cannot invalidate an already prepared root.
+    if (complete && transactionIt->delta && transactionIt->delta->matches(preparedPages)) {
+        KisPageStoreDetail::setError(error, {});
+        return true;
+    }
+    if (transactionIt->revision == std::numeric_limits<quint64>::max()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("transaction revision space is exhausted"));
+        return false;
+    }
 
-    const auto &base = d->protectedRoot(transactionIt->snapshot.transaction.baseEpoch.value);
-
-    QVector<KisPageVersion> changes = complete ? QVector<KisPageVersion>{} : transactionIt->snapshot.changes;
-    QHash<KisPageKey, qsizetype> changeIndexes;
-    changeIndexes.reserve(changes.size() + preparedPages.proofs.size());
-    for (qsizetype i = 0; i < changes.size(); ++i) {
-        changeIndexes.insert(changes.at(i).key, i);
+    const auto base = d->protectedRoot(transactionIt->transaction.baseEpoch.value);
+    const quint64 revision = transactionIt->revision;
+    previous = complete ? nullptr : transactionIt->delta;
+    locker.unlock();
+    const auto storage = KisMutationStorageAllocator<EpochTransactionChanges>::retained(d->budget);
+    next = std::allocate_shared<EpochTransactionChanges>(storage, storage);
+    const size_t previousChanges = previous ? previous->changes.size() : 0;
+    next->changes.reserve(previousChanges + size_t(preparedPages.proofs.size()));
+    next->surfaceChanges.reserve((previous ? previous->surfaceChanges.size() : 0)
+                                 + size_t(preparedPages.surfaceChanges.size()));
+    next->removedPages.reserve((previous ? previous->removedPages.size() : 0)
+                               + size_t(preparedPages.removedPages.size()));
+    if (previous) {
+        next->changes.insert(next->changes.end(), previous->changes.begin(), previous->changes.end());
+        next->surfaceChanges.insert(next->surfaceChanges.end(), previous->surfaceChanges.begin(), previous->surfaceChanges.end());
+        next->removedPages.insert(next->removedPages.end(), previous->removedPages.begin(), previous->removedPages.end());
     }
     for (const KisPreparedPageProof &proof : preparedPages.proofs) {
         const KisPageVersion &after = proof.authority.version;
@@ -857,29 +921,25 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
             return false;
         }
 
-        const qsizetype existingIndex = changeIndexes.value(after.key, -1);
-        if (existingIndex >= 0) {
-            KisPageVersion &existing = changes[existingIndex];
-            if (after.generation.value <= existing.generation.value) {
+        // The original prefix remains sorted while unique new input keys are
+        // appended. Paid capacity was admitted before any element changes.
+        const auto end = next->changes.begin() + previousChanges;
+        const auto existing = std::lower_bound(next->changes.begin(), end, after.key,
+            [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
+        if (existing != end && existing->key == after.key) {
+            if (after.generation.value <= existing->generation.value) {
                 KisPageStoreDetail::setError(error, QStringLiteral("prepared generation does not advance the transaction chain"));
                 return false;
             }
-            existing = after;
+            *existing = after;
         } else {
-            changes.append(after);
-            changeIndexes.insert(after.key, changes.size() - 1);
+            next->changes.push_back(after);
         }
     }
 
-    std::sort(changes.begin(), changes.end(), [](const KisPageVersion &lhs, const KisPageVersion &rhs) {
+    std::sort(next->changes.begin(), next->changes.end(), [](const KisPageVersion &lhs, const KisPageVersion &rhs) {
         return pageKeyLess(lhs.key, rhs.key);
     });
-    QVector<KisSurfaceEpochChange> surfaceChanges = complete ? QVector<KisSurfaceEpochChange>{} : transactionIt->snapshot.surfaceChanges;
-    QHash<quint64, qsizetype> surfaceChangeIndexes;
-    surfaceChangeIndexes.reserve(surfaceChanges.size() + preparedPages.surfaceChanges.size());
-    for (qsizetype i = 0; i < surfaceChanges.size(); ++i) {
-        surfaceChangeIndexes.insert(surfaceChanges.at(i).after.surface.value, i);
-    }
     for (const KisSurfaceEpochChange &change : preparedPages.surfaceChanges) {
         KisSurfaceEpochState baseState;
         if (!base.surfaceState(change.before.surface, &baseState)
@@ -887,37 +947,51 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
             KisPageStoreDetail::setError(error, QStringLiteral("prepared surface metadata does not match the transaction base"));
             return false;
         }
-        const qsizetype existingIndex = surfaceChangeIndexes.value(change.after.surface.value, -1);
-        if (existingIndex >= 0) {
-            if (!(surfaceChanges.at(existingIndex) == change)) {
+        const auto existing = std::find_if(next->surfaceChanges.begin(), next->surfaceChanges.end(),
+            [&](const auto &value) { return value.after.surface == change.after.surface; });
+        if (existing != next->surfaceChanges.end()) {
+            if (!(*existing == change)) {
                 KisPageStoreDetail::setError(error, QStringLiteral("surface metadata was prepared with competing values"));
                 return false;
             }
         } else {
-            surfaceChanges.append(change);
-            surfaceChangeIndexes.insert(change.after.surface.value, surfaceChanges.size() - 1);
+            next->surfaceChanges.push_back(change);
         }
     }
-    QVector<KisPageKey> removedPages = complete ? QVector<KisPageKey>{} : transactionIt->snapshot.removedPages;
-    QSet<KisPageKey> removedPageSet(removedPages.begin(), removedPages.end());
     for (const KisPageKey &key : preparedPages.removedPages) {
-        KisPageVersion removedVersion;
-        if (!base.containsPage(key, &removedVersion) || changeIndexes.contains(key)) {
+        if (!base.containsPage(key)) {
             KisPageStoreDetail::setError(error, QStringLiteral("removed page is absent from the transaction base or also written"));
             return false;
         }
-        if (!removedPageSet.contains(key)) {
-            removedPages.append(key);
-            removedPageSet.insert(key);
+        next->removedPages.push_back(key);
+    }
+    std::sort(next->removedPages.begin(), next->removedPages.end(), pageKeyLess);
+    next->removedPages.erase(std::unique(next->removedPages.begin(), next->removedPages.end()), next->removedPages.end());
+    for (const auto &key : next->removedPages) {
+        const auto written = std::lower_bound(next->changes.begin(), next->changes.end(), key,
+            [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
+        if (written != next->changes.end() && written->key == key) {
+            KisPageStoreDetail::setError(error, QStringLiteral("removed page is also written in the transaction"));
+            return false;
         }
     }
-    transactionIt->snapshot.changes = changes;
-    transactionIt->snapshot.surfaceChanges = surfaceChanges;
-    transactionIt->snapshot.removedPages = removedPages;
-    transactionIt->snapshot.state = KisPageTransactionState::Prepared;
+    locker.relock();
+    transactionIt = d->transactions.find(preparedPages.transaction.value);
+    if (transactionIt == d->transactions.end() || !transactionIt->isActive() || transactionIt->revision != revision) {
+        KisPageStoreDetail::setError(error, QStringLiteral("transaction changed during write set preparation"));
+        return false;
+    }
+    // Keep the replaced immutable value alive until after the gate unlock.
+    previous = std::move(transactionIt->delta);
+    transactionIt->delta = std::move(next);
+    transactionIt->state = KisPageTransactionState::Prepared;
     ++transactionIt->revision;
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("epoch transaction storage admission failed"));
+    return false;
 }
 
 KisImageEpochCommitResult KisImageEpochReferenceModel::commit(const KisPageTransaction &transaction)
@@ -930,18 +1004,18 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::commit(const KisPageTrans
 }
 
 KisImageEpochReferenceModel::PreparedCommit
-KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure)
+KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure) try
 {
     KisImageEpochCommitResult localFailure;
     KisImageEpochCommitResult &result = failure ? *failure : localFailure;
     result = {};
+    std::shared_ptr<const EpochTransactionChanges> prepared;
     QMutexLocker locker(&d->mutex);
     auto transactionIt = d->transactions.find(transaction.id.value);
     if (!d->operational() || !transaction.isValid() || transactionIt == d->transactions.end()
-        || !(transactionIt->snapshot.transaction == transaction)
-        || transactionIt->snapshot.state != KisPageTransactionState::Prepared
-        || (transactionIt->snapshot.changes.isEmpty() && transactionIt->snapshot.surfaceChanges.isEmpty()
-            && transactionIt->snapshot.removedPages.isEmpty())) {
+        || !(transactionIt->transaction == transaction)
+        || transactionIt->state != KisPageTransactionState::Prepared
+        || !transactionIt->delta || transactionIt->delta->empty()) {
         result.error = QStringLiteral("transaction is not prepared for commit");
         return {};
     }
@@ -955,13 +1029,13 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     }
     const KisImageEpochId epoch{d->nextEpoch++};
     const quint64 revision = transactionIt->revision;
-    const KisPageTransactionSnapshot prepared = transactionIt->snapshot;
+    prepared = transactionIt->delta;
     const KisImageEpochRootSnapshot current = d->current;
     // All inputs below are immutable snapshots. No QHash iterator or mutable
     // transaction state may be used until it is freshly looked up on install.
     locker.unlock();
 
-    for (const KisPageVersion &change : prepared.changes) {
+    for (const KisPageVersion &change : prepared->changes) {
         KisPageVersion baseVersion;
         KisPageVersion currentVersion;
         const bool baseContains = base.resolve(change.key, &baseVersion);
@@ -972,7 +1046,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
             return {};
         }
     }
-    for (const KisSurfaceEpochChange &change : prepared.surfaceChanges) {
+    for (const KisSurfaceEpochChange &change : prepared->surfaceChanges) {
         KisSurfaceEpochState currentState;
         if (!current.surfaceState(change.before.surface, &currentState) || !(currentState == change.before)) {
             result.status = KisImageEpochCommitStatus::Conflict;
@@ -980,7 +1054,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
             return {};
         }
     }
-    for (const KisPageKey &key : prepared.removedPages) {
+    for (const KisPageKey &key : prepared->removedPages) {
         KisPageVersion baseVersion;
         KisPageVersion currentVersion;
         if (!base.containsPage(key, &baseVersion) || !current.containsPage(key, &currentVersion)
@@ -1001,7 +1075,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     root.m_propertyRevision = current.propertyRevision();
     root.m_pageRoot = current.m_pageRoot;
     root.m_surfaces = current.m_surfaces;
-    const qsizetype pageDeltaSize = prepared.changes.size() + prepared.removedPages.size();
+    const qsizetype pageDeltaSize = qsizetype(prepared->changes.size() + prepared->removedPages.size());
     const qsizetype currentPageCount = current.pageCount();
     const bool densePageDelta = pageDeltaSize > 0 && pageDeltaSize >= (currentPageCount + 3) / 4;
     if (densePageDelta) {
@@ -1009,40 +1083,29 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
         // K*log(N) nodes when most leaves change. A dense delta is rebuilt
         // once in O(N+K); because N <= 4K here, fixed-K commits can never
         // fall into this path as the document grows.
-        QHash<KisPageKey, KisPageVersion> replacements;
-        replacements.reserve(prepared.changes.size());
-        for (const KisPageVersion &change : prepared.changes) {
-            replacements.insert(change.key, change);
-        }
-        const QSet<KisPageKey> removals(prepared.removedPages.constBegin(), prepared.removedPages.constEnd());
-        QVector<KisPageVersion> manifest;
-        manifest.reserve(currentPageCount + replacements.size());
-        const QVector<KisPageVersion> currentManifest = current.manifest();
-        for (const KisPageVersion &version : currentManifest) {
-            if (removals.contains(version.key))
-                continue;
-            auto replacement = replacements.find(version.key);
-            if (replacement != replacements.end()) {
-                manifest.append(replacement.value());
-                replacements.erase(replacement);
-            } else {
-                manifest.append(version);
-            }
-        }
-        for (const KisPageVersion &version : std::as_const(replacements)) {
-            manifest.append(version);
-        }
-        sortManifest(&manifest);
+        EpochArray<KisPageVersion> manifest(prepared->changes.get_allocator());
+        manifest.reserve(size_t(currentPageCount) + prepared->changes.size());
+        auto change = prepared->changes.cbegin();
+        auto removed = prepared->removedPages.cbegin();
+        appendPageRoot(current.m_pageRoot, [&](const KisPageVersion &version) {
+            while (change != prepared->changes.end() && pageKeyLess(change->key, version.key))
+                manifest.push_back(*change++);
+            while (removed != prepared->removedPages.end() && pageKeyLess(*removed, version.key))
+                ++removed;
+            if (removed != prepared->removedPages.end() && *removed == version.key) return;
+            manifest.push_back(change != prepared->changes.end() && change->key == version.key ? *change++ : version);
+        });
+        manifest.insert(manifest.end(), change, prepared->changes.end());
         root.m_pageRoot = buildPageRoot(manifest, 0, manifest.size());
     } else {
-        for (const KisPageVersion &change : prepared.changes) {
+        for (const KisPageVersion &change : prepared->changes) {
             root.m_pageRoot = insertPageRoot(root.m_pageRoot, change);
         }
-        for (const KisPageKey &key : prepared.removedPages) {
+        for (const KisPageKey &key : prepared->removedPages) {
             root.m_pageRoot = removePageRoot(root.m_pageRoot, key);
         }
     }
-    for (const KisSurfaceEpochChange &change : prepared.surfaceChanges) {
+    for (const KisSurfaceEpochChange &change : prepared->surfaceChanges) {
         bool replaced = false;
         for (KisSurfaceEpochState &surface : root.m_surfaces) {
             if (surface.surface == change.after.surface) {
@@ -1067,7 +1130,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     locker.relock();
     transactionIt = d->transactions.find(transaction.id.value);
     if (!(d->current.epoch() == current.epoch()) || transactionIt == d->transactions.end()
-        || transactionIt->revision != revision || transactionIt->snapshot.state != KisPageTransactionState::Prepared) {
+        || transactionIt->revision != revision || transactionIt->state != KisPageTransactionState::Prepared) {
         result.status = KisImageEpochCommitStatus::Conflict;
         result.error = QStringLiteral("epoch or transaction changed during candidate preparation");
         return {};
@@ -1082,6 +1145,10 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     candidate.m_transaction = transaction.id;
     candidate.m_revision = revision;
     return candidate;
+}
+catch (const std::bad_alloc &) {
+    if (failure) failure->error = QStringLiteral("epoch root preparation storage admission failed");
+    return {};
 }
 
 KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCommit &&candidate,
@@ -1100,7 +1167,7 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCom
     auto transactionIt = d->transactions.find(consumed.m_transaction.value);
     if (!(d->current.epoch() == root.previousEpoch()) || transactionIt == d->transactions.end()
         || transactionIt->revision != consumed.m_revision
-        || transactionIt->snapshot.state != KisPageTransactionState::Prepared) {
+        || transactionIt->state != KisPageTransactionState::Prepared) {
         result.status = KisImageEpochCommitStatus::Conflict;
         result.error = QStringLiteral("epoch or transaction changed before candidate installation");
         return result;
@@ -1108,8 +1175,8 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCom
     if (!installReservedRoot(consumed, context, installMetadata, &result))
         return result;
 
-    const KisPageTransaction transaction = transactionIt->snapshot.transaction;
-    transactionIt->snapshot.state = KisPageTransactionState::Committed;
+    const KisPageTransaction transaction = transactionIt->transaction;
+    transactionIt->state = KisPageTransactionState::Committed;
     d->finishTransaction(transaction);
     d->queueRoot(root.previousEpoch().value);
     return result;
@@ -1207,12 +1274,12 @@ bool KisImageEpochReferenceModel::abort(const KisPageTransaction &transaction, Q
     QMutexLocker locker(&d->mutex);
     auto transactionIt = d->transactions.find(transaction.id.value);
     if (!d->operational() || !transaction.isValid() || transactionIt == d->transactions.end()
-        || !(transactionIt->snapshot.transaction.baseEpoch == transaction.baseEpoch)
-        || !transactionIt->snapshot.isActive()) {
+        || !(transactionIt->transaction.baseEpoch == transaction.baseEpoch)
+        || !transactionIt->isActive()) {
         KisPageStoreDetail::setError(error, QStringLiteral("transaction cannot be aborted"));
         return false;
     }
-    transactionIt->snapshot.state = KisPageTransactionState::Aborted;
+    transactionIt->state = KisPageTransactionState::Aborted;
     d->finishTransaction(transaction);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -1344,17 +1411,23 @@ qsizetype KisImageEpochReferenceModel::activeTransactionCount() const
 
 qsizetype KisImageEpochReferenceModel::collectFinishedTransactions(qsizetype budget)
 {
+    std::shared_ptr<const EpochTransactionChanges> released;
     QMutexLocker locker(&d->mutex);
-    const qsizetype removed = budget < 0 ? d->finishedTransactionCount : qMin(budget, d->finishedTransactionCount);
-    for (qsizetype i = 0; i < removed; ++i) {
+    const qsizetype limit = budget < 0 ? d->finishedTransactionCount : qMin(budget, d->finishedTransactionCount);
+    qsizetype removed = 0;
+    while (removed < limit && d->finishedTransactionsHead) {
         const auto record = d->transactions.find(d->finishedTransactionsHead);
-        Q_ASSERT(record != d->transactions.end() && !record->snapshot.isActive());
+        Q_ASSERT(record != d->transactions.end() && !record->isActive());
         d->finishedTransactionsHead = record->nextFinished;
+        released = std::move(record->delta);
         d->transactions.erase(record);
+        --d->finishedTransactionCount;
+        if (!d->finishedTransactionsHead) d->finishedTransactionsTail = 0;
+        ++removed;
+        locker.unlock();
+        released.reset();
+        locker.relock();
     }
-    d->finishedTransactionCount -= removed;
-    if (!d->finishedTransactionsHead)
-        d->finishedTransactionsTail = 0;
     return removed;
 }
 
@@ -1503,8 +1576,28 @@ KisImageEpochRootSnapshot KisImageEpochReferenceModel::retainedRoot(KisImageEpoc
 
 KisPageTransactionSnapshot KisImageEpochReferenceModel::transaction(KisPageTransactionId id) const
 {
+    KisPageTransactionSnapshot result;
+    std::shared_ptr<const EpochTransactionChanges> delta;
     QMutexLocker locker(&d->mutex);
-    return d->transactions.value(id.value).snapshot;
+    const auto found = d->transactions.constFind(id.value);
+    if (found == d->transactions.cend()) return {};
+    result.transaction = found->transaction;
+    result.state = found->state;
+    delta = found->delta;
+    locker.unlock();
+    if (delta) {
+        result.changes = QVector<KisPageVersion>(delta->changes.begin(), delta->changes.end());
+        result.surfaceChanges = QVector<KisSurfaceEpochChange>(delta->surfaceChanges.begin(), delta->surfaceChanges.end());
+        result.removedPages = QVector<KisPageKey>(delta->removedPages.begin(), delta->removedPages.end());
+    }
+    return result;
+}
+
+KisPageTransaction KisImageEpochReferenceModel::activeTransaction(KisPageTransactionId id) const
+{
+    QMutexLocker lock(&d->mutex);
+    const auto *record = d->activeTransaction(id);
+    return record ? record->transaction : KisPageTransaction{};
 }
 
 bool KisImageEpochReferenceModel::resolve(const KisPageKey &key,
@@ -1533,19 +1626,22 @@ bool KisImageEpochReferenceModel::resolve(const KisPageKey &key,
         const auto *transaction = d->activeTransaction(view.transaction);
         if (!transaction)
             return fail();
-        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).resolve(key, version);
+        return d->protectedRoot(transaction->transaction.baseEpoch.value).resolve(key, version);
     }
     case KisPageReadViewKind::TransactionOverlay: {
         const auto *transaction = d->activeTransaction(view.transaction);
         if (!transaction)
             return fail();
-        const qsizetype changeIndex = findChange(transaction->snapshot.changes, key);
-        if (changeIndex >= 0) {
-            if (version)
-                *version = transaction->snapshot.changes.at(changeIndex);
-            return true;
+        if (transaction->delta) {
+            const auto &changes = transaction->delta->changes;
+            const auto change = std::lower_bound(changes.begin(), changes.end(), key,
+                [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
+            if (change != changes.end() && change->key == key) {
+                if (version) *version = *change;
+                return true;
+            }
         }
-        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).resolve(key, version);
+        return d->protectedRoot(transaction->transaction.baseEpoch.value).resolve(key, version);
     }
     case KisPageReadViewKind::ExactVersion: {
         if (!(d->retainedSnapshots.value(view.retention.value) == view.epoch))
@@ -1588,7 +1684,7 @@ bool KisImageEpochReferenceModel::surfaceState(KisSurfaceId surface,
         if (!transaction) {
             return false;
         }
-        return d->protectedRoot(transaction->snapshot.transaction.baseEpoch.value).surfaceState(surface, state);
+        return d->protectedRoot(transaction->transaction.baseEpoch.value).surfaceState(surface, state);
     }
     }
     return false;

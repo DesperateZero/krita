@@ -1086,6 +1086,26 @@ private Q_SLOTS:
     void preparedEpochCandidateRejectsChangedInputs_data();
     void preparedEpochCandidateRejectsChangedInputs();
     void preparedEpochCandidateOwnerAndLifetime();
+    void epochTransactionStorageAtCapacity_data()
+    {
+        QTest::addColumn<bool>("complete");
+        QTest::addColumn<int>("refusal");
+        for (bool full : {false, true})
+            for (int storage = 0; storage < 4; ++storage)
+                QTest::newRow(qPrintable(QStringLiteral("complete%1-storage%2").arg(full).arg(storage))) << full << storage;
+    }
+    void epochTransactionStorageAtCapacity();
+    void epochTransactionStorageRetainsOriginalOwner();
+    void epochTransactionPreparationRevalidatesConcurrentRevision();
+    void epochTransactionRejectsOpposingIncrementalChanges_data()
+    {
+        QTest::addColumn<bool>("firstRemoval");
+        QTest::addColumn<bool>("complete");
+        for (bool removed : {false, true})
+            for (bool full : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("removed%1-complete%2").arg(removed).arg(full))) << removed << full;
+    }
+    void epochTransactionRejectsOpposingIncrementalChanges();
     void persistentExtentIndexMatchesManifestOracle();
     void rootCollectionTracksReferencesIncrementally();
     void retirementQueuesPreserveBudgetAndIdentity_data()
@@ -2007,6 +2027,185 @@ void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomic
     read.kind = KisPageTransitionKind::ReleaseRead;
     QVERIFY(coordinator.applyOwner(read.version.key, read).accepted);
     QVERIFY(model.releaseSnapshot(retainedOriginal.token));
+}
+
+void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
+{
+    QFETCH(bool, complete); QFETCH(int, refusal);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget;
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    KisImageEpochReferenceModel model;
+    model.attachBackingBudget(budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.manifest = {pageVersion(0, 1), pageVersion(1, 1), pageVersion(2, 1)};
+    initial.surfaces = {surfaceEpochState()};
+    if (refusal == 2)
+        for (int i = 2; i <= 512; ++i) initial.surfaces.append(surfaceEpochState({quint64(i)}));
+    if (refusal == 3)
+        for (int i = 3; i < 512; ++i) initial.manifest.append(pageVersion(i, 1));
+    QVERIFY(model.initialize(initial));
+    const auto tx = model.beginTransaction({1});
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    KisPreparedPageSet original;
+    original.transaction = tx.id;
+    original.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
+    original.surfaceChanges = {{initial.surfaces.first(), surfaceEpochState({1}, 2, 0x19)}};
+    original.removedPages = {pageKey(1)};
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    QVERIFY(model.prepare(original));
+    QVERIFY(live() > before);
+    const auto accepted = model.transaction(tx.id);
+    KisPreparedPageSet changed = complete ? original : KisPreparedPageSet{};
+    changed.transaction = tx.id;
+    changed.proofs = {preparedProof(pageVersion(complete ? 0 : 2, complete ? 3 : 2), tx.id, ticket, 2)};
+    if (refusal == 1)
+        for (int i = 3; i < 512; ++i) changed.proofs.append(preparedProof(pageVersion(i, 2), tx.id, ticket, quint64(i)));
+    if (refusal == 2)
+        for (int i = 1; i < initial.surfaces.size(); ++i)
+            changed.surfaceChanges.append({initial.surfaces[i], surfaceEpochState({quint64(i + 1)}, 2, 0x19)});
+    if (refusal == 3)
+        for (int i = 3; i < 512; ++i) changed.removedPages.append(pageKey(i));
+    const auto acceptedBytes = live();
+    // For array cases the original shared value is admitted first; only the
+    // selected large real capacity refuses. All partial charges must unwind.
+    const quint64 headroom = refusal ? 2048 : 0;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - headroom);
+    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes - headroom);
+    QCOMPARE(model.activeTransaction(tx.id), tx); // Native queries export no arrays.
+    QVERIFY(model.preparePublication(original)); // Identical full facts reuse the original storage.
+    QString error;
+    QVERIFY(!(complete ? model.preparePublication(changed, &error) : model.prepare(changed, &error)));
+    QVERIFY(error.contains(QStringLiteral("storage admission")));
+    QCOMPARE(model.activeTransaction(tx.id), tx);
+    QCOMPARE(live(), limits.metadataArenaBytes - headroom);
+    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    QCOMPARE(live(), acceptedBytes);
+    const auto refused = model.transaction(tx.id);
+    QCOMPARE(refused.changes, accepted.changes);
+    QCOMPARE(refused.surfaceChanges, accepted.surfaceChanges);
+    QCOMPARE(refused.removedPages, accepted.removedPages);
+    QVERIFY(complete ? model.preparePublication(changed) : model.prepare(changed));
+    auto candidate = model.prepareCommit(tx, nullptr);
+    QVERIFY(candidate.isValid());
+    const auto preparedBytes = live();
+    const size_t installFillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *installFiller = kisAllocateMutationStorage(parent.data(), installFillerBytes, 1);
+    const auto freeInstallFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), installFiller, installFillerBytes, 1); });
+    if (complete) QVERIFY(model.preparePublication(changed)); // Preserve the prepared root's revision.
+    QVERIFY(model.installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    // The original committed record remains charged until collection.
+    QCOMPARE(model.collectFinishedTransactions(0), qsizetype(0));
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    QCOMPARE(model.collectFinishedTransactions(1), qsizetype(1));
+    QVERIFY(live() < limits.metadataArenaBytes);
+    QVERIFY(live() - installFillerBytes < preparedBytes);
+}
+
+void KisPageStoreReferenceTest::epochTransactionStorageRetainsOriginalOwner()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
+    const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
+    KisImageEpochReferenceModel::PreparedCommit orphan;
+    auto budget = std::make_unique<KisBackingBudgetController>();
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent));
+    auto model = std::make_unique<KisImageEpochReferenceModel>();
+    model->attachBackingBudget(*budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.manifest = {pageVersion(0, 1)};
+    QVERIFY(model->initialize(initial));
+    const auto tx = model->beginTransaction({1});
+    KisPreparedPageSet delta; delta.transaction = tx.id; delta.removedPages = {pageKey(0)};
+    QVERIFY(model->prepare(delta));
+    orphan = model->prepareCommit(tx, nullptr);
+    QVERIFY(orphan.isValid());
+    model.reset(); budget.reset();
+    QVERIFY(live() > baseline); // Original immutable value/control retains its accounting owner.
+    orphan = {};
+    QCOMPARE(live(), baseline);
+}
+
+void KisPageStoreReferenceTest::epochTransactionPreparationRevalidatesConcurrentRevision()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 8 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    const auto storage = KisMutationStorageAllocator<KisPageVersion>::retained(&budget);
+    KisImageEpochReferenceModel model; model.attachBackingBudget(budget);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.surfaces = {surfaceEpochState()};
+    QVERIFY(model.initialize(initial));
+    const auto tx = model.beginTransaction({1});
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    KisPreparedPageSet input; input.transaction = tx.id;
+    for (int i = 0; i < 32768; ++i) input.proofs.append(preparedProof(pageVersion(i, 2), tx.id, ticket, quint64(i + 1)));
+    std::atomic<bool> start{false};
+    std::array<bool, 2> accepted{};
+    std::array<QString, 2> errors;
+    const auto prepare = [&](int index) {
+        while (!start.load()) std::this_thread::yield();
+        accepted[size_t(index)] = model.prepare(input, &errors[size_t(index)]);
+    };
+    std::thread first(prepare, 0), second(prepare, 1);
+    start = true;
+    first.join(); second.join();
+    QCOMPARE(int(accepted[0]) + int(accepted[1]), 1);
+    QVERIFY(!errors[accepted[0] ? 1 : 0].isEmpty());
+    const auto bytes = quint64(input.proofs.size()) * sizeof(KisPageVersion);
+    QVERIFY(live() - before >= bytes && live() - before < bytes + 512);
+    QCOMPARE(model.transaction(tx.id).changes.size(), input.proofs.size());
+    QVERIFY(model.abort(tx));
+    QCOMPARE(model.collectFinishedTransactions(), qsizetype(1));
+    QCOMPARE(live(), before); // Losing work and accepted data both physically freed.
+}
+
+void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChanges()
+{
+    QFETCH(bool, firstRemoval); QFETCH(bool, complete);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.manifest = {pageVersion(0, 1)};
+    KisImageEpochReferenceModel model; QVERIFY(model.initialize(initial));
+    const auto tx = model.beginTransaction({1});
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    KisPreparedPageSet written; written.transaction = tx.id;
+    written.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
+    KisPreparedPageSet removed; removed.transaction = tx.id; removed.removedPages = {pageKey(0)};
+    QVERIFY(model.prepare(firstRemoval ? removed : written));
+    const auto &next = firstRemoval ? written : removed;
+    QCOMPARE(complete ? model.preparePublication(next) : model.prepare(next), complete);
+    const auto saved = model.transaction(tx.id);
+    const bool endsRemoved = complete ? !firstRemoval : firstRemoval;
+    QCOMPARE(saved.changes.isEmpty(), endsRemoved);
+    QCOMPARE(saved.removedPages.isEmpty(), !endsRemoved);
+    QVERIFY(model.commit(tx).isCommitted());
+    KisPageVersion version;
+    QCOMPARE(model.captureCommittedRoot().containsPage(pageKey(0), &version), !endsRemoved);
+    if (!endsRemoved) QCOMPARE(version, pageVersion(0, 2));
 }
 
 void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
