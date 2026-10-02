@@ -81,9 +81,9 @@ public:
                        KisPageBackingPreparation &&backing);
     void retireEffects(const QVector<KisPageTransitionEffect> &effects,
                        bool backgroundReclamation);
-    // Transfer one already-funded metadata effect without invoking retirement.
-    // Refusal leaves the effect with its original history work record.
-    bool acceptEffect(const KisPageTransitionEffect &effect);
+    // Detach committed Debt and retained the original record. Transfer is
+    // infallible under the metadata owner's gate and invokes no provider.
+    void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
     KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();

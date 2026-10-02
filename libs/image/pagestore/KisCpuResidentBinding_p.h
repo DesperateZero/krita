@@ -202,7 +202,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         for (const auto &[slot, allocation] : std::as_const(allocations)) {
             if (allocation.binding) allocation.binding->revoke();
             if (allocation.retirementCompletion.isValid())
-                completions->complete(allocation.retirementCompletion, KisCompletionStatus::Cancelled);
+                completions->completePrepared(allocation.retirementCompletion, KisCompletionStatus::Cancelled);
         }
     }
 
@@ -273,8 +273,8 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         // Cold allocation prepared this terminal capacity before physical
         // adoption. A refusal to retire keeps the same private ticket Pending.
         const auto completion = allocation->second.retirementCompletion;
-        return completion.isValid() ? Retirement{allocation, completion}
-                                    : Retirement{allocation, {}, "completion allocation failed"};
+        if (!completion.isValid()) qFatal("Live allocation has no prepared retirement completion");
+        return {allocation, completion};
     }
 
     AllocationMap allocations;

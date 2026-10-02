@@ -44,6 +44,7 @@
 #include "KisPageStoreRandomAccessor.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageRetirementRecord_p.h"
+#include "KisPageRetirementQueue_p.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiledDataManagerPageStoreBackend.h"
 #include "KisTiles3PageReplicaProvider.h"
@@ -2836,7 +2837,20 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
 {
     QFETCH(int, history);
     auto expected = pageWithHistory(history);
+    // This metadata oracle has synthetic replicas. Its model retirement owner
+    // accepts each emitted responsibility; physical handoff is tested by the
+    // original ledger/queue fixtures.
+    std::array<quint64, 3> debt{};
     KisPageMetadataCoordinator coordinator;
+    coordinator.attachRetirementDebtOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *, qsizetype count, quint64 *cookie, QString *) {
+            auto &counts = *static_cast<std::array<quint64, 3> *>(p);
+            counts[0] += quint64(count); *cookie = quint64(count); return true;
+        }, +[](void *p, quint64 cookie) noexcept {
+            (*static_cast<std::array<quint64, 3> *>(p))[1] += cookie;
+        }, +[](void *p, quint64 cookie) noexcept {
+            (*static_cast<std::array<quint64, 3> *>(p))[2] += cookie;
+        });
     QVERIFY(coordinator.configure(4));
     QVERIFY(coordinator.registerPage(expected));
     KisPageVersion cursor;
@@ -2876,6 +2890,9 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
             break;
     } while (visited <= history);
     QCOMPARE(visited, history);
+    QCOMPARE(debt[0], quint64(history));
+    QCOMPARE(debt[1], quint64(history));
+    QCOMPARE(debt[2], quint64(0));
     const auto metrics = coordinator.metrics();
     QCOMPARE(metrics.historySliceVersionInputs, quint64(history));
     QVERIFY(metrics.maximumHistorySliceVersionInputs <= 32);
@@ -7952,14 +7969,11 @@ void KisPageStoreReferenceTest::ownerLedgerVerifiesTerminalProviderIdentity()
 void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
 {
     auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
-    KisCpuResidentReplicaProviderConfig config;
-    config.provider = {51};
-    config.providerEpoch = {1};
-    config.budgetBytes = 1024 * 1024;
-    QVERIFY(provider->configure(config, completions));
+    auto provider = QSharedPointer<FakeCpuReplicaProvider>::create(completions);
+    KisBackingBudgetController budget;
     KisPageOwnerLedger owner;
     QVERIFY(owner.configure(completions));
+    owner.attachBackingBudget(budget);
     QVERIFY(owner.registerProvider(provider));
     auto descriptor = allocationDescriptor();
     descriptor.initialization = KisPageInitialization::DefaultPixel;
@@ -7977,16 +7991,23 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     // A duplicate bind cannot reclassify an existing payload operation.
     QVERIFY(!owner.bindRetirementOperation(operation, result));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(1));
+    QVERIFY(provider->complete(operation, true));
     QVERIFY(owner.releaseTerminalProviderOperation(operation));
-    const auto retirement = owner.nextOperationId();
-    result = provider->retire(retirement, result.replica, {});
-    QVERIFY(result.isValid());
-    const KisCompletionDomain source = KisCompletionDomain::CpuJob;
-    const auto ticket = completions->allocatePending(completions->registerSource(source));
-    result.completion = ticket;
-    result.status = KisPageRequestStatus::Pending;
-    QVERIFY(owner.bindRetirementOperation(retirement, result));
-    QVERIFY(!owner.bindProviderOperation(retirement, result));
+    // An unprepared result cannot recreate the old post-provider allocation.
+    auto unprepared = result; unprepared.operation = owner.nextOperationId();
+    QVERIFY(!owner.bindRetirementOperation(unprepared.operation, unprepared));
+    QCOMPARE(owner.providerOperationCount(), qsizetype(0));
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    QAtomicInt references{1};
+    KisPageRetirementQueue queue(owner, metadata, budget, references, &references,
+        [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
+    auto record = kisPreparePageRetirementRecord(&budget);
+    record->replica = result.replica; record->provider = provider;
+    QVERIFY(!queue.retireRecord(*record)); // Actual provider returns Pending.
+    const auto retirement = record->retirementOperation;
+    QVERIFY(retirement.isValid());
+    auto duplicate = result; duplicate.operation = retirement;
+    QVERIFY(!owner.bindProviderOperation(retirement, duplicate));
     QVERIFY(!owner.releaseTerminalProviderOperation(retirement));
     QCOMPARE(owner.providerOperationCount(), qsizetype(1));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(0));
@@ -7994,14 +8015,18 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     const auto second = owner.nextOperationId();
     auto payload = result;
     payload.operation = second;
+    const auto ticket = completions->allocatePending(completions->registerSource(KisCompletionDomain::CpuJob));
+    payload.completion = ticket;
     QVERIFY(owner.bindProviderOperation(second, payload));
     QCOMPARE(owner.providerOperationCount(), qsizetype(2));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(1));
-    QVERIFY(completions->complete(ticket, KisCompletionStatus::Succeeded));
-    QVERIFY(owner.releaseTerminalProviderOperation(retirement));
+    QVERIFY(provider->complete(retirement, true));
+    QVERIFY(queue.retireRecord(*record));
+    QVERIFY(!record->operationStorage.empty());
     QVERIFY(!owner.releaseTerminalProviderOperation(retirement));
     QCOMPARE(owner.providerOperationCount(), qsizetype(1));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(1));
+    QVERIFY(completions->complete(ticket, KisCompletionStatus::Succeeded));
     QVERIFY(owner.releaseTerminalProviderOperation(second));
     QCOMPARE(owner.providerOperationCount(), qsizetype(0));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(0));

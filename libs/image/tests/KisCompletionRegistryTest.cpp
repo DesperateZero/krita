@@ -576,9 +576,9 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     QCOMPARE(registry.sourceStatistics(source).readinessWaiters, quint64(2));
     // Isolated ranges, a bridge, then closing the gap: every terminal kind
     // completes from the original nodes while admission is actually refused.
-    for (const auto index : {2, 4, 3}) QVERIFY(registry.complete(tickets[index], status));
-    QVERIFY(registry.complete(tickets[1], KisCompletionStatus::Succeeded));
-    QVERIFY(registry.complete(tickets[0], status));
+    for (const auto index : {2, 4, 3}) registry.completePrepared(tickets[index], status);
+    registry.completePrepared(tickets[1], KisCompletionStatus::Succeeded);
+    registry.completePrepared(tickets[0], status);
     QCOMPARE(calls, 2);
     QCOMPARE(registry.sourceStatistics(source).pendingTickets, quint64(0));
     QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5));

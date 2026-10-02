@@ -774,8 +774,8 @@ public:
         }
         const auto retirementCompletion = completions->allocatePending(completionSource);
         auto failCompletion = qScopeGuard([&]() {
-            completions->complete(completion, KisCompletionStatus::Failed);
-            if (retirementCompletion.isValid()) completions->complete(retirementCompletion, KisCompletionStatus::Failed);
+            completions->completePrepared(completion, KisCompletionStatus::Failed);
+            if (retirementCompletion.isValid()) completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
         });
         if (!retirementCompletion.isValid())
             return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 retirement completion preparation failed"));
@@ -830,14 +830,7 @@ public:
             return KisReplicaOperation::failed(operation,
                                    QStringLiteral("tiles3 physical payload budget is exhausted"));
         }
-        if (!completions->complete(completion,
-                                   KisCompletionStatus::Succeeded)) {
-            const auto released = allocations.extract(handle.allocation.slot);
-            releasePhysical(tileData, released.mapped().physicalBacking);
-            return KisReplicaOperation::failed(
-                operation,
-                QStringLiteral("tiles3 completion publication failed"));
-        }
+        completions->completePrepared(completion, KisCompletionStatus::Succeeded);
         failCompletion.dismiss();
         return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
     }
@@ -1128,8 +1121,8 @@ try
     if (!completion.isValid()) return KisReplicaOperation::failed(operation, QStringLiteral("alias completion is unavailable"));
     const auto retirementCompletion = d->completions->allocatePending(d->completionSource);
     auto failCompletion = qScopeGuard([&] {
-        d->completions->complete(completion, KisCompletionStatus::Failed);
-        if (retirementCompletion.isValid()) d->completions->complete(retirementCompletion, KisCompletionStatus::Failed);
+        d->completions->completePrepared(completion, KisCompletionStatus::Failed);
+        if (retirementCompletion.isValid()) d->completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
     });
     if (!retirementCompletion.isValid())
         return KisReplicaOperation::failed(operation, QStringLiteral("alias retirement completion preparation failed"));
@@ -1139,7 +1132,7 @@ try
         return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias physical budget is exhausted"));
     }
     ++d->work.adoptedPages; d->work.adoptedBytes += bytes;
-    d->completions->complete(completion, KisCompletionStatus::Succeeded);
+    d->completions->completePrepared(completion, KisCompletionStatus::Succeeded);
     failCompletion.dismiss();
     return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
 }
@@ -1174,7 +1167,7 @@ try
         KisPageStoreDetail::setError(error, QStringLiteral("initial retirement completion preparation failed"));
         return {};
     }
-    auto failCompletion = qScopeGuard([&] { d->completions->complete(retirementCompletion, KisCompletionStatus::Failed); });
+    auto failCompletion = qScopeGuard([&] { d->completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed); });
     auto prepared = d->prepareAdoption(version, descriptor, tileData);
     const KisReplicaHandle handle = prepared.handle;
     if (!d->adopt(prepared, tileData, retirementCompletion)) {
@@ -1271,12 +1264,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
         released = d->allocations.extract(retirement.allocation);
     }
     retired->deref();
-    if (!d->completions->complete(completion,
-                                  KisCompletionStatus::Succeeded)) {
-        return KisReplicaOperation::failed(
-            operation,
-            QStringLiteral("tiles3 retirement completion publication failed"));
-    }
+    d->completions->completePrepared(completion, KisCompletionStatus::Succeeded);
     return {KisPageRequestStatus::Ready, operation, replica, completion, {}};
 }
 

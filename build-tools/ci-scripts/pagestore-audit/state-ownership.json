@@ -137,7 +137,7 @@
       "status": "canonical",
       "target-authoritative-owner": "provider-owned KisCpuResidentBinding handle under its local gate",
       "terminal-paths": [
-        "provider retire preserves its original Pending retirement ticket on reader/transition refusal; physical detach/free completes that prepared ticket without new storage admission",
+        "provider retire preserves its original Pending retirement ticket on reader/transition refusal; allocate, alias, retire, transfer and archive use Registry completePrepared after successful physical work, without result-time capacity failure or business rollback; invalid or repeated producer completion is a contract violation",
         "provider close revokes bindings and cancels unused private retirement tickets",
         "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
         "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates",
@@ -277,13 +277,14 @@
     {
       "creation-paths": [
         "KisPageRetirementQueue::retireEffects",
-        "KisPageRetirementQueue::acceptEffect transfers an already funded Debt node without provider code or allocation; history retains each unaccepted effect in its original key record",
+        "KisPageRetirementQueue::acceptEffect infallibly transfers an already funded Debt node under the original metadata owner gate, without provider code or allocation; no post-detach effect recovery record remains",
         "KisPageRetirementQueue::retireOrDefer",
         "prepareWait checks original operation/last-use or exact physical binding and arms one pending record",
         "unadmitted owned records request actual budget reservation grants through their original ledger; an already detached single record uses the existing atomic reclassification without batch Debt scratch, including at metadata hard capacity; unowned orphans retain only their original reservation",
         "cold configuration admits the original queue pass, wake context, retry notification task and funded reusable deadline before physical adoption; per-record subscriptions keep distinct weak wait incarnations, and refusal falls back to the already admitted retry",
         "funded readiness/deadline callback bodies reuse the original retained allocator; the deadline tree links the embedded delay node; retry arm/cancel retain that same storage and takeReady consumes only its current monitor-published generation",
-        "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait"
+        "real retirement records are charged cold nodes from original backing preparation/registration, not nodes allocated after detachment; orphan/admission reservations are embedded in the record and budget grant in the original wait",
+        "bindRetirementOperation fills only the original record's preinstalled operation node; its record pointer distinguishes queue retirement from generic explicit Pending binding, deleting the detachedRetirement flag and result-time allocation fallback"
       ],
       "current-writers": [
         "KisPageRetirementQueue"
@@ -317,7 +318,7 @@
         "epoch root retention change",
         "published version supersession",
         "cold configuration admits the original collector reusable task, retained wake context and one deadline; original owner-gated scheduled flag and per-enqueue root pin exclude duplicate enqueue",
-        "one charged key-index node owns readiness linkage, fixed 32 candidate identities, root cookie, slice cursor and the charged metadata effect packet prepared before detach; a fixed 16-pointer pass selects original records",
+        "one charged key-index node owns readiness linkage, fixed 32 candidate identities, root cookie and slice cursor; a local charged metadata effect packet is prepared before detach and transferred in the same owner-gated slice; a fixed 16-pointer pass selects original records",
         "historySlice enumerates only fixed identity storage; discardHistory validates original compact records and prepares exact allocator capacity plus Debt before removal; visitPageKeys streams keys without a Qt directory projection"
       ],
       "current-writers": [
@@ -339,8 +340,8 @@
         "collector bounds each candidate bitmap to 32 exact versions including default revision; a protection change marks an existing cookie or between-slice cursor for repeat; close/destruction ends all outstanding cursors",
         "close drain",
         "prepared task stays charged as a live cache; finished publishes original idle/reschedule and releases the root only after invocation; no per-pass task allocation",
-        "foreground and background share collectPassLocked/collectSliceLocked; detach refusal retains the original key/cookie, accepted detach moves effects into that key and advances the effect cursor only after queue acceptance; accepted packet capacity is freed only after all effects cross the boundary",
-        "storage or Debt refusal uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle and unaccepted effects reject close; generic transition projections, remaining provider/core/fixed storage and complete permanent-pressure exits remain unqualified"
+        "foreground and background share collectPassLocked/collectSliceLocked; replica detach requires the configured Debt owner, exact registered backing and original retirement record before removal; successful detach commits Debt and queue acceptance transfers the same records without allocation or refusal, deleting the persistent effect packet/cursor and post-detach retry",
+        "storage or Debt refusal before detach uses the same cold deadline with 1-100 ms backoff; close/stop cancel future semantic wakes before idle; generic transition projections, remaining provider/core/fixed storage and complete permanent-pressure exits remain unqualified"
       ]
     },
     {

@@ -1303,8 +1303,11 @@ try {
         }
         const BackingKey key = effect.replica.allocationIdentity();
         const auto found = d->backings.find(key);
-        if (found == d->backings.end())
-            continue; // a rejected, unregistered provider result owns its reservation
+        if (found == d->backings.end() || !(found->second.replica == effect.replica)
+            || !found->second.retirement) {
+            KisPageStoreDetail::setError(error, QStringLiteral("retirement effect has no registered backing and original record"));
+            return {};
+        }
         const auto existing = targetClasses.find(key);
         if (existing != targetClasses.cend()) {
             if (existing->second != KisBackingBudgetClass::RetirementDebt) {
@@ -1710,7 +1713,20 @@ bool KisPageOwnerLedger::bindProviderOperation(
     const KisReplicaOperation &result,
     QString *error)
 {
-    return bindProviderOperationImpl(operation, result, false, error);
+    QMutexLocker locker(&d->mutex);
+    if (!d->acceptsProviderResultLocked(operation, result, error)) return false;
+    try {
+        if (d->operations.empty())
+            d->operations = OperationIndex(std::less<quint64>{},
+                KisMutationStorageAllocator<std::pair<const quint64, ProviderOperationRecord>>::retained(d->backingBudget));
+        d->operations.emplace(operation.value, ProviderOperationRecord{result.completion});
+    }
+    catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("provider operation storage was refused"));
+        return false;
+    }
+    KisPageStoreDetail::setError(error, {});
+    return true;
 }
 
 KisVerifiedCompletion KisPageOwnerLedger::verifyTerminalProviderResult(
@@ -1740,12 +1756,8 @@ bool KisPageOwnerLedger::bindRetirementOperation(
 {
     QMutexLocker lock(&d->mutex);
     auto found = d->operations.find(operation.value);
-    if (found == d->operations.end()) {
-        lock.unlock();
-        return bindProviderOperationImpl(operation, result, true, error);
-    }
     if (!d->completions || found == d->operations.end() ||
-        !found->second.detachedRetirement || found->second.completion.isValid() ||
+        !found->second.retirement || found->second.completion.isValid() ||
         !result.isValid() || !(result.operation == operation) ||
         !d->providers.contains(providerKey(result.replica.provider, result.replica.providerEpoch))) {
         KisPageStoreDetail::setError(error, QStringLiteral("retirement operation was not prepared or result mismatched"));
@@ -1765,7 +1777,7 @@ KisPageOperationId KisPageOwnerLedger::prepareRetirementOperation(KisPageRetirem
     const auto operation = KisPageStoreDetail::allocateMonotonicId<KisPageOperationId>(&s_nextOperationId);
     if (!operation.isValid()) return {};
     record.operationStorage.key() = operation.value;
-    record.operationStorage.mapped() = {{}, true, &record};
+    record.operationStorage.mapped() = {{}, &record};
     if (d->operations.empty() && d->operations.get_allocator() != record.operationStorage.get_allocator())
         d->operations = OperationIndex(std::less<quint64>{}, record.operationStorage.get_allocator());
     const auto inserted = d->operations.insert(std::move(record.operationStorage));
@@ -1783,28 +1795,6 @@ void KisPageOwnerLedger::cancelRetirementOperation(KisPageOperationId operation)
         Q_ASSERT(record);
         record->operationStorage = d->operations.extract(found);
     }
-}
-
-bool KisPageOwnerLedger::bindProviderOperationImpl(
-    KisPageOperationId operation,
-    const KisReplicaOperation &result,
-    bool detachedRetirement,
-    QString *error)
-{
-    QMutexLocker locker(&d->mutex);
-    if (!d->acceptsProviderResultLocked(operation, result, error)) return false;
-    try {
-        if (d->operations.empty())
-            d->operations = OperationIndex(std::less<quint64>{},
-                KisMutationStorageAllocator<std::pair<const quint64, ProviderOperationRecord>>::retained(d->backingBudget));
-        d->operations.emplace(operation.value, ProviderOperationRecord{result.completion, detachedRetirement});
-    }
-    catch (const std::bad_alloc &) {
-        KisPageStoreDetail::setError(error, QStringLiteral("provider operation storage was refused"));
-        return false;
-    }
-    KisPageStoreDetail::setError(error, {});
-    return true;
 }
 
 KisVerifiedCompletion KisPageOwnerLedger::verifyProviderOperation(
@@ -1890,7 +1880,7 @@ qsizetype KisPageOwnerLedger::publicationBlockingOperationCount() const
     QMutexLocker locker(&d->mutex);
     return std::count_if(d->operations.cbegin(), d->operations.cend(),
                          [](const auto &entry) {
-                             return !entry.second.detachedRetirement;
+                             return !entry.second.retirement;
                          });
 }
 

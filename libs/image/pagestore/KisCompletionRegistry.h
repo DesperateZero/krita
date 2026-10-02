@@ -87,6 +87,10 @@ public:
     // Terminal publication only changes/merges prepared records and exposes
     // status before notifying waiters; it performs no storage admission.
     bool complete(const KisCompletionTicket &ticket, KisCompletionStatus status);
+    // Producer-owned, issued Pending ticket: preparation removed capacity
+    // refusal. Invalid identity or repeated terminal publication is a contract
+    // violation, never a business failure after the physical operation.
+    void completePrepared(const KisCompletionTicket &ticket, KisCompletionStatus status) noexcept;
     KisCompletionStatus status(const KisCompletionTicket &ticket) const;
     KisVerifiedCompletion verifyTerminal(const KisCompletionTicket &ticket) const;
     // Atomic check/registration. Ready requires a caller recheck, not an inline

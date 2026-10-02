@@ -67,26 +67,12 @@ void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key)
 {
     auto [entry, inserted] = m_work.try_emplace(key);
     auto &work = entry->second;
-    if (inserted) work.effects = KisPageMetadataCoordinator::HistoryEffects(
-        KisMutationStorageAllocator<KisPageTransitionEffect>(m_work.get_allocator()));
     work.key = key;
     // Protection can disappear between slices, when the root cookie is gone
     // but the cursor has already passed versions that must now be revisited.
     if (!inserted && work.scanning)
         work.repeat = true;
     if (!work.is_linked()) m_ready.push_back(work);
-}
-
-bool KisPageHistoryCollector::finishEffectsLocked(Work &work)
-{
-    while (size_t(work.nextEffect) < work.effects.size()) {
-        if (!m_retirementQueue.acceptEffect(work.effects[work.nextEffect])) return false;
-        ++work.nextEffect;
-    }
-    // Release actual capacity once responsibility has crossed the boundary.
-    KisPageMetadataCoordinator::HistoryEffects(work.effects.get_allocator()).swap(work.effects);
-    work.nextEffect = 0;
-    return true;
 }
 
 void KisPageHistoryCollector::endScanLocked(Work &work, bool finished)
@@ -106,8 +92,6 @@ void KisPageHistoryCollector::endScanLocked(Work &work, bool finished)
 bool KisPageHistoryCollector::collectSliceLocked(
     Work &work, quint64 &visitedVersions, qsizetype &rootBudget)
 {
-    // A previous detach remains in this same node until every effect is accepted.
-    if (!finishEffectsLocked(work)) return false;
     const auto markReachable = [&](const KisPageVersion &version) {
         for (qsizetype i = 0; i < work.candidateCount; ++i)
             if (work.candidates[size_t(i)] == version) work.reachableMask |= quint32(1) << i;
@@ -160,16 +144,20 @@ bool KisPageHistoryCollector::collectSliceLocked(
     for (qsizetype i = 0; i < roots.rootsVisited; ++i) markReachable(roots.versions[size_t(i)]);
     if (!roots.complete) return true;
 
+    KisPageMetadataCoordinator::HistoryEffects effects{
+        KisMutationStorageAllocator<KisPageTransitionEffect>(m_work.get_allocator())};
     quint32 removed = 0;
     if (!m_metadata.discardHistory(work.key, work.candidates.data(), work.candidateCount,
-                                  work.reachableMask, work.effects, &removed)) return false;
+                                  work.reachableMask, effects, &removed)) return false;
     for (qsizetype i = 0; i < work.candidateCount; ++i) {
         if (removed & (quint32(1) << i)) {
             --work.historicalCount;
             m_removeDescriptor(m_ownerContext, work.candidates[size_t(i)]);
         }
     }
-    if (!finishEffectsLocked(work)) return false;
+    // Successful detach committed Debt and preserved every original retirement
+    // record. Transfer cannot refuse or allocate while this owner gate is held.
+    for (const auto &effect : effects) m_retirementQueue.acceptEffect(effect);
     work.after = work.sliceAfter;
     endScanLocked(work, !work.after.isValid());
     if (!work.after.isValid()) {
@@ -404,7 +392,6 @@ KisPageHistoryCollectorSnapshot KisPageHistoryCollector::snapshotLocked() const
     result.retryWakeups = m_retryWakeups;
     result.retryScheduled = m_retryScheduled;
     for (const auto &entry : m_work) {
-        result.pendingEffects += entry.second.effects.size() - entry.second.nextEffect;
         result.cachedReachableVersions += quint64(qPopulationCount(entry.second.reachableMask));
     }
     result.jobScheduled = m_jobScheduled;

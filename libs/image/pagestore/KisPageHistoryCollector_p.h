@@ -26,7 +26,6 @@ struct KisPageHistoryCollectorSnapshot
     qsizetype pendingPages = 0;
     qsizetype deferredPages = 0;
     qsizetype activeScans = 0;
-    qsizetype pendingEffects = 0;
     quint64 retryWakeups = 0;
     bool retryScheduled = false;
     quint64 cachedReachableVersions = 0;
@@ -103,9 +102,6 @@ private:
         qsizetype historicalCount = 0;
         bool scanning = false;
         bool repeat = false;
-        // Metadata prepares this charged packet before authoritative detach.
-        KisPageMetadataCoordinator::HistoryEffects effects;
-        qsizetype nextEffect = 0;
     };
     struct KeyLess {
         bool operator()(const KisPageKey &a, const KisPageKey &b) const {
@@ -118,7 +114,6 @@ private:
         KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>>;
     bool collectSliceLocked(Work &work,
         quint64 &visitedVersions, qsizetype &rootBudget);
-    bool finishEffectsLocked(Work &work);
     bool collectPassLocked();
     void endScanLocked(Work &work, bool finished = false);
 

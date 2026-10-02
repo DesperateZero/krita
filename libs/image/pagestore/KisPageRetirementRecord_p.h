@@ -77,7 +77,6 @@ using KisPagePhysicalBackingIndex = std::map<KisReplicaPhysicalSlotIdentity, Kis
 struct KisPageProviderOperationRecord
 {
     KisCompletionTicket completion;
-    bool detachedRetirement = false;
     KisPageRetirementRecord *retirement = nullptr;
 };
 using KisPageProviderOperationIndex = std::map<quint64, KisPageProviderOperationRecord,
@@ -90,7 +89,7 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     {
         KisPageProviderOperationIndex prepared(std::less<quint64>{},
             KisMutationStorageAllocator<std::pair<const quint64, KisPageProviderOperationRecord>>(storage));
-        prepared.emplace(0, KisPageProviderOperationRecord{{}, true, this});
+        prepared.emplace(0, KisPageProviderOperationRecord{{}, this});
         operationStorage = prepared.extract(0);
         prepareBackingStorage();
     }

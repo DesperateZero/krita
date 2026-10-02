@@ -3123,8 +3123,7 @@ bool KisPageStore::closeSession(QString *error)
     // The public total remains unchanged: this is only the pre-drain gate.
     stats.providerOperations = d->owner.publicationBlockingOperationCount();
     const auto capturedReleases = d->readCoordinator.snapshotLocked().pendingCapturedReleases;
-    const auto historyEffects = d->historyCollector.snapshotLocked().pendingEffects;
-    if (stats.hasOutstandingCapabilities() || capturedReleases || historyEffects) {
+    if (stats.hasOutstandingCapabilities() || capturedReleases) {
         d->closing = false;
         d->readCoordinator.cancelCloseLocked();
         d->retirementQueue.cancelCloseAndSchedule();
@@ -3136,7 +3135,7 @@ bool KisPageStore::closeSession(QString *error)
                                 "proofs=%7 surfaceChanges=%8 removals=%9 "
                                 "providerCalls=%10 blockingOperations=%11 "
                                 "seals=%12 archives=%13 shutdownReplicas=%14 "
-                                "defaultPreparations=%15 capturedReleases=%16 historyEffects=%17")
+                                "defaultPreparations=%15 capturedReleases=%16")
                      .arg(stats.activeTransactions)
                      .arg(stats.retainedSnapshots)
                      .arg(stats.pendingRequests)
@@ -3152,8 +3151,7 @@ bool KisPageStore::closeSession(QString *error)
                      .arg(stats.pendingArchiveOperations)
                      .arg(pendingShutdownReplicas)
                      .arg(stats.activeDefaultPreparations)
-                     .arg(capturedReleases)
-                     .arg(historyEffects));
+                     .arg(capturedReleases));
         return false;
     }
 
@@ -3281,10 +3279,11 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     }
     const quint64 source = completions->registerSource(KisCompletionDomain::HostLogical);
     const KisCompletionTicket ready = source != 0 ? completions->allocatePending(source) : KisCompletionTicket();
-    if (source == 0 || !ready.isValid() || !completions->complete(ready, KisCompletionStatus::Succeeded)) {
+    if (!ready.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore host completion source registration failed"));
         return false;
     }
+    completions->completePrepared(ready, KisCompletionStatus::Succeeded);
     d->completions = completions;
     d->readyHostCompletion = ready;
     for (const auto &surface : initialEpoch.surfaces) {

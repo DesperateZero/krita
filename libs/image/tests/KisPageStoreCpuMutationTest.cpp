@@ -674,6 +674,14 @@ private Q_SLOTS:
         QTest::newRow("ledger-preparation-storage") << 4;
     }
     void historyRefusalPreservesOriginalWork();
+    void historyDetachRequiresRetirementOwner_data()
+    {
+        QTest::addColumn<int>("missing");
+        QTest::newRow("debt-owner") << 0;
+        QTest::newRow("registered-backing") << 1;
+        QTest::newRow("original-retirement-record") << 2;
+    }
+    void historyDetachRequiresRetirementOwner();
     void retirementPreparationRollsBackAtCapacity();
     void synchronousProviderResultsAtCapacity();
     void providerCompletionPreparationRejectsBeforePayload_data()
@@ -4808,7 +4816,6 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     QVERIFY(f.metadata.pageSnapshot(key(), &page));
     QCOMPARE(bool(page.findVersion(f.replica.version)), refusal != 2);
     if (refusal == 2) {
-        QCOMPARE(stats().pendingEffects, qsizetype(0));
         QCOMPARE(capabilityCalls.load(), 0);
     } else QCOMPARE(f.physical.provider->retireCalls.load(), 0);
     blockingDebt.release();
@@ -4822,12 +4829,42 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     QVERIFY(f.retirement.isDrained());
     QVERIFY(f.metadata.pageSnapshot(key(), &page));
     QVERIFY(!page.findVersion(f.replica.version));
-    QCOMPARE(stats().pendingEffects, qsizetype(0));
     QCOMPARE(stats().activeScans, qsizetype(0));
     QVERIFY(!stats().retryScheduled);
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
     QVERIFY(f.live() < before); // The real key/retirement/operation storage was freed.
     QCOMPARE(f.references.loadAcquire(), 1);
+}
+
+void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()
+{
+    QFETCH(int, missing);
+    ReadTerminalFixture f(256 * 1024);
+    f.metadata.attachBackingBudget(f.budget);
+    if (missing) f.metadata.attachRetirementDebtOwner(&f.owner,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<KisPageOwnerLedger *>(p)->prepareRetirementDebt(effects, count, cookie, error);
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->commitRetirementDebt(cookie); },
+        +[](void *p, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(p)->cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    KisPageRetirementRecordPointer retained;
+    if (missing == 1) f.owner.releaseRetiredBacking(f.replica);
+    else if (missing == 2) {
+        retained = f.owner.takeRetirementRecord(f.replica);
+        QVERIFY(retained);
+    }
+    const auto stats = [&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked(); };
+    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
+    f.history.stopAutomaticWakeups();
+    { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
+    KisPageStateSnapshot page;
+    QVERIFY(f.metadata.pageSnapshot(key(), &page));
+    QVERIFY(page.findVersion(f.replica.version));
+    QCOMPARE(f.physical.provider->retireCalls.load(), 0);
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    QCOMPARE(f.retirement.snapshot().pendingReplicas, qsizetype(0));
+    QCOMPARE(stats().pendingPages, qsizetype(1));
 }
 
 void KisPageStoreCpuMutationTest::synchronousProviderResultsAtCapacity()

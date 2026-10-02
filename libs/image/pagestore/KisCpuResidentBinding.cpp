@@ -408,7 +408,7 @@ KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &reque
         return KisReplicaOperation::failed(request.operation,
             QStringLiteral("%1 transfer completion allocation failed").arg(providerLabel));
     }
-    auto failCompletion = qScopeGuard([&] { completions->complete(completion, KisCompletionStatus::Failed); });
+    auto failCompletion = qScopeGuard([&] { completions->completePrepared(completion, KisCompletionStatus::Failed); });
     const void *sourceData = source->acquireRead(request.source.allocationIdentity(), false);
     if (!sourceData) {
         return KisReplicaOperation::failed(request.operation,
@@ -424,10 +424,7 @@ KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &reque
     target->releaseWrite();
     source->releaseRead();
     releaseSource.dismiss();
-    if (!completions->complete(completion, KisCompletionStatus::Succeeded)) {
-        return KisReplicaOperation::failed(request.operation,
-            QStringLiteral("%1 transfer completion publication failed").arg(providerLabel));
-    }
+    completions->completePrepared(completion, KisCompletionStatus::Succeeded);
     failCompletion.dismiss();
     return {KisPageRequestStatus::Ready, request.operation, request.target, completion, {}};
 }

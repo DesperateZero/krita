@@ -142,9 +142,8 @@ KisPageArchiveOperation KisUnifiedSsdPageStore::storeExact(
 
     const auto completion = d->completions->allocatePending(d->completionSource);
     if (!completion.isValid()) return fail(QStringLiteral("legacy swap archive completion preparation failed"));
-    const auto finishFailure = qScopeGuard([&] {
-        if (d->completions->status(completion) == KisCompletionStatus::Pending)
-            d->completions->complete(completion, KisCompletionStatus::Failed);
+    auto finishFailure = qScopeGuard([&] {
+        d->completions->completePrepared(completion, KisCompletionStatus::Failed);
     });
     QByteArray payload(qsizetype(write.sourceLayout.byteSize), char(0));
     const quint64 rowBytes = write.descriptor.minimumRowBytes();
@@ -165,11 +164,8 @@ KisPageArchiveOperation KisUnifiedSsdPageStore::storeExact(
     entry.legacySwapRecord = swapRecord;
     entry.checksum = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
 
-    if (!d->completions->complete(completion,
-                                  KisCompletionStatus::Succeeded)) {
-        d->swapStore->forgetRawRecord(swapRecord);
-        return fail(QStringLiteral("legacy swap archive completion failed"));
-    }
+    d->completions->completePrepared(completion, KisCompletionStatus::Succeeded);
+    finishFailure.dismiss();
     d->storedBytes += entry.layout.byteSize;
     d->records.insert(write.version, entry);
     result.status = KisPageRequestStatus::Ready;

@@ -585,14 +585,13 @@ void KisPageRetirementQueue::retireEffects(
     schedulePassLocked();
 }
 
-bool KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
+void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect) noexcept
 {
     if (m_owner.backingClass(effect.replica) != KisBackingBudgetClass::RetirementDebt)
-        return false;
+        qFatal("Detached history effect has no committed retirement debt");
     m_metadata.removeCpuReadBinding(effect.replica);
     auto record = m_owner.takeRetirementRecord(effect.replica);
-    Q_ASSERT(record);
-    if (!record) return false;
+    if (!record) qFatal("Detached history effect has no original retirement record");
     // Registration fixed this threading permission before any backing existed.
     // Transfer needs neither a provider callback nor additional storage.
     const bool background = record->backgroundRetirement;
@@ -602,7 +601,6 @@ bool KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
     (background ? m_ready : m_pending).push_back(*record.release());
     updatePeaksLocked();
     if (background) schedulePassLocked();
-    return true;
 }
 
 void KisPageRetirementQueue::disarmAutomaticWakeupsLocked()

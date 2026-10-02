@@ -105,8 +105,8 @@ public:
         }
         const auto retirementCompletion = completions->allocatePending(completionSource);
         auto failCompletion = qScopeGuard([&] {
-            completions->complete(completion, KisCompletionStatus::Failed);
-            if (retirementCompletion.isValid()) completions->complete(retirementCompletion, KisCompletionStatus::Failed);
+            completions->completePrepared(completion, KisCompletionStatus::Failed);
+            if (retirementCompletion.isValid()) completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
         });
         if (!retirementCompletion.isValid())
             return KisReplicaOperation::failed(operation, QStringLiteral("CPU retirement completion preparation failed"));
@@ -154,11 +154,7 @@ public:
         allocation.binding = QSharedPointer<CpuResidentBinding>::create(bytes, handle);
         allocations.emplace(handle.allocation.slot, allocation);
         committedBytes += byteSize;
-        if (!completions->complete(completion, KisCompletionStatus::Succeeded)) {
-            committedBytes -= byteSize;
-            allocations.erase(handle.allocation.slot);
-            return KisReplicaOperation::failed(operation, QStringLiteral("CPU completion publication failed"));
-        }
+        completions->completePrepared(completion, KisCompletionStatus::Succeeded);
 
         failCompletion.dismiss();
         KisReplicaOperation result;
@@ -292,10 +288,7 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
     d->consumeOperation(operation);
     d->committedBytes -= replica.layout.byteSize;
     d->allocations.erase(retirement.allocation);
-    if (!d->completions->complete(retirement.completion, KisCompletionStatus::Succeeded)) {
-        return KisReplicaOperation::failed(operation,
-                               QStringLiteral("CPU retirement completion publication failed"));
-    }
+    d->completions->completePrepared(retirement.completion, KisCompletionStatus::Succeeded);
     return {KisPageRequestStatus::Ready, operation, replica, retirement.completion, {}};
 }
 

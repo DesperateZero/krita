@@ -3172,7 +3172,8 @@ bool KisPageMetadataCoordinator::discardHistory(
             }
         }
         const quint64 revision = page->revision;
-        if (!prepared.empty() && d->prepareRetirementDebt) {
+        if (!prepared.empty()) {
+            if (!d->prepareRetirementDebt) { ++shard->rejectedTransitions; return false; }
             lock.unlock();
             const bool accepted = d->prepareRetirementDebt(d->retirementDebtContext,
                 prepared.data(), qsizetype(prepared.size()), &debtCookie, nullptr);

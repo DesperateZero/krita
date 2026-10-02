@@ -277,6 +277,13 @@ bool KisCompletionRegistry::complete(const KisCompletionTicket &ticket,
     return true;
 }
 
+void KisCompletionRegistry::completePrepared(const KisCompletionTicket &ticket,
+                                           KisCompletionStatus status) noexcept
+{
+    if (!complete(ticket, status))
+        qFatal("Prepared completion ticket is invalid or already terminal");
+}
+
 KisPageReadinessStatus KisCompletionRegistry::watchTerminal(const KisCompletionTicket &ticket,
     KisPageReadinessCallback ready, KisPageReadinessSubscription *subscription)
 {

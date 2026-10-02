@@ -256,8 +256,9 @@ private:
     using HistoryEffects = std::vector<KisPageTransitionEffect,
         KisMutationStorageAllocator<KisPageTransitionEffect>>;
     // Select eligible, unreachable records and prepare their exact effects and
-    // Debt before removal. A refusal changes no record and returns no effects.
-    // The caller owns the root proof and retains this packet until accepted.
+    // Debt before removal. Replica effects require a configured Debt owner and
+    // their original registered retirement records. Refusal changes no record;
+    // success transfers the local packet infallibly under the caller's owner gate.
     bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
                         qsizetype count, quint32 reachableMask,
                         HistoryEffects &effects, quint32 *removedMask);

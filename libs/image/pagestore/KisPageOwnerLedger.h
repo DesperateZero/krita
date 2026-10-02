@@ -128,10 +128,11 @@ public:
     bool commitBackingHandoff(
         KisBackingHandoffReservation &&reservation) noexcept;
     /**
-     * Pre-admit every owned replica emitted by a local metadata transition to
+     * Pre-admit every replica emitted by a local metadata transition to
      * RetirementDebt. The returned cookie freezes the exact backing classes;
      * metadata must commit it only after its authoritative detach succeeds,
-     * or cancel it on every rejection/stale retry.
+     * or cancel it on every rejection/stale retry. Each effect must still own
+     * its registered backing and original retirement record.
      */
     bool prepareRetirementDebt(const KisPageTransitionEffect *effects, qsizetype count,
                                quint64 *cookie,
@@ -162,8 +163,9 @@ public:
         KisPageOperationId operation,
         const KisReplicaOperation &result,
         QString *error = nullptr) const;
-    // Owner-only classification: the replica has already been detached from
-    // reachable metadata. A provider must not classify its own result here.
+    // Fill the original record's preinstalled retirement operation only.
+    // Callers must prepare it before invoking the provider; no result-time
+    // allocation or fallback binding is permitted.
     bool bindRetirementOperation(KisPageOperationId operation,
                                  const KisReplicaOperation &result,
                                  QString *error = nullptr);
@@ -213,10 +215,6 @@ private:
                                QString *error);
     void commitPreparedBackingChanges(quint64 cookie) noexcept;
     void cancelPreparedBackingChanges(quint64 cookie) noexcept;
-    bool bindProviderOperationImpl(KisPageOperationId operation,
-                                   const KisReplicaOperation &result,
-                                   bool detachedRetirement,
-                                   QString *error);
     class Private;
     QScopedPointer<Private> d;
     friend class KisPageOwnerDomainAdmission;
