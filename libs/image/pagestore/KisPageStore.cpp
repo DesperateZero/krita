@@ -56,12 +56,6 @@ bool ownsPreparedReplica(const KisReplicaHandle &replica, const KisPageVersion &
         && !(replica.allocationIdentity() == source.allocationIdentity());
 }
 
-bool needsDefaultMaterialization(const KisPageVersionStateSnapshot *state,
-                                 const KisPageVersion &version)
-{
-    return version.isDefaultPixel() && (!state || state->isVirtualDefault());
-}
-
 struct WriteClosureRecord {
     KisPageTransition transition(KisPageTransitionKind kind) const
     {
@@ -530,11 +524,10 @@ public:
                                  QMutexLocker<QMutex> *locker,
                                  QString *error)
     {
-        KisPageStateSnapshot existing;
+        KisPageMetadataCoordinator::VersionInfo existing;
         const auto isMaterialized = [&] {
             if (!metadata.versionSnapshot(version, &existing)) return false;
-            const auto *existingVersion = existing.findVersion(version);
-            return existingVersion && !needsDefaultMaterialization(existingVersion, version);
+            return existing.version.isValid() && !existing.needsDefaultMaterialization(version);
         };
         if (isMaterialized()) {
             KisPageStoreDetail::setError(error, {});
@@ -646,14 +639,13 @@ public:
         // A competing caller may have completed between provider allocation
         // and registration. Keep exactly one authority and retire the loser.
         if (metadata.versionSnapshot(version, &existing)) {
-            const auto *existingVersion = existing.findVersion(version);
-            if (existingVersion && !needsDefaultMaterialization(existingVersion, version)) {
+            if (existing.version.isValid() && !existing.needsDefaultMaterialization(version)) {
                 retireRejected();
                 KisPageStoreDetail::setError(error, {});
                 return true;
             }
             KisPageTransition attach;
-            attach.kind = existingVersion ? KisPageTransitionKind::MaterializeDefault
+            attach.kind = existing.version.isValid() ? KisPageTransitionKind::MaterializeDefault
                                           : KisPageTransitionKind::AttachHistoricalDefault;
             attach.version = version;
             attach.target = allocation.replica;
@@ -2615,12 +2607,23 @@ KisPageStorePublicationStatistics KisPageStore::publicationStatistics() const
 class KisCapturedReadView::Private
 {
 public:
+    using DefaultCache = std::map<quint64, QSharedPointer<const KisCpuDefaultReadBuffer>, std::less<quint64>,
+        KisMutationStorageAllocator<std::pair<const quint64, QSharedPointer<const KisCpuDefaultReadBuffer>>>>;
+    explicit Private(KisBackingBudgetController &budget)
+        : defaults(std::less<quint64>{}, DefaultCache::allocator_type(&budget)) {}
+    static bool lessKey(const KisPageKey &a, const KisPageKey &b)
+    {
+        return std::tie(a.surface.value, a.page.row, a.page.column) <
+               std::tie(b.surface.value, b.page.row, b.page.column);
+    }
     bool surfaceState(KisSurfaceId surface, KisSurfaceEpochState *state) const
     {
-        const auto found = stagedSurfaces.constFind(surface.value);
-        if (found == stagedSurfaces.constEnd())
+        const auto &surfaces = release->stagedSurfaces;
+        const auto found = std::lower_bound(surfaces.begin(), surfaces.end(), surface.value,
+            [](const auto &candidate, quint64 id) { return candidate.surface.value < id; });
+        if (found == surfaces.end() || !(found->surface == surface))
             return root.surfaceState(surface, state);
-        *state = found.value();
+        *state = *found;
         return true;
     }
 
@@ -2628,20 +2631,17 @@ public:
     {
         if (!key.isValid())
             return false;
-        const auto less = [](const KisPageKey &a, const KisPageKey &b) {
-            return std::tie(a.surface.value, a.page.row, a.page.column) <
-                   std::tie(b.surface.value, b.page.row, b.page.column);
-        };
         const auto &versions = release->versions;
         const auto found = std::lower_bound(versions.begin(), versions.end(), key,
-            [&](const KisPageVersion &candidate, const KisPageKey &value) { return less(candidate.key, value); });
+            [&](const KisPageVersion &candidate, const KisPageKey &value) { return lessKey(candidate.key, value); });
         if (found != versions.end() && found->key == key) {
             *version = *found;
             return true;
         }
         if (!root.resolve(key, version))
             return false;
-        if (overlayTransaction.isValid() && (version->isDefaultPixel() || removedPages.contains(key))) {
+        if (overlayTransaction.isValid() && (version->isDefaultPixel()
+            || std::binary_search(release->removedPages.begin(), release->removedPages.end(), key, lessKey))) {
             KisSurfaceEpochState surface;
             if (!surfaceState(key.surface, &surface))
                 return false;
@@ -2650,38 +2650,43 @@ public:
         return true;
     }
     QSharedPointer<const KisCpuDefaultReadBuffer> defaultReadBuffer(const KisPageVersion &version) const
+    try
     {
         QMutexLocker lock(&defaultMutex);
-        const auto found = defaults.constFind(version.key.surface.value);
-        if (found != defaults.constEnd())
-            return found.value();
+        const auto found = defaults.find(version.key.surface.value);
+        if (found != defaults.end()) return found->second;
         KisSurfaceEpochState surface;
         if (!surfaceState(version.key.surface, &surface)
             || surface.defaultPixelRevision != version.defaultPixelRevision)
             return {};
-        auto buffer = owner->defaultStorage.readBuffer(surface);
-        if (buffer)
-            defaults.insert(version.key.surface.value, buffer);
-        return buffer;
+        const auto insertion = defaults.try_emplace(version.key.surface.value);
+        const auto slot = insertion.first;
+        const bool inserted = insertion.second;
+        Q_ASSERT(inserted); Q_UNUSED(inserted);
+        const auto rollback = qScopeGuard([&] { if (!slot->second) defaults.erase(slot); });
+        slot->second = owner->defaultStorage.readBuffer(surface);
+        return slot->second;
     }
+    catch (const std::bad_alloc &) { return {}; }
 
     ~Private()
     {
         if (!owner)
             return;
         owner->readCoordinator.releaseCapturedView(std::move(release));
-        KisPageStore::PrivateReleaser::cleanup(owner);
     }
-    KisPageStore::Private *owner = nullptr;
+    // Last member to release: all ordinary funded arrays/root/defaults must
+    // die before the Store controller. The shared allocation itself uses the
+    // original retained allocator, covering control-block disposal afterward.
+    std::unique_ptr<KisPageStore::Private, void (*)(KisPageStore::Private *)>
+        owner{nullptr, &KisPageStore::PrivateReleaser::cleanup};
     KisImageEpochRootSnapshot root;
     KisImageEpochSnapshotToken retention;
     KisPageVersion exactVersion;
     KisPageTransactionId overlayTransaction;
     KisPageCapturedReleasePointer release;
-    QSet<KisPageKey> removedPages;
-    QHash<quint64, KisSurfaceEpochState> stagedSurfaces;
     mutable QMutex defaultMutex;
-    mutable QHash<quint64, QSharedPointer<const KisCpuDefaultReadBuffer>> defaults;
+    mutable DefaultCache defaults;
 };
 
 KisCapturedReadView::~KisCapturedReadView() = default;
@@ -2825,7 +2830,7 @@ void KisCpuReadGuard::reset()
     m_byteSize = 0;
     // Physical unpin precedes root release/GC. The retained root keeps the
     // logical version non-discardable for the entire native access lifetime.
-    m_scope.clear();
+    m_scope.reset();
 }
 KisPageVersion KisCpuReadGuard::version() const
 {
@@ -2888,7 +2893,9 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     // no root/token obligation. The version capacity is prepared similarly
     // below, then selection is repeated under the owner gate before claiming.
     try {
-        result.d = QSharedPointer<KisCapturedReadView::Private>::create();
+        result.d = std::allocate_shared<KisCapturedReadView::Private>(
+            KisMutationStorageAllocator<KisCapturedReadView::Private>::retained(&d->backingBudget),
+            d->backingBudget);
         result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope storage is unavailable"));
@@ -2896,7 +2903,6 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     }
     QMutexLocker locker(&d->mutex);
     KisImageEpochRootSnapshot root;
-    KisPreparedPageSet delta;
     KisPageVersion exact;
     for (;;) {
         if (!d->operational || d->closing) {
@@ -2928,12 +2934,15 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
             return {};
         }
         if (selector.kind != KisPageReadViewKind::TransactionOverlay) break;
-        delta = d->publicationCoordinator.transactionDeltaLocked(selector.transaction);
-        if (result.d->release->versions.capacity() >= size_t(delta.proofs.size())) break;
+        size_t versions = 0, removals = 0, surfaces = 0;
+        if (d->publicationCoordinator.captureDeltaLocked(selector.transaction, *result.d->release,
+                                                         &versions, &removals, &surfaces)) break;
         ++d->activeProviderCalls;
         locker.unlock();
         try {
-            result.d->release->versions.reserve(size_t(delta.proofs.size()));
+            result.d->release->versions.reserve(versions);
+            result.d->release->removedPages.reserve(removals);
+            result.d->release->stagedSurfaces.reserve(surfaces);
         } catch (const std::bad_alloc &) {
             locker.relock(); --d->activeProviderCalls;
             KisPageStoreDetail::setError(error, QStringLiteral("read scope version storage is unavailable"));
@@ -2943,15 +2952,13 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     }
     auto &release = *result.d->release;
     if (selector.kind == KisPageReadViewKind::TransactionOverlay) {
-        for (const auto &proof : delta.proofs) release.versions.push_back(proof.authority.version);
         std::sort(release.versions.begin(), release.versions.end(), [](const auto &a, const auto &b) {
-            return std::tie(a.key.surface.value, a.key.page.row, a.key.page.column) <
-                   std::tie(b.key.surface.value, b.key.page.row, b.key.page.column);
+            return KisCapturedReadView::Private::lessKey(a.key, b.key);
         });
+        std::sort(release.removedPages.begin(), release.removedPages.end(), KisCapturedReadView::Private::lessKey);
+        std::sort(release.stagedSurfaces.begin(), release.stagedSurfaces.end(),
+            [](const auto &a, const auto &b) { return a.surface.value < b.surface.value; });
         result.d->overlayTransaction = selector.transaction;
-        result.d->removedPages = QSet<KisPageKey>(delta.removedPages.cbegin(), delta.removedPages.cend());
-        for (const auto &change : delta.surfaceChanges)
-            result.d->stagedSurfaces.insert(change.after.surface.value, change.after);
     }
     const auto retained = d->epochs.retainSnapshot(root.epoch());
     if (!retained.isValid()) {
@@ -2984,7 +2991,7 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         return {};
     }
     d->lifetimeReferences.ref();
-    result.d->owner = d;
+    result.d->owner.reset(d);
     result.d->root = std::move(root);
     result.d->retention = retained.token;
     result.d->exactVersion = exact;
@@ -3389,7 +3396,7 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
         valid = providers[i]->validate(replicas[i], descriptor) && valid;
     locker.relock();
     --d->activeProviderCalls;
-    KisPageStateSnapshot existingPage;
+    KisPageMetadataCoordinator::VersionInfo existingPage;
     if (!valid || d->operational || d->closed || d->metadata.versionSnapshot(version, &existingPage)) {
         KisPageStoreDetail::setError(error, QStringLiteral("initial page replicas failed provider validation"));
         return false;
@@ -3576,7 +3583,7 @@ bool KisPageStore::finalizeInitialization(QString *error)
         return false;
     }
     for (const KisPageVersion &version : d->epochs.captureCommittedRoot().manifest()) {
-        KisPageStateSnapshot page;
+        KisPageMetadataCoordinator::VersionInfo page;
         if (!d->publicationCoordinator.descriptorLocked(version) || !d->metadata.versionSnapshot(version, &page)
             || !(page.publishedGeneration == version.generation)) {
             KisPageStoreDetail::setError(error, QStringLiteral("PageStore initial manifest is not fully adopted"));
@@ -3678,7 +3685,7 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
     QMutexLocker locker(&d->mutex);
     d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup);
     if (!d->operational || !view.isValidFor(key) || !access.isValid()
-        || (captured && (!captured->d || captured->d->owner != d.data()))) {
+        || (captured && (!captured->d || captured->d->owner.get() != d.data()))) {
         request.error = QStringLiteral("PageStore read request is invalid or unavailable");
         return request;
     }
@@ -3691,13 +3698,32 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
     QString preparationError;
     if (!cleanup.prepareRequestLocked(locker, &preparationError)) return fail(preparationError);
     KisPageVersion version;
-    KisPageStateSnapshot page;
+    KisPageMetadataCoordinator::VersionInfo page;
+    KisPageMetadataCoordinator::ReplicaCandidates candidates{
+        KisMutationStorageAllocator<KisPageMetadataCoordinator::ReplicaCandidate>(&d->backingBudget)};
+    const auto snapshotVersion = [&] {
+        for (;;) {
+            const bool exists = d->metadata.versionSnapshot(version, &page);
+            // Prepare the first physical candidate before materializing a
+            // default. Once capacity is ready, selection and AcquireRead keep
+            // the original owner gate, including after default installation.
+            const size_t count = std::max<size_t>(1, exists ? page.replicaCount : 0);
+            if (candidates.capacity() >= count)
+                return exists && d->metadata.versionSnapshot(version, &page, &candidates);
+            ++d->activeProviderCalls;
+            locker.unlock();
+            const auto relock = qScopeGuard([&] { locker.relock(); --d->activeProviderCalls; });
+            candidates.reserve(count);
+        }
+    };
     if (!(captured ? captured->resolvePageVersion(key, &version)
                    : d->publicationCoordinator.resolveVersionLocked(key, view, &version))) {
         return fail(QStringLiteral("PageStore read view does not resolve a page"));
     }
-    const bool hasPage = d->metadata.versionSnapshot(version, &page);
-    if (!hasPage || needsDefaultMaterialization(page.findVersion(version), version)) {
+    bool hasPage = false;
+    try { hasPage = snapshotVersion(); }
+    catch (const std::bad_alloc &) { return fail(QStringLiteral("exact replica candidate storage was refused")); }
+    if (!hasPage || page.needsDefaultMaterialization(version)) {
         KisSurfaceEpochState surface;
         KisImageEpochId publishedEpoch;
         if (captured) {
@@ -3729,19 +3755,21 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
                     ? QStringLiteral("committed default identity is unavailable") : failure);
             }
         }
-        if (!d->ensureDefaultPageLocked(version, publishedEpoch, surface, access, priority, &locker, &failure)
-            || !d->metadata.versionSnapshot(version, &page)) {
+        if (!d->ensureDefaultPageLocked(version, publishedEpoch, surface, access, priority, &locker, &failure)) {
             return fail(failure.isEmpty()
                 ? QStringLiteral("PageStore default page materialization failed") : failure);
         }
+        try {
+            if (!snapshotVersion()) return fail(QStringLiteral("PageStore default metadata is unavailable"));
+        } catch (const std::bad_alloc &) { return fail(QStringLiteral("exact replica candidate storage was refused")); }
     }
     // Keep the exact version captured above, including across provider work.
-    const KisPageVersionStateSnapshot *versionState = page.findVersion(version);
-    const KisReplicaStateSnapshot *replica = nullptr;
+    const KisPageMetadataCoordinator::ReplicaCandidate *replica = nullptr;
     QSharedPointer<KisPageReplicaProvider> provider;
-    if (versionState) {
-        const KisReplicaStateSnapshot *authorityReplica =
-            versionState->findReplica(versionState->authority);
+    if (page.version.isValid()) {
+        const auto authority = std::find_if(candidates.begin(), candidates.end(),
+            [&](const auto &candidate) { return candidate.replica == page.authority; });
+        const auto *authorityReplica = authority == candidates.end() ? nullptr : &*authority;
         if (authorityReplica && authorityReplica->validity == KisReplicaValidity::Valid
             && authorityReplica->replica.domain == access.domain) {
             const QSharedPointer<KisPageReplicaProvider> authorityProvider =
@@ -3752,8 +3780,8 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
             }
         }
     }
-    if (versionState && !replica) {
-        for (const KisReplicaStateSnapshot &candidate : versionState->replicas) {
+    if (page.version.isValid() && !replica) {
+        for (const auto &candidate : candidates) {
             if (candidate.validity != KisReplicaValidity::Valid || candidate.replica.domain != access.domain) {
                 continue;
             }

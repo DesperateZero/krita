@@ -2011,30 +2011,29 @@ try
         return false;
     }
 
-    KisPageStateSnapshot snapshot;
+    KisPageMetadataCoordinator::VersionInfo snapshot;
     if (!metadata.versionSnapshot(version, &snapshot)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page metadata is unavailable"));
         return false;
     }
-    const KisPageVersionStateSnapshot *prepared = snapshot.findVersion(version);
-    if (!prepared || prepared->publication != KisPagePublicationState::Prepared ||
-        !(prepared->preparedBy == transaction) || !prepared->authority.isValid()) {
+    if (!snapshot.version.isValid() || snapshot.publication != KisPagePublicationState::Prepared ||
+        !(snapshot.preparedBy == transaction) || !snapshot.authority.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("page is not prepared by the requested transaction"));
         return false;
     }
 
     auto record = prepareLedgerNode<SealedProofRecord>(budget);
     const QSharedPointer<KisPageReplicaProvider> authorityProvider =
-        provider(prepared->authority.provider, prepared->authority.providerEpoch);
+        provider(snapshot.authority.provider, snapshot.authority.providerEpoch);
     if (!authorityProvider ||
-        !authorityProvider->validate(prepared->authority, descriptor)) {
+        !authorityProvider->validate(snapshot.authority, descriptor)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page authority failed provider validation"));
         return false;
     }
 
     KisPreparedPageProof sealed;
     sealed.transaction = transaction;
-    sealed.authority = prepared->authority;
+    sealed.authority = snapshot.authority;
     sealed.producerCompletion = producerCompletion;
     QMutexLocker locker(&d->mutex);
     if (!d->completions || d->nextValidationStamp == 0 ||
@@ -2093,21 +2092,17 @@ bool KisPageOwnerLedger::validatePreparedPage(
         return false;
     }
 
-    KisPageStateSnapshot snapshot;
-    const KisPageVersionStateSnapshot *prepared = nullptr;
-    if (metadata.versionSnapshot(proof.authority.version, &snapshot)) {
-        prepared = snapshot.findVersion(proof.authority.version);
-    }
-    if (!prepared || prepared->publication != KisPagePublicationState::Prepared ||
-        !(prepared->preparedBy == proof.transaction) ||
-        !(prepared->authority == proof.authority)) {
+    KisPageMetadataCoordinator::VersionInfo snapshot;
+    if (!metadata.versionSnapshot(proof.authority.version, &snapshot) || !snapshot.version.isValid()
+        || snapshot.publication != KisPagePublicationState::Prepared
+        || !(snapshot.preparedBy == proof.transaction) || !(snapshot.authority == proof.authority)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof no longer matches metadata"));
         return false;
     }
     const QSharedPointer<KisPageReplicaProvider> authorityProvider =
         provider(proof.authority.provider, proof.authority.providerEpoch);
     if (!authorityProvider ||
-        !authorityProvider->validate(prepared->authority, descriptor)) {
+        !authorityProvider->validate(snapshot.authority, descriptor)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof no longer matches provider state"));
         return false;
     }

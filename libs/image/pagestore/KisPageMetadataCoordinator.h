@@ -229,7 +229,32 @@ private:
     bool mutationBaseSnapshot(const KisPageVersion &base,
                               const KisPageVersion &sealed,
                               KisPageStateSnapshot *snapshot) const;
-    bool versionSnapshot(const KisPageVersion &version, KisPageStateSnapshot *snapshot) const;
+    // Original exact query: scalar facts only. Generic read selection supplies
+    // its funded candidate array; leases/tokens are never exported here.
+    struct VersionInfo {
+        KisPageVersion version;
+        KisPageGeneration publishedGeneration;
+        KisPagePublicationState publication = KisPagePublicationState::Unpublished;
+        KisPageTransactionId preparedBy;
+        KisReplicaHandle authority;
+        quint32 replicaCount = 0;
+        bool captured = false;
+        bool isVirtualDefault() const {
+            return version.isDefaultPixel() && !replicaCount && !authority.isValid()
+                && (publication == KisPagePublicationState::Published
+                    || publication == KisPagePublicationState::Historical);
+        }
+        bool needsDefaultMaterialization(const KisPageVersion &identity) const {
+            return identity.isDefaultPixel() && (!version.isValid() || isVirtualDefault());
+        }
+    };
+    struct ReplicaCandidate {
+        KisReplicaHandle replica;
+        KisReplicaValidity validity;
+    };
+    using ReplicaCandidates = std::vector<ReplicaCandidate, KisMutationStorageAllocator<ReplicaCandidate>>;
+    bool versionSnapshot(const KisPageVersion &version, VersionInfo *snapshot,
+                         ReplicaCandidates *replicas = nullptr) const;
     // Cold exact query for original read-release records. Completion may clear
     // multiple leases carrying the same ticket; this never grants write access.
     bool queryLastUsePending(const KisReplicaHandle &replica,
@@ -414,8 +439,9 @@ private:
     KisPageTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);
-    bool projectVersionPair(const KisPageVersion &base, const KisPageVersion &sealed,
-                            KisPageStateSnapshot *snapshot, bool countMutationInput) const;
+    KisPageTransitionResult applyCapturedProtection(const KisPageKey &key,
+                                                   const KisPageTransition &transition,
+                                                   KisPageMetadataReadCleanup *cleanup = nullptr);
     class Private;
     QScopedPointer<Private> d;
 };

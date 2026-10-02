@@ -33,6 +33,7 @@ struct KisPagePublicationCoordinatorSnapshot {
 };
 
 class KisPageReadCleanup;
+struct KisPageCapturedRelease;
 
 /**
  * Owner-gated transaction publication state.
@@ -166,6 +167,8 @@ public:
 
     KisPreparedPageProof findPreparedProofLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;
+    bool captureDeltaLocked(KisPageTransactionId transaction, KisPageCapturedRelease &capture,
+                            size_t *versions, size_t *removals, size_t *surfaces) const;
     bool stagesRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
     KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
         const KisPageTransaction &transaction,

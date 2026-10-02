@@ -2112,13 +2112,13 @@ KisPageTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTran
     // provider allocation. Acquire its actual authority pin, not a stale null
     // source; the target still initializes directly from the exact default.
     if (write.baseVersion.isDefaultPixel() && !write.source.isValid()) {
-        KisPageStateSnapshot current;
-        if (!metadata->versionSnapshot(write.baseVersion, &current) || current.versions.isEmpty()) {
+        KisPageMetadataCoordinator::VersionInfo current;
+        if (!metadata->versionSnapshot(write.baseVersion, &current) || !current.version.isValid()) {
             KisPageTransitionResult rejected;
             rejected.rejectionReason = QStringLiteral("write default base disappeared");
             return rejected;
         }
-        write.source = current.versions.first().authority;
+        write.source = current.authority;
     }
     if (!initialized)
         return metadata->applyOwner(write.version.key, write);
@@ -2312,13 +2312,11 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
 
 KisPageTransitionResult KisPageWriteCoordinator::cancelPrivateWrite(KisPageTransition write)
 {
-    KisPageStateSnapshot snapshot;
-    if (metadata->versionSnapshot(write.version, &snapshot)) {
-        if (const auto *version = snapshot.findVersion(write.version)) {
-            write.kind = version->publication == KisPagePublicationState::Prepared
-                ? KisPageTransitionKind::AbortPreparedVersion : KisPageTransitionKind::CancelWrite;
-            return metadata->applyOwner(write.version.key, write);
-        }
+    KisPageMetadataCoordinator::VersionInfo snapshot;
+    if (metadata->versionSnapshot(write.version, &snapshot) && snapshot.version.isValid()) {
+        write.kind = snapshot.publication == KisPagePublicationState::Prepared
+            ? KisPageTransitionKind::AbortPreparedVersion : KisPageTransitionKind::CancelWrite;
+        return metadata->applyOwner(write.version.key, write);
     }
     KisPageTransitionResult rejected;
     rejected.rejectionReason = QStringLiteral("private write version is absent");

@@ -913,11 +913,10 @@ bool KisPageReadCoordinator::belongsToPreparedTransactionLocked(
     const KisPageVersion &version,
     KisPageTransactionId transaction) const
 {
-    KisPageStateSnapshot page;
+    KisPageMetadataCoordinator::VersionInfo page;
     if (!m_metadata.versionSnapshot(version, &page)) return false;
-    const auto *state = page.findVersion(version);
-    return state && state->publication == KisPagePublicationState::Prepared &&
-        state->preparedBy == transaction && state->capturedReadViews.isEmpty();
+    return page.version.isValid() && page.publication == KisPagePublicationState::Prepared &&
+        page.preparedBy == transaction && !page.captured;
 }
 
 bool KisPageReadCoordinator::protectsPreparedTransactionLocked(
@@ -1035,7 +1034,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
                 release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
                 release.version = version;
                 release.readView = pending.token;
-                if (!m_metadata.applyOwner(version.key, release).accepted) {
+                if (!m_metadata.applyOwner(version.key, release, &pending.cleanup).accepted) {
                     pending.processing = false;
                     return false;
                 }

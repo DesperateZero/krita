@@ -1948,21 +1948,21 @@ MetadataArenaDemand newMetadataDemand(const Snapshots &snapshots)
     return result;
 }
 
-bool readableVersion(const MetadataShard &shard, const KisPageVersion &version, KisPageVersionStateSnapshot *snapshot)
+const KisVersionRecord *readableVersion(const MetadataShard &shard, const KisPageVersion &identity)
 {
-    const auto page = shard.pages.constFind(version.key);
-    if (page == shard.pages.constEnd() || !shard.records.snapshot(version, snapshot))
-        return false;
-    return snapshot->publication == KisPagePublicationState::Published
-        || snapshot->publication == KisPagePublicationState::Historical
-        || (snapshot->publication == KisPagePublicationState::Prepared && !snapshot->capturedReadViews.isEmpty());
+    KisVersionSlotId slot;
+    if (!shard.pages.contains(identity.key) || !shard.records.findVersion(identity, &slot)) return nullptr;
+    const auto *version = shard.records.version(slot);
+    return version && (version->publication == KisPagePublicationState::Published
+        || version->publication == KisPagePublicationState::Historical
+        || (version->publication == KisPagePublicationState::Prepared && version->capturedReadViews.isValid()))
+        ? version : nullptr; // Borrowed only while the caller holds the shard gate.
 }
 
-bool cpuReadableReplica(const KisReplicaStateSnapshot &state)
+bool cpuReadableReplica(const KisReplicaRecord &state, const KisPageVersion &version)
 {
-    return state.validity == KisReplicaValidity::Valid && state.replica.isValid()
-        && (state.replica.domain == KisPageAccessDomain::CpuRam
-            || state.replica.domain == KisPageAccessDomain::UmaShared);
+    return state.validity == KisReplicaValidity::Valid && replicaHandle(state, version).isValid()
+        && (state.domain == KisPageAccessDomain::CpuRam || state.domain == KisPageAccessDomain::UmaShared);
 }
 
 } // namespace
@@ -2739,11 +2739,10 @@ KisPageMetadataCoordinator::installCpuReadBinding(const KisReplicaHandle &replic
     QMutexLocker locker(&shard->mutex);
     // Provider lookup happened outside this lock. Revalidate the exact
     // replica before publishing a cache entry; never resurrect retired data.
-    KisPageVersionStateSnapshot version;
-    if (!readableVersion(*shard, replica.version, &version)
-        || std::none_of(version.replicas.cbegin(), version.replicas.cend(), [&](const auto &state) {
-               return state.replica == replica && cpuReadableReplica(state);
-           }))
+    const auto *version = readableVersion(*shard, replica.version);
+    KisReplicaSlotId slot;
+    if (!version || !shard->records.findReplicaSlot(version->slot, replica, &slot)
+        || !cpuReadableReplica(*shard->records.replica(slot), replica.version))
         return {};
     const auto existing = shard->cpuBindings.constFind(replica.version);
     if (existing != shard->cpuBindings.constEnd())
@@ -2793,21 +2792,22 @@ KisReplicaHandle KisPageMetadataCoordinator::cpuReadReplica(const KisPageVersion
     if (!shard)
         return {};
     QMutexLocker locker(&shard->mutex);
-    KisPageVersionStateSnapshot state;
-    if (!readableVersion(*shard, version, &state))
+    const auto *state = readableVersion(*shard, version);
+    if (!state)
         return {};
     // Cold discovery does not export/copy a diagnostic page snapshot. Prefer
     // a ready CPU authority, otherwise require an unambiguous ready CPU
     // replica. Authority elsewhere alone is not a materialization request.
-    const auto *authority = state.findReplica(state.authority);
-    if (authority && cpuReadableReplica(*authority)) return authority->replica;
+    const auto *authority = shard->records.replica(state->authorityReplica);
+    if (authority && cpuReadableReplica(*authority, version)) return replicaHandle(*authority, version);
     KisReplicaHandle selected;
-    for (const auto &candidate : state.replicas) {
-        if (!cpuReadableReplica(candidate))
-            continue;
+    for (auto slot = state->firstReplica; slot.isValid();) {
+        const auto *candidate = shard->records.replica(slot);
+        slot = candidate->nextReplica;
+        if (!cpuReadableReplica(*candidate, version)) continue;
         if (selected.isValid())
             return {};
-        selected = candidate.replica;
+        selected = replicaHandle(*candidate, version);
     }
     return selected;
 }
@@ -2973,14 +2973,6 @@ bool KisPageMetadataCoordinator::mutationBaseSnapshot(const KisPageVersion &base
                                                       const KisPageVersion &sealed,
                                                       KisPageStateSnapshot *snapshot) const
 {
-    return projectVersionPair(base, sealed, snapshot, true);
-}
-
-bool KisPageMetadataCoordinator::projectVersionPair(const KisPageVersion &base,
-                                                    const KisPageVersion &sealed,
-                                                    KisPageStateSnapshot *snapshot,
-                                                    bool countMutationInput) const
-{
     auto *shard = d->shardFor(base.key);
     if (!shard || !snapshot || (sealed.isValid() && !(sealed.key == base.key)))
         return false;
@@ -2997,17 +2989,52 @@ bool KisPageMetadataCoordinator::projectVersionPair(const KisPageVersion &base,
             snapshot->versions.append(std::move(version));
         }
     }
-    if (countMutationInput) {
-        shard->mutationBaseVersionInputs += quint64(snapshot->versions.size());
-        if (kisOnPageStoreReclamationThread())
-            shard->backgroundMutationBaseVersionInputs += quint64(snapshot->versions.size());
-    }
+    shard->mutationBaseVersionInputs += quint64(snapshot->versions.size());
+    if (kisOnPageStoreReclamationThread())
+        shard->backgroundMutationBaseVersionInputs += quint64(snapshot->versions.size());
     return true;
 }
 
-bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &version, KisPageStateSnapshot *snapshot) const
+bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity, VersionInfo *snapshot,
+                                                 ReplicaCandidates *replicas) const
 {
-    return projectVersionPair(version, {}, snapshot, false);
+    auto *shard = d->shardFor(identity.key);
+    if (!shard || !snapshot) return false;
+    for (;;) {
+        QMutexLocker lock(&shard->mutex);
+        const auto page = shard->pages.constFind(identity.key);
+        if (page == shard->pages.cend()) return false;
+        VersionInfo next;
+        const auto *published = shard->records.version(page->publishedVersion);
+        Q_ASSERT(published);
+        next.publishedGeneration = published ? published->version.generation : KisPageGeneration{};
+        KisVersionSlotId slot;
+        if (shard->records.findVersion(identity, &slot)) {
+            const auto *version = shard->records.version(slot);
+            next.version = version->version;
+            next.publication = version->publication;
+            next.preparedBy = version->preparedBy;
+            next.authority = shard->records.projectReplica(version->authorityReplica);
+            next.replicaCount = version->replicaCount;
+            next.captured = version->capturedReadViews.isValid();
+            if (replicas) {
+                if (replicas->capacity() < version->replicaCount) {
+                    const auto count = version->replicaCount;
+                    lock.unlock();
+                    replicas->reserve(count); // Refusal precedes changing the output.
+                    continue; // Re-select one complete shard cut after preparation.
+                }
+                replicas->clear();
+                for (auto replicaSlot = version->firstReplica; replicaSlot.isValid();) {
+                    const auto *replica = shard->records.replica(replicaSlot);
+                    replicas->push_back({replicaHandle(*replica, identity), replica->validity});
+                    replicaSlot = replica->nextReplica;
+                }
+            }
+        } else if (replicas) replicas->clear();
+        *snapshot = next;
+        return true; // Existing page and missing exact version remain distinct.
+    }
 }
 
 bool KisPageMetadataCoordinator::canAddTransientVersion(const KisPageVersion &target, quint32 limit) const
@@ -3296,6 +3323,9 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyOwner(const KisPageKey 
 {
     if (transition.kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, transition, cleanup);
+    if (transition.kind == KisPageTransitionKind::RetainCapturedVersion
+        || transition.kind == KisPageTransitionKind::ReleaseCapturedVersion)
+        return applyCapturedProtection(key, transition, cleanup);
     return applyOwnerSequence(key, {transition});
 }
 
@@ -3311,6 +3341,9 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const Kis
     }
     if (transitions.size() == 1 && transitions.first().kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, transitions.first());
+    if (transitions.size() == 1 && (transitions.first().kind == KisPageTransitionKind::RetainCapturedVersion
+                                  || transitions.first().kind == KisPageTransitionKind::ReleaseCapturedVersion))
+        return applyCapturedProtection(key, transitions.first());
     return applyProjectedSequence(key, transitions);
 }
 
@@ -3366,6 +3399,112 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     ++shard->readProtectionTransitions;
     result.accepted = true;
     return result;
+}
+
+KisPageTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
+    const KisPageKey &key, const KisPageTransition &transition, KisPageMetadataReadCleanup *cleanup)
+{
+    KisPageTransitionResult result;
+    const bool retain = transition.kind == KisPageTransitionKind::RetainCapturedVersion;
+    if ((!retain && transition.kind != KisPageTransitionKind::ReleaseCapturedVersion)
+        || !(transition.version.key == key) || !transition.readView.isValid()
+        || (cleanup && cleanup->m_authority && cleanup->m_authority != d->budgetAuthority)) {
+        result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
+        return result;
+    }
+    auto *shard = d->shardFor(key);
+    if (!shard) {
+        result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
+        return result;
+    }
+    for (;;) {
+        MetadataArenaGrowth growth;
+        MetadataArenas::ReleasedBlocks released;
+        QMutexLocker lock(&shard->mutex);
+        auto page = shard->pages.find(key);
+        KisVersionSlotId versionSlot;
+        if (page == shard->pages.end() || !shard->canMutate(key, page.value())) {
+            result.rejectionReason = QStringLiteral("captured version is missing or reserved for publication");
+            return result;
+        }
+        ++shard->localTransitionSequences;
+        const bool background = kisOnPageStoreReclamationThread();
+        if (background) ++shard->backgroundLocalTransitionSequences;
+        if (!shard->records.findVersion(transition.version, &versionSlot)) {
+            ++shard->rejectedTransitions;
+            result.rejectionReason = QStringLiteral("captured version identity is not readable");
+            return result;
+        }
+        auto *version = shard->records.version(versionSlot);
+        if (version->publication == KisPagePublicationState::Unpublished
+            || version->publication == KisPagePublicationState::Retiring) {
+            ++shard->rejectedTransitions;
+            result.rejectionReason = QStringLiteral("captured version identity is not readable");
+            return result;
+        }
+        if (retain && (version->publication != KisPagePublicationState::Prepared
+                       || !(version->preparedBy == transition.transaction))) {
+            ++shard->rejectedTransitions;
+            result.rejectionReason = QStringLiteral("captured private version is foreign or already retained");
+            return result;
+        }
+        auto *link = &version->capturedReadViews;
+        while (link->isValid()) {
+            const auto *node = shard->records.overflow(*link);
+            Q_ASSERT(node && node->kind == KisMetadataOverflowKind::CapturedReadView);
+            if (node->value == transition.readView.value) break;
+            link = &shard->records.overflow(*link)->next;
+        }
+        if (retain == link->isValid()) {
+            ++shard->rejectedTransitions;
+            result.rejectionReason = retain ? QStringLiteral("captured private version is foreign or already retained")
+                                            : QStringLiteral("captured version token is stale or foreign");
+            return result;
+        }
+        if (retain) {
+            const quint64 revision = page->revision;
+            MetadataArenaDemand demand; demand.overflow = 1;
+            const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
+                page = shard->pages.find(key);
+                return page != shard->pages.end() && shard->canMutate(key, page.value())
+                    && page->revision == revision;
+            }, &result.rejectionReason);
+            if (storage == MetadataGrowthResult::Stale) {
+                --shard->localTransitionSequences;
+                if (background) --shard->backgroundLocalTransitionSequences;
+                continue;
+            }
+            if (storage != MetadataGrowthResult::Ready) {
+                ++shard->rejectedTransitions;
+                result.rejectionReason = QStringLiteral("captured protection storage is exhausted");
+                return result;
+            }
+            // Arena values stay stable across growth. The unchanged page
+            // revision also keeps this exact append link valid after relock.
+            auto reservation = shard->arenas.overflow.reserveSlots(1);
+            KisMetadataOverflowNode node;
+            node.value = transition.readView.value;
+            *link = shard->arenas.overflow.emplaceReserved(&reservation, node);
+            Q_ASSERT(link->isValid());
+        } else {
+            const auto slot = *link;
+            *link = shard->records.overflow(slot)->next;
+            const bool erased = shard->arenas.overflow.erase(slot, &released.overflow, 1);
+            Q_ASSERT(erased); Q_UNUSED(erased);
+            if (!released.overflow.isEmpty()) {
+                released.budgetRelease = shard->budgetCharge.take(released.overflow.byteSize());
+                if (cleanup) {
+                    if (!cleanup->m_authority) cleanup->m_authority = std::move(released.budgetRelease.authority);
+                    cleanup->m_bytes += std::exchange(released.budgetRelease.bytes, 0);
+                    cleanup->m_blocks.append(std::move(released.overflow));
+                }
+            }
+        }
+        ++page->revision;
+        ++shard->acceptedTransitions;
+        result.accepted = true;
+        return result;
+    }
 }
 
 KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(

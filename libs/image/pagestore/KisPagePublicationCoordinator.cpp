@@ -7,6 +7,7 @@
 #include "KisPagePublicationCoordinator_p.h"
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPageReadCoordinator_p.h"
 
 #include <QScopeGuard>
 #include <QReadWriteLock>
@@ -70,9 +71,9 @@ bool KisPagePublicationCoordinator::ensureVirtualDefaultLocked(
     const KisPageAllocationDescriptor descriptor = surface.allocationDescriptor();
     if (!descriptor.isValid())
         return false;
-    KisPageStateSnapshot page;
+    KisPageMetadataCoordinator::VersionInfo page;
     if (m_metadata.versionSnapshot(version, &page)) {
-        if (!page.findVersion(version)) {
+        if (!page.version.isValid()) {
             KisPageTransition attach;
             attach.kind = KisPageTransitionKind::AttachHistoricalDefault;
             attach.version = version;
@@ -94,13 +95,14 @@ bool KisPagePublicationCoordinator::ensureVirtualDefaultLocked(
         KisPageVersionStateSnapshot implicit;
         implicit.version = head;
         implicit.publication = KisPagePublicationState::Published;
-        page.key = version.key;
-        page.publishedEpoch = current.epoch();
-        page.publishedGeneration = head.generation;
-        page.publishedDefaultPixelRevision = head.defaultPixelRevision;
-        page.nextGeneration = KisPageGeneration{head.generation.value + 1};
-        page.versions.append(implicit);
-        if (!m_metadata.registerPage(page, error))
+        KisPageStateSnapshot initial;
+        initial.key = version.key;
+        initial.publishedEpoch = current.epoch();
+        initial.publishedGeneration = head.generation;
+        initial.publishedDefaultPixelRevision = head.defaultPixelRevision;
+        initial.nextGeneration = KisPageGeneration{head.generation.value + 1};
+        initial.versions.append(implicit);
+        if (!m_metadata.registerPage(initial, error))
             return false;
         putDescriptorLocked(head, currentSurface.allocationDescriptor());
         if (!(head == version))
@@ -1404,6 +1406,26 @@ KisPagePublicationCoordinator::transactionDeltaLocked(KisPageTransactionId trans
         for (const auto &key : (*found)->removals) result.removedPages.append(key);
     }
     return result;
+}
+
+bool KisPagePublicationCoordinator::captureDeltaLocked(
+    KisPageTransactionId transaction, KisPageCapturedRelease &capture,
+    size_t *versions, size_t *removals, size_t *surfaces) const
+{
+    const auto found = m_preparedTransactions.constFind(transaction.value);
+    const auto *state = found == m_preparedTransactions.cend() ? nullptr : found->get();
+    *versions = state ? state->proofs.size() : 0;
+    *removals = state ? state->removals.size() : 0;
+    *surfaces = state ? size_t(state->surfaceChanges.size()) : 0;
+    if (capture.versions.capacity() < *versions || capture.removedPages.capacity() < *removals
+        || capture.stagedSurfaces.capacity() < *surfaces) return false;
+    capture.versions.clear(); capture.removedPages.clear(); capture.stagedSurfaces.clear();
+    if (state) {
+        for (const auto &proof : state->proofs) capture.versions.push_back(proof.second.authority.version);
+        for (const auto &key : state->removals) capture.removedPages.push_back(key);
+        for (const auto &change : state->surfaceChanges) capture.stagedSurfaces.push_back(change.after);
+    }
+    return true; // One owner cut, using already prepared actual storage only.
 }
 
 bool KisPagePublicationCoordinator::stagesRemovalLocked(

@@ -28,7 +28,7 @@
 class KisPageReadCleanup;
 
 // Prepared before retaining the root or any sealed version. Capture resolution
-// and release use this same immutable version storage; only the retained prefix
+// and release use this same immutable version/removal/surface storage; only the retained prefix
 // and completed release facts change under the owner gate.
 struct KisPageCapturedRelease;
 struct KisPageCapturedReleaseDeleter
@@ -40,10 +40,15 @@ using KisPageCapturedReleasePointer = std::unique_ptr<KisPageCapturedRelease, Ki
 struct KisPageCapturedRelease
 {
     explicit KisPageCapturedRelease(KisBackingBudgetController &budget)
-        : versions(KisMutationStorageAllocator<KisPageVersion>(&budget)) {}
+        : versions(KisMutationStorageAllocator<KisPageVersion>(&budget))
+        , removedPages(KisMutationStorageAllocator<KisPageKey>(&budget))
+        , stagedSurfaces(KisMutationStorageAllocator<KisSurfaceEpochState>(&budget)) {}
     KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget);
     KisImageEpochSnapshotToken token;
     std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> versions;
+    std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removedPages;
+    std::vector<KisSurfaceEpochState, KisMutationStorageAllocator<KisSurfaceEpochState>> stagedSurfaces;
+    KisPageMetadataReadCleanup cleanup;
     size_t retained = 0;
     size_t next = 0;
     bool versionReleased = false;

@@ -337,7 +337,7 @@ private:
     KisCpuReadGuard
     readResidentPageImpl(const KisPageKey &key, KisCpuResidentReadStatus *status, bool waitForLocalGate) const;
     class Private;
-    QSharedPointer<Private> d;
+    std::shared_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuReadGuard;
 };
@@ -365,7 +365,7 @@ public:
 
 private:
     void reset();
-    QSharedPointer<KisCapturedReadView::Private> m_scope;
+    std::shared_ptr<KisCapturedReadView::Private> m_scope;
     QSharedPointer<KisCpuResidentBinding> m_binding;
     const void *m_data = nullptr;
     QSharedPointer<const KisCpuDefaultReadBuffer> m_defaultBuffer;
@@ -594,6 +594,7 @@ private:
         KisSurfaceId surface, const QSet<KisLogicalPageId> &targets,
         bool legacyIntent, bool *borrowed, QString *error);
     friend class KisTiledDataManagerPageStoreBackend;
+    friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
     KisReadRequest acquireReadImpl(const KisPageKey &key,
                                    const KisPageReadView &view,
                                    KisPageAccessRequirement access,

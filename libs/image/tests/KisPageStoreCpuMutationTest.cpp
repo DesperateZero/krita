@@ -908,6 +908,7 @@ private Q_SLOTS:
     void capturedOverlayFreezesSealedDelta();
     void capturedOverlayDefaultIdentitySurvivesAbortAndRestore();
     void capturedOverlayOutlivesFacade();
+    void capturedCutStorageRefusalAndLifetime();
     void capturedOverlayRevalidatesCommitPreparation();
     void capturedOverlayGenericSessionKeepsExactVersion();
     void sharedReadFailureReleasesOnlyExpiredPins_data()
@@ -1419,6 +1420,63 @@ void KisPageStoreCpuMutationTest::capturedOverlayOutlivesFacade()
     guard = {};
     kisDrainPageStoreReclamation();
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::capturedCutStorageRefusalAndLifetime()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto warm = parent->reserve({}, nullptr);
+    auto warmSibling = parent->reserve({}, nullptr);
+    QVERIFY(warm.isValid() && warmSibling.isValid()); warm.release(); warmSibling.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    Fixture f;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto segment = f.begin(tx);
+    auto write = segment.beginWrite(key()); QVERIFY(write.isValid());
+    static_cast<quint8 *>(write.data())[0] = 0x71;
+    write = {}; QVERIFY(segment.seal()); segment = {};
+    QVERIFY(f.remove(tx, key(1)));
+    KisSurfaceEpochState surface;
+    QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    ++surface.defaultPixelRevision; surface.format.defaultPixel = QByteArray(4, char(0x65));
+    QVERIFY(f.store->stageSurfaceMetadata(tx, surface));
+    const auto overlay = KisPageReadView::transactionOverlay(tx.id);
+    auto captured = f.store->captureReadView(overlay); QVERIFY(captured.isValid());
+    const auto snapshots = f.store->sessionStats().retainedSnapshots;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    {
+        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        // The real per-cut default map node must be paid before buffer creation.
+        QVERIFY(!captured.readResidentPage(key(1)).isValid());
+        QVERIFY(!f.store->captureReadView(overlay).isValid());
+        QCOMPARE(f.store->sessionStats().retainedSnapshots, snapshots);
+    }
+    auto defaultGuard = captured.readResidentPage(key(1)); QVERIFY(defaultGuard.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(defaultGuard.data()), 4), QByteArray(4, char(0x65)));
+    ++surface.defaultPixelRevision; surface.format.defaultPixel = QByteArray(4, char(0x75));
+    QVERIFY(f.store->stageSurfaceMetadata(tx, surface));
+    auto later = f.store->captureReadView(overlay); QVERIFY(later.isValid());
+    auto laterGuard = later.readResidentPage(key(1)); QVERIFY(laterGuard.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(laterGuard.data()), 4), QByteArray(4, char(0x75)));
+    laterGuard = {}; later = {};
+    QVERIFY(f.store->abort(tx)); f.store.reset();
+    auto physicalGuard = captured.readResidentPage(key()); QVERIFY(physicalGuard.isValid());
+    captured = {};
+    QCOMPARE(static_cast<const quint8 *>(physicalGuard.data())[0], quint8(0x71));
+    QCOMPARE(QByteArray(static_cast<const char *>(defaultGuard.data()), 4), QByteArray(4, char(0x65)));
+    QVERIFY(live() > baseline);
+    physicalGuard = {}; defaultGuard = {};
+    f.completions.reset(); f.provider.reset();
+    kisDrainPageStoreReclamation();
+    QTRY_COMPARE(live(), baseline);
 }
 
 void KisPageStoreCpuMutationTest::capturedOverlayRevalidatesCommitPreparation()

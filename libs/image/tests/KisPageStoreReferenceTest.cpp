@@ -947,6 +947,7 @@ private Q_SLOTS:
     void metadataReadProtectionReclaimsEmptyBlocks();
     void metadataReadProtectionDeferredCleanup_data();
     void metadataReadProtectionDeferredCleanup();
+    void capturedProtectionAndExactQueryAtCapacity();
     void metadataReadProtectionReclaimerIdentity();
     void reclamationTaskStorageBeforeOwnerRelease();
     void reclamationTaskRejectedPreparation();
@@ -4573,6 +4574,73 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
     }
 }
 
+void KisPageStoreReferenceTest::capturedProtectionAndExactQueryAtCapacity()
+{
+    using Arena = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageMetadataCoordinator coordinator;
+    coordinator.attachBackingBudget(budget);
+    QVERIFY(coordinator.configure(1));
+    auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
+    auto prepared = initialPageState(pageVersion(0, 2), replica(pageVersion(0, 2), 1, 1, 2)).versions.first();
+    prepared.publication = KisPagePublicationState::Prepared;
+    prepared.preparedBy = {71};
+    const int count = int(2 * Arena::slotsPerBlock());
+    for (int i = 0; i < count; ++i) prepared.capturedReadViews.append({quint64(i + 1)});
+    page.versions.append(prepared); page.nextGeneration = {3};
+    QVERIFY(coordinator.registerPage(page));
+    QCOMPARE(coordinator.footprint().overflowArena.freeSlots, quint64(0));
+    const auto live = [&] {
+        return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const quint64 before = live();
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - before);
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    KisPageTransition claim;
+    claim.kind = KisPageTransitionKind::RetainCapturedVersion;
+    claim.version = prepared.version; claim.transaction = prepared.preparedBy;
+    claim.readView = {quint64(count + 1)};
+    const auto metrics = coordinator.metrics();
+    QVERIFY(!coordinator.applyOwner(page.key, claim).accepted);
+    QCOMPARE(coordinator.metrics().rejectedTransitions, metrics.rejectedTransitions + 1);
+    QCOMPARE(coordinator.footprint().overflowArena.usedSlots, quint64(count));
+    KisPageMetadataCoordinator::VersionInfo info;
+    QVERIFY(coordinator.versionSnapshot(prepared.version, &info));
+    QVERIFY(info.captured); QCOMPARE(info.authority, prepared.authority);
+    QCOMPARE(coordinator.cpuReadReplica(prepared.version), prepared.authority);
+    KisPageMetadataCoordinator::ReplicaCandidates candidates{
+        KisMutationStorageAllocator<KisPageMetadataCoordinator::ReplicaCandidate>(&budget)};
+    info.preparedBy = {99};
+    QVERIFY_EXCEPTION_THROWN(coordinator.versionSnapshot(prepared.version, &info, &candidates), std::bad_alloc);
+    QCOMPARE(info.preparedBy, KisPageTransactionId{99}); QVERIFY(candidates.empty());
+    KisPageStateSnapshot actual;
+    QVERIFY(coordinator.pageSnapshot(page.key, &actual)); comparePageRecords(actual, page);
+
+    KisPageMetadataReadCleanup cleanup;
+    claim.kind = KisPageTransitionKind::ReleaseCapturedVersion;
+    for (int i = 0; i < count; ++i) {
+        claim.readView = {quint64(i + 1)};
+        QVERIFY(coordinator.applyOwner(page.key, claim, &cleanup).accepted);
+    }
+    QVERIFY(!coordinator.applyOwner(page.key, claim, &cleanup).accepted);
+    QVERIFY(!cleanup.isEmpty()); QCOMPARE(cleanup.byteSize(), quint64(Arena::blockByteSize()));
+    QCOMPARE(live(), limits.metadataArenaBytes); // Detached allocation is still charged.
+    QVERIFY(coordinator.versionSnapshot(prepared.version, &info)); QVERIFY(!info.captured);
+    QVERIFY(!coordinator.cpuReadReplica(prepared.version).isValid());
+    const auto after = coordinator.metrics();
+    QCOMPARE(after.localVersionInputs, metrics.localVersionInputs);
+    QCOMPARE(after.localVersionInstalls, metrics.localVersionInstalls);
+    cleanup.clear(); QCOMPARE(live(), limits.metadataArenaBytes - Arena::blockByteSize());
+    QVERIFY(coordinator.versionSnapshot(prepared.version, &info, &candidates));
+    QCOMPARE(candidates.size(), size_t(1)); QCOMPARE(candidates.front().replica, prepared.authority);
+    auto missing = prepared.version; ++missing.generation.value;
+    QVERIFY(coordinator.versionSnapshot(missing, &info, &candidates));
+    QVERIFY(!info.version.isValid() && candidates.empty());
+}
+
 void KisPageStoreReferenceTest::indexedMutationBaseLookup()
 {
     QFETCH(int, history);
@@ -4596,9 +4664,9 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
     QCOMPARE(snapshot.versions.first().version, base);
     QCOMPARE(snapshot.versions.last().version, sealed);
     QCOMPARE(snapshot.nextGeneration, page.nextGeneration);
-    QVERIFY(coordinator.versionSnapshot(page.versions[history].version, &snapshot));
-    QCOMPARE(snapshot.versions.size(), 1);
-    QCOMPARE(snapshot.versions.first().version, page.versions[history].version);
+    KisPageMetadataCoordinator::VersionInfo exact;
+    QVERIFY(coordinator.versionSnapshot(page.versions[history].version, &exact));
+    QCOMPARE(exact.version, page.versions[history].version);
     QVERIFY(coordinator.mutationBaseSnapshot(base, base, &snapshot));
     QCOMPARE(snapshot.versions.size(), 1);
     QCOMPARE(coordinator.metrics().mutationBaseVersionInputs - before.mutationBaseVersionInputs, quint64(3));
@@ -4646,7 +4714,8 @@ void KisPageStoreReferenceTest::indexedMutationConcurrentProtection()
     QVERIFY(coordinator.pageSnapshot(page.key, &actual));
     comparePageRecords(actual, retainedDiagnostic);
     QCOMPARE(coordinator.metrics().localTransitionSequences, quint64(1600));
-    QCOMPARE(coordinator.metrics().localVersionInputs, quint64(1600));
+    QCOMPARE(coordinator.metrics().localVersionInputs, quint64(0));
+    QCOMPARE(coordinator.metrics().localVersionInstalls, quint64(0));
 }
 
 void KisPageStoreReferenceTest::indexedRecordSlotReuse()
@@ -4692,9 +4761,9 @@ void KisPageStoreReferenceTest::indexedRecordSlotReuse()
             write.kind = KisPageTransitionKind::CancelWrite;
             run(write);
         }
-        KisPageStateSnapshot missing;
+        KisPageMetadataCoordinator::VersionInfo missing;
         QVERIFY(coordinator.versionSnapshot(write.version, &missing));
-        QVERIFY(missing.versions.isEmpty());
+        QVERIFY(!missing.version.isValid());
     }
 }
 
@@ -8153,11 +8222,11 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
         QCOMPARE(proof.providerValidationStamp, quint64(77));
         QCOMPARE(owner.sealedProofCount(), qsizetype(0));
         QCOMPARE(live(), limits.metadataArenaBytes);
-        KisPageStateSnapshot unchanged;
+        KisPageMetadataCoordinator::VersionInfo unchanged;
         QVERIFY(metadata.versionSnapshot(writeVersion, &unchanged));
-        const auto version = unchanged.findVersion(writeVersion);
-        QVERIFY(version && version->publication == KisPagePublicationState::Prepared);
-        QVERIFY(version->authority == writeAllocation.replica && version->preparedBy == transaction.id);
+        QCOMPARE(unchanged.version, writeVersion);
+        QCOMPARE(unchanged.publication, KisPagePublicationState::Prepared);
+        QVERIFY(unchanged.authority == writeAllocation.replica && unchanged.preparedBy == transaction.id);
     }
     QCOMPARE(live(), baseline);
     size_t sealFillerBytes = 0;
