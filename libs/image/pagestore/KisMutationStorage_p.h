@@ -35,6 +35,11 @@ class KRITAIMAGE_EXPORT KisMutationStorageOwner
 public:
     void *allocate(size_t bytes, size_t alignment);
     void deallocate(void *data, size_t bytes, size_t alignment) noexcept;
+    // Existing arena payloads use a reservation before physical allocation.
+    // Their original charge follows this same accounting lifetime, without
+    // charging it twice or retaining the controller itself.
+    void retainLiveCharge(quint64 bytes) noexcept;
+    void releaseLiveCharge(quint64 bytes) noexcept;
     void ref() noexcept { m_references.fetch_add(1, std::memory_order_relaxed); }
     void deref() noexcept;
 private:

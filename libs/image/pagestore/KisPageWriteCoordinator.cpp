@@ -1483,6 +1483,19 @@ void *KisMutationStorageOwner::allocate(size_t bytes, size_t alignment)
 void KisMutationStorageOwner::deallocate(void *data, size_t bytes, size_t alignment) noexcept
 {
     kisFreeMutationStorage(nullptr, data, bytes, alignment);
+    releaseLiveCharge(bytes);
+    deref();
+}
+
+void KisMutationStorageOwner::retainLiveCharge(quint64 bytes) noexcept
+{
+    QMutexLocker lock(&m_gate);
+    Q_ASSERT(m_controller && bytes <= std::numeric_limits<quint64>::max() - m_bytes);
+    m_bytes += bytes;
+}
+
+void KisMutationStorageOwner::releaseLiveCharge(quint64 bytes) noexcept
+{
     {
         QMutexLocker lock(&m_gate);
         Q_ASSERT(m_bytes >= sizeof(KisMutationStorageOwner) + bytes);
@@ -1493,7 +1506,6 @@ void KisMutationStorageOwner::deallocate(void *data, size_t bytes, size_t alignm
         else if (m_parent)
             m_parent->releaseSharedNonPayloadLive(m_child, KisPageAccessDomain::CpuRam, bytes);
     }
-    deref();
 }
 
 void KisMutationStorageOwner::detach(

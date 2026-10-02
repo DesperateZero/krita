@@ -512,7 +512,8 @@
       "terminal-paths": [
         "record transition replacement",
         "historical collection and retirement",
-        "coordinator close"
+        "coordinator close",
+        "PreparedPublication owns paid Data, arrays, authority hash nodes and nested installation protections; prepare refusal cancels original activities and reservations, install transfers the same candidate to DeferredPublicationCleanup, and physical storage remains charged through its final clear"
       ]
     },
     {
@@ -542,7 +543,8 @@
         "empty block intrusive return batch",
         "arena close and drain",
         "coordinator destruction after owner quiescence",
-        "single read-protection terminal transitions detach empty blocks into the caller-owned KisPageMetadataReadCleanup, retaining the original budget authority and charge until payload destruction; another metadata owner cannot append to that value"
+        "single read-protection terminal transitions detach empty blocks into the caller-owned KisPageMetadataReadCleanup, retaining the original budget authority and charge until payload destruction; another metadata owner cannot append to that value",
+        "all MetadataArenaGrowth holders use the original paid allocator; unattached payloads are freed before reservation release; MetadataBudgetAuthority retains the original mutation accounting owner for manually reserved directory/block charges, so deferred shard storage releases the same shared-child charge after coordinator and controller destruction without charging it twice"
       ]
     },
     {

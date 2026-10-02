@@ -1426,9 +1426,9 @@ void KisPageStoreCpuMutationTest::capturedCutStorageRefusalAndLifetime()
 {
     KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
     auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
-    auto warm = parent->reserve({}, nullptr);
-    auto warmSibling = parent->reserve({}, nullptr);
-    QVERIFY(warm.isValid() && warmSibling.isValid()); warm.release(); warmSibling.release();
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
     const auto live = [&] {
         return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };

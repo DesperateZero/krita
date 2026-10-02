@@ -318,8 +318,6 @@ private:
     // revisions (root publication) or exact detachment semantics (mutation)
     // before changing any state, and holds no two shard locks.
     // Ordinary commit/restore uses indexed records + publication-only deltas.
-    // Fused synchronous retirement is optional and limited to 32 records/page;
-    // an over-budget candidate must retry ordinary publication + queued GC.
     // Candidates own the semantic delta plus arena-slot, exact-index,
     // physical-index and sparse-activity reservations needed by metadata
     // installation. Installation consumes those capabilities only after all
@@ -343,13 +341,17 @@ private:
 
     private:
         class Data;
-        std::unique_ptr<Data> data;
+        struct DataDeleter {
+            KisMutationStorageAllocator<Data> storage;
+            void operator()(Data *value) const noexcept;
+        };
+        using DataPointer = std::unique_ptr<Data, DataDeleter>;
+        DataPointer data;
         bool m_conflicted = false;
         friend class KisPageMetadataCoordinator;
         friend class DeferredPublicationCleanup;
     };
-    // Consumed candidate storage, including the old record set left by a
-    // fused swap. PageStore moves it across the owner-gate boundary and calls
+    // Consumed candidate storage. PageStore moves it across the owner gate and calls
     // clearBatch() only after unlocking. It owns no live coordinator access.
     class KRITAIMAGE_EXPORT DeferredPublicationCleanup
     {
@@ -362,14 +364,14 @@ private:
         DeferredPublicationCleanup &operator=(const DeferredPublicationCleanup &) = delete;
         bool isEmpty() const;
         // One unit is one candidate page (or one empty-candidate terminal
-        // payload). Fused page payloads are independently bounded by the
-        // publication record budget. This is a cooperative destruction budget,
+        // payload). Actual candidate capacity remains charged until freed.
+        // This is a cooperative destruction budget,
         // not a byte or hard wall-time guarantee for one unit.
         qsizetype pendingWorkUnits() const;
         qsizetype clearBatch(qsizetype maximumWorkUnits);
 
     private:
-        std::unique_ptr<PreparedPublication::Data> data;
+        PreparedPublication::DataPointer data;
         friend class KisPageMetadataCoordinator;
     };
     PreparedPublication preparePublication(const KisPageTransaction &transaction,

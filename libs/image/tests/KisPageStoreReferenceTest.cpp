@@ -1014,6 +1014,16 @@ private Q_SLOTS:
                 QTest::newRow(qPrintable(QStringLiteral("history%1-reject%2").arg(h).arg(r))) << h << r;
     }
     void deferredPublicationCleanupOwnsCandidate();
+    void publicationStorageRefusalAndLateCleanup_data()
+    {
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<int>("outcome");
+        for (int kind = 0; kind < 4; ++kind)
+            for (int outcome = 0; outcome < 4; ++outcome)
+                QTest::newRow(qPrintable(QStringLiteral("kind%1-outcome%2").arg(kind).arg(outcome)))
+                    << kind << outcome;
+    }
+    void publicationStorageRefusalAndLateCleanup();
     void diagnosticRecorderIsOwnerAndThreadScoped();
     void currentTransactionPinsBaseWithoutManifestExport();
     void capturedReadViewFreezesPagesAndSurfaceDefault();
@@ -3281,22 +3291,20 @@ void KisPageStoreReferenceTest::metadataReadProtectionAtCapacity()
     const auto expected = KisPageStateMachine{}.apply(initial, transition);
     QVERIFY(expected.accepted);
 
-    quint64 initialBytes = 0;
-    {
-        KisBackingBudgetController budget;
-        KisPageMetadataCoordinator coordinator;
-        coordinator.attachBackingBudget(budget);
-        QVERIFY(coordinator.configure(1));
-        QVERIFY(coordinator.registerPage(initial));
-        initialBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
-    }
     KisPageBackingLimits limits;
-    limits.metadataArenaBytes = initialBytes;
+    limits.metadataArenaBytes = 4 * 1024 * 1024;
     KisBackingBudgetController budget(limits);
     KisPageMetadataCoordinator coordinator;
     coordinator.attachBackingBudget(budget);
     QVERIFY(coordinator.configure(1));
     QVERIFY(coordinator.registerPage(initial));
+    // Fill after preparation: paid candidate arrays need transient headroom.
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - budget.usage()
+        .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam);
+    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
+             limits.metadataArenaBytes);
     QCOMPARE(coordinator.footprint().overflowArena.freeSlots, quint64(0));
     const auto before = coordinator.metrics();
     const auto result = kind == 2
@@ -3313,7 +3321,7 @@ void KisPageStoreReferenceTest::metadataReadProtectionAtCapacity()
     QCOMPARE(after.readProtectionSlotReuses, before.readProtectionSlotReuses + (kind == 1 ? 1 : 0));
     QCOMPARE(after.readProtectionSlotReleases, before.readProtectionSlotReleases + (kind == 1 ? 0 : 1));
     const auto usage = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-    QCOMPARE(usage.live.cpuRam, initialBytes);
+    QCOMPARE(usage.live.cpuRam, limits.metadataArenaBytes);
     QCOMPARE(usage.reserved.cpuRam, quint64(0));
     QCOMPARE(coordinator.footprint().overflowArena.usedSlots, quint64(count - (kind == 1 ? 0 : 1)));
     KisPageStateSnapshot actual;
@@ -4058,6 +4066,9 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
     quint64 oneCapacityBatch = 0;
     {
         KisBackingBudgetController budget;
+        std::array<KisBackingBudgetReservation, 8> slots;
+        for (auto &slot : slots) { slot = budget.reserve({}, nullptr); QVERIFY(slot.isValid()); }
+        for (auto &slot : slots) slot.release();
         KisPageMetadataCoordinator metadata;
         metadata.attachBackingBudget(budget);
         QVERIFY2(metadata.configure(1, &error), qPrintable(error));
@@ -4075,10 +4086,12 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
     }
 
     KisPageBackingLimits limits;
-    limits.metadataArenaBytes = oneCapacityBatch;
+    limits.metadataArenaBytes = 2 * oneCapacityBatch;
     KisBackingBudgetController budget(limits);
-    auto accountingSlot = budget.reserve({}, nullptr);
-    QVERIFY(accountingSlot.isValid()); accountingSlot.release();
+    auto storageOwner = KisMutationStorageAllocator<char>::retained(&budget);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = budget.reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
     const quint64 controllerStorage = budget.usage().buckets[
         size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(controllerStorage > 0);
@@ -4095,6 +4108,11 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         const auto before = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         QCOMPARE(before.live.cpuRam, oneCapacityBatch);
+        const size_t fillerBytes = size_t(limits.metadataArenaBytes - before.live.cpuRam);
+        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
+                 limits.metadataArenaBytes);
         const auto rejected = pageVersion(64, 1);
         QVERIFY(!metadata.registerPage(
             initialPageState(rejected, replica(rejected, 1, 1, 65)), &error));
@@ -4102,7 +4120,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         QCOMPARE(metadata.pageCount(), qsizetype(64));
         const auto after = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        QCOMPARE(after.live.cpuRam, oneCapacityBatch);
+        QCOMPARE(after.live.cpuRam, limits.metadataArenaBytes);
         QCOMPARE(after.reserved.cpuRam, quint64(0));
     }
     QCOMPARE(budget.usage()
@@ -5350,6 +5368,143 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     QVERIFY(cleanup.isEmpty());
 }
 
+void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
+{
+    QFETCH(int, kind);
+    QFETCH(int, outcome);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> parentSlots;
+    for (auto &slot : parentSlots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : parentSlots) slot.release();
+    const auto parentLive = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const quint64 parentBaseline = parentLive();
+    auto budget = std::make_unique<KisBackingBudgetController>(limits);
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent));
+    auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+    metadata->attachBackingBudget(*budget);
+    QVERIFY(metadata->configure(1));
+    const KisPageTransaction tx{{74}, {1}};
+    auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
+    KisPageTransition transition;
+    transition.version = pageVersion(0, 2);
+    transition.transaction = tx.id;
+    transition.imageEpoch = {2};
+    KisCompletionRegistry registry;
+    const auto lastUse = registry.allocatePending(registry.registerSource(KisCompletionDomain::CpuJob));
+    if (kind == 1) {
+        auto &base = page.versions.first();
+        auto before = base.authority; before.allocation.slot = 10000;
+        base.replicas.append({before, KisReplicaValidity::Valid, {}, {{4}}, 2, {lastUse}});
+        base.capturedReadViews.append({19});
+        transition.kind = KisPageTransitionKind::AcquireRecoverableWrite;
+        transition.baseVersion = base.version;
+        transition.source = before; transition.target = base.authority;
+        transition.target.version = transition.version; ++transition.target.allocation.generation;
+        transition.writer = {51}; transition.operation = {52}; transition.imageEpoch = {};
+    } else if (kind == 2) {
+        transition.kind = KisPageTransitionKind::RestoreCommittedVersion;
+        transition.version = {page.key, {1}, 2}; transition.transaction = {};
+    } else {
+        const auto target = replica(transition.version, 1, 1, 2);
+        page.versions.append({transition.version, KisPagePublicationState::Prepared,
+            {{target, KisReplicaValidity::Valid, {}, {{5}}, 1, {lastUse}}}, target, tx.id, {{20}}});
+        page.nextGeneration = {3};
+        transition.kind = kind == 3 ? KisPageTransitionKind::DetachPreparedVersion
+                                    : KisPageTransitionKind::CommitTransaction;
+        if (kind == 3) transition.imageEpoch = {};
+    }
+    QVERIFY(metadata->registerPage(page));
+    const auto prepare = [&] {
+        return kind == 1 ? metadata->prepareRecoverableWrite(tx, transition)
+             : kind == 3 ? metadata->prepareMutation(tx, {transition})
+                         : metadata->preparePublication(tx, {2}, {transition});
+    };
+    // Warm only the original reusable activity/index capacity, then discard
+    // the complete candidate. No candidate payload is exempted from pressure.
+    auto warm = prepare(); QVERIFY(warm.isValid()); warm = {};
+    const auto childLive = [&] {
+        return budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const quint64 before = childLive();
+    size_t fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
+    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] {
+        if (filler) kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1);
+    });
+    QCOMPARE(parentLive(), limits.metadataArenaBytes);
+    auto refused = prepare(); QVERIFY(!refused.isValid()); QVERIFY(!refused.needsReprepare());
+    QCOMPARE(childLive(), before);
+    QCOMPARE(metadata->footprint().pageActivities, quint64(0));
+    KisPageStateSnapshot actual;
+    QVERIFY(metadata->pageSnapshot(page.key, &actual)); comparePageRecords(actual, page);
+    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    auto candidate = prepare(); QVERIFY(candidate.isValid());
+    QVERIFY(childLive() > before);
+    QCOMPARE(metadata->footprint().pageActivities, quint64(1));
+    auto expected = KisPageStateMachine().apply(page, transition);
+    QVERIFY(expected.accepted);
+    if (kind == 1) {
+        auto ready = transition; ready.kind = KisPageTransitionKind::PrepareWrite;
+        expected = KisPageStateMachine().apply(expected.next, ready); QVERIFY(expected.accepted);
+    }
+    quint64 readerStorage = 0;
+    if (outcome == 2) {
+        KisPageTransition read;
+        read.kind = KisPageTransitionKind::AcquireRead; read.version = page.versions.first().version;
+        read.target = page.versions.first().authority; read.lease = {33};
+        const quint64 beforeRead = childLive();
+        QVERIFY(metadata->applyOwner(page.key, read).accepted);
+        QVERIFY(childLive() >= beforeRead);
+        // A new reader can retain an overflow arena beyond candidate cleanup.
+        readerStorage = childLive() - beforeRead;
+        const auto changed = KisPageStateMachine().apply(page, read); QVERIFY(changed.accepted);
+        page = changed.next;
+        // Detachment accepts reader churn and preserves the newest protection.
+        if (kind == 3) expected = KisPageStateMachine().apply(page, transition);
+    }
+    fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
+    filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    QCOMPARE(parentLive(), limits.metadataArenaBytes);
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    const bool success = outcome != 1 && (outcome != 2 || kind == 3);
+    if (outcome == 1) candidate = {};
+    else {
+        const bool installed = kind == 1
+            ? metadata->installRecoverableWrite(std::move(candidate), tx, nullptr, &cleanup)
+            : kind == 3 ? metadata->installMutation(std::move(candidate), tx, nullptr, &cleanup)
+                        : metadata->installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup);
+        QCOMPARE(installed, success);
+        QVERIFY(!cleanup.isEmpty());
+        QVERIFY(childLive() > before); // Transfer has not freed candidate storage.
+    }
+    QVERIFY(!candidate.isValid());
+    QVERIFY(metadata->pageSnapshot(page.key, &actual));
+    comparePageRecords(actual, success ? expected.next : page);
+    if (success || outcome == 1) {
+        QCOMPARE(metadata->footprint().versionArena.outstandingReservations, quint64(0));
+        QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
+        QCOMPARE(metadata->footprint().overflowArena.outstandingReservations, quint64(0));
+    } // A rejected candidate retains its reservations until deferred cleanup.
+    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    if (outcome == 3) {
+        metadata.reset(); budget.reset();
+        QVERIFY(parentLive() > parentBaseline); // Original arenas and control storage remain physical.
+        QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
+        QCOMPARE(parentLive(), parentBaseline);
+    } else {
+        if (!cleanup.isEmpty()) QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
+        QCOMPARE(metadata->footprint().versionArena.outstandingReservations, quint64(0));
+        QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
+        QCOMPARE(metadata->footprint().overflowArena.outstandingReservations, quint64(0));
+        QCOMPARE(childLive(), before + readerStorage);
+        metadata.reset(); budget.reset();
+        QCOMPARE(parentLive(), parentBaseline);
+    }
+}
+
 void KisPageStoreReferenceTest::preparedPublicationMatchesFullReferenceTransitions()
 {
     const KisPageTransaction transaction{KisPageTransactionId{74}, KisImageEpochId{1}};
@@ -5787,10 +5942,12 @@ void KisPageStoreReferenceTest::recoverableWritePreparationHonorsBudget()
         auto prepared = metadata.prepareRecoverableWrite(tx, write);
         QVERIFY(prepared.isValid()); // Same input has a positive control.
     }
-    KisPageBackingLimits limits; limits.metadataArenaBytes = initialBytes;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * initialBytes;
     KisBackingBudgetController budget(limits);
-    auto accountingSlot = budget.reserve({}, nullptr);
-    QVERIFY(accountingSlot.isValid()); accountingSlot.release();
+    auto storageOwner = KisMutationStorageAllocator<char>::retained(&budget);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = budget.reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
     const quint64 controllerStorage = budget.usage().buckets[
         size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(controllerStorage > 0);
@@ -5799,19 +5956,25 @@ void KisPageStoreReferenceTest::recoverableWritePreparationHonorsBudget()
         metadata.attachBackingBudget(budget);
         QVERIFY(metadata.configure(1));
         QVERIFY(metadata.registerPage(page));
+        const size_t fillerBytes = size_t(limits.metadataArenaBytes - budget.usage()
+            .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam);
+        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
+                 limits.metadataArenaBytes);
         for (int attempt = 0; attempt < 2; ++attempt) {
             QString error;
             const auto previousPressure = budget.usage().backpressureCount;
             auto prepared = metadata.prepareRecoverableWrite(tx, write, &error);
             QVERIFY(!prepared.isValid());
             QVERIFY(!prepared.needsReprepare()); // Real pressure, not a revision race.
-            QCOMPARE(error, QStringLiteral("metadata arena block allocation failed"));
+            QCOMPARE(error, QStringLiteral("metadata publication preparation storage was refused"));
             QCOMPARE(budget.usage().backpressureCount, previousPressure + 1);
             KisPageStateSnapshot actual;
             QVERIFY(metadata.pageSnapshot(page.key, &actual));
             comparePageRecords(actual, page);
             const auto usage = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-            QCOMPARE(usage.live.cpuRam, initialBytes);
+            QCOMPARE(usage.live.cpuRam, limits.metadataArenaBytes);
             QCOMPARE(usage.reserved.cpuRam, quint64(0));
             QCOMPARE(metadata.footprint().pageActivities, quint64(0));
         }
