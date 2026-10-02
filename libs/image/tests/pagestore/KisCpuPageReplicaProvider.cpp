@@ -152,11 +152,11 @@ public:
         }
 
         allocation.binding = QSharedPointer<CpuResidentBinding>::create(bytes, handle);
-        allocations.insert(handle.allocation.slot, allocation);
+        allocations.emplace(handle.allocation.slot, allocation);
         committedBytes += byteSize;
         if (!completions->complete(completion, KisCompletionStatus::Succeeded)) {
             committedBytes -= byteSize;
-            allocations.remove(handle.allocation.slot);
+            allocations.erase(handle.allocation.slot);
             return KisReplicaOperation::failed(operation, QStringLiteral("CPU completion publication failed"));
         }
 
@@ -286,7 +286,7 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
     if (retirement.failure)
         return KisReplicaOperation::failed(operation,
             QStringLiteral("CPU retirement %1").arg(QString::fromLatin1(retirement.failure)));
-    if (!retirement.allocation->binding->retire(replica.allocationIdentity())) {
+    if (!retirement.allocation->second.binding->retire(replica.allocationIdentity())) {
         return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
     }
     d->consumeOperation(operation);

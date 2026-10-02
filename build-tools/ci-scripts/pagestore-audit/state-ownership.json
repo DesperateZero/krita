@@ -119,7 +119,8 @@
       "creation-paths": [
         "KisTiles3PageReplicaProvider prepares allocation and retirement tickets before allocating payload or adopting an immutable/initial tile; test-only KisCpuPageReplicaProvider uses the same allocation-index lifecycle",
         "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before",
-        "Tiles3 ResidencyObserver prepares charged stable payload and slot nodes before tracking; original payload stores domain/revision and one intrusive dirty link, without a second journal record; observer storage and retained snapshots share the original process nonpayload root",
+        "Tiles3 prepares actual charged allocation, stable payload and slot nodes before fresh pixels or alias/initial adoption; all three entry points share prepareAdoption/adopt and transfer those nodes without later index allocation; allocation and lease indexes reuse the observer retained process-root allocator",
+        "original observer Payload owns physical identity, logical reference count, domain/revision and one intrusive dirty link; the duplicate physicalPayloads Qt table is deleted; existing physical aliases prepare only a logical allocation node and charge physical bytes once",
         "prepareResidencyChange prepares charged admission snapshots and transition reservation capacity before publishing the original transition serial; any cold refusal cancels that same serial and earlier owner reservations before physical movement"
       ],
       "current-writers": [
@@ -141,14 +142,17 @@
         "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
         "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates",
         "physical residency commit updates and links only the original prepared payload; exact slot/revision acknowledgement unlinks it, stale acknowledgement preserves newer dirtiness, and untrack extracts actual payload/slot nodes for free outside the observer gate",
-        "backingDomainChanges prepares an actually charged immutable snapshot; the default retained allocator can outlive the provider facade, while Ledger supplies its original budget for its local validation cut; outer observer/transition Qt objects and bootstrap remain unqualified"
+        "backingDomainChanges prepares an actually charged immutable snapshot; the default retained allocator can outlive the provider facade, while Ledger supplies its original budget for its local validation cut; outer observer/transition Qt objects and bootstrap remain unqualified",
+        "physical registration failure or exception unregisters and untracks the same prepared payload; failed actual node preparation precedes pixel work and leaves original aliases/references unchanged; binding wrappers and TileDataStore registration storage remain unqualified fixed/core costs",
+        "retire extracts the actual charged allocation node for destruction outside the provider gate; last logical reference removes the original observer payload/slot nodes, while provider destruction unregisters original payloads before observer teardown",
+        "resident memory statistics wait for the original transition serial and read canonical payload domains; they never acquire a tile swap gate under the observer gate, preserving physical-to-observer lock order"
       ]
     },
     {
       "creation-paths": [
         "KisCpuResidentBinding::acquireRead",
         "KisCpuWriteBindingReservation::acquire",
-        "generic CPU/tiles3 lease index insertion precedes binding acquireAccess under the original provider gate; failure or rejected pin erases only that prepared record"
+        "generic CPU/tiles3 lease index insertion precedes binding acquireAccess under the original provider gate; Tiles3 actual lease nodes/buckets use the retained shared-root allocator, failure or rejected pin erases only that prepared record and preserves original live leases"
       ],
       "current-writers": [
         "KisCpuResidentBinding"

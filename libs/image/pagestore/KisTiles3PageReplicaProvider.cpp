@@ -209,12 +209,6 @@ struct Tiles3Allocation
     }
 };
 
-struct Tiles3PhysicalPayload
-{
-    quint64 identity = 0;
-    quint64 logicalReferences = 0;
-};
-
 class Tiles3ReplicaSource final : public KisPageReplicaSource
 {
 public:
@@ -241,6 +235,7 @@ public:
             quint64 revision = 0;
             KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
             quint64 transition = 0;
+            quint64 logicalReferences = 1;
         };
         using PayloadMap = std::map<KisTileData *, Payload, std::less<KisTileData *>,
             KisMutationStorageAllocator<std::pair<KisTileData *const, Payload>>>;
@@ -251,6 +246,11 @@ public:
         using WeakAdmissions = std::vector<QWeakPointer<KisReplicaBackingDomainAdmission>,
             KisMutationStorageAllocator<QWeakPointer<KisReplicaBackingDomainAdmission>>>;
     public:
+        struct PreparedPayload {
+            PayloadMap::node_type payload;
+            SlotMap::node_type slot;
+        };
+        auto storageAllocator() const { return m_admissions.get_allocator(); }
         explicit ResidencyObserver(const QSharedPointer<KisBackingBudgetController> &process)
             : m_budget(QSharedPointer<KisBackingBudgetController>::create())
         {
@@ -395,20 +395,76 @@ public:
             return {};
         }
 
-        bool track(KisTileData *tileData, quint64 slot, quint64 bytes)
-        try
+        PreparedPayload preparePayload(quint64 identity, quint64 bytes) const
         {
-            PayloadMap::node_type rejected;
-            QMutexLocker locker(&m_mutex);
-            if (!tileData || !slot || !bytes || m_payloads.find(tileData) != m_payloads.end())
-                return false;
-            const auto payload = m_payloads.try_emplace(tileData, slot, bytes).first;
-            auto rollback = qScopeGuard([&] { rejected = m_payloads.extract(payload); });
-            if (!m_slots.emplace(slot, &payload->second).second) return false;
-            rollback.dismiss();
-            return true;
+            PayloadMap payloads(m_payloads.get_allocator());
+            SlotMap slots(m_slots.get_allocator());
+            payloads.try_emplace(nullptr, identity, bytes);
+            slots.emplace(identity, nullptr);
+            return {payloads.extract(nullptr), slots.extract(identity)};
         }
-        catch (const std::bad_alloc &) { return false; }
+
+        quint64 physicalIdentity(KisTileData *tile) const
+        {
+            QMutexLocker locker(&m_mutex);
+            const auto found = m_payloads.find(tile);
+            return found == m_payloads.end() ? 0 : found->second.slot;
+        }
+
+        quint64 retainExisting(KisTileData *tile, quint64 bytes)
+        {
+            QMutexLocker locker(&m_mutex);
+            const auto found = m_payloads.find(tile);
+            if (found == m_payloads.end() || found->second.bytes != bytes
+                || found->second.logicalReferences == std::numeric_limits<quint64>::max()) return 0;
+            ++found->second.logicalReferences;
+            return found->second.slot;
+        }
+
+        bool track(KisTileData *tile, PreparedPayload &prepared)
+        {
+            QMutexLocker locker(&m_mutex);
+            if (!tile || prepared.payload.empty() || prepared.slot.empty()
+                || m_payloads.count(tile) || m_slots.count(prepared.slot.key())) return false;
+            prepared.payload.key() = tile;
+            auto installed = m_payloads.insert(std::move(prepared.payload));
+            prepared.slot.mapped() = &installed.position->second;
+            m_slots.insert(std::move(prepared.slot));
+            return true; // Both actual nodes were prepared before physical creation/adoption.
+        }
+
+        bool releaseReference(KisTileData *tile, quint64 identity)
+        {
+            QMutexLocker locker(&m_mutex);
+            const auto found = m_payloads.find(tile);
+            Q_ASSERT(found != m_payloads.end() && found->second.slot == identity && found->second.logicalReferences);
+            return found != m_payloads.end() && found->second.slot == identity
+                && found->second.logicalReferences && !--found->second.logicalReferences;
+        }
+
+        std::pair<KisTileData *, quint64> firstPayload() const
+        {
+            QMutexLocker locker(&m_mutex);
+            return m_payloads.empty() ? std::pair<KisTileData *, quint64>{}
+                : std::make_pair(m_payloads.begin()->first, m_payloads.begin()->second.slot);
+        }
+
+        quint64 residentBytes() const
+        {
+            QMutexLocker locker(&m_mutex);
+            // Swap holds the physical gate before entering this observer.
+            // Wait for its original serial, never take a tile gate here.
+            for (;;) {
+                const bool active = std::any_of(m_payloads.begin(), m_payloads.end(),
+                    [](const auto &entry) { return entry.second.transition != 0; });
+                if (!active) break;
+                m_transitionChanged.wait(&m_mutex);
+            }
+            quint64 bytes = 0;
+            for (const auto &[tile, payload] : m_payloads)
+                if (payload.domain == KisPageAccessDomain::CpuRam) bytes += payload.bytes;
+            return bytes;
+        }
 
         bool initialize(KisTileData *tileData,
                         const KisTileDataResidencyState &state)
@@ -563,9 +619,11 @@ public:
 
     ~Private()
     {
-        for (auto payload = physicalPayloads.cbegin(); payload != physicalPayloads.cend(); ++payload) {
-            KisTileDataStore::instance()->unregisterResidencyObserver(payload.key(), residencyObserver);
-            residencyObserver->untrack(payload.key(), payload->identity);
+        while (residencyObserver) {
+            const auto [tile, identity] = residencyObserver->firstPayload();
+            if (!tile) break;
+            KisTileDataStore::instance()->unregisterResidencyObserver(tile, residencyObserver);
+            residencyObserver->untrack(tile, identity);
         }
     }
 
@@ -592,53 +650,84 @@ public:
         return handle;
     }
 
-    quint64 retainPhysical(KisTileData *tileData, quint64 bytes)
+    struct PreparedAdoption {
+        KisReplicaHandle handle;
+        AllocationMap::node_type allocation;
+        ResidencyObserver::PreparedPayload physical;
+    };
+
+    PreparedAdoption prepareAdoption(const KisPageVersion &version,
+        const KisPageAllocationDescriptor &descriptor, KisTileData *tile = nullptr)
     {
-        auto existing = physicalPayloads.find(tileData);
-        if (existing != physicalPayloads.end()) {
-            if (quint64(tileData->pixelSize()) * KisTileData::WIDTH * KisTileData::HEIGHT != bytes)
-                return {};
-            ++existing->logicalReferences;
-            return existing->identity;
+        const bool existing = tile && residencyObserver->physicalIdentity(tile);
+        const quint64 bytes = descriptor.minimumByteSize();
+        if (!canAllocateHandle() || (!existing &&
+            (bytes > config.budgetBytes - qMin(config.budgetBytes, committedBytes)
+             || !nextPhysicalSlot || nextPhysicalSlot == std::numeric_limits<quint64>::max()))) return {};
+        PreparedAdoption prepared;
+        prepared.handle = allocateHandle(version, descriptor);
+        AllocationMap scratch(allocations.get_allocator());
+        scratch.try_emplace(prepared.handle.allocation.slot);
+        prepared.allocation = scratch.extract(prepared.handle.allocation.slot);
+        if (!existing) prepared.physical = residencyObserver->preparePayload(nextPhysicalSlot, bytes);
+        return prepared;
+    }
+
+    quint64 retainPhysical(KisTileData *tileData, quint64 bytes,
+                           ResidencyObserver::PreparedPayload &prepared)
+    {
+        if (const quint64 existing = residencyObserver->retainExisting(tileData, bytes)) {
+            return existing;
         }
-        if (!tileData || bytes > config.budgetBytes - qMin(config.budgetBytes, committedBytes)
-            || nextPhysicalSlot == 0
-            || nextPhysicalSlot == std::numeric_limits<quint64>::max()) {
+        if (!tileData || prepared.payload.empty()
+            || !residencyObserver->track(tileData, prepared)) {
             return {};
         }
-        const quint64 identity = nextPhysicalSlot++;
-        physicalPayloads.insert(tileData, {identity, 1});
+        const quint64 identity = nextPhysicalSlot;
+        auto rollback = qScopeGuard([&] {
+            KisTileDataStore::instance()->unregisterResidencyObserver(tileData, residencyObserver);
+            residencyObserver->untrack(tileData, identity);
+        });
         KisTileDataResidencyState initialState;
-        if (!residencyObserver->track(tileData, identity, bytes)
-            || !KisTileDataStore::instance()->registerResidencyObserver(
+        if (!KisTileDataStore::instance()->registerResidencyObserver(
                 tileData, residencyObserver, &initialState)
             || !residencyObserver->initialize(tileData, initialState)) {
-            KisTileDataStore::instance()->unregisterResidencyObserver(
-                tileData, residencyObserver);
-            residencyObserver->untrack(tileData, identity);
-            physicalPayloads.remove(tileData);
             return {};
         }
+        ++nextPhysicalSlot;
         committedBytes += bytes;
+        rollback.dismiss();
         return identity;
     }
 
     void releasePhysical(KisTileData *tileData,
                          quint64 identity)
     {
-        auto existing = physicalPayloads.find(tileData);
-        Q_ASSERT(existing != physicalPayloads.end());
-        Q_ASSERT(existing->identity == identity);
-        Q_ASSERT(existing->logicalReferences != 0);
-        if (--existing->logicalReferences == 0) {
+        if (residencyObserver->releaseReference(tileData, identity)) {
             const quint64 bytes = quint64(tileData->pixelSize()) *
                 KisTileData::WIDTH * KisTileData::HEIGHT;
             Q_ASSERT(committedBytes >= bytes);
             committedBytes -= bytes;
             KisTileDataStore::instance()->unregisterResidencyObserver(tileData, residencyObserver);
             residencyObserver->untrack(tileData, identity);
-            physicalPayloads.erase(existing);
         }
+    }
+
+    bool adopt(PreparedAdoption &prepared, KisTileData *tile,
+               const KisCompletionTicket &retirementCompletion)
+    {
+        if (!prepared.handle.isValid() || prepared.allocation.empty() || !tile) return false;
+        // The wrapper is still a cold fallible Qt object. Its failure occurs
+        // before original physical references or canonical index installation.
+        const auto binding = QSharedPointer<Tiles3ResidentBinding>::create(tile, prepared.handle, &handoffAdmission);
+        const quint64 physical = retainPhysical(tile, prepared.handle.layout.byteSize, prepared.physical);
+        if (!physical) return false;
+        auto rollback = qScopeGuard([&] { releasePhysical(tile, physical); });
+        prepared.allocation.mapped() = {binding, physical, retirementCompletion};
+        const auto accepted = allocations.insert(std::move(prepared.allocation));
+        if (!accepted.inserted) return false;
+        rollback.dismiss();
+        return true;
     }
 
     KisReplicaOperation allocate(
@@ -647,6 +736,7 @@ public:
         const KisPageAllocationDescriptor &descriptor,
         KisPageAccessDomain domain,
         KisTileData *copySource = nullptr, const KisCpuPagePayload *payload = nullptr)
+    try
     {
         // This allocator returns independent mutable storage only; complete
         // payload aliases use an explicit immutable source instead.
@@ -689,6 +779,9 @@ public:
         });
         if (!retirementCompletion.isValid())
             return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 retirement completion preparation failed"));
+        auto prepared = prepareAdoption(version, descriptor);
+        if (!prepared.handle.isValid())
+            return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 physical identity or budget is exhausted"));
         if (payload) {
             tileData = KisTileDataStore::instance()->createTileDataFromRows(
                 qint32(descriptor.format.pixelStride), static_cast<const quint8 *>(payload->data),
@@ -732,19 +825,15 @@ public:
                 QStringLiteral("tiles3 tile allocation alignment is insufficient"));
         }
 
-        const KisReplicaHandle handle = allocateHandle(version, descriptor);
-
-        const quint64 physical = retainPhysical(tileData, byteSize);
-        if (!physical) {
+        const KisReplicaHandle handle = prepared.handle;
+        if (!adopt(prepared, tileData, retirementCompletion)) {
             return KisReplicaOperation::failed(operation,
                                    QStringLiteral("tiles3 physical payload budget is exhausted"));
         }
-        allocations.insert(handle.allocation.slot,
-                           {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &handoffAdmission), physical, retirementCompletion});
         if (!completions->complete(completion,
                                    KisCompletionStatus::Succeeded)) {
-            allocations.remove(handle.allocation.slot);
-            releasePhysical(tileData, physical);
+            const auto released = allocations.extract(handle.allocation.slot);
+            releasePhysical(tileData, released.mapped().physicalBacking);
             return KisReplicaOperation::failed(
                 operation,
                 QStringLiteral("tiles3 completion publication failed"));
@@ -752,9 +841,12 @@ public:
         failCompletion.dismiss();
         return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
     }
+    catch (const std::bad_alloc &)
+    {
+        return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 adoption storage preparation failed"));
+    }
 
     quint64 nextPhysicalSlot = 1;
-    QHash<KisTileData *, Tiles3PhysicalPayload> physicalPayloads;
     QSharedPointer<ResidencyObserver> residencyObserver;
     Tiles3HandoffAdmission handoffAdmission;
     KisTiles3PayloadWork work;
@@ -782,6 +874,8 @@ try
         config, completions, QStringLiteral("tiles3"), error);
     if (configured) {
         observer->setProviderIdentity(config.provider, config.providerEpoch);
+        d->allocations = Private::AllocationMap(observer->storageAllocator());
+        d->activeLeases = KisCpuBindingLeaseMap(observer->storageAllocator());
         d->residencyObserver = std::move(observer);
     }
     return configured;
@@ -862,7 +956,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
     const auto it = d->findExactAllocation(source);
-    KisTileData *sourceTile = it != d->allocations.end() ? it->tileData() : nullptr;
+    KisTileData *sourceTile = it != d->allocations.end() ? it->second.tileData() : nullptr;
     if (!targetVersion.isValid() ||
         !(source.version.key == targetVersion.key) ||
         targetVersion.generation.value <= source.version.generation.value ||
@@ -874,10 +968,9 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
     // Join the same binding gate as generic reads, transfer and retire BEFORE consuming a
     // preclone or looking at source bytes. A physical/native writer rejects
     // here instead of waiting on its swap pin while holding the provider lock.
-    // Keep the binding itself, not an allocations iterator: allocate() may
-    // rehash that table. The guarded source is pinned once for both cache-hit
+    // Keep the original source binding for the whole cold allocation. It is pinned once for both cache-hit
     // and copy paths; duplicatePinnedTileData must not take a nested read lock.
-    const auto sourceBinding = it->binding;
+    const auto sourceBinding = it->second.binding;
     if (!sourceBinding || !sourceBinding->acquireRead(source.allocationIdentity(), false)) {
         return KisReplicaOperation::failed(operation,
             QStringLiteral("tiles3 native copy source binding is busy or retired"));
@@ -927,10 +1020,10 @@ TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
     const auto expected = binding->readIdentity(guard.version());
     {
         QMutexLocker lock(&d->mutex);
-        const auto allocation = d->allocations.constFind(expected.allocation.slot);
+        const auto allocation = d->allocations.find(expected.allocation.slot);
         if (!(expected.provider == d->config.provider) ||
             !(expected.providerEpoch == d->config.providerEpoch) ||
-            allocation == d->allocations.constEnd() || allocation->binding != binding) return {};
+            allocation == d->allocations.end() || allocation->second.binding != binding) return {};
     }
     return Tiles3TileReadCache::prepare(binding, expected, binding->guardedTile(), std::move(reuse), true);
 }
@@ -949,11 +1042,11 @@ TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
     const auto found = d->activeLeases.find(lease.value);
     if (!lease.isValid() || found == d->activeLeases.end() ||
         found->second.mode != KisPageAccessMode::Read) return {};
-    const auto allocation = d->allocations.constFind(found->second.allocation.slot);
-    if (allocation == d->allocations.constEnd() ||
-        !allocation->binding->matchesAllocation(found->second.allocation)) return {};
+    const auto allocation = d->allocations.find(found->second.allocation.slot);
+    if (allocation == d->allocations.end() ||
+        !allocation->second.binding->matchesAllocation(found->second.allocation)) return {};
     const KisReplicaAllocationIdentity expected{d->config.provider, d->config.providerEpoch, found->second.allocation};
-    return Tiles3TileReadCache::prepare(allocation->binding, expected, allocation->tileData(), std::move(reuse), true);
+    return Tiles3TileReadCache::prepare(allocation->second.binding, expected, allocation->second.tileData(), std::move(reuse), true);
 }
 
 TileLease KisTiles3PageReplicaProvider::prepareTileReadCache(
@@ -964,8 +1057,8 @@ TileLease KisTiles3PageReplicaProvider::prepareTileReadCache(
     QMutexLocker lock(&d->mutex);
     const auto allocation = d->findExactAllocation(replica);
     if (allocation == d->allocations.end()) return {};
-    return Tiles3TileReadCache::prepare(allocation->binding, replica.allocationIdentity(),
-                                        allocation->tileData(), std::move(reuse), false);
+    return Tiles3TileReadCache::prepare(allocation->second.binding, replica.allocationIdentity(),
+                                        allocation->second.tileData(), std::move(reuse), false);
 }
 
 QSharedPointer<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCpuReadSource(
@@ -1006,6 +1099,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousSource(
     KisPageOperationId operation, const QSharedPointer<const KisPageReplicaSource> &source,
     const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
     KisReplicaSourceUse use, KisPagePriority priority)
+try
 {
     Q_UNUSED(priority);
     const auto input = qSharedPointerDynamicCast<const Tiles3ReplicaSource>(source);
@@ -1039,17 +1133,19 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousSource(
     });
     if (!retirementCompletion.isValid())
         return KisReplicaOperation::failed(operation, QStringLiteral("alias retirement completion preparation failed"));
-    const KisReplicaHandle handle = d->allocateHandle(targetVersion, descriptor);
-    const quint64 physical = d->retainPhysical(input->tile, bytes);
-    if (!physical) {
+    auto prepared = d->prepareAdoption(targetVersion, descriptor, input->tile);
+    const KisReplicaHandle handle = prepared.handle;
+    if (!d->adopt(prepared, input->tile, retirementCompletion)) {
         return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias physical budget is exhausted"));
     }
-    d->allocations.insert(handle.allocation.slot,
-         {QSharedPointer<Tiles3ResidentBinding>::create(input->tile, handle, &d->handoffAdmission), physical, retirementCompletion});
     ++d->work.adoptedPages; d->work.adoptedBytes += bytes;
     d->completions->complete(completion, KisCompletionStatus::Succeeded);
     failCompletion.dismiss();
     return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
+}
+catch (const std::bad_alloc &)
+{
+    return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias storage preparation failed"));
 }
 
 
@@ -1058,6 +1154,7 @@ KisReplicaHandle KisTiles3PageReplicaProvider::adoptInitialTile(
     const KisPageAllocationDescriptor &descriptor,
     KisTileData *tileData,
     QString *error)
+try
 {
     if (!version.isValid() || !supportsNativeTileLayout(descriptor) ||
         !tileData || tileData->pixelSize() != descriptor.format.pixelStride ||
@@ -1078,19 +1175,22 @@ KisReplicaHandle KisTiles3PageReplicaProvider::adoptInitialTile(
         return {};
     }
     auto failCompletion = qScopeGuard([&] { d->completions->complete(retirementCompletion, KisCompletionStatus::Failed); });
-    const KisReplicaHandle handle = d->allocateHandle(version, descriptor);
-    const quint64 physical = d->retainPhysical(tileData, byteSize);
-    if (!physical) {
+    auto prepared = d->prepareAdoption(version, descriptor, tileData);
+    const KisReplicaHandle handle = prepared.handle;
+    if (!d->adopt(prepared, tileData, retirementCompletion)) {
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 initial physical payload budget is exhausted"));
         return {};
     }
-    d->allocations.insert(handle.allocation.slot,
-                          {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &d->handoffAdmission), physical, retirementCompletion});
     failCompletion.dismiss();
     KisPageStoreDetail::setError(error, {});
     ++d->work.adoptedPages;
     d->work.adoptedBytes += byteSize;
     return handle;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 initial adoption storage preparation failed"));
+    return {};
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::transfer(
@@ -1134,7 +1234,7 @@ bool KisTiles3PageReplicaProvider::validate(
     return supportsNativeTileLayout(descriptor) &&
            replica.layout.matches(descriptor) &&
            allocationIt != d->allocations.end() &&
-           allocationIt->tileData();
+           allocationIt->second.tileData();
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::retire(
@@ -1144,6 +1244,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
 {
     KisTileData *retired = nullptr;
     KisCompletionTicket completion;
+    Private::AllocationMap::node_type released;
     {
         QMutexLocker locker(&d->mutex);
         auto retirement = d->beginRetirement(operation, replica, lastUse);
@@ -1151,7 +1252,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
             return KisReplicaOperation::failed(operation,
                 QStringLiteral("tiles3 retirement %1").arg(QString::fromLatin1(retirement.failure)));
         completion = retirement.completion;
-        retired = retirement.allocation->tileData();
+        retired = retirement.allocation->second.tileData();
         if (!retired) {
             return KisReplicaOperation::failed(
                 operation, QStringLiteral("tiles3 retirement allocation is stale"));
@@ -1161,13 +1262,13 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
                 operation, QStringLiteral("tiles3 residency transition is active"));
         }
         retired->ref();
-        if (!retirement.allocation->binding->retire(replica.allocationIdentity())) {
+        if (!retirement.allocation->second.binding->retire(replica.allocationIdentity())) {
             retired->deref();
             return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 native reader still pins allocation"));
         }
         d->consumeOperation(operation);
-        d->releasePhysical(retired, retirement.allocation->physicalBacking);
-        d->allocations.erase(retirement.allocation);
+        d->releasePhysical(retired, retirement.allocation->second.physicalBacking);
+        released = d->allocations.extract(retirement.allocation);
     }
     retired->deref();
     if (!d->completions->complete(completion,
@@ -1182,14 +1283,8 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
 KisReplicaMemoryUsage KisTiles3PageReplicaProvider::memoryUsage() const
 {
     QMutexLocker locker(&d->mutex);
-    quint64 residentBytes = 0;
-    for (auto payload = d->physicalPayloads.cbegin();
-         payload != d->physicalPayloads.cend(); ++payload) {
-        if (payload.key()->isResident())
-            residentBytes += quint64(payload.key()->pixelSize()) *
-                KisTileData::WIDTH * KisTileData::HEIGHT;
-    }
-    return {residentBytes, d->committedBytes, d->config.budgetBytes};
+    return {d->residencyObserver ? d->residencyObserver->residentBytes() : 0,
+            d->committedBytes, d->config.budgetBytes};
 }
 
 KisReplicaBackingFootprint KisTiles3PageReplicaProvider::backingFootprint(
@@ -1197,17 +1292,17 @@ KisReplicaBackingFootprint KisTiles3PageReplicaProvider::backingFootprint(
 {
     QMutexLocker locker(&d->mutex);
     const auto it = d->findExactAllocation(replica);
-    if (it == d->allocations.end() || !it->physicalBacking) {
+    if (it == d->allocations.end() || !it->second.physicalBacking) {
         return {};
     }
-    KisTileData *tileData = it->tileData();
+    KisTileData *tileData = it->second.tileData();
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 revision = 0;
     if (!tileData || !d->residencyObserver->observation(
             tileData, &domain, &revision)) {
         return {};
     }
-    return {it->physicalBacking, domain, replica.layout.byteSize, revision};
+    return {it->second.physicalBacking, domain, replica.layout.byteSize, revision};
 }
 
 KisReplicaBackingDomainChanges
@@ -1267,12 +1362,12 @@ KisTileData *KisTiles3PageReplicaProvider::tileDataForLease(
     QMutexLocker locker(&d->mutex);
     const auto leaseIt = d->activeLeases.find(lease.value);
     if (leaseIt == d->activeLeases.end()) return nullptr;
-    const auto allocationIt = d->allocations.constFind(leaseIt->second.allocation.slot);
-    if (allocationIt == d->allocations.constEnd() ||
-        !allocationIt->binding->matchesAllocation(leaseIt->second.allocation)) {
+    const auto allocationIt = d->allocations.find(leaseIt->second.allocation.slot);
+    if (allocationIt == d->allocations.end() ||
+        !allocationIt->second.binding->matchesAllocation(leaseIt->second.allocation)) {
         return nullptr;
     }
-    return allocationIt->tileData();
+    return allocationIt->second.tileData();
 }
 
 KisTileData *KisTiles3PageReplicaProvider::tileDataForCpuWriteGuard(const KisCpuWriteGuard &guard) const
@@ -1282,5 +1377,5 @@ KisTileData *KisTiles3PageReplicaProvider::tileDataForCpuWriteGuard(const KisCpu
     if (!guard.providerBacking(&replica)) return nullptr;
     QMutexLocker lock(&d->mutex);
     const auto it = d->findExactAllocation(replica);
-    return it != d->allocations.end() ? it->tileData() : nullptr;
+    return it != d->allocations.end() ? it->second.tileData() : nullptr;
 }
