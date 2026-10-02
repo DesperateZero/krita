@@ -33,6 +33,7 @@
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
 #include "tiles3/tests/kis_tile_data_store_test_access.h"
+#include "pagestore/KisPageStoreReclamation_p.h"
 
 #include "testui.h"
 
@@ -63,6 +64,9 @@ public:
         , m_oldPool(m_config.memoryPoolLimitPercent())
         , m_oldSwap(m_config.maxSwapSize())
     {
+        // Previous images are gone, but their terminal owners may still be
+        // queued. Finish that work before changing the shared process limit.
+        kisDrainPageStoreReclamation();
         const qreal configuredMegabytes = hardMegabytes + poolMegabytes + 0.5;
         m_config.setMemoryHardLimitPercent(
             100.0 * configuredMegabytes / KisImageConfig::totalRAM());
@@ -76,6 +80,9 @@ public:
 
     ~TinyTileBudget()
     {
+        // The tester has released its image before this fixture restores the
+        // configuration. No stroke work is drained inside the workload.
+        kisDrainPageStoreReclamation();
         m_config.setMemoryHardLimitPercent(m_oldHard);
         m_config.setMemorySoftLimitPercent(m_oldSoft);
         m_config.setMemoryPoolLimitPercent(m_oldPool);

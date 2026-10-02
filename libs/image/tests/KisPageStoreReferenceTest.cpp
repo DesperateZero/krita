@@ -1070,6 +1070,13 @@ private Q_SLOTS:
                     << kind << outcome;
     }
     void publicationStorageRefusalAndLateCleanup();
+    void mutationCandidateStorageAtSharedCapacity_data()
+    {
+        QTest::addColumn<bool>("install");
+        QTest::newRow("cancel") << false;
+        QTest::newRow("install") << true;
+    }
+    void mutationCandidateStorageAtSharedCapacity();
     void diagnosticRecorderIsOwnerAndThreadScoped();
     void currentTransactionPinsBaseWithoutManifestExport();
     void capturedReadViewFreezesPagesAndSurfaceDefault();
@@ -6118,6 +6125,62 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     coordinator.reset(); // Cleanup owns no dereferenced shard/coordinator state.
     QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
     QVERIFY(cleanup.isEmpty());
+}
+
+void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
+{
+    QFETCH(bool, install);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget(limits);
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    KisPageMetadataCoordinator metadata;
+    metadata.attachBackingBudget(budget); QVERIFY(metadata.configure(1));
+    const KisPageTransaction tx{{74}, {1}};
+    QVector<KisPageVersion> versions;
+    for (int x = 0; x < 324; ++x) {
+        auto page = initialPageState(pageVersion(x, 1), replica(pageVersion(x, 1), 1, 1, quint64(2 * x + 1)));
+        const auto target = replica(pageVersion(x, 2), 1, 1, quint64(2 * x + 2));
+        page.versions.append({target.version, KisPagePublicationState::Prepared,
+            {{target, KisReplicaValidity::Valid, {}, {}, 0, {}}}, target, tx.id, {}});
+        page.nextGeneration = {3};
+        QVERIFY(metadata.registerPage(page)); versions.append(target.version);
+    }
+    const auto prepare = [&] { return metadata.prepareMutation(tx, versions.constData(), versions.size()); };
+    auto warm = prepare(); QVERIFY(warm.isValid()); warm = {};
+    const auto live = [](const KisBackingBudgetController &owner) {
+        return owner.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const quint64 before = live(budget);
+    constexpr quint64 candidateRoom = 64 * 1024;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live(*parent) - candidateRoom);
+    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    auto candidate = prepare(); QVERIFY(candidate.isValid());
+    QVERIFY(live(budget) > before && live(budget) - before < candidateRoom);
+    qInfo() << "BR1_DETACHMENT_CANDIDATE_BYTES" << live(budget) - before;
+    QCOMPARE(metadata.footprint().pageActivities, quint64(324));
+    const size_t remainingBytes = size_t(limits.metadataArenaBytes - live(*parent));
+    void *remaining = kisAllocateMutationStorage(parent.data(), remainingBytes, 1);
+    const auto releaseRemaining = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), remaining, remainingBytes, 1); });
+    QCOMPARE(live(*parent), limits.metadataArenaBytes);
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    if (install) QVERIFY(metadata.installMutation(std::move(candidate), tx, nullptr, &cleanup));
+    else candidate = {};
+    for (const auto &version : versions) {
+        KisPageStateSnapshot page; QVERIFY(metadata.pageSnapshot(version.key, &page));
+        const auto *record = page.findVersion(version); QVERIFY(record);
+        QCOMPARE(record->publication, install ? KisPagePublicationState::Historical : KisPagePublicationState::Prepared);
+        QCOMPARE(record->preparedBy, install ? KisPageTransactionId{} : tx.id);
+        QCOMPARE(page.publishedGeneration, KisPageGeneration{1});
+        QCOMPARE(page.nextGeneration, KisPageGeneration{3});
+    }
+    qsizetype cleared = 0;
+    while (!cleanup.isEmpty()) cleared += cleanup.clearBatch(17);
+    QCOMPARE(cleared, install ? qsizetype(324) : qsizetype(0));
+    QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+    QCOMPARE(live(budget), before);
+    for (const auto &bucket : parent->usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
 }
 
 void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
