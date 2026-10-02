@@ -2066,7 +2066,7 @@ public:
     QAtomicInteger<quint64> registeredPages{0};
     void *retirementDebtContext = nullptr;
     PrepareRetirementDebt prepareRetirementDebt = nullptr;
-    FinalizeRetirementDebt commitRetirementDebt = nullptr;
+    CommitRetirementEffects commitRetirementDebt = nullptr;
     FinalizeRetirementDebt cancelRetirementDebt = nullptr;
     // Shared identity prevents a capability surviving destruction from being
     // accepted by another coordinator constructed at the same address.
@@ -2782,7 +2782,7 @@ void KisPageMetadataCoordinator::attachBackingBudget(
 void KisPageMetadataCoordinator::attachRetirementDebtOwner(
     void *context,
     PrepareRetirementDebt prepare,
-    FinalizeRetirementDebt commit,
+    CommitRetirementEffects commit,
     FinalizeRetirementDebt cancel)
 {
     QMutexLocker locker(&d->configurationMutex);
@@ -3224,14 +3224,13 @@ KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVer
 
 bool KisPageMetadataCoordinator::discardHistory(
     const KisPageKey &key, const KisPageVersion *versions, qsizetype count,
-    quint32 reachableMask, HistoryEffects &effects, quint32 *removedMask)
+    quint32 reachableMask, quint32 *removedMask)
 {
-    Q_ASSERT(effects.empty());
     *removedMask = 0;
     auto *shard = d->shardFor(key);
     if (!shard || count < 0 || count > HistorySlice::Limit) return false;
     for (;;) {
-        HistoryEffects prepared(effects.get_allocator());
+        KisPageWorkingArray<KisPageTransitionEffect> prepared(shard->budgetAuthority->storage<char>());
         MetadataArenas::ReleasedBlocks released;
         quint64 debtCookie = 0;
         bool debtPrepared = false;
@@ -3312,12 +3311,12 @@ bool KisPageMetadataCoordinator::discardHistory(
             shard->backgroundLocalVersionRemovals += removed;
         }
         ++shard->acceptedTransitions;
-        effects = std::move(prepared);
         *removedMask = selected;
         released = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (debtPrepared) {
-            d->commitRetirementDebt(d->retirementDebtContext, debtCookie);
+            d->commitRetirementDebt(d->retirementDebtContext, debtCookie,
+                                    prepared.data(), qsizetype(prepared.size()));
             debtPrepared = false;
         }
         return true;
@@ -3401,7 +3400,7 @@ void KisPageMetadataReadCleanup::clear() noexcept
     if (bytes) authority->releaseLive(bytes);
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::applyOwner(const KisPageKey &key,
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwner(const KisPageKey &key,
                                                                const KisPageTransition &transition,
                                                                KisPageMetadataReadCleanup *cleanup)
 {
@@ -3413,13 +3412,13 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyOwner(const KisPageKey 
     return applyOwnerSequence(key, {transition});
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const KisPageKey &key,
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const KisPageKey &key,
                                                                        const QVector<KisPageTransition> &transitions)
 {
     if (transitions.isEmpty() || std::any_of(transitions.cbegin(), transitions.cend(), [](const auto &t) {
             return !localTransition(t.kind);
         })) {
-        KisPageTransitionResult result;
+        KisPageMetadataTransitionResult result;
         result.rejectionReason = QStringLiteral("owner transition is not a local metadata mutation");
         return result;
     }
@@ -3431,11 +3430,11 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const Kis
     return applyProjectedSequence(key, transitions);
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::applyReadProtection(
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     const KisPageKey &key, const KisPageTransition &transition,
     KisPageMetadataReadCleanup *cleanup)
 {
-    KisPageTransitionResult result;
+    KisPageMetadataTransitionResult result;
     const bool releaseRead = transition.kind == KisPageTransitionKind::ReleaseRead;
     if ((!releaseRead && transition.kind != KisPageTransitionKind::AcknowledgeLastUse)
         || !(transition.version.key == key)
@@ -3485,10 +3484,10 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     return result;
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
     const KisPageKey &key, const KisPageTransition &transition, KisPageMetadataReadCleanup *cleanup)
 {
-    KisPageTransitionResult result;
+    KisPageMetadataTransitionResult result;
     const bool retain = transition.kind == KisPageTransitionKind::RetainCapturedVersion;
     if ((!retain && transition.kind != KisPageTransitionKind::ReleaseCapturedVersion)
         || !(transition.version.key == key) || !transition.readView.isValid()
@@ -3591,10 +3590,10 @@ KisPageTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
     }
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
     const KisPageKey &key, const QVector<KisPageTransition> &transitions)
 try {
-    KisPageTransitionResult result;
+    KisPageMetadataTransitionResult result;
     auto *shard = d->shardFor(key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
@@ -3660,15 +3659,11 @@ try {
             if (!step.accepted) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = step.rejectionReason;
-                result.effects.clear();
                 return result; // no authoritative record has changed
             }
             next = std::move(step.next);
             effects.insert(effects.end(), step.effects.cbegin(), step.effects.cend());
         }
-        // This is the existing caller-owned output contract. Construct it
-        // before Debt preparation or the first authoritative record change.
-        result.effects = QVector<KisPageTransitionEffect>(effects.cbegin(), effects.cend());
         // Only projected records are installed/removed. Unrelated history and its
         // reader/pin/last-use state are neither copied nor overwritten.
         const quint64 expectedRevision = page->revision;
@@ -3683,7 +3678,6 @@ try {
                 --shard->backgroundLocalTransitionSequences;
                 shard->backgroundLocalVersionInputs -= quint64(input.versions.size());
             }
-            result.effects.clear();
         };
         quint64 retirementDebtCookie = 0;
         bool retirementDebtPrepared = false;
@@ -3693,17 +3687,21 @@ try {
                                         retirementDebtCookie);
             }
         });
-        if (!result.effects.isEmpty() && d->prepareRetirementDebt) {
+        if (!effects.empty()) {
+            if (!d->prepareRetirementDebt) {
+                ++shard->rejectedTransitions;
+                result.rejectionReason = QStringLiteral("retirement effect receiver is not configured");
+                return result;
+            }
             QString debtError;
             lock.unlock();
             if (!d->prepareRetirementDebt(d->retirementDebtContext,
-                                          result.effects.constData(), result.effects.size(),
+                                          effects.data(), qsizetype(effects.size()),
                                           &retirementDebtCookie,
                                           &debtError)) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = debtError.isEmpty()
                     ? QStringLiteral("retirement debt budget is exhausted") : debtError;
-                result.effects.clear();
                 return result;
             }
             retirementDebtPrepared = true;
@@ -3731,13 +3729,11 @@ try {
         if (storage != MetadataGrowthResult::Ready) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata arena budget is exhausted");
-            result.effects.clear();
             return result;
         }
         const auto nextHeader = next.header();
         if (!shard->ensureActivityCapacity(key, &nextHeader, &result.rejectionReason)) {
             result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
-            result.effects.clear();
             return result;
         }
         // The next values already witness retention. No second removal set
@@ -3745,7 +3741,6 @@ try {
         if (!shard->records.putBatch(&page.value(), next.versions, workingStorage)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
-            result.effects.clear();
             return result;
         }
         quint64 removed = 0;
@@ -3770,8 +3765,8 @@ try {
         auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (retirementDebtPrepared) {
-            d->commitRetirementDebt(d->retirementDebtContext,
-                                    retirementDebtCookie);
+            d->commitRetirementDebt(d->retirementDebtContext, retirementDebtCookie,
+                                    effects.data(), qsizetype(effects.size()));
             retirementDebtPrepared = false;
         }
         Q_UNUSED(releasedBlocks);
@@ -3779,7 +3774,7 @@ try {
     }
 }
 catch (const std::bad_alloc &) {
-    KisPageTransitionResult refused;
+    KisPageMetadataTransitionResult refused;
     refused.rejectionReason = QStringLiteral("metadata transition working storage was refused");
     return refused;
 }
@@ -3836,19 +3831,19 @@ QVector<KisReplicaHandle> KisPageMetadataCoordinator::shutdownReplicaHandles() c
     return result;
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::acknowledgeLastUse(const KisPageVersion &version,
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::acknowledgeLastUse(const KisPageVersion &version,
                                                                        const KisReplicaHandle &replica,
                                                                        const KisVerifiedCompletion &completion)
 {
     return acknowledgeLastUse(version, replica, completion, nullptr);
 }
 
-KisPageTransitionResult KisPageMetadataCoordinator::acknowledgeLastUse(const KisPageVersion &version,
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::acknowledgeLastUse(const KisPageVersion &version,
                                                                        const KisReplicaHandle &replica,
                                                                        const KisVerifiedCompletion &completion,
                                                                        KisPageMetadataReadCleanup *cleanup)
 {
-    KisPageTransitionResult result;
+    KisPageMetadataTransitionResult result;
     if (!version.isValid() || !replica.isValid() || !(replica.version == version) || !completion.isValid()) {
         result.rejectionReason = QStringLiteral("verified last-use completion is invalid");
         return result;

@@ -601,14 +601,11 @@ bool KisPagePublicationCoordinator::hasActiveTransactionLocked(
     return snapshot.transaction == transaction && snapshot.isActive();
 }
 
-void KisPagePublicationCoordinator::retireEffectsUnlocked(
-    QVector<KisPageTransitionEffect> effects, QMutexLocker<QMutex> &ownerLock)
+void KisPagePublicationCoordinator::processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock)
 {
-    if (effects.isEmpty() && m_backgroundReclamation) return;
     ++m_activeProviderCalls;
     ownerLock.unlock();
-    m_retirementQueue.retireEffects(effects, m_backgroundReclamation);
-    effects.clear();
+    m_retirementQueue.processAcceptedEffects(m_backgroundReclamation);
     ownerLock.relock();
     --m_activeProviderCalls;
 }
@@ -785,7 +782,7 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
     }
     if (!update.prepareSurfaceLocked(error) || !update.tryInstallLocked(&metadataCleanup, error)) return false;
     update.collectRetirementsLocked();
-    retireEffectsUnlocked({}, ownerLock);
+    processRetirementsUnlocked(ownerLock);
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -1106,7 +1103,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         diagnostic.next(Phase::CommitHistoryCollect, quint64(historyCandidates.size()));
         m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
         diagnostic.next(Phase::CommitProviderRetire, 0);
-        retireEffectsUnlocked({}, ownerLock);
+        processRetirementsUnlocked(ownerLock);
         ++m_committedTransactions;
         const KisImageEpochCommitTicket ticket{committed.root.epoch(), preparedCommit.data->completion};
         ownerLock.unlock();
@@ -1314,7 +1311,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     sourceClaim.dismiss();
     m_history.collectEpochBookkeepingLocked();
     m_history.collectUnreachableLocked(historyCandidates.constData(), historyCandidates.size());
-    retireEffectsUnlocked({}, ownerLock);
+    processRetirementsUnlocked(ownerLock);
     return {restored.root.epoch(), completion};
 }
 
@@ -1329,13 +1326,12 @@ bool KisPagePublicationCoordinator::abortLocked(
 
     m_preparingCommits.insert(transaction.id.value);
     const auto preparation = qScopeGuard([&] { m_preparingCommits.remove(transaction.id.value); });
-    QVector<KisPageTransitionEffect> retirementEffects;
-    // A later page can reject cancellation after earlier pages detached.
-    // Keep the remaining transaction retryable, but never drop those effects.
+    // Earlier pages already transferred their records even if a later page
+    // refuses. Keep the remainder retryable and preserve the foreground pump.
     const auto retire = qScopeGuard([&] {
-        retireEffectsUnlocked(std::move(retirementEffects), ownerLock);
+        processRetirementsUnlocked(ownerLock);
     });
-    if (!m_prepareAbort(m_ownerContext, transaction.id, &retirementEffects, cleanup)) {
+    if (!m_prepareAbort(m_ownerContext, transaction.id, cleanup)) {
         return false;
     }
 
@@ -1344,10 +1340,9 @@ bool KisPagePublicationCoordinator::abortLocked(
         KisPageTransition transition;
         transition.kind = KisPageTransitionKind::AbortTransaction;
         transition.transaction = transaction.id;
-        const KisPageTransitionResult result = m_metadata.applyOwner(proof.authority.version.key, transition);
+        const KisPageMetadataTransitionResult result = m_metadata.applyOwner(proof.authority.version.key, transition);
         if (!result.accepted)
             return false;
-        retirementEffects += result.effects;
         if (!revokePreparedProofLocked(proof))
             return false;
     }

@@ -79,11 +79,10 @@ public:
                        const QSharedPointer<KisPageReplicaProvider> &provider,
                        const KisCompletionTicket &lastUse,
                        KisPageBackingPreparation &&backing);
-    void retireEffects(const QVector<KisPageTransitionEffect> &effects,
-                       bool backgroundReclamation);
-    // Detach committed Debt and retained the original record. Transfer is
+    void processAcceptedEffects(bool backgroundReclamation);
+    // Detach committed Debt and retain the original record. Transfer is
     // infallible under the metadata owner's gate and invokes no provider.
-    void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
+    KRITAIMAGE_EXPORT void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
     KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();
@@ -102,6 +101,7 @@ private:
                                   KisBackingBudgetReservation *reservation,
                                   KisBackingBudgetClass currentClass);
     void defer(KisPageRetirementRecordPointer record);
+    KisPageStoreRetirementProgress retireBatch(KisPageRetirementRecords &batch);
     void finishAttemptLocked(KisPageRetirementRecords &batch, KisPageRetirementRecords::iterator entry, bool retired);
     void schedulePassLocked();
     void scheduleRetryLocked();
@@ -125,6 +125,8 @@ private:
 
     mutable QMutex m_mutex;
     KisPageRetirementRecords m_pending;
+    // Accepted first attempts and notified retries share original records;
+    // only records with background permission are eligible for worker passes.
     KisPageRetirementRecords m_ready;
     // Same sole record owner, partitioned to bound a no-signal retry wake.
     KisPageRetirementRecords m_retryPending;

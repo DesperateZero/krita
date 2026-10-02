@@ -105,7 +105,6 @@ public:
     using RestoreIsIdle = bool (*)(void *context);
     using PrepareAbort = bool (*)(void *context,
                                   KisPageTransactionId transaction,
-                                  QVector<KisPageTransitionEffect> *retirementEffects,
                                   KisPageReadCleanup &cleanup);
 
     KisPagePublicationCoordinator(KisImageEpochReferenceModel &epochs,
@@ -260,8 +259,7 @@ private:
     bool hasActiveTransactionLocked(const KisPageTransaction &transaction) const;
     quint64 currentDefaultRevisionLocked(KisSurfaceId surface) const;
     bool reserveDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
-    void retireEffectsUnlocked(QVector<KisPageTransitionEffect> effects,
-                               QMutexLocker<QMutex> &ownerLock);
+    void processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock);
 };
 
 #endif // KIS_PAGE_PUBLICATION_COORDINATOR_P_H

@@ -138,6 +138,7 @@ private:
     std::shared_ptr<Private> d;
     friend class KisPageMutationSession;
     friend class KisTiledDataManagerPageStoreBackend;
+    friend class KisPageStoreCpuMutationTest;
     // Adapter-only result export into unique storage prepared before pixels.
     // A null output queries the count; -1 rejects an unavailable execution or
     // insufficient/shared output. No new page keys or permissions are stored.

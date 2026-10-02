@@ -59,6 +59,34 @@
 namespace
 {
 
+// Synthetic oracle receiver. Its output storage is prepared before metadata
+// changes; commit observes the delivered span without allocating after accept.
+struct MetadataEffectReceiver {
+    QVector<KisPageTransitionEffect> effects, candidate;
+    quint64 prepared = 0, committed = 0, cancelled = 0;
+    static bool prepare(void *p, const KisPageTransitionEffect *values, qsizetype count,
+                        quint64 *cookie, QString *)
+    {
+        auto &self = *static_cast<MetadataEffectReceiver *>(p);
+        self.candidate = QVector<KisPageTransitionEffect>(values, values + count);
+        self.prepared += quint64(count); *cookie = quint64(count);
+        return true;
+    }
+    static void commit(void *p, quint64 cookie, const KisPageTransitionEffect *values, qsizetype count) noexcept
+    {
+        auto &self = *static_cast<MetadataEffectReceiver *>(p);
+        Q_ASSERT(cookie == quint64(count) && self.candidate.size() == count);
+        for (qsizetype i = 0; i < count; ++i) self.candidate[i] = values[i];
+        self.effects = std::move(self.candidate);
+        self.committed += cookie;
+    }
+    static void cancel(void *p, quint64 cookie) noexcept
+    {
+        auto &self = *static_cast<MetadataEffectReceiver *>(p);
+        self.candidate.clear(); self.cancelled += cookie;
+    }
+};
+
 struct CollidingIndexKey {
     quint64 value = 0;
     friend bool operator==(CollidingIndexKey a, CollidingIndexKey b) { return a.value == b.value; }
@@ -926,6 +954,12 @@ class KisPageStoreReferenceTest : public QObject
 {
     Q_OBJECT
 
+    static void attachEffects(KisPageMetadataCoordinator &metadata, MetadataEffectReceiver &receiver)
+    {
+        metadata.attachRetirementDebtOwner(&receiver, &MetadataEffectReceiver::prepare,
+                                           &MetadataEffectReceiver::commit, &MetadataEffectReceiver::cancel);
+    }
+
 private Q_SLOTS:
     void indexedHistorySlices_data()
     {
@@ -1732,6 +1766,8 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
 {
     const KisPageTransaction transaction{KisPageTransactionId{72}, KisImageEpochId{1}};
     KisPageMetadataCoordinator coordinator;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(8));
     QVector<KisPageTransition> transitions;
     for (int i = 0; i < 2; ++i) {
@@ -2859,17 +2895,9 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
     // This metadata oracle has synthetic replicas. Its model retirement owner
     // accepts each emitted responsibility; physical handoff is tested by the
     // original ledger/queue fixtures.
-    std::array<quint64, 3> debt{};
+    MetadataEffectReceiver debt;
     KisPageMetadataCoordinator coordinator;
-    coordinator.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *, qsizetype count, quint64 *cookie, QString *) {
-            auto &counts = *static_cast<std::array<quint64, 3> *>(p);
-            counts[0] += quint64(count); *cookie = quint64(count); return true;
-        }, +[](void *p, quint64 cookie) noexcept {
-            (*static_cast<std::array<quint64, 3> *>(p))[1] += cookie;
-        }, +[](void *p, quint64 cookie) noexcept {
-            (*static_cast<std::array<quint64, 3> *>(p))[2] += cookie;
-        });
+    attachEffects(coordinator, debt);
     QVERIFY(coordinator.configure(4));
     QVERIFY(coordinator.registerPage(expected));
     KisPageVersion cursor;
@@ -2893,14 +2921,14 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
             const auto oracle = KisPageStateMachine().apply(expected, discard);
             QVERIFY(oracle.accepted);
             expected = oracle.next;
-            KisPageMetadataCoordinator::HistoryEffects effects;
+            debt.effects.clear();
             quint32 removed = 0;
             QVERIFY(coordinator.discardHistory(expected.key, slice.versions.data(), slice.count,
-                                               0, effects, &removed));
+                                               0, &removed));
             QCOMPARE(removed, slice.count == 32 ? ~quint32(0) : (quint32(1) << slice.count) - 1);
-            QCOMPARE(qsizetype(effects.size()), oracle.effects.size());
+            QCOMPARE(debt.effects.size(), oracle.effects.size());
             for (const auto &effect : oracle.effects) {
-                QVERIFY(std::any_of(effects.cbegin(), effects.cend(), [&](const auto &a) {
+                QVERIFY(std::any_of(debt.effects.cbegin(), debt.effects.cend(), [&](const auto &a) {
                     return a.replica == effect.replica && a.lastUse == effect.lastUse;
                 }));
             }
@@ -2909,9 +2937,9 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
             break;
     } while (visited <= history);
     QCOMPARE(visited, history);
-    QCOMPARE(debt[0], quint64(history));
-    QCOMPARE(debt[1], quint64(history));
-    QCOMPARE(debt[2], quint64(0));
+    QCOMPARE(debt.prepared, quint64(history));
+    QCOMPARE(debt.committed, quint64(history));
+    QCOMPARE(debt.cancelled, quint64(0));
     const auto metrics = coordinator.metrics();
     QCOMPARE(metrics.historySliceVersionInputs, quint64(history));
     QVERIFY(metrics.maximumHistorySliceVersionInputs <= 32);
@@ -2982,6 +3010,8 @@ void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
     QString error;
     QVERIFY2(machine.validateInvariants(expected, &error), qPrintable(error));
     KisPageMetadataCoordinator coordinator;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(1));
     QVERIFY2(coordinator.registerPage(expected, &error), qPrintable(error));
 
@@ -3319,7 +3349,6 @@ void KisPageStoreReferenceTest::metadataReadProtectionAtCapacity()
         ? coordinator.acknowledgeLastUse(transition.version, transition.target, completions.verifyTerminal(ticket))
         : coordinator.applyOwner(initial.key, transition);
     QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
-    QVERIFY(result.effects.isEmpty());
     const auto after = coordinator.metrics();
     QCOMPARE(after.localTransitionSequences, before.localTransitionSequences + 1);
     QCOMPARE(after.localVersionInputs, before.localVersionInputs);
@@ -3419,7 +3448,6 @@ void KisPageStoreReferenceTest::metadataReadProtectionMatchesReference()
             ? coordinator.applyOwnerSequence(initial.key, sequence)
             : coordinator.applyOwner(initial.key, transition);
     QCOMPARE(result.accepted, accepted);
-    QVERIFY(result.effects.isEmpty());
     KisPageStateSnapshot actual;
     QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
     comparePageRecords(actual, expected);
@@ -4390,6 +4418,8 @@ void KisPageStoreReferenceTest::indexedHistoricalDiscard()
     QString error;
     QVERIFY2(machine.validateInvariants(page, &error), qPrintable(error));
     KisPageMetadataCoordinator coordinator;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(4));
     QVERIFY(coordinator.registerPage(page));
     if (variant >= 12) {
@@ -4397,14 +4427,14 @@ void KisPageStoreReferenceTest::indexedHistoricalDiscard()
         const auto detached = coordinator.applyOwner(page.key, detach);
         QCOMPARE(detached.accepted, expectedDetach.accepted);
         QCOMPARE(detached.rejectionReason, expectedDetach.rejectionReason);
-        QVERIFY(detached.effects.isEmpty());
+        QVERIFY(receiver.effects.isEmpty());
         if (detached.accepted) page = expectedDetach.next;
     }
     const auto expected = machine.apply(page, discard);
     const auto result = coordinator.applyOwner(page.key, discard);
     QCOMPARE(result.accepted, expected.accepted);
     QCOMPARE(result.rejectionReason, expected.rejectionReason);
-    QCOMPARE(result.effects.size(), expected.effects.size());
+    QCOMPARE(receiver.effects.size(), expected.effects.size());
     QCOMPARE(coordinator.metrics().fullSnapshotExports, quint64(0));
     QVERIFY(coordinator.metrics().localVersionInputs <= (variant >= 12 ? 6 : 5));
     QCOMPARE(coordinator.metrics().localVersionRemovals, quint64(expected.accepted ? discard.versions.size() : 0));
@@ -4429,6 +4459,8 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
     auto expected = pageWithHistory(history);
     const auto initial = expected; // immutable external diagnostic copy
     KisPageMetadataCoordinator coordinator;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(4));
     QVERIFY(coordinator.registerPage(initial));
     const KisPageStateMachine machine;
@@ -4449,7 +4481,8 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
             effects += step.effects;
         }
         const auto before = coordinator.metrics();
-        KisPageTransitionResult result;
+        receiver.effects.clear();
+        KisPageMetadataTransitionResult result;
         if (transitions.size() == 1 && transitions.first().kind == KisPageTransitionKind::CommitTransaction) {
             const KisPageTransaction tx{transitions.first().transaction, {1}};
             auto publication = coordinator.preparePublication(tx, transitions.first().imageEpoch, transitions);
@@ -4460,11 +4493,10 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
         }
         QCOMPARE(result.accepted, accepted);
         QCOMPARE(result.rejectionReason, rejection);
-        QVERIFY(result.next.versions.isEmpty()); // never returns a partial page disguised as a full snapshot
-        QCOMPARE(result.effects.size(), effects.size());
+        QCOMPARE(receiver.effects.size(), effects.size());
         for (qsizetype i = 0; i < effects.size(); ++i) {
-            QCOMPARE(result.effects[i].replica, effects[i].replica);
-            QCOMPARE(result.effects[i].lastUse, effects[i].lastUse);
+            QCOMPARE(receiver.effects[i].replica, effects[i].replica);
+            QCOMPARE(receiver.effects[i].lastUse, effects[i].lastUse);
         }
         if (accepted)
             expected = next;
@@ -4612,23 +4644,30 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         void *filler = nullptr;
         size_t bytes = 0;
         int prepared = 0, committed = 0, cancelled = 0;
-    } debt{&budget, limits.metadataArenaBytes};
+        MetadataEffectReceiver receiver;
+    } debt{&budget, limits.metadataArenaBytes, true, nullptr, 0, 0, 0, 0, {}};
     KisPageMetadataCoordinator coordinator;
     coordinator.attachBackingBudget(budget);
     // Synthetic metadata oracle: this receiver owns its effect contract.
     // Actual provider/backing transfer remains in the ledger/queue tests.
     coordinator.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *, qsizetype count, quint64 *cookie, QString *) {
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
             auto &d = *static_cast<Debt *>(p);
-            ++d.prepared; *cookie = quint64(count);
+            MetadataEffectReceiver::prepare(&d.receiver, effects, count, cookie, error);
+            ++d.prepared;
             if (d.fill) {
                 const auto live = d.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
                 d.bytes = size_t(d.limit - live);
                 d.filler = kisAllocateMutationStorage(d.budget, d.bytes, 1);
             }
             return true;
-        }, +[](void *p, quint64) noexcept { ++static_cast<Debt *>(p)->committed; },
-        +[](void *p, quint64) noexcept { ++static_cast<Debt *>(p)->cancelled; });
+        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
+            auto &d = *static_cast<Debt *>(p); ++d.committed;
+            MetadataEffectReceiver::commit(&d.receiver, cookie, effects, count);
+        }, +[](void *p, quint64 cookie) noexcept {
+            auto &d = *static_cast<Debt *>(p); ++d.cancelled;
+            MetadataEffectReceiver::cancel(&d.receiver, cookie);
+        });
     QVERIFY(coordinator.configure(1));
     auto initial = pageWithHistory(17);
     auto &current = initial.versions.first();
@@ -4686,7 +4725,7 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         if (headroom == 0 || variant != 0) {
             QVERIFY(!result.accepted);
             QVERIFY(!result.rejectionReason.isEmpty());
-            QVERIFY(result.effects.isEmpty());
+            QVERIFY(debt.receiver.effects.isEmpty());
             QCOMPARE(coordinator.metrics().localVersionInstalls, before.localVersionInstalls);
             KisPageStateSnapshot actual; QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
             comparePageRecords(actual, initial);
@@ -4708,8 +4747,8 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     }
     const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
     QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
-    QCOMPARE(result.effects.size(), effects.size());
-    for (qsizetype i = 0; i < effects.size(); ++i) QCOMPARE(result.effects[i].replica, effects[i].replica);
+    QCOMPARE(debt.receiver.effects.size(), effects.size());
+    for (qsizetype i = 0; i < effects.size(); ++i) QCOMPARE(debt.receiver.effects[i].replica, effects[i].replica);
     KisPageStateSnapshot actual; QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
     comparePageRecords(actual, expected);
     if (variant != 0) QCOMPARE(debt.committed, 1);
@@ -4929,13 +4968,19 @@ void KisPageStoreReferenceTest::indexedRecordSlotReuse()
 {
     auto expected = pageWithHistory(127);
     KisPageMetadataCoordinator coordinator;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(1));
     QVERIFY(coordinator.registerPage(expected));
     auto run = [&](const KisPageTransition &transition) {
+        receiver.effects.clear();
         const auto oracle = KisPageStateMachine().apply(expected, transition);
         QVERIFY2(oracle.accepted, qPrintable(oracle.rejectionReason));
         const auto actual = coordinator.applyOwner(expected.key, transition);
         QVERIFY2(actual.accepted, qPrintable(actual.rejectionReason));
+        QCOMPARE(receiver.effects.size(), oracle.effects.size());
+        for (qsizetype i = 0; i < oracle.effects.size(); ++i)
+            QCOMPARE(receiver.effects[i].replica, oracle.effects[i].replica);
         expected = oracle.next;
         KisPageStateSnapshot snapshot;
         QVERIFY(coordinator.pageSnapshot(expected.key, &snapshot));
@@ -5985,6 +6030,8 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     const KisPageStateMachine machine;
     auto expected = page;
     auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+    MetadataEffectReceiver receiver;
+    attachEffects(*metadata, receiver);
     QVERIFY(metadata->configure(4));
     QVERIFY(metadata->registerPage(page));
     QString error;
@@ -6080,11 +6127,12 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
         auto next = write; next.kind = kind;
         const auto oracle = machine.apply(expected, next);
         QVERIFY2(oracle.accepted, qPrintable(oracle.rejectionReason));
+        receiver.effects.clear();
         const auto applied = metadata->applyOwner(page.key, next);
         QVERIFY2(applied.accepted, qPrintable(applied.rejectionReason));
-        QCOMPARE(applied.effects.size(), oracle.effects.size());
-        for (qsizetype i = 0; i < applied.effects.size(); ++i)
-            QCOMPARE(applied.effects.at(i).replica, write.target);
+        QCOMPARE(receiver.effects.size(), oracle.effects.size());
+        for (qsizetype i = 0; i < receiver.effects.size(); ++i)
+            QCOMPARE(receiver.effects.at(i).replica, write.target);
         expected = oracle.next;
     }
     if (outcome == 1) {
@@ -7134,6 +7182,8 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
 {
     const KisPageTransaction tx{KisPageTransactionId{89}, KisImageEpochId{1}};
     KisPageMetadataCoordinator coordinator, foreign;
+    MetadataEffectReceiver receiver;
+    attachEffects(coordinator, receiver);
     QVERIFY(coordinator.configure(4));
     QVERIFY(foreign.configure(4));
     QVector<KisPageTransition> changes;
@@ -8516,7 +8566,7 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     write.writer = owner.nextWriterToken();
     write.transaction = transaction.id;
     write.writeMode = KisPageWriteMode::PreserveContents;
-    KisPageTransitionResult transition = metadata.applyOwner(base.key, write);
+    KisPageMetadataTransitionResult transition = metadata.applyOwner(base.key, write);
     QVERIFY2(transition.accepted, qPrintable(transition.rejectionReason));
 
     write.kind = KisPageTransitionKind::PrepareWrite;

@@ -46,7 +46,7 @@ class KisPageStore;
 class KisCpuWriteBindingReservation;
 class KisPageStoreWriteReservation;
 struct KisPageTransition;
-struct KisPageTransitionResult;
+struct KisPageMetadataTransitionResult;
 
 enum class KisPageWriteInputKind : quint8 {
     MutableGuard,
@@ -587,7 +587,7 @@ public:
                                 KisPageAllocationDescriptor *, QString *error,
                                 const KisPageTransition *pending = nullptr,
                                 KisReplicaHandle *recoverableBefore = nullptr);
-    KisPageTransitionResult preparePrivateWrite(KisPageTransition &, bool initialized);
+    KisPageMetadataTransitionResult preparePrivateWrite(KisPageTransition &, bool initialized);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
     // the retagged physical reservation. Otherwise write is unchanged and the
@@ -599,7 +599,7 @@ public:
         KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
         QMutexLocker<QMutex> &,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &);
-    KisPageTransitionResult publishPrivateWrite(KisPageTransition);
+    KisPageMetadataTransitionResult publishPrivateWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
         KisPageReplicaProvider &, const KisPageTransition &,
         const KisPageAllocationDescriptor &, KisPageAccessRequirement,
@@ -616,7 +616,7 @@ public:
         QString *error) const;
     // The caller retains admission until detach succeeds. Metadata, not an
     // adapter-local flag, determines which private state must be cancelled.
-    KisPageTransitionResult cancelPrivateWrite(KisPageTransition write);
+    KisPageMetadataTransitionResult cancelPrivateWrite(KisPageTransition write);
 
     KisPageWritePlanKind select(const KisPageWriteIntent &,
                                 const KisMutationPageEntry *pending = nullptr,

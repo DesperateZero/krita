@@ -2103,7 +2103,7 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     return true;
 }
 
-KisPageTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTransition &write, bool initialized)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTransition &write, bool initialized)
 {
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
@@ -2111,7 +2111,7 @@ KisPageTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTran
     if (write.baseVersion.isDefaultPixel() && !write.source.isValid()) {
         KisPageMetadataCoordinator::VersionInfo current;
         if (!metadata->versionSnapshot(write.baseVersion, &current) || !current.version.isValid()) {
-            KisPageTransitionResult rejected;
+            KisPageMetadataTransitionResult rejected;
             rejected.rejectionReason = QStringLiteral("write default base disappeared");
             return rejected;
         }
@@ -2124,7 +2124,7 @@ KisPageTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTran
     return metadata->applyOwnerSequence(write.version.key, {write, prepare});
 }
 
-KisPageTransitionResult KisPageWriteCoordinator::publishPrivateWrite(KisPageTransition write)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::publishPrivateWrite(KisPageTransition write)
 {
     write.kind = KisPageTransitionKind::BeginPublish;
     auto publish = write;
@@ -2307,7 +2307,7 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
     return prepared;
 }
 
-KisPageTransitionResult KisPageWriteCoordinator::cancelPrivateWrite(KisPageTransition write)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::cancelPrivateWrite(KisPageTransition write)
 {
     KisPageMetadataCoordinator::VersionInfo snapshot;
     if (metadata->versionSnapshot(write.version, &snapshot) && snapshot.version.isValid()) {
@@ -2315,7 +2315,7 @@ KisPageTransitionResult KisPageWriteCoordinator::cancelPrivateWrite(KisPageTrans
             ? KisPageTransitionKind::AbortPreparedVersion : KisPageTransitionKind::CancelWrite;
         return metadata->applyOwner(write.version.key, write);
     }
-    KisPageTransitionResult rejected;
+    KisPageMetadataTransitionResult rejected;
     rejected.rejectionReason = QStringLiteral("private write version is absent");
     return rejected;
 }

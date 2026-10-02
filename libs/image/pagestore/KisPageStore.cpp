@@ -287,7 +287,7 @@ public:
         kisEnqueuePageStoreReclamation(nullptr);
         owner.attachBackingBudget(backingBudget);
         metadata.attachBackingBudget(backingBudget);
-        metadata.attachRetirementDebtOwner(&owner,
+        metadata.attachRetirementDebtOwner(this,
                                            &Private::prepareRetirementDebt,
                                            &Private::commitRetirementDebt,
                                            &Private::cancelRetirementDebt);
@@ -298,18 +298,20 @@ public:
                                       quint64 *cookie,
                                       QString *error)
     {
-        auto *ledger = static_cast<KisPageOwnerLedger *>(context);
-        return ledger->prepareRetirementDebt(effects, count, cookie, error);
+        return static_cast<Private *>(context)->owner.prepareRetirementDebt(effects, count, cookie, error);
     }
 
-    static void commitRetirementDebt(void *context, quint64 cookie) noexcept
+    static void commitRetirementDebt(void *context, quint64 cookie,
+                                      const KisPageTransitionEffect *effects, qsizetype count) noexcept
     {
-        static_cast<KisPageOwnerLedger *>(context)->commitRetirementDebt(cookie);
+        auto *self = static_cast<Private *>(context);
+        self->owner.commitRetirementDebt(cookie);
+        for (qsizetype i = 0; i < count; ++i) self->retirementQueue.acceptEffect(effects[i]);
     }
 
     static void cancelRetirementDebt(void *context, quint64 cookie) noexcept
     {
-        static_cast<KisPageOwnerLedger *>(context)->cancelRetirementDebt(cookie);
+        static_cast<Private *>(context)->owner.cancelRetirementDebt(cookie);
     }
 
     static void releaseRetirementLifetime(void *context)
@@ -366,11 +368,10 @@ public:
 
     static bool preparePublicationAbort(void *context,
                                         KisPageTransactionId transaction,
-                                        QVector<KisPageTransitionEffect> *retirementEffects,
                                         KisPageReadCleanup &cleanup)
     {
         auto *owner = static_cast<KisPageStore::Private *>(context);
-        if (!retirementEffects || owner->writeCoordinator.transactionHasSessionOrPreparation(transaction)) {
+        if (owner->writeCoordinator.transactionHasSessionOrPreparation(transaction)) {
             return false;
         }
         for (auto it = owner->activeWrites.begin(); it != owner->activeWrites.end();) {
@@ -384,7 +385,6 @@ public:
             if (active->access && active->access->isValid()) return false;
             const auto result = owner->cancelWriteLocked(active->request);
             if (!result.accepted) return false;
-            *retirementEffects += result.effects;
             owner->releaseGenericWrite(transaction, active->request.version.key);
             it = owner->activeWrites.erase(it);
         }
@@ -402,7 +402,6 @@ public:
             const auto result = owner->cancelWriteLocked(it->second);
             if (!result.accepted)
                 return false;
-            *retirementEffects += result.effects;
             owner->releaseGenericWrite(it->second.transaction, it->second.version.key);
             it = owner->writeRequests.erase(it);
         }
@@ -485,7 +484,7 @@ public:
         return result;
     }
 
-    KisPageTransitionResult cancelWriteLocked(const WriteClosureRecord &request)
+    KisPageMetadataTransitionResult cancelWriteLocked(const WriteClosureRecord &request)
     {
         auto result = writeCoordinator.cancelPrivateWrite(request.transition(KisPageTransitionKind::CancelWrite));
         if (result.accepted)
@@ -493,12 +492,11 @@ public:
         return result;
     }
 
-    void retireEffectsLocked(const QVector<KisPageTransitionEffect> &effects, QMutexLocker<QMutex> &lock)
+    void processRetirementsLocked(QMutexLocker<QMutex> &lock)
     {
-        if (effects.isEmpty() && backgroundReclamation) return;
         ++activeProviderCalls;
         lock.unlock();
-        retirementQueue.retireEffects(effects, backgroundReclamation);
+        retirementQueue.processAcceptedEffects(backgroundReclamation);
         lock.relock();
         --activeProviderCalls;
     }
@@ -649,7 +647,7 @@ public:
                                           : KisPageTransitionKind::AttachHistoricalDefault;
             attach.version = version;
             attach.target = allocation.replica;
-            const KisPageTransitionResult attached = metadata.applyOwner(version.key, attach);
+            const KisPageMetadataTransitionResult attached = metadata.applyOwner(version.key, attach);
             if (!attached.accepted) {
                 retireRejected();
                 KisPageStoreDetail::setError(error, attached.rejectionReason);
@@ -909,8 +907,7 @@ public:
         Q_ASSERT(entry && entry->key() == page.target.version.key);
         return owner->writeCoordinator.writeTransition(*entry, transaction.id, page.source, page.target);
     }
-    bool cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page,
-                          QVector<KisPageTransitionEffect> &effects)
+    bool cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page)
     {
         auto *entry = writes.at(index);
         Q_ASSERT(entry && !entry->isExposed());
@@ -921,7 +918,6 @@ public:
         owner->writeCoordinator.recordCancelled(*entry);
         if (page.proof.isValid())
             owner->owner.revokePreparedPage(page.proof);
-        effects += result.effects;
         owner->publicationCoordinator.removeDescriptorLocked(page.target.version);
         if (entry->isCpuWrite())
             ++owner->mutationStats.pagesCancelled;
@@ -956,16 +952,15 @@ public:
             heldOwnerLock = &*acquired;
         }
         auto &lock = *heldOwnerLock;
-        QVector<KisPageTransitionEffect> effects;
         const auto retire = qScopeGuard([&] {
             releaseStorageLocked(lock);
-            owner->retireEffectsLocked(effects, lock);
+            owner->processRetirementsLocked(lock);
         });
         for (auto slot = writes.firstEntry(); slot.isValid();) {
             const auto next = writes.nextEntry(slot);
             auto *entry = writes.at(slot);
             if (Page *page = pageAtEntry(slot.index)) {
-                if (!cancelPageLocked(slot.index, *page, effects)) {
+                if (!cancelPageLocked(slot.index, *page)) {
                     state = State::Failed;
                     return false;
                 }
@@ -990,8 +985,7 @@ public:
         ++owner->activeProviderCalls;
         lock.unlock();
         abandonedPages = ColdPageSet{};
-        owner->retirementQueue.retireEffects(effects, owner->backgroundReclamation);
-        effects.clear();
+        owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
         lock.relock();
         --owner->activeProviderCalls;
         detachLocked(lock);
@@ -1153,7 +1147,6 @@ public:
     bool prepareAliasLocked(const KisPageKey &key,
                             const QSharedPointer<const KisPageReplicaSource> &source,
                             QMutexLocker<QMutex> &lock,
-                            QVector<KisPageTransitionEffect> &effects,
                             QString *error)
     {
         const auto producer = owner->owner.provider(source->provider(), source->providerEpoch());
@@ -1235,7 +1228,6 @@ public:
             KisPageStoreDetail::setError(error, applied.rejectionReason);
             return false;
         }
-        effects += applied.effects;
         if (!page) {
             page = resources;
             page->source = adoption.source;
@@ -1484,11 +1476,14 @@ qsizetype KisPageMutationExecution::finishPreparedWrites(
     for (size_t i = 0; i < wordCount; ++i)
         hasUntouchedPreparation |= d->prepared()[i] != 0;
     if (hasUntouchedPreparation) {
-        QVector<KisPageTransitionEffect> retirements;
         QMutexLocker scopeLock(&d->scope->mutex);
         auto *scope = d->scope.get();
         auto *owner = scope->owner;
         QMutexLocker ownerLock(&owner->mutex);
+        const auto retire = qScopeGuard([&] {
+            scope->releaseStorageLocked(ownerLock);
+            owner->processRetirementsLocked(ownerLock);
+        });
         for (size_t i = 0; i < d->count; ++i) {
             const quint64 mask = quint64(1) << (i % 64);
             if (!(d->prepared()[i / 64] & mask))
@@ -1499,7 +1494,7 @@ qsizetype KisPageMutationExecution::finishPreparedWrites(
             auto *page = scope->pageAtEntry(index);
             if (!page)
                 continue;
-            if (!scope->cancelPageLocked(index, *page, retirements)) {
+            if (!scope->cancelPageLocked(index, *page)) {
                 scope->state = KisPageMutationSession::Private::State::Failed;
                 KisPageStoreDetail::setError(
                     error, QStringLiteral("operation write preparation could not be rolled back"));
@@ -1508,8 +1503,6 @@ qsizetype KisPageMutationExecution::finishPreparedWrites(
             scope->erasePageAtEntry(index);
             bound.page = nullptr;
         }
-        scope->releaseStorageLocked(ownerLock);
-        owner->retireEffectsLocked(retirements, ownerLock);
     }
 
     if (changed) {
@@ -2302,11 +2295,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, Phase::MutationSealOwnerWait, pageWork);
     QMutexLocker lock(&owner->mutex);
     phase.next(Phase::MutationSealInputs, pageWork);
-    QVector<KisPageTransitionEffect> retirements;
     const auto retire = [&] {
         d->releaseStorageLocked(lock);
-        owner->retireEffectsLocked(retirements, lock);
-        retirements.clear();
+        owner->processRetirementsLocked(lock);
     };
     // A final semantic removal discards only this segment's unsealed target.
     // Previously sealed history remains untouched until the batch install.
@@ -2320,7 +2311,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             ++privatePageCount;
             continue;
         }
-        if (!d->cancelPageLocked(index, *page, retirements)) {
+        if (!d->cancelPageLocked(index, *page)) {
             d->state = Private::State::Failed;
             retire();
             KisPageStoreDetail::setError(error, QStringLiteral("mutation could not discard its removed target"));
@@ -2377,7 +2368,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             const auto *entry = d->writes.at(index);
             const auto source = entry->initializationSource();
             const bool hadPage = d->pageAtEntry(index) != nullptr;
-            if (source && !d->prepareAliasLocked(entry->key(), source, lock, retirements, &failure)) {
+            if (source && !d->prepareAliasLocked(entry->key(), source, lock, &failure)) {
                 success = false;
                 break;
             }
@@ -2522,7 +2513,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     overlay = {};
     sealedPages = Private::ColdPageSet{};
     d->clearSources();
-    owner->retirementQueue.retireEffects(retirements, owner->backgroundReclamation);
+    owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
     --owner->activeProviderCalls;
@@ -4025,7 +4016,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     }
     pendingIt->second.replica = allocation.replica;
     transition.target = allocation.replica;
-    KisPageTransitionResult stateResult = d->writeCoordinator.preparePrivateWrite(transition, false);
+    KisPageMetadataTransitionResult stateResult = d->writeCoordinator.preparePrivateWrite(transition, false);
     if (!stateResult.accepted) {
         rejectAllocation(stateResult.rejectionReason);
         return request;
@@ -4038,7 +4029,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         const auto cancelled = d->cancelWriteLocked(d->writeRequests.find(requestId.value)->second);
         if (cancelled.accepted) {
             d->writeRequests.erase(requestId.value);
-            d->retireEffectsLocked(cancelled.effects, locker);
+            d->processRetirementsLocked(locker);
         } else {
             // No request capability was returned, so transaction abort owns
             // the retry. Do not release its only page/admission record.
@@ -4219,7 +4210,7 @@ bool KisPageStore::cancel(const KisWriteRequest &request)
         return false;
     d->releaseGenericWrite(requestIt->second.transaction, requestIt->second.version.key);
     d->writeRequests.erase(requestIt);
-    d->retireEffectsLocked(result.effects, locker);
+    d->processRetirementsLocked(locker);
     return true;
 }
 
@@ -4478,7 +4469,6 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         if (success)
             proof = {};
     }
-    QVector<KisPageTransitionEffect> retirements;
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     if (success) {
         lock.unlock();
@@ -4503,10 +4493,9 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         const auto cancelled = d->cancelWriteLocked(request);
         if (!cancelled.accepted)
             return {}; // consumed lease remains abort-retryable in activeWrites
-        retirements = cancelled.effects;
     }
     d->activeWrites.erase(lease.m_leaseId.value);
-    d->retireEffectsLocked(retirements, lock);
+    d->processRetirementsLocked(lock);
     d->releaseGenericWrite(request.transaction, request.version.key);
     return success ? completion : KisCompletionTicket{};
 }

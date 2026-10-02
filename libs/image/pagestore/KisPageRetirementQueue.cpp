@@ -410,10 +410,12 @@ void KisPageRetirementQueue::prepareTask()
         KisPageRetirementRecords batch;
         {
             QMutexLocker lock(&m_mutex);
-            while (!m_closing && !m_ready.empty() &&
-                   qsizetype(batch.size()) < WorkerBatchBudget) {
-                disarmLocked(m_ready.front(), true);
-                batch.splice(batch.end(), m_ready, m_ready.begin());
+            for (auto it = m_ready.begin(); !m_closing && it != m_ready.end() &&
+                 qsizetype(batch.size()) < WorkerBatchBudget;) {
+                const auto entry = it++;
+                if (!entry->backgroundRetirement) continue;
+                disarmLocked(*entry, true);
+                batch.splice(batch.end(), m_ready, entry);
             }
             m_activeReplicas += qsizetype(batch.size());
             ++m_backgroundPasses;
@@ -421,13 +423,7 @@ void KisPageRetirementQueue::prepareTask()
                 m_maximumReplicasPerPass, quint64(batch.size()));
             updatePeaksLocked();
         }
-        for (auto it = batch.begin(); it != batch.end();) {
-            const auto entry = it++;
-            const bool retired = retireRecord(*entry);
-            if (!retired) prepareWait(*entry);
-            QMutexLocker lock(&m_mutex);
-            finishAttemptLocked(batch, entry, retired);
-        }
+        retireBatch(batch);
     }, &m_budget, +[](void *value) {
         auto *queue = static_cast<KisPageRetirementQueue *>(value);
         {
@@ -457,7 +453,8 @@ void KisPageRetirementQueue::prepareTask()
 
 void KisPageRetirementQueue::schedulePassLocked()
 {
-    if (m_jobScheduled || m_closing || m_ready.empty()) return;
+    if (m_jobScheduled || m_closing || std::none_of(m_ready.cbegin(), m_ready.cend(),
+        [](const auto &record) { return record.backgroundRetirement; })) return;
     m_jobScheduled = true;
     m_ownerLifetimeReferences.ref();
     Q_ASSERT(m_task);
@@ -519,7 +516,6 @@ void KisPageRetirementQueue::retireOrDefer(
 KisPageStoreRetirementProgress KisPageRetirementQueue::process(
     qsizetype replicaBudget)
 {
-    KisPageStoreRetirementProgress result;
     KisPageRetirementRecords batch;
     {
         QMutexLocker lock(&m_mutex);
@@ -531,9 +527,22 @@ KisPageStoreRetirementProgress KisPageRetirementQueue::process(
             batch.splice(batch.end(), pending, pending.begin());
         }
         if (m_retryPending.empty()) cancelRetryLocked();
-        m_activeReplicas += count;
+        for (auto it = m_ready.begin(); it != m_ready.end() &&
+             qsizetype(batch.size()) < std::max(qsizetype(0), replicaBudget);) {
+            const auto entry = it++;
+            if (entry->backgroundRetirement) continue;
+            disarmLocked(*entry, true);
+            batch.splice(batch.end(), m_ready, entry);
+        }
+        m_activeReplicas += qsizetype(batch.size());
         updatePeaksLocked();
     }
+    return retireBatch(batch);
+}
+
+KisPageStoreRetirementProgress KisPageRetirementQueue::retireBatch(KisPageRetirementRecords &batch)
+{
+    KisPageStoreRetirementProgress result;
     // No queue/owner gate is held while the provider checks its local pin gate
     // and performs destruction. A blocked item rotates behind other debt.
     for (auto it = batch.begin(); it != batch.end();) {
@@ -551,27 +560,24 @@ KisPageStoreRetirementProgress KisPageRetirementQueue::process(
     return result;
 }
 
-void KisPageRetirementQueue::retireEffects(
-    const QVector<KisPageTransitionEffect> &effects,
-    bool backgroundReclamation)
+void KisPageRetirementQueue::processAcceptedEffects(bool backgroundReclamation)
 {
     if (!backgroundReclamation || kisOnPageStoreReclamationThread())
         process(backgroundReclamation ? 8 : std::numeric_limits<qsizetype>::max());
-    KisPageRetirementRecords ready;
-    quint64 bytes = 0;
-    for (const KisPageTransitionEffect &effect : effects) {
-        auto record = takeEffectRecord(effect);
-        if (record->backgroundRetirement) {
-            ready.push_back(*record.release());
-            bytes += effect.replica.layout.byteSize;
-        } else if (!retireRecord(*record)) defer(std::move(record));
+    KisPageRetirementRecords batch;
+    {
+        QMutexLocker lock(&m_mutex);
+        // Accepted foreground records await their first attempt in the same
+        // ready list. Later failures use the original pending/retry policy.
+        for (auto it = m_ready.begin(); it != m_ready.end();) {
+            const auto entry = it++;
+            if (!entry->backgroundRetirement)
+                batch.splice(batch.end(), m_ready, entry);
+        }
+        m_activeReplicas += qsizetype(batch.size());
+        updatePeaksLocked();
     }
-    if (ready.empty()) return;
-    QMutexLocker lock(&m_mutex);
-    m_pendingBytes += bytes;
-    m_ready.splice(m_ready.end(), ready);
-    updatePeaksLocked();
-    schedulePassLocked();
+    retireBatch(batch);
 }
 
 KisPageRetirementRecordPointer KisPageRetirementQueue::takeEffectRecord(
@@ -597,7 +603,7 @@ void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
     const bool background = record->backgroundRetirement;
     QMutexLocker lock(&m_mutex);
     m_pendingBytes += effect.replica.layout.byteSize;
-    (background ? m_ready : m_pending).push_back(*record.release());
+    m_ready.push_back(*record.release());
     updatePeaksLocked();
     if (background) schedulePassLocked();
 }

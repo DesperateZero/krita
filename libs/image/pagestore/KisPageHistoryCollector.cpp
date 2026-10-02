@@ -144,20 +144,15 @@ bool KisPageHistoryCollector::collectSliceLocked(
     for (qsizetype i = 0; i < roots.rootsVisited; ++i) markReachable(roots.versions[size_t(i)]);
     if (!roots.complete) return true;
 
-    KisPageMetadataCoordinator::HistoryEffects effects{
-        KisMutationStorageAllocator<KisPageTransitionEffect>(m_work.get_allocator())};
     quint32 removed = 0;
     if (!m_metadata.discardHistory(work.key, work.candidates.data(), work.candidateCount,
-                                  work.reachableMask, effects, &removed)) return false;
+                                  work.reachableMask, &removed)) return false;
     for (qsizetype i = 0; i < work.candidateCount; ++i) {
         if (removed & (quint32(1) << i)) {
             --work.historicalCount;
             m_removeDescriptor(m_ownerContext, work.candidates[size_t(i)]);
         }
     }
-    // Successful detach committed Debt and preserved every original retirement
-    // record. Transfer cannot refuse or allocate while this owner gate is held.
-    for (const auto &effect : effects) m_retirementQueue.acceptEffect(effect);
     work.after = work.sliceAfter;
     endScanLocked(work, !work.after.isValid());
     if (!work.after.isValid()) {

@@ -28,6 +28,12 @@ class KisPagePublicationCoordinator;
 class KisPageReadCoordinator;
 class KisPageMetadataReadCleanup;
 class KisPageRetirementQueue;
+
+struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
+{
+    bool accepted = false;
+    QString rejectionReason;
+};
 class KisPageStore;
 
 struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
@@ -196,7 +202,7 @@ public:
     bool pageSnapshot(const KisPageKey &key, KisPageStateSnapshot *snapshot) const;
     QVector<KisPageKey> pageKeys() const;
     QVector<KisReplicaHandle> shutdownReplicaHandles() const;
-    KisPageTransitionResult acknowledgeLastUse(const KisPageVersion &version,
+    KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion);
     // Bounded owner/coordinator publication projection. This is not a caller
@@ -214,14 +220,16 @@ private:
                                            const KisPageTransitionEffect *, qsizetype,
                                            quint64 *,
                                            QString *);
+    using CommitRetirementEffects = void (*)(void *, quint64,
+                                             const KisPageTransitionEffect *, qsizetype) noexcept;
     using FinalizeRetirementDebt = void (*)(void *, quint64) noexcept;
     void attachBackingBudget(KisBackingBudgetController &budget);
     void attachRetirementDebtOwner(void *context,
                                    PrepareRetirementDebt prepare,
-                                   FinalizeRetirementDebt commit,
+                                   CommitRetirementEffects commit,
                                    FinalizeRetirementDebt cancel);
     // Production-only bounded input and transition result. Neither API exports
-    // the complete history; applyOwner*.next is intentionally empty. The same
+    // the complete history or transfer effects to callers. The same
     // state-machine guards run on touched records plus indexed global collision
     // witnesses. Unclassified transitions retain the full reference path.
     // Omitted history is NOT absence of logical/physical owners. These bounded
@@ -287,23 +295,22 @@ private:
     // caller must rescan after semantic changes can insert before the cursor;
     // this is enumeration, NOT root reachability or retirement authorization.
     HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after, qsizetype budget) const;
-    using HistoryEffects = std::vector<KisPageTransitionEffect,
-        KisMutationStorageAllocator<KisPageTransitionEffect>>;
     // Select eligible, unreachable records and prepare their exact effects and
     // Debt before removal. Replica effects require a configured Debt owner and
     // their original registered retirement records. Refusal changes no record;
-    // success transfers the local packet infallibly under the caller's owner gate.
+    // success commits Debt and transfers effects to the configured receiver
+    // infallibly under the caller's owner gate, without invoking a provider.
     bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
                         qsizetype count, quint32 reachableMask,
-                        HistoryEffects &effects, quint32 *removedMask);
+                        quint32 *removedMask);
     void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &)) const;
-    KisPageTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
+    KisPageMetadataTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
                                       KisPageMetadataReadCleanup *cleanup = nullptr);
-    KisPageTransitionResult acknowledgeLastUse(const KisPageVersion &version,
+    KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion,
                                                KisPageMetadataReadCleanup *cleanup);
-    KisPageTransitionResult applyOwnerSequence(const KisPageKey &key, const QVector<KisPageTransition> &transitions);
+    KisPageMetadataTransitionResult applyOwnerSequence(const KisPageKey &key, const QVector<KisPageTransition> &transitions);
     // Directory invalidation, not a read-side counter. PageStore samples it
     // under its registration gate around a whole-directory default/restore
     // plan; per-page revision claims alone cannot detect a newly added key.
@@ -444,12 +451,12 @@ private:
     friend class KisPageStoreReferenceTest;
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
-    KisPageTransitionResult applyProjectedSequence(const KisPageKey &key,
+    KisPageMetadataTransitionResult applyProjectedSequence(const KisPageKey &key,
                                                    const QVector<KisPageTransition> &transitions);
-    KisPageTransitionResult applyReadProtection(const KisPageKey &key,
+    KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);
-    KisPageTransitionResult applyCapturedProtection(const KisPageKey &key,
+    KisPageMetadataTransitionResult applyCapturedProtection(const KisPageKey &key,
                                                    const KisPageTransition &transition,
                                                    KisPageMetadataReadCleanup *cleanup = nullptr);
     class Private;

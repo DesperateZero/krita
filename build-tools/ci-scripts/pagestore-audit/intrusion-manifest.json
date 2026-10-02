@@ -622,7 +622,7 @@
       "symbols": [
         "KisPageRetirementQueue",
         "retireOrDefer",
-        "retireEffects",
+        "processAcceptedEffects",
         "takeForClose"
       ],
       "target-owner": "KisPageRetirementQueue"
