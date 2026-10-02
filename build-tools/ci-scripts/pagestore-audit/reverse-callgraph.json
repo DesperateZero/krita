@@ -25423,7 +25423,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1464,
+          "line": 1466,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -25432,7 +25432,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 1466,
+          "line": 1468,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -25441,7 +25441,7 @@
           "column": 87,
           "dynamic": false,
           "implicit": false,
-          "line": 1535,
+          "line": 1537,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -51582,7 +51582,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 1423,
+          "line": 1425,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -52523,7 +52523,7 @@
           "column": 81,
           "dynamic": false,
           "implicit": false,
-          "line": 1431,
+          "line": 1433,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -55566,7 +55566,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 1540,
+          "line": 1542,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -56467,7 +56467,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 1569,
+          "line": 1571,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -57140,7 +57140,7 @@
           "column": 104,
           "dynamic": false,
           "implicit": false,
-          "line": 1431,
+          "line": 1433,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -61640,7 +61640,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 1727,
+          "line": 1729,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -66866,7 +66866,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 1431,
+          "line": 1433,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -67903,7 +67903,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1548,
+          "line": 1550,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -91456,7 +91456,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1553,
+          "line": 1555,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -91465,7 +91465,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1560,
+          "line": 1562,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -94107,7 +94107,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 1625,
+          "line": 1627,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96090,7 +96090,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1521,
+          "line": 1523,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96099,7 +96099,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 1555,
+          "line": 1557,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96108,7 +96108,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1565,
+          "line": 1567,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96117,7 +96117,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1601,
+          "line": 1603,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96126,7 +96126,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1609,
+          "line": 1611,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -96253,7 +96253,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 1604,
+          "line": 1606,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97148,7 +97148,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1486,
+          "line": 1488,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97275,7 +97275,7 @@
       "definitions": [
         {
           "column": 40,
-          "line": 1657,
+          "line": 1659,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97311,7 +97311,7 @@
       "definitions": [
         {
           "column": 67,
-          "line": 1692,
+          "line": 1694,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97483,7 +97483,7 @@
       "definitions": [
         {
           "column": 53,
-          "line": 1460,
+          "line": 1462,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97506,7 +97506,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1558,
+          "line": 1560,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -97537,7 +97537,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1454,
+          "line": 1456,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97560,7 +97560,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 1463,
+          "line": 1465,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97641,7 +97641,7 @@
           "column": 10,
           "dynamic": false,
           "implicit": false,
-          "line": 1519,
+          "line": 1521,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97663,7 +97663,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1736,
+          "line": 1738,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97790,7 +97790,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1435,
+          "line": 1437,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97929,7 +97929,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1632,
+          "line": 1634,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -97993,7 +97993,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1704,
+          "line": 1706,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98025,7 +98025,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 1683,
+          "line": 1685,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98047,7 +98047,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1679,
+          "line": 1681,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98237,7 +98237,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1514,
+          "line": 1516,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98373,7 +98373,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1443,
+          "line": 1445,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98396,7 +98396,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1541,
+          "line": 1543,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98481,7 +98481,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1686,
+          "line": 1688,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98535,7 +98535,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1663,
+          "line": 1665,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98841,7 +98841,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1613,
+          "line": 1615,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -98886,7 +98886,7 @@
       "definitions": [
         {
           "column": 70,
-          "line": 1761,
+          "line": 1763,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -99039,7 +99039,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 1506,
+          "line": 1508,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -99075,7 +99075,7 @@
       "definitions": [
         {
           "column": 66,
-          "line": 1754,
+          "line": 1756,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -99111,7 +99111,7 @@
       "definitions": [
         {
           "column": 32,
-          "line": 1470,
+          "line": 1472,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -142732,7 +142732,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1520,
+          "line": 1522,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142741,7 +142741,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1554,
+          "line": 1556,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142750,7 +142750,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1564,
+          "line": 1566,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142759,7 +142759,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1603,
+          "line": 1605,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142768,7 +142768,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1608,
+          "line": 1610,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142777,7 +142777,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1636,
+          "line": 1638,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142786,7 +142786,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 1644,
+          "line": 1646,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142795,7 +142795,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1649,
+          "line": 1651,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142804,7 +142804,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1653,
+          "line": 1655,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142813,7 +142813,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1669,
+          "line": 1671,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -142822,7 +142822,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 1674,
+          "line": 1676,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -161684,7 +161684,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 1547,
+          "line": 1549,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -161693,7 +161693,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 1559,
+          "line": 1561,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -161702,7 +161702,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 1571,
+          "line": 1573,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -161711,7 +161711,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 1575,
+          "line": 1577,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -173487,7 +173487,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 1642,
+          "line": 1644,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -173496,7 +173496,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 1667,
+          "line": 1669,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -200768,7 +200768,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1528,
+          "line": 1530,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -203939,7 +203939,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 1530,
+          "line": 1532,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -211851,7 +211851,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 1707,
+          "line": 1709,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -213214,7 +213214,7 @@
           "column": 69,
           "dynamic": false,
           "implicit": false,
-          "line": 1431,
+          "line": 1433,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -213223,7 +213223,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -213232,7 +213232,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -214991,7 +214991,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -215000,7 +215000,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -216714,7 +216714,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -216723,7 +216723,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -218457,7 +218457,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -218466,7 +218466,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -220198,7 +220198,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -220207,7 +220207,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -221930,7 +221930,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -221939,7 +221939,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -223671,7 +223671,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -223680,7 +223680,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -225421,7 +225421,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -225430,7 +225430,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -227216,7 +227216,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -227225,7 +227225,7 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 1551,
+          "line": 1553,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -227234,7 +227234,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -229065,7 +229065,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -229074,7 +229074,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -230806,7 +230806,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -230815,7 +230815,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -232601,7 +232601,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -232610,7 +232610,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -234396,7 +234396,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -234405,7 +234405,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -236191,7 +236191,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -236200,7 +236200,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -238121,7 +238121,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -238130,7 +238130,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -240011,7 +240011,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -240020,7 +240020,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 1715,
+          "line": 1717,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -240029,7 +240029,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -240038,7 +240038,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 1747,
+          "line": 1749,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -241923,7 +241923,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -241932,7 +241932,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 1549,
+          "line": 1551,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -241941,7 +241941,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 1552,
+          "line": 1554,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -241950,7 +241950,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -243889,7 +243889,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -243898,7 +243898,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -245801,7 +245801,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -245810,7 +245810,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -248082,7 +248082,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -248091,7 +248091,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 1624,
+          "line": 1626,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -248100,7 +248100,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -249859,7 +249859,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -249868,7 +249868,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -251600,7 +251600,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -251609,7 +251609,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -253485,7 +253485,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -253494,7 +253494,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -255487,7 +255487,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -255496,7 +255496,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -257237,7 +257237,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -257246,7 +257246,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -258969,7 +258969,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -258978,7 +258978,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -260710,7 +260710,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -260719,7 +260719,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -262433,7 +262433,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -262442,7 +262442,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -264183,7 +264183,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -264192,7 +264192,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -265735,7 +265735,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 1438,
+          "line": 1440,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -265744,7 +265744,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 1722,
+          "line": 1724,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -265883,7 +265883,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 1738,
+          "line": 1740,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -266007,7 +266007,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 1537,
+          "line": 1539,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         }
       ],
@@ -268660,7 +268660,7 @@
           "column": 81,
           "dynamic": false,
           "implicit": false,
-          "line": 1447,
+          "line": 1449,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -268669,7 +268669,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 1526,
+          "line": 1528,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -268678,7 +268678,7 @@
           "column": 82,
           "dynamic": false,
           "implicit": false,
-          "line": 1706,
+          "line": 1708,
           "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp"
         },
         {
@@ -293384,7 +293384,7 @@
     "libs/image/pagestore/KisPageMetadataReservation_p.h": "0cac3570f50bed2e161033299d980a68f052bb054e134eb5c43f06e9d1419145",
     "libs/image/pagestore/KisPageOwnerLedger.cpp": "dcdddb0a5ce55bce3fb48f2f7246bf0932560e1a95e6c71a3d981c4c5fa337d7",
     "libs/image/pagestore/KisPageOwnerLedger.h": "a1aac75c49c0977d4b6eafbc868a8aac90ec20b8f0bf52f4b71f48a755ae9c20",
-    "libs/image/pagestore/KisPagePublicationCoordinator.cpp": "e0bca7d90742474d200cc2c411aa51c0731e036effb72f98b4c85f6b374ecfe2",
+    "libs/image/pagestore/KisPagePublicationCoordinator.cpp": "1b785e1e3ab1c58f4d3c1b921781bf618e6a17fe2575c6166968f372555f4170",
     "libs/image/pagestore/KisPagePublicationCoordinator_p.h": "2c0c7065991377f13c7eb9b2a5ba0593af3c7e2d6c9ce37034d79f16c5a4d6b5",
     "libs/image/pagestore/KisPageReadCoordinator.cpp": "918fa175024d01c48b48a76cc1ad7feaf9a3b55f5c6bc8001ded97ed10a41c56",
     "libs/image/pagestore/KisPageReadCoordinator_p.h": "3caba4ab4af5145e0388677e46a45effc4ebb10648811301e972254dc9b8dec3",

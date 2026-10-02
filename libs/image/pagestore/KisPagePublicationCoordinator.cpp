@@ -1420,8 +1420,10 @@ bool KisPagePublicationCoordinator::abortLocked(
             return false;
         revokePreparedProofLocked(proof);
     }
+    // Admission and the original preparation claim keep this transaction
+    // active until its epoch exit; the public identity guard cannot reject it.
     if (!m_epochs.abort(transaction))
-        return false;
+        qFatal("Owned transaction changed before abort completion");
     auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
     const auto disposeOverlay = qScopeGuard([&] {
         ownerLock.unlock();

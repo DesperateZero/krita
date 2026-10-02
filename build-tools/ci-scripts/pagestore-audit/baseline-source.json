@@ -1825,7 +1825,7 @@
         "utility",
         "vector"
       ],
-      "lines": 1771,
+      "lines": 1773,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStore",
@@ -1838,7 +1838,7 @@
         "Change",
         "KisPagePublicationCoordinator"
       ],
-      "sha256": "e0bca7d90742474d200cc2c411aa51c0731e036effb72f98b4c85f6b374ecfe2",
+      "sha256": "1b785e1e3ab1c58f4d3c1b921781bf618e6a17fe2575c6166968f372555f4170",
       "synchronization_declarations": 6
     },
     "libs/image/pagestore/KisPagePublicationCoordinator_p.h": {
@@ -6202,5 +6202,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "7141769304ae83437db17339383e6f43e464963c"
+  "working_tree_head": "bdba047303e80570afc6698811eb88c0f28a04c9"
 }
