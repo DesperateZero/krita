@@ -173,9 +173,7 @@ void KisPageReadCoordinator::armLastUseLocked(const std::shared_ptr<ActiveReadRe
     try {
         Q_ASSERT(m_lastUseWakeContext);
         const auto active = m_activeReads.find(record->leaseId);
-        if (active == m_activeReads.end() || active->second != record ||
-            m_automaticWakeupsStopped || m_lastUseClosing ||
-            !record->metadataReleased || record->lastUseSubscription.isValid()) return;
+        if (active == m_activeReads.end() || active->second != record) return;
         const std::weak_ptr<LastUseWakeContext> context = m_lastUseWakeContext;
         const std::weak_ptr<ActiveReadRecord> pending = record;
         KisPageReadinessSubscription subscription;
@@ -259,7 +257,6 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
 {
     KisPageReadCleanup cleanup(*this);
     bool retry = false;
-    bool allocationFailed = false;
     bool progressed = false;
     {
         QMutexLocker ownerLock(&m_ownerMutex);
@@ -271,8 +268,7 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
             readyBudget = context->readyCount;
         }
         if (!m_cancelRetries.empty() && m_operational) {
-            try { retryCancelledRequestsLocked(ownerLock, cleanup); }
-            catch (const std::bad_alloc &) { allocationFailed = true; }
+            retryCancelledRequestsLocked(ownerLock, cleanup);
             retry = !m_cancelRetries.empty();
             ++visited;
         }
@@ -328,7 +324,6 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
     cleanup.finish(); // complete physical cleanup before idle/lifetime publication
     {
         QMutexLocker lock(&context->mutex);
-        if (allocationFailed) ++context->dispatchFailures;
         if (context->accepting && retry && (context->head || context->cleanupPending)) {
             if (progressed) context->nextRetryDelayMs = 1;
             context->retryScheduled = context->retry.arm(context->nextRetryDelayMs);
@@ -648,12 +643,8 @@ bool KisPageReadCoordinator::cancelLocked(
         return false;
     }
     auto &pending = requestIt->second;
-    bool released = pending.state == KisPagePendingReadRecord::State::Released;
-    try {
-        if (!released) released = releaseReadLocked(pending.replica, pending.reservedLease, cleanup);
-    } catch (const std::bad_alloc &) {
-        // The original request remains the cancellation owner.
-    }
+    const bool released = pending.state == KisPagePendingReadRecord::State::Released
+        || releaseReadLocked(pending.replica, pending.reservedLease, cleanup);
     pending.state = released ? KisPagePendingReadRecord::State::Released
                              : KisPagePendingReadRecord::State::Cancelling;
     if (released) {
@@ -733,7 +724,7 @@ void KisPageReadCoordinator::releaseLocked(
 }
 
 bool KisPageReadCoordinator::finishReleasedReadLocked(
-    quint64 leaseId, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged) try
+    quint64 leaseId, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged)
 {
     if (lastUseAcknowledged) *lastUseAcknowledged = false;
     auto activeIt = m_activeReads.find(leaseId);
@@ -763,7 +754,6 @@ bool KisPageReadCoordinator::finishReleasedReadLocked(
     }
     return true;
 }
-catch (const std::bad_alloc &) { return false; }
 
 bool KisPageReadCoordinator::finishHistoryReadLocked(
     const std::shared_ptr<ActiveReadRecord> &record,
@@ -882,7 +872,7 @@ void KisPageReadCoordinator::acknowledgeCompletedLastUsesLocked(
 
 bool KisPageReadCoordinator::acknowledgeRecordLocked(
     const std::shared_ptr<ActiveReadRecord> &record, const KisVerifiedCompletion &completion,
-    KisPageReadCleanup &cleanup) try
+    KisPageReadCleanup &cleanup)
 {
     const auto active = m_activeReads.find(record->leaseId);
     if (!record->metadataReleased || !(record->releaseLastUse == completion.ticket()) ||
@@ -907,7 +897,6 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
     ++m_pendingHistoryReads;
     return true;
 }
-catch (const std::bad_alloc &) { return false; }
 
 bool KisPageReadCoordinator::belongsToPreparedTransactionLocked(
     const KisPageVersion &version,
