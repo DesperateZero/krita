@@ -19,6 +19,7 @@
 #include <atomic>
 #include <boost/intrusive/list.hpp>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <map>
 #include <utility>
@@ -371,6 +372,9 @@ public:
 
             auto result = QSharedPointer<Transition>::create(
                 this, tileData, serial, targetDomain);
+            // This original Transition now owns cancellation of its serial.
+            // The local guard covers only failure before that acceptance.
+            cancel.dismiss();
             result->m_reservations.reserve(admissions.size());
             const KisReplicaPhysicalSlotIdentity physical{
                 m_provider, m_providerEpoch, slot};
@@ -384,7 +388,6 @@ public:
                     return {};
                 result->m_reservations.push_back(std::move(reservation));
             }
-            cancel.dismiss();
             KisPageStoreDetail::setError(error, {});
             return result;
         }
@@ -436,9 +439,10 @@ public:
         {
             QMutexLocker locker(&m_mutex);
             const auto found = m_payloads.find(tile);
-            Q_ASSERT(found != m_payloads.end() && found->second.slot == identity && found->second.logicalReferences);
-            return found != m_payloads.end() && found->second.slot == identity
-                && found->second.logicalReferences && !--found->second.logicalReferences;
+            // The original live allocation owns this exact payload reference.
+            if (found == m_payloads.end() || found->second.slot != identity
+                || !found->second.logicalReferences) std::terminate();
+            return !--found->second.logicalReferences;
         }
 
         std::pair<KisTileData *, quint64> firstPayload() const
@@ -584,16 +588,13 @@ public:
         {
             QMutexLocker locker(&m_mutex);
             auto tracked = m_payloads.find(tileData);
-            Q_ASSERT(tracked != m_payloads.end());
-            Q_ASSERT(tracked == m_payloads.end()
-                     || tracked->second.transition == serial);
+            // Physical movement has committed; untrack waits for this serial.
             if (tracked == m_payloads.end() || tracked->second.transition != serial)
-                return;
+                std::terminate();
             const auto order = kisCompareBackingRevision(
                 revision, tracked->second.revision);
-            Q_ASSERT(order == KisBackingRevisionOrder::Newer);
             if (order != KisBackingRevisionOrder::Newer)
-                return;
+                std::terminate();
             auto &payload = tracked->second;
             payload.revision = revision;
             payload.domain = domain;

@@ -740,6 +740,7 @@ private Q_SLOTS:
     void providerAdoptionPreparationRejectsBeforePayload();
     void providerLeasePreparationPreservesOriginalPin();
     void providerMemoryUsageWaitsForOriginalTransition();
+    void residencyObserverRegistrationRejectsRecreatedIdentity();
     void writeTransferRejectsMismatchedOperation();
     void historyPreparationRevalidatesProtection();
     void retirementResultBindsAtCapacity_data()
@@ -5805,6 +5806,49 @@ void KisPageStoreCpuMutationTest::providerLeasePreparationPreservesOriginalPin()
     QVERIFY(retry.isValid()); f.provider->releaseAccess(std::move(retry), {});
     kisFreeMutationStorage(process.data(), std::exchange(filler, nullptr), fillerBytes, 1);
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::residencyObserverRegistrationRejectsRecreatedIdentity()
+{
+    struct Observer final : KisTileDataResidencyObserver {
+        struct Terminal final : KisTileDataResidencyTransition {
+            explicit Terminal(Observer *value) : owner(value) {}
+            ~Terminal() override { if (!completed) ++owner->cancelled; }
+            void commit(quint64) noexcept override { completed = true; ++owner->committed; }
+            Observer *owner;
+            bool completed = false;
+        };
+        QSharedPointer<KisTileDataResidencyTransition> prepareResidencyChange(
+            KisTileData *, const KisTileDataResidencyState &, bool, QString *) override
+        {
+            auto result = QSharedPointer<Terminal>::create(this);
+            if (++prepared == 1) { entered.release(); resume.acquire(); }
+            return result;
+        }
+        std::atomic<int> prepared{0}, committed{0}, cancelled{0};
+        QSemaphore entered, resume;
+    };
+    auto observer = QSharedPointer<Observer>::create();
+    auto *tiles = KisTileDataStore::instance();
+    const quint8 pixel[4] = {0x17, 0x17, 0x17, 0x17};
+    auto *tile = tiles->createDefaultTileData(4, pixel); QVERIFY(tile && tile->ref());
+    const auto releaseTile = qScopeGuard([&] { tile->deref(); });
+    const auto unregister = qScopeGuard([&] { tiles->unregisterResidencyObserver(tile, observer); });
+    KisTileDataResidencyState original, replacement;
+    QVERIFY(tiles->registerResidencyObserver(tile, observer, &original));
+    bool swapped = false;
+    std::thread swap([&] { swapped = tiles->trySwapTileData(tile); });
+    const bool entered = observer->entered.tryAcquire(1, 5000);
+    tiles->unregisterResidencyObserver(tile, observer);
+    const bool registered = tiles->registerResidencyObserver(tile, observer, &replacement);
+    observer->resume.release(); swap.join();
+    QVERIFY(entered && registered);
+    QCOMPARE(replacement.resident, original.resident); QCOMPARE(replacement.revision, original.revision);
+    QVERIFY(swapped && !tile->isResident());
+    QCOMPARE(observer->prepared.load(), 2);
+    QCOMPARE(observer->committed.load(), 1);
+    QCOMPARE(observer->cancelled.load(), 1);
+    QVERIFY(tile->blockSwapping()); tile->unblockSwapping();
 }
 
 void KisPageStoreCpuMutationTest::providerMemoryUsageWaitsForOriginalTransition()

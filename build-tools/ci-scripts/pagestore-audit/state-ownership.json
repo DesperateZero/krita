@@ -122,7 +122,8 @@
         "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before",
         "Tiles3 prepares actual charged allocation, stable payload and slot nodes before fresh pixels or alias/initial adoption; all three entry points share prepareAdoption/adopt and transfer those nodes without later index allocation; allocation and lease indexes reuse the observer retained process-root allocator",
         "original observer Payload owns physical identity, logical reference count, domain/revision and one intrusive dirty link; the duplicate physicalPayloads Qt table is deleted; existing physical aliases prepare only a logical allocation node and charge physical bytes once",
-        "prepareResidencyChange prepares charged admission snapshots and transition reservation capacity before publishing the original transition serial; any cold refusal cancels that same serial and earlier owner reservations before physical movement"
+        "prepareResidencyChange prepares charged admission snapshots before publishing the original serial, then transition reservation capacity before physical movement; the local guard owns cancellation until Transition acceptance, then that original Transition alone owns cancellation",
+        "TileDataStore revalidates the original prepared observer array identity as well as physical and membership revisions; a recreated registration cannot inherit an old candidate's permission even when its numerical revisions match"
       ],
       "current-writers": [
         "provider-owned stable KisCpuResidentBinding; original allocation index retains its binding, physical key and private prepared retirement ticket"
@@ -142,7 +143,7 @@
         "provider close revokes bindings and cancels unused private retirement tickets",
         "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
         "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates",
-        "physical residency commit updates and links only the original prepared payload; exact slot/revision acknowledgement unlinks it, stale acknowledgement preserves newer dirtiness, and untrack extracts actual payload/slot nodes for free outside the observer gate",
+        "physical residency commit updates and links only the original prepared payload; its protected serial/revision cannot silently reject completion after physical movement, and a lost payload reference cannot be disguised as non-final release; exact slot/revision acknowledgement unlinks it, stale acknowledgement preserves newer dirtiness, and untrack extracts actual payload/slot nodes for free outside the observer gate",
         "backingDomainChanges prepares an actually charged immutable snapshot; the default retained allocator can outlive the provider facade, while Ledger supplies its original budget for its local validation cut; outer observer/transition Qt objects and bootstrap remain unqualified",
         "physical registration failure or exception unregisters and untracks the same prepared payload; failed actual node preparation precedes pixel work and leaves original aliases/references unchanged; binding wrappers and TileDataStore registration storage remain unqualified fixed/core costs",
         "retire extracts the actual charged allocation node for destruction outside the provider gate; last logical reference removes the original observer payload/slot nodes, while provider destruction unregisters original payloads before observer teardown",

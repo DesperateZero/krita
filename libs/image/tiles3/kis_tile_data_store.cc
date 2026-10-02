@@ -488,6 +488,9 @@ bool KisTileDataStore::validateResidencyChangeLocked(
     if (!prepared.observersRevision)
         return found == m_residencyObservers.cend();
     return found != m_residencyObservers.cend()
+        // A deleted and recreated registration can reuse numerical revisions.
+        // The prepared array pins its original storage through validation.
+        && found->observers.constData() == prepared.observers.constData()
         && found->resident == prepared.sourceResident
         && found->revision == prepared.sourceRevision
         && found->observersRevision == prepared.observersRevision;

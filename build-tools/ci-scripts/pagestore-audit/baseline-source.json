@@ -3142,13 +3142,14 @@
         "atomic",
         "boost/intrusive/list.hpp",
         "cstring",
+        "exception",
         "limits",
         "map",
         "tiles3/kis_tile_data.h",
         "tiles3/kis_tile_data_store.h",
         "utility"
       ],
-      "lines": 1368,
+      "lines": 1369,
       "member_fields": [
         "m_admissions",
         "m_binding",
@@ -3186,7 +3187,7 @@
         "Tiles3TileReadCache",
         "Transition"
       ],
-      "sha256": "02eef46ae43c17fb13926b9601bb780f50ad3e931adc858772097e011d13faaa",
+      "sha256": "4f3721cf3d8bf407171b01f5e6ddc7089a4b8e63a59666f984fbf5bb75e2b02b",
       "synchronization_declarations": 4
     },
     "libs/image/pagestore/KisTiles3PageReplicaProvider.h": {
@@ -3313,7 +3314,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreCpuMutationTest.cpp": {
-      "container_declarations": 82,
+      "container_declarations": 85,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisImageEpochReferenceModel.h",
@@ -3349,7 +3350,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 10077,
+      "lines": 10121,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3374,12 +3375,13 @@
         "Context",
         "Fixture",
         "KisPageStoreCpuMutationTest",
+        "Observer",
         "PausedObserver",
         "ReadTerminalFixture",
         "Terminal",
         "TestProvider"
       ],
-      "sha256": "6cfa868fe0cb34454e10331957480e811ff7a27a9d57a831490c6dd3c0322567",
+      "sha256": "1b968abcbfd6cb8cfb3d5f052d383c7edd0baa7b891762aedc1023fdd484714a",
       "synchronization_declarations": 3
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -4762,11 +4764,11 @@
         "stdio.h",
         "utility"
       ],
-      "lines": 762,
+      "lines": 765,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "8790e508745fca19b437589cc419241bd4a69d5512564fb28890ee03b43b5df2",
+      "sha256": "b0ef7365f941047a95d349b0748250176f9f85f94a03026fb51f65d3dbbfa68e",
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/kis_tile_data_store.h": {
@@ -6213,5 +6215,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "1bc171aefe59b5931fead205155311292f3534ca"
+  "working_tree_head": "e0fc83ab79a2d761bd61cdae64226a569330d3bb"
 }
