@@ -2364,13 +2364,12 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealPrivatePublish, quint64(privatePageCount));
-    KisCompletionTicket completion;
-    if (privatePageCount)
-        completion = owner->readyHostCompletion;
+    // Configuration prepares this immutable terminal ticket before any
+    // mutation can be admitted; seal never creates a completion source.
+    const KisCompletionTicket completion = owner->readyHostCompletion;
+    Q_ASSERT(completion.isValid());
     QString failure;
-    bool success = !privatePageCount || completion.isValid();
-    if (!success)
-        failure = QStringLiteral("ready host completion is unavailable for private publication");
+    bool success = true;
     const auto validateClaims = [&](const char *stage) {
         if (success && !d->claimsHeldLocked()) {
             success = false;
@@ -2416,12 +2415,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealProofPrepare, quint64(sealedPageCount));
-    if (success && sealedPageCount && !completion.isValid())
-        completion = owner->readyHostCompletion;
-    if (success && sealedPageCount && !completion.isValid()) {
-        success = false;
-        failure = QStringLiteral("ready host completion is unavailable for proof preparation");
-    }
     if (success)
         for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
             auto *page = d->pageAtEntry(slot.index);

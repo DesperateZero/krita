@@ -11,7 +11,6 @@
 
 #include <QScopeGuard>
 #include <QReadWriteLock>
-#include <QHash>
 #include <QSet>
 
 #include <algorithm>
@@ -889,28 +888,23 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         || !(preparedPages.transaction == transaction.id)) {
         return {};
     }
-    QHash<quint64, const KisSurfaceEpochChange *> surfaceChanges;
-    bool changesSurfaceDefault = false;
-    surfaceChanges.reserve(preparedPages.surfaceChanges.size());
-    for (const KisSurfaceEpochChange &change : preparedPages.surfaceChanges) {
-        surfaceChanges.insert(change.after.surface.value, &change);
-        if (change.before.defaultPixelRevision != change.after.defaultPixelRevision)
-            changesSurfaceDefault = true;
-    }
-    QSet<KisPageKey> preparedKeys;
-    preparedKeys.reserve(preparedPages.proofs.size());
-    for (const KisPreparedPageProof &proof : preparedPages.proofs)
-        preparedKeys.insert(proof.authority.version.key);
+    const auto found = m_preparedTransactions.find(transaction.id.value);
+    // Storage preparation may leave an empty original transaction record
+    // after refusal or an implicit-default removal. It is not a delta.
+    if (found == m_preparedTransactions.cend() || found->second->isEmpty())
+        return {};
+    const PreparedTransactionState &owned = *found->second;
+    // The synchronous preparation claim below protects these original facts
+    // through every owner unlock, including rebase and unlocked cleanup.
+    const auto surfaceChangeFor = [&](KisSurfaceId surface) -> const KisSurfaceEpochChange * {
+        const auto change = std::find_if(owned.surfaceChanges.cbegin(), owned.surfaceChanges.cend(),
+            [&](const auto &value) { return value.after.surface == surface; });
+        return change == owned.surfaceChanges.cend() ? nullptr : &*change;
+    };
 
     QVector<KisPageAllocationDescriptor> proofDescriptors;
     proofDescriptors.reserve(preparedPages.proofs.size());
     {
-        const auto found = m_preparedTransactions.find(transaction.id.value);
-        // Storage preparation may leave an empty original transaction record
-        // after refusal or an implicit-default removal. It is not a delta.
-        if (found == m_preparedTransactions.cend() || found->second->isEmpty())
-            return {};
-        const PreparedTransactionState &owned = *found->second;
         if (owned.proofs.size() != size_t(preparedPages.proofs.size())
             || owned.surfaceChanges.size() != size_t(preparedPages.surfaceChanges.size())
             || owned.removals.size() != size_t(preparedPages.removedPages.size())) {
@@ -924,9 +918,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
                 return {};
             proofDescriptors.append(descriptor);
         }
-        for (const KisSurfaceEpochChange &change : owned.surfaceChanges) {
-            const auto supplied = surfaceChanges.constFind(change.after.surface.value);
-            if (supplied == surfaceChanges.constEnd() || !(change == *supplied.value()))
+        for (const KisSurfaceEpochChange &change : preparedPages.surfaceChanges) {
+            const auto original = surfaceChangeFor(change.after.surface);
+            if (!original || !(change == *original))
                 return {};
         }
         for (const KisPageKey &key : preparedPages.removedPages) {
@@ -934,6 +928,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
                 return {};
         }
     }
+    const bool changesSurfaceDefault = std::any_of(owned.surfaceChanges.cbegin(), owned.surfaceChanges.cend(),
+        [](const auto &change) { return change.before.defaultPixelRevision != change.after.defaultPixelRevision; });
 
     CommitPreparation preparation(transaction.id);
     m_preparingCommits.push_back(preparation);
@@ -981,10 +977,10 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         const QVector<KisPageStateSnapshot> registeredPages =
             changesSurfaceDefault ? m_metadata.publicationHeaders() : QVector<KisPageStateSnapshot>();
         const auto replacesDefault = [&](const KisPageStateSnapshot &page) {
-            const auto surfaceChange = surfaceChanges.constFind(page.key.surface.value);
-            return surfaceChange != surfaceChanges.constEnd()
-                && surfaceChange.value()->before.defaultPixelRevision != surfaceChange.value()->after.defaultPixelRevision
-                && !preparedKeys.contains(page.key)
+            const auto surfaceChange = surfaceChangeFor(page.key.surface);
+            return surfaceChange
+                && surfaceChange->before.defaultPixelRevision != surfaceChange->after.defaultPixelRevision
+                && !owned.proofs.count(page.key)
                 && KisPageVersion{page.key, page.publishedGeneration, page.publishedDefaultPixelRevision}.isDefaultPixel();
         };
         const auto replacements = std::count_if(registeredPages.cbegin(), registeredPages.cend(), replacesDefault);
@@ -992,7 +988,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         catch (const std::bad_alloc &) { return {}; }
         for (const KisPageStateSnapshot &page : registeredPages) {
             if (!replacesDefault(page)) continue;
-            const KisSurfaceEpochChange &change = *surfaceChanges.value(page.key.surface.value);
+            const KisSurfaceEpochChange &change = *surfaceChangeFor(page.key.surface);
             const KisPageVersion currentVersion{page.key, page.publishedGeneration, page.publishedDefaultPixelRevision};
 
             PreparedDescriptorChange replacement;
@@ -1038,9 +1034,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
                 || !m_epochs.surfaceState(key.surface, transactionView, &surface)) {
                 return {};
             }
-            const auto surfaceChange = surfaceChanges.constFind(key.surface.value);
-            if (surfaceChange != surfaceChanges.constEnd())
-                surface = surfaceChange.value()->after;
+            if (const auto surfaceChange = surfaceChangeFor(key.surface))
+                surface = surfaceChange->after;
             const KisPageVersion target{key, KisPageGeneration{1}, surface.defaultPixelRevision};
             const KisPageVersion currentVersion{key, page.publishedGeneration, page.publishedDefaultPixelRevision};
             const KisPageVersionStateSnapshot *published = page.findVersion(currentVersion);
@@ -1100,10 +1095,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         }
         diagnostic.next(Phase::CommitCompletion);
         const KisCompletionTicket commitCompletion = m_readyHostCompletion;
-        if (!commitCompletion.isValid()) {
-            discardPreparedCandidates(publication, rootCandidate, ownerLock);
-            return {};
-        }
+        Q_ASSERT(commitCompletion.isValid()); // Prepared once by Store configuration.
 
         QVector<KisBackingClassChange> backingChanges;
         backingChanges.reserve(preparedPages.proofs.size() * 2 + descriptorChanges.size() * 2);
@@ -1167,11 +1159,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
             continue;
         }
 
-        for (const KisPreparedPageProof &proof : preparedPages.proofs) {
-            const bool revoked = revokePreparedProofLocked(proof);
-            Q_ASSERT(revoked);
-            Q_UNUSED(revoked);
-        }
+        for (const KisPreparedPageProof &proof : preparedPages.proofs)
+            revokePreparedProofLocked(proof);
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
         m_history.collectEpochBookkeepingLocked(!(transaction.baseEpoch == currentRoot.epoch()));
         for (const KisPreparedPageProof &proof : preparedPages.proofs) {
@@ -1344,10 +1333,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             continue;
         }
         completion = m_readyHostCompletion;
-        if (!completion.isValid()) {
-            discardPreparedCandidates(publication, rootCandidate, ownerLock);
-            return {};
-        }
+        Q_ASSERT(completion.isValid()); // Prepared once by Store configuration.
 
         QVector<KisBackingClassChange> backingChanges;
         backingChanges.reserve(restoreTargets.size() * 2);
@@ -1432,8 +1418,7 @@ bool KisPagePublicationCoordinator::abortLocked(
         const KisPageMetadataTransitionResult result = m_metadata.applyOwner(proof.authority.version.key, transition);
         if (!result.accepted)
             return false;
-        if (!revokePreparedProofLocked(proof))
-            return false;
+        revokePreparedProofLocked(proof);
     }
     if (!m_epochs.abort(transaction))
         return false;
@@ -1625,21 +1610,23 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
     }
 }
 
-bool KisPagePublicationCoordinator::revokePreparedProofLocked(
-    const KisPreparedPageProof &proof)
+void KisPagePublicationCoordinator::revokePreparedProofLocked(
+    const KisPreparedPageProof &proof) noexcept
 {
     auto transaction = m_preparedTransactions.find(proof.transaction.value);
-    Q_ASSERT(transaction != m_preparedTransactions.end());
-    if (transaction == m_preparedTransactions.end()) return false;
+    if (transaction == m_preparedTransactions.end())
+        qFatal("Owned prepared proof has no transaction record");
     auto &state = *transaction->second;
     auto stored = state.proofs.find(proof.authority.version.key);
-    Q_ASSERT(stored != state.proofs.end() && stored->second == proof);
-    if (stored == state.proofs.end() || !(stored->second == proof)) return false;
-    if (!m_owner.revokePreparedPage(proof)) return false;
+    // Commit/abort select this proof from the original authority under their
+    // preparation claim. Ledger revocation unlinks its paid node and frees it;
+    // there is no capacity admission or provider action to retry here.
+    if (stored == state.proofs.end() || !(stored->second == proof)
+        || !m_owner.revokePreparedPage(proof))
+        qFatal("Owned prepared proof changed before revocation");
     state.proofs.erase(stored);
     // Keep the original state/index until commit or abort has fully changed
     // visibility. Their final exit disposes its aggregate outside the gate.
-    return true;
 }
 
 bool KisPagePublicationCoordinator::prepareDefaultRevisionsLocked(

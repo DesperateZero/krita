@@ -201,7 +201,7 @@ public:
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
 
 private:
-    bool revokePreparedProofLocked(const KisPreparedPageProof &proof);
+    void revokePreparedProofLocked(const KisPreparedPageProof &proof) noexcept;
     struct PreparedTransactionState {
         explicit PreparedTransactionState(const KisMutationStorageAllocator<char> &storage)
             : proofs(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)

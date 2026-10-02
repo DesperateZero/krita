@@ -843,6 +843,7 @@ private Q_SLOTS:
     void accessorFailedMoveDropsCachedPointer();
     void surfaceRectPageWorkingSet_data();
     void surfaceRectPageWorkingSet();
+    void commitValidatesOriginalDelta();
     void commitPreparationClaimsAndLateCapture();
     void publicationCleanupUsesBoundedBackgroundPasses();
     void hostLogicalCompletionIsPreparedOnce();
@@ -2460,6 +2461,53 @@ void KisPageStoreCpuMutationTest::blockedRetirementDoesNotBlockPublication()
     resume.release();
     QVERIFY(f.store->waitForRetirementIdle());
     f.provider->beforeRetire = {};
+    QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::commitValidatesOriginalDelta()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx);
+    for (int x : {0, 2}) {
+        auto write = mutation.beginWrite(key(x)); QVERIFY(write.isValid());
+        static_cast<quint8 *>(write.data())[0] = 0x72;
+    }
+    QVERIFY(mutation.seal());
+    QVERIFY(f.remove(tx, key(1)));
+    QVERIFY(f.store->stageSurfaceDefaultPixel(tx, {1}, QByteArray(f.bpp, char(0x44)), &f.error));
+    const auto original = f.store->preparedPages(tx);
+    QCOMPARE(original.proofs.size(), qsizetype(2));
+    QCOMPARE(original.surfaceChanges.size(), qsizetype(1));
+    QCOMPARE(original.removedPages.size(), qsizetype(1));
+    const auto preparations = f.store->publicationStatistics().preparedMutationCommits;
+    const auto reject = [&](const KisPreparedPageSet &supplied) {
+        QVERIFY(!f.store->commit(tx, supplied).isValid());
+        QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(1));
+        QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(2));
+        QCOMPARE(f.store->publicationStatistics().preparedMutationCommits, preparations);
+    };
+    auto supplied = original;
+    supplied.proofs[1] = supplied.proofs[0]; reject(supplied);
+    supplied = original; supplied.proofs.removeLast(); reject(supplied);
+    supplied = original; ++supplied.proofs[0].providerValidationStamp; reject(supplied);
+    supplied = original; supplied.surfaceChanges.append(original.surfaceChanges.first()); reject(supplied);
+    supplied = original; supplied.surfaceChanges.clear(); reject(supplied);
+    supplied = original;
+    supplied.surfaceChanges[0].after.contentExtent.adjust(0, 0, 64, 0);
+    ++supplied.surfaceChanges[0].after.extentRevision;
+    QVERIFY(supplied.isValid()); reject(supplied);
+    supplied = original; supplied.removedPages[0] = key(3);
+    QVERIFY(supplied.isValid()); reject(supplied);
+    supplied = original; supplied.removedPages.append(original.removedPages.first()); reject(supplied);
+    // Exact ownership is independent of the caller's export order. Every
+    // refused input above left these original facts and proofs available.
+    supplied = original; std::reverse(supplied.proofs.begin(), supplied.proofs.end());
+    QVERIFY(f.store->commit(tx, supplied).isValid());
+    QCOMPARE(quint8(f.pixel({}, 0)[0]), quint8(0x72));
+    QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x44)));
+    QCOMPARE(quint8(f.pixel({}, 2)[0]), quint8(0x72));
+    QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(0));
     QVERIFY(f.store->closeSession());
 }
 
