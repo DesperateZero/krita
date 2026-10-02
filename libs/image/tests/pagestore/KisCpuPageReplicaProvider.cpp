@@ -45,7 +45,7 @@ struct CpuAllocation
         size_t alignment = alignof(std::max_align_t);
     };
 
-    QSharedPointer<KisCpuResidentBinding> binding;
+    std::shared_ptr<KisCpuResidentBinding> binding;
     KisCompletionTicket retirementCompletion;
 };
 
@@ -151,7 +151,7 @@ public:
             }
         }
 
-        allocation.binding = QSharedPointer<CpuResidentBinding>::create(bytes, handle);
+        allocation.binding = std::make_shared<CpuResidentBinding>(bytes, handle);
         allocations.emplace(handle.allocation.slot, allocation);
         committedBytes += byteSize;
         completions->completePrepared(completion, KisCompletionStatus::Succeeded);
@@ -299,7 +299,7 @@ KisReplicaMemoryUsage KisCpuPageReplicaProvider::memoryUsage() const
     return {d->committedBytes, d->committedBytes, d->config.budgetBytes};
 }
 
-QSharedPointer<KisCpuResidentBinding> KisCpuPageReplicaProvider::cpuResidentBinding(
+std::shared_ptr<KisCpuResidentBinding> KisCpuPageReplicaProvider::cpuResidentBinding(
     const KisReplicaHandle &replica, KisCpuResidentReadStatus *status) const
 {
     return d->binding(replica, status);

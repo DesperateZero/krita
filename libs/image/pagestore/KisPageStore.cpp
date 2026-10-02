@@ -2144,7 +2144,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
                 allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, &failure, &backing.retirement);
             const auto binding = backingOwned ? d->provider->cpuResidentBinding(allocation.replica)
-                                               : QSharedPointer<KisCpuResidentBinding>{};
+                                               : std::shared_ptr<KisCpuResidentBinding>{};
             writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
             data = d->pinWritable(writable, counters);
             lock.relock();
@@ -2805,7 +2805,7 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     // cold miss/recheck. No provider lookup or large handle on the warm path.
     if (!link)
         link = KisPageReadCoordinator::discoverCpuReadBinding(d->owner->metadata, d->owner->owner, version);
-    QSharedPointer<KisCpuResidentBinding> binding;
+    std::shared_ptr<KisCpuResidentBinding> binding;
     const void *data = nullptr;
     constexpr int maximumAttempts = 3; // initial pin plus two immediate rediscoveries
     for (int attempt = 0; link && attempt < maximumAttempts; ++attempt) {
@@ -2861,7 +2861,7 @@ void KisCpuReadGuard::reset()
     if (m_data && m_binding)
         m_binding->releaseRead();
     m_data = nullptr;
-    m_binding.clear();
+    m_binding.reset();
     m_defaultBuffer.clear();
     m_version = {};
     m_pageExtent = {};

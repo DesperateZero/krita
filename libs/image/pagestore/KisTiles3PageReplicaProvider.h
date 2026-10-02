@@ -115,7 +115,7 @@ public:
         const KisPageAllocationDescriptor &descriptor,
         KisPagePriority priority) override;
     KisTiles3PayloadWork payloadWork() const;
-    QSharedPointer<KisCpuResidentBinding> cpuResidentBinding(
+    std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
         const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const override;
 
     // The caller must own a completed immutable/locked legacy producer input.

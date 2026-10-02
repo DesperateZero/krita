@@ -128,10 +128,10 @@ public:
     bool copySynchronousSourceToCpu(const QSharedPointer<const KisPageReplicaSource> &s,
         const KisPageAllocationDescriptor &d, void *target, quint32 stride, quint64 bytes) override
     { return p->copySynchronousSourceToCpu(s, d, target, stride, bytes); }
-    QSharedPointer<KisCpuResidentBinding> cpuResidentBinding(const KisReplicaHandle &r,
+    std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(const KisReplicaHandle &r,
         KisCpuResidentReadStatus *status = nullptr) const override
     { if (beforeBinding) beforeBinding(r);
-      return rejectNativeBinding || r == rejectBindingFor ? QSharedPointer<KisCpuResidentBinding>{} : p->cpuResidentBinding(r, status); }
+      return rejectNativeBinding || r == rejectBindingFor ? std::shared_ptr<KisCpuResidentBinding>{} : p->cpuResidentBinding(r, status); }
     KisReplicaOperation transfer(const KisReplicaTransferRequest &r, KisPagePriority pri) override
     { if (beforeTransfer) beforeTransfer(); auto result = p->transfer(r, pri);
       if (mismatchTransferOperation) ++result.operation.value; return result; }
@@ -736,6 +736,7 @@ private Q_SLOTS:
         QTest::newRow("allocation-node") << 0;
         QTest::newRow("payload-node") << 1;
         QTest::newRow("slot-node") << 2;
+        QTest::newRow("binding-control") << 3;
     }
     void providerAdoptionPreparationRejectsBeforePayload();
     void providerLeasePreparationPreservesOriginalPin();
@@ -900,6 +901,8 @@ private Q_SLOTS:
     void guardReleaseParksPendingBacking();
     void executionPreparationReusesParkedBacking_data() { pixelRows(); }
     void executionPreparationReusesParkedBacking();
+    void historyCollectionReleasesReadBindingCache_data() { pixelRows(); }
+    void historyCollectionReleasesReadBindingCache();
     void pinFootprintTracksGuards_data();
     void pinFootprintTracksGuards();
     void mutablePreparationDoesNotAliasSource_data();
@@ -3617,6 +3620,22 @@ void KisPageStoreCpuMutationTest::executionPreparationReusesParkedBacking()
     QVERIFY(f.store->closeSession());
 }
 
+void KisPageStoreCpuMutationTest::historyCollectionReleasesReadBindingCache()
+{
+    QFETCH(int, bpp);
+    Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x31));
+    for (int i = 0; i < 33; ++i) {
+        auto view = f.store->captureReadView();
+        auto guard = view.readResidentPage(key()); QVERIFY(guard.isValid());
+        QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(1));
+        guard = {}; view = {};
+        QVERIFY(f.fill(quint8(0x32 + i)));
+        QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(0));
+        QCOMPARE(f.pixel(), QByteArray(bpp, char(0x32 + i)));
+    }
+    QVERIFY(f.store->closeSession());
+}
+
 void KisPageStoreCpuMutationTest::guardReleaseParksPendingBacking_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("seal"); QTest::addColumn<bool>("borrow");
@@ -5795,12 +5814,17 @@ void KisPageStoreCpuMutationTest::providerAdoptionPreparationRejectsBeforePayloa
     const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto baseline = live();
     const auto measuredAlias = alias(); QVERIFY(measuredAlias.isValid());
-    const quint64 allocationBytes = live() - baseline; QVERIFY(allocationBytes > 0);
-    QVERIFY(retire(measuredAlias)); QCOMPARE(live(), baseline);
+    const quint64 aliasBytes = live() - baseline;
+    auto aliasBinding = f.provider->p->cpuResidentBinding(measuredAlias.replica); QVERIFY(aliasBinding);
+    QVERIFY(retire(measuredAlias));
+    const quint64 bindingBytes = live() - baseline; QVERIFY(bindingBytes > sizeof(KisCpuResidentBinding));
+    const quint64 allocationBytes = aliasBytes - bindingBytes; QVERIFY(allocationBytes > 0);
+    aliasBinding.reset(); QCOMPARE(live(), baseline);
     const auto measuredFresh = fresh(); QVERIFY(measuredFresh.isValid());
     const quint64 freshBytes = live() - baseline; QVERIFY(freshBytes > allocationBytes);
     QVERIFY(retire(measuredFresh)); QCOMPARE(live(), baseline);
-    const quint64 room = node == 0 ? 0 : node == 1 ? allocationBytes : freshBytes - 1;
+    const quint64 room = node == 0 ? 0 : node == 1 ? allocationBytes :
+        node == 2 ? freshBytes - bindingBytes - 1 : freshBytes - 1;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - room);
     void *filler = kisAllocateMutationStorage(process.data(), fillerBytes, 1);
     const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.data(), filler, fillerBytes, 1); });
@@ -10056,7 +10080,7 @@ void KisPageStoreCpuMutationTest::productionHandoffConcurrentConsumers()
         std::optional<KisReadLease> lease;
         KisCompletionTicket lastUse;
         KisCapturedReadView captured;
-        QSharedPointer<KisCpuResidentBinding> beforeBinding;
+        std::shared_ptr<KisCpuResidentBinding> beforeBinding;
         bool beforePinned = false;
         KisPageOwnerLedger otherOwner;
         if (!stop.load()) {

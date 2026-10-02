@@ -67,7 +67,7 @@ public:
                                const KisReplicaHandle &replica,
                                const KisCompletionTicket &lastUse) override;
     KisReplicaMemoryUsage memoryUsage() const override;
-    QSharedPointer<KisCpuResidentBinding> cpuResidentBinding(
+    std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
         const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const override;
 
 private:

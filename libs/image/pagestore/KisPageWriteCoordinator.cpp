@@ -2158,7 +2158,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     // fact after install; neither adapter receives a second terminal ledger.
     struct Prepared {
         QSharedPointer<KisPageReplicaProvider> beforeProvider;
-        QSharedPointer<KisCpuResidentBinding> beforeBinding;
+        std::shared_ptr<KisCpuResidentBinding> beforeBinding;
         bool beforePinned = false;
         KisCpuBackingHandoff physical;
         KisBackingHandoffReservation accounting;

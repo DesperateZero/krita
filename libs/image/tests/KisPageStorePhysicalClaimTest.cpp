@@ -42,7 +42,7 @@ struct Fixture
 {
     QSharedPointer<KisCompletionRegistry> completions = QSharedPointer<KisCompletionRegistry>::create();
     QSharedPointer<KisTiles3PageReplicaProvider> provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
-    QSharedPointer<KisCpuResidentBinding> binding;
+    std::shared_ptr<KisCpuResidentBinding> binding;
     KisReplicaHandle replica;
     KisPageAllocationDescriptor desc;
     KisTileData *tile = nullptr;
@@ -89,6 +89,8 @@ class KisPageStorePhysicalClaimTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void residentBindingStorageFollowsLastHandle_data();
+    void residentBindingStorageFollowsLastHandle();
     void retirementReadiness_data();
     void retirementReadiness();
     void tileReadCacheLifetime_data();
@@ -133,6 +135,63 @@ private Q_SLOTS:
     }
     void ledgerAliasMembershipAtCapacity();
 };
+
+void KisPageStorePhysicalClaimTest::residentBindingStorageFollowsLastHandle_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("outcome");
+    for (int bpp : {1, 4, 8, 16}) for (int outcome = 0; outcome < 3; ++outcome)
+        QTest::newRow(qPrintable(QStringLiteral("bpp%1-outcome%2").arg(bpp).arg(outcome))) << bpp << outcome;
+}
+
+void KisPageStorePhysicalClaimTest::residentBindingStorageFollowsLastHandle()
+{
+    QFETCH(int, bpp); QFETCH(int, outcome);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
+    QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
+    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
+    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {200}; config.providerEpoch = {1}; config.budgetBytes = 1024 * 1024;
+    const auto desc = descriptor(bpp);
+    QString error;
+    QVERIFY2(provider->configure(config, completions, &error, process), qPrintable(error));
+    const auto allocation = provider->requestReplica({1}, {key(0), {1}}, desc, cpu.domain,
+        KisPageAccessMode::Read, KisPagePriority::Normal);
+    QVERIFY2(allocation.isValid(), qPrintable(allocation.error));
+    auto binding = provider->cpuResidentBinding(allocation.replica); QVERIFY(binding);
+    std::weak_ptr<KisCpuResidentBinding> weak(binding);
+    bool pinned = false;
+    const auto unpin = qScopeGuard([&] { if (pinned) binding->releaseRead(); });
+    const void *bytes = nullptr;
+    if (outcome == 2) {
+        bytes = binding->acquireRead(allocation.replica.allocationIdentity(), true); QVERIFY(bytes);
+        pinned = true;
+    } else if (outcome == 0) {
+        const auto retired = provider->retire({2}, allocation.replica, {});
+        QVERIFY2(retired.isValid(), qPrintable(retired.error));
+        QVERIFY(completions->verifyTerminal(retired.completion).succeeded());
+        QVERIFY(!provider->cpuResidentBinding(allocation.replica));
+    }
+    provider.reset(); // Its controller exits; the original allocation stays charged.
+    KisCpuResidentReadStatus status;
+    QVERIFY(!binding->acquireRead(allocation.replica.allocationIdentity(), true, &status));
+    QCOMPARE(status, KisCpuResidentReadStatus::Retired);
+    if (pinned) {
+        QCOMPARE(QByteArray(static_cast<const char *>(bytes), int(desc.minimumByteSize())),
+                 QByteArray(int(desc.minimumByteSize()), char(0x31)));
+        binding->releaseRead(); pinned = false;
+    }
+    const auto tail = live(); QVERIFY(tail > baseline + sizeof(KisCpuResidentBinding));
+    binding.reset(); QVERIFY(weak.expired());
+    QCOMPARE(live(), tail); // allocate_shared storage is still held by the weak control block.
+    weak.reset();
+    QCOMPARE(live(), baseline);
+    for (const auto &bucket : process->usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+}
 
 void KisPageStorePhysicalClaimTest::retirementReadiness_data()
 {

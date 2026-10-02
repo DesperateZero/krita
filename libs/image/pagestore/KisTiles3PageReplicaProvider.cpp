@@ -70,10 +70,14 @@ struct Tiles3HandoffAdmission
 class Tiles3ResidentBinding final : public KisCpuResidentBinding
 {
 public:
-    Tiles3ResidentBinding(KisTileData *tile, const KisReplicaHandle &handle,
-                          Tiles3HandoffAdmission *admission)
-        : KisCpuResidentBinding(handle), m_tile(tile), m_admission(admission)
-    { m_tile->ref(); }
+    Tiles3ResidentBinding(const KisReplicaHandle &handle, Tiles3HandoffAdmission *admission)
+        : KisCpuResidentBinding(handle), m_admission(admission) {}
+    void adoptTile(KisTileData *tile) noexcept
+    {
+        Q_ASSERT(!m_tile && tile);
+        m_tile = tile;
+        m_tile->ref();
+    }
     ~Tiles3ResidentBinding() override { if (m_tile) m_tile->deref(); }
     // Only used while an owner-issued immutable read guard holds this binding.
     KisTileData *guardedTile() const { return m_tile; }
@@ -135,7 +139,7 @@ private:
     {
         if (m_tile) { m_tile->deref(); m_tile = nullptr; }
     }
-    KisTileData *m_tile;
+    KisTileData *m_tile = nullptr;
     // Used only by a short claim whose KisCpuBackingHandoff retains provider.
     Tiles3HandoffAdmission *m_admission;
 };
@@ -172,7 +176,7 @@ public:
         if (status == KisCpuResidentReadStatus::Retired) return ReadPinResult::Retired;
         return ReadPinResult::Unavailable;
     }
-    static TileLease prepare(const QSharedPointer<KisCpuResidentBinding> &binding,
+    static TileLease prepare(const std::shared_ptr<KisCpuResidentBinding> &binding,
                              const KisReplicaAllocationIdentity &expected,
                              KisTileData *tile, TileLease reuse, bool pin)
     {
@@ -191,7 +195,7 @@ public:
         return reuse;
     }
 private:
-    QSharedPointer<KisCpuResidentBinding> m_binding;
+    std::shared_ptr<KisCpuResidentBinding> m_binding;
     KisReplicaAllocationIdentity m_expected;
     KisTileData *m_tile = nullptr;
     bool m_pinned = false;
@@ -199,7 +203,7 @@ private:
 
 struct Tiles3Allocation
 {
-    QSharedPointer<Tiles3ResidentBinding> binding;
+    std::shared_ptr<Tiles3ResidentBinding> binding;
     quint64 physicalBacking = 0;
     KisCompletionTicket retirementCompletion;
 
@@ -670,6 +674,11 @@ public:
         scratch.try_emplace(prepared.handle.allocation.slot);
         prepared.allocation = scratch.extract(prepared.handle.allocation.slot);
         if (!existing) prepared.physical = residencyObserver->preparePayload(nextPhysicalSlot, bytes);
+        // Prepare the original binding and actual shared control block before
+        // pixel allocation/copy or physical adoption. A refused candidate owns
+        // no tile; accepted handles keep this one charged allocation.
+        prepared.allocation.mapped().binding = std::allocate_shared<Tiles3ResidentBinding>(
+            residencyObserver->storageAllocator(), prepared.handle, &handoffAdmission);
         return prepared;
     }
 
@@ -717,9 +726,9 @@ public:
                const KisCompletionTicket &retirementCompletion)
     {
         if (!prepared.handle.isValid() || prepared.allocation.empty() || !tile) return false;
-        // The wrapper is still a cold fallible Qt object. Its failure occurs
-        // before original physical references or canonical index installation.
-        const auto binding = QSharedPointer<Tiles3ResidentBinding>::create(tile, prepared.handle, &handoffAdmission);
+        const auto &binding = prepared.allocation.mapped().binding;
+        Q_ASSERT(binding);
+        binding->adoptTile(tile);
         const quint64 physical = retainPhysical(tile, prepared.handle.layout.byteSize, prepared.physical);
         if (!physical) return false;
         auto rollback = qScopeGuard([&] { releasePhysical(tile, physical); });
@@ -1000,7 +1009,7 @@ bool KisTiles3PageReplicaProvider::sourceMatchesReadGuard(
 
 KisTileData *KisTiles3PageReplicaProvider::tileDataForCpuReadGuard(const KisCpuReadGuard &guard) const
 {
-    const auto binding = qSharedPointerDynamicCast<Tiles3ResidentBinding>(guard.m_binding);
+    const auto binding = std::dynamic_pointer_cast<Tiles3ResidentBinding>(guard.m_binding);
     return guard.isValid() && binding ? binding->guardedTile() : nullptr;
 }
 
@@ -1008,7 +1017,7 @@ TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
     const KisCpuReadGuard &guard, TileLease reuse) const
 {
     if (!guard.isValid()) return {};
-    const auto binding = qSharedPointerDynamicCast<Tiles3ResidentBinding>(guard.m_binding);
+    const auto binding = std::dynamic_pointer_cast<Tiles3ResidentBinding>(guard.m_binding);
     if (!binding) return {};
     const auto expected = binding->readIdentity(guard.version());
     {
@@ -1330,7 +1339,7 @@ bool KisTiles3PageReplicaProvider::registerBackingDomainAdmission(
     return registered;
 }
 
-QSharedPointer<KisCpuResidentBinding> KisTiles3PageReplicaProvider::cpuResidentBinding(
+std::shared_ptr<KisCpuResidentBinding> KisTiles3PageReplicaProvider::cpuResidentBinding(
     const KisReplicaHandle &replica, KisCpuResidentReadStatus *status) const
 {
     return d->binding(replica, status);

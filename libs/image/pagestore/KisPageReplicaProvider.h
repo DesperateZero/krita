@@ -457,8 +457,9 @@ public:
 
     // Optional stable CPU allocation record. Retrieval is cold binding setup,
     // not pixel access; consumers still need an owner-issued root capability.
-    // Unsupported providers return null and retain the generic lease path.
-    virtual QSharedPointer<KisCpuResidentBinding> cpuResidentBinding(
+    // Its actual shared allocation follows the provider's storage owner through
+    // the last guard/control-block release. Unsupported providers return null.
+    virtual std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
         const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const;
 };
 

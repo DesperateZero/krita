@@ -155,14 +155,14 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
 };
 
 KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
-    const QSharedPointer<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
+    const std::shared_ptr<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
     const KisReplicaHandle &replica, KisPageAccessRequirement requirement, KisPageAccessMode mode);
 KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
-    const QSharedPointer<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
+    const std::shared_ptr<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
 KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
     const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
-    const QSharedPointer<KisCpuResidentBinding> &source,
-    const QSharedPointer<KisCpuResidentBinding> &target, const QString &providerLabel);
+    const std::shared_ptr<KisCpuResidentBinding> &source,
+    const std::shared_ptr<KisCpuResidentBinding> &target, const QString &providerLabel);
 
 template<typename Allocation>
 struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
@@ -224,7 +224,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
             activeLeases, allocation->second.binding, access);
     }
 
-    QSharedPointer<KisCpuResidentBinding> binding(
+    std::shared_ptr<KisCpuResidentBinding> binding(
         const KisReplicaHandle &handle, KisCpuResidentReadStatus *status)
     {
         std::lock_guard<QMutex> locker(mutex);
@@ -232,7 +232,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         if (status) *status = found == allocations.end()
             ? KisCpuResidentReadStatus::InvalidIdentity : KisCpuResidentReadStatus::Ready;
         return found == allocations.end()
-            ? QSharedPointer<KisCpuResidentBinding>{} : found->second.binding;
+            ? std::shared_ptr<KisCpuResidentBinding>{} : found->second.binding;
     }
 
     KisReplicaOperation transfer(const KisReplicaTransferRequest &request,
@@ -295,9 +295,9 @@ public:
     KisCpuWriteBindingReservation &operator=(KisCpuWriteBindingReservation &&) noexcept;
     KisCpuWriteBindingReservation(const KisCpuWriteBindingReservation &) = delete;
     KisCpuWriteBindingReservation &operator=(const KisCpuWriteBindingReservation &) = delete;
-    static KisCpuWriteBindingReservation acquire(const QSharedPointer<KisCpuResidentBinding> &binding,
+    static KisCpuWriteBindingReservation acquire(const std::shared_ptr<KisCpuResidentBinding> &binding,
                                                  const KisReplicaAllocationIdentity &expected);
-    bool isValid() const { return !m_binding.isNull(); }
+    bool isValid() const { return bool(m_binding); }
     // Waits only for the local gate/swap barrier, never initiates swap-in.
     void *pinResident(KisCpuResidentReadStatus *status = nullptr);
     // Explicit cold control path; the caller must first observe NonResident.
@@ -307,7 +307,7 @@ public:
     void reset();
 private:
     friend class KisCpuBackingHandoff;
-    QSharedPointer<KisCpuResidentBinding> m_binding;
+    std::shared_ptr<KisCpuResidentBinding> m_binding;
 };
 
 /** Prepared physical transfer only; no logical write or recovery permission.
@@ -331,7 +331,7 @@ public:
     static KisCpuBackingHandoff prepare(const QSharedPointer<KisPageReplicaProvider> &provider,
                                         const KisReplicaHandle &source, const KisPageVersion &target,
                                         const KisPageAllocationDescriptor &descriptor);
-    bool isValid() const { return !m_binding.isNull(); }
+    bool isValid() const { return bool(m_binding); }
     bool isClaimed() const { return m_claimed; }
     const KisReplicaHandle &target() const { return m_target; }
     bool tryClaim();
@@ -339,7 +339,7 @@ public:
     void reset() noexcept;
 private:
     QSharedPointer<KisPageReplicaProvider> m_provider;
-    QSharedPointer<KisCpuResidentBinding> m_binding;
+    std::shared_ptr<KisCpuResidentBinding> m_binding;
     KisReplicaHandle m_source;
     KisReplicaHandle m_target;
     bool m_claimed = false;
@@ -353,7 +353,7 @@ public:
     KisCpuReadBindingLink(const KisReplicaHandle &handle,
                          const QSharedPointer<KisPageReplicaProvider> &provider)
         : replica(handle), m_provider(provider) {}
-    QSharedPointer<KisCpuResidentBinding> resolve(KisCpuResidentReadStatus *status = nullptr) const
+    std::shared_ptr<KisCpuResidentBinding> resolve(KisCpuResidentReadStatus *status = nullptr) const
     {
         std::call_once(m_once, [this] {
             auto candidate = m_provider->cpuResidentBinding(replica, &m_status);
@@ -371,7 +371,7 @@ public:
 private:
     QSharedPointer<KisPageReplicaProvider> m_provider;
     mutable std::once_flag m_once;
-    mutable QSharedPointer<KisCpuResidentBinding> m_binding;
+    mutable std::shared_ptr<KisCpuResidentBinding> m_binding;
     mutable KisCpuResidentReadStatus m_status = KisCpuResidentReadStatus::BindingUnavailable;
 };
 

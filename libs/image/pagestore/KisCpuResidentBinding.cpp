@@ -118,7 +118,7 @@ void KisCpuBackingHandoff::reset() noexcept
 {
     if (m_claimed) m_binding->finishHandoff(nullptr);
     m_claimed = false;
-    m_binding.clear();
+    m_binding.reset();
     m_provider.clear();
     m_source = {}; m_target = {};
 }
@@ -314,7 +314,7 @@ KisCpuWriteBindingReservation &KisCpuWriteBindingReservation::operator=(KisCpuWr
     return *this;
 }
 KisCpuWriteBindingReservation KisCpuWriteBindingReservation::acquire(
-    const QSharedPointer<KisCpuResidentBinding> &binding, const KisReplicaAllocationIdentity &expected)
+    const std::shared_ptr<KisCpuResidentBinding> &binding, const KisReplicaAllocationIdentity &expected)
 {
     KisCpuWriteBindingReservation result;
     if (binding && binding->reserveWrite(expected)) result.m_binding = binding;
@@ -333,7 +333,7 @@ void KisCpuWriteBindingReservation::unpin() { if (m_binding) m_binding->unpinRes
 void KisCpuWriteBindingReservation::reset()
 {
     if (m_binding) m_binding->releaseReservedWrite();
-    m_binding.clear();
+    m_binding.reset();
 }
 
 bool KisCpuResidentBinding::retire(const KisReplicaAllocationIdentity &expected)
@@ -364,7 +364,7 @@ void KisCpuResidentBinding::revoke()
 }
 
 KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
-    const QSharedPointer<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
+    const std::shared_ptr<KisCpuResidentBinding> &binding, KisPageLeaseId lease, KisPageOperationId operation,
     const KisReplicaHandle &replica, KisPageAccessRequirement requirement, KisPageAccessMode mode)
 {
     if (!binding || !lease.isValid() || !operation.isValid() ||
@@ -386,7 +386,7 @@ KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
 }
 
 void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
-    const QSharedPointer<KisCpuResidentBinding> &binding, const KisReplicaAccess &access)
+    const std::shared_ptr<KisCpuResidentBinding> &binding, const KisReplicaAccess &access)
 {
     auto lease = activeLeases.find(access.lease.value);
     if (!binding || !access.isValid() || lease == activeLeases.end() ||
@@ -400,8 +400,8 @@ void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
 
 KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
     const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
-    const QSharedPointer<KisCpuResidentBinding> &source,
-    const QSharedPointer<KisCpuResidentBinding> &target, const QString &providerLabel)
+    const std::shared_ptr<KisCpuResidentBinding> &source,
+    const std::shared_ptr<KisCpuResidentBinding> &target, const QString &providerLabel)
 {
     const KisCompletionTicket completion = completions->allocatePending(completionSource);
     if (!completion.isValid()) {

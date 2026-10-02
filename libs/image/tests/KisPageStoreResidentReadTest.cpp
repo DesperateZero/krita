@@ -159,15 +159,15 @@ class ReadBindingProbeProvider final : public GenericOnlyProvider
 public:
     using GenericOnlyProvider::GenericOnlyProvider;
     mutable int bindingCalls = 0;
-    std::function<QSharedPointer<KisCpuResidentBinding>(const KisReplicaHandle &,
+    std::function<std::shared_ptr<KisCpuResidentBinding>(const KisReplicaHandle &,
         KisCpuResidentReadStatus *)> bindingProbe;
-    QSharedPointer<KisCpuResidentBinding> cpuResidentBinding(
+    std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
         const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const override
     {
         ++bindingCalls;
         return bindingProbe ? bindingProbe(replica, status) : p->cpuResidentBinding(replica, status);
     }
-    QSharedPointer<KisCpuResidentBinding> originalBinding(const KisReplicaHandle &r,
+    std::shared_ptr<KisCpuResidentBinding> originalBinding(const KisReplicaHandle &r,
                                                          KisCpuResidentReadStatus *status = nullptr)
     { return p->cpuResidentBinding(r, status); }
 };
@@ -371,7 +371,7 @@ void KisPageStoreResidentReadTest::bindingStorageFailureUnlocks()
     QString error; auto provider = makeProvider(false, completions, &error); QVERIFY(provider);
     auto op = provider->requestReplica({900}, {key(0), {1}}, descriptor(), cpu.domain,
         KisPageAccessMode::Read, KisPagePriority::Normal); QVERIFY(op.isValid());
-    auto binding = QSharedPointer<StorageFailureBinding>::create(op.replica);
+    auto binding = std::make_shared<StorageFailureBinding>(op.replica);
     KisCpuBindingLeaseMap leases;
     const auto mode = path == 3 ? KisPageAccessMode::Write : KisPageAccessMode::Read;
     bool rejected = false;
@@ -521,7 +521,7 @@ void KisPageStoreResidentReadTest::capturedReadRetriesStaleBinding()
     QVERIFY(wrong.isValid());
     auto wrongBinding = provider->originalBinding(wrong.replica); QVERIFY(wrongBinding);
     int remaining = mode <= 2 ? 1 : 100;
-    QSharedPointer<KisCpuResidentBinding> busyBinding;
+    std::shared_ptr<KisCpuResidentBinding> busyBinding;
     bool busyPinned = false;
     const auto cleanup = qScopeGuard([&] {
         provider->bindingProbe = {};
@@ -532,13 +532,13 @@ void KisPageStoreResidentReadTest::capturedReadRetriesStaleBinding()
             if (mode == 0 || mode == 3) return wrongBinding;
             if (mode == 6) {
                 busyBinding = provider->originalBinding(replica, status);
-                if (!busyBinding || !busyBinding->acquireWrite(replica.allocationIdentity())) return QSharedPointer<KisCpuResidentBinding>{};
+                if (!busyBinding || !busyBinding->acquireWrite(replica.allocationIdentity())) return std::shared_ptr<KisCpuResidentBinding>{};
                 busyPinned = true;
                 return busyBinding;
             }
             if (status) *status = mode == 2 || mode == 5 ? KisCpuResidentReadStatus::Retired
                 : mode == 7 ? KisCpuResidentReadStatus::BindingUnavailable : KisCpuResidentReadStatus::InvalidIdentity;
-            return QSharedPointer<KisCpuResidentBinding>{};
+            return std::shared_ptr<KisCpuResidentBinding>{};
         }
         return provider->originalBinding(replica, status);
     };
@@ -643,7 +643,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
                     {b.replica, KisReplicaValidity::Valid, {}, {}, 0, {}}};
     page.versions = {old}; QVERIFY(metadata.registerPage(page));
     auto stale = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version); QVERIFY(stale);
-    QSharedPointer<KisCpuResidentBinding> binding;
+    std::shared_ptr<KisCpuResidentBinding> binding;
     if (warm) { binding = stale->resolve(); QVERIFY(binding); }
     auto physical = KisCpuBackingHandoff::prepare(provider, a.replica, {key(0), {2}}, desc); QVERIFY(physical.isValid());
     const auto target = physical.target();

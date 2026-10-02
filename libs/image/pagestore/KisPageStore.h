@@ -367,7 +367,7 @@ public:
 private:
     void reset();
     std::shared_ptr<KisCapturedReadView::Private> m_scope;
-    QSharedPointer<KisCpuResidentBinding> m_binding;
+    std::shared_ptr<KisCpuResidentBinding> m_binding;
     const void *m_data = nullptr;
     QSharedPointer<const KisCpuDefaultReadBuffer> m_defaultBuffer;
     KisPageVersion m_version;

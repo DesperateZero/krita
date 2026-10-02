@@ -27,7 +27,7 @@ KisReplicaOperation KisPageReplicaProvider::prepareSynchronousCpuPayload(
             QStringLiteral("synchronous CPU payload preparation is unsupported")};
 }
 
-QSharedPointer<KisCpuResidentBinding> KisPageReplicaProvider::cpuResidentBinding(
+std::shared_ptr<KisCpuResidentBinding> KisPageReplicaProvider::cpuResidentBinding(
     const KisReplicaHandle &, KisCpuResidentReadStatus *status) const
 {
     if (status) *status = KisCpuResidentReadStatus::UnsupportedProvider;
