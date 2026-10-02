@@ -195,8 +195,11 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
             if (lease.mode == KisPageAccessMode::Read) found->binding->releaseRead();
             else found->binding->releaseWrite();
         }
-        for (const auto &allocation : std::as_const(allocations))
+        for (const auto &allocation : std::as_const(allocations)) {
             if (allocation.binding) allocation.binding->revoke();
+            if (allocation.retirementCompletion.isValid())
+                completions->complete(allocation.retirementCompletion, KisCompletionStatus::Cancelled);
+        }
     }
 
     KisReplicaAccess resolveAccess(KisPageLeaseId lease, KisPageOperationId operation,
@@ -263,7 +266,9 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         const auto allocation = findExactAllocation(replica);
         if (allocation == allocations.end())
             return {allocation, {}, "allocation is stale"};
-        const auto completion = completions->allocatePending(completionSource);
+        // Cold allocation prepared this terminal capacity before physical
+        // adoption. A refusal to retire keeps the same private ticket Pending.
+        const auto completion = allocation->retirementCompletion;
         return completion.isValid() ? Retirement{allocation, completion}
                                     : Retirement{allocation, {}, "completion allocation failed"};
     }

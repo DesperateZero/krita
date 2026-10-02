@@ -10,6 +10,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QScopeGuard>
 
 #include <memory>
 #include <limits>
@@ -139,6 +140,12 @@ KisPageArchiveOperation KisUnifiedSsdPageStore::storeExact(
         return fail(QStringLiteral("legacy swap archive payload size is unsupported"));
     }
 
+    const auto completion = d->completions->allocatePending(d->completionSource);
+    if (!completion.isValid()) return fail(QStringLiteral("legacy swap archive completion preparation failed"));
+    const auto finishFailure = qScopeGuard([&] {
+        if (d->completions->status(completion) == KisCompletionStatus::Pending)
+            d->completions->complete(completion, KisCompletionStatus::Failed);
+    });
     QByteArray payload(qsizetype(write.sourceLayout.byteSize), char(0));
     const quint64 rowBytes = write.descriptor.minimumRowBytes();
     const int rowCount = write.descriptor.pageExtent.height();
@@ -158,10 +165,7 @@ KisPageArchiveOperation KisUnifiedSsdPageStore::storeExact(
     entry.legacySwapRecord = swapRecord;
     entry.checksum = QCryptographicHash::hash(payload, QCryptographicHash::Sha256);
 
-    const KisCompletionTicket completion =
-        d->completions->allocatePending(d->completionSource);
-    if (!completion.isValid() ||
-        !d->completions->complete(completion,
+    if (!d->completions->complete(completion,
                                   KisCompletionStatus::Succeeded)) {
         d->swapStore->forgetRawRecord(swapRecord);
         return fail(QStringLiteral("legacy swap archive completion failed"));

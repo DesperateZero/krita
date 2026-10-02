@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSemaphore>
+#include <QScopeGuard>
+#include <array>
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "KisCompletionRegistry.h"
+#include "KisPageWriteCoordinator_p.h"
 
 namespace {
 quint64 addSource(KisCompletionRegistry &registry)
@@ -44,6 +47,9 @@ private Q_SLOTS:
     void shuffledCompletionMatchesOracle();
     void concurrentAllocationAndCompletion();
     void compactStorage();
+    void preparedCompletionsAtCapacity_data();
+    void preparedCompletionsAtCapacity();
+    void registryStorageReturnsToProcessOwner();
     void terminalReadiness_data();
     void terminalReadiness();
     void readinessCancellation();
@@ -142,7 +148,7 @@ void KisCompletionRegistryTest::cancelledPendingSubscriptionsDoNotAccumulate()
         second.reset();
         QCOMPARE(registry.status(ticket), KisCompletionStatus::Pending);
         QCOMPARE(registry.sourceStatistics(source).readinessWaiters, quint64(0));
-        QCOMPARE(registry.sourceStatistics(source).storageRecords, quint64(0));
+        QCOMPARE(registry.sourceStatistics(source).storageRecords, quint64(iteration + 1));
         QCOMPARE(registry.sourceStatistics(source).readinessSignals, quint64(0));
         QCOMPARE(registry.sourceStatistics(source).readinessCapacity, quint64(0));
     }
@@ -518,7 +524,7 @@ void KisCompletionRegistryTest::compactStorage()
     QCOMPARE(stats.allocatedTickets, quint64(100001));
     QCOMPARE(stats.pendingTickets, quint64(1));
     QCOMPARE(stats.terminalTickets, quint64(100000));
-    QCOMPARE(stats.storageRecords, quint64(1));
+    QCOMPARE(stats.storageRecords, quint64(2)); // Gap preparation and the terminal range.
     QCOMPARE(registry.status(gap), KisCompletionStatus::Pending);
     QVERIFY(registry.complete(gap, KisCompletionStatus::Succeeded));
     QCOMPARE(registry.sourceStatistics(source).storageRecords, quint64(1));
@@ -527,8 +533,90 @@ void KisCompletionRegistryTest::compactStorage()
     QVERIFY(!registry.complete(first, KisCompletionStatus::Failed));
     const auto pendingSource = addSource(registry);
     for (int i = 0; i < 100000; ++i) QVERIFY(registry.allocatePending(pendingSource).isValid());
-    QCOMPARE(registry.sourceStatistics(pendingSource).storageRecords, quint64(0));
+    QCOMPARE(registry.sourceStatistics(pendingSource).storageRecords, quint64(100000));
     QCOMPARE(registry.sourceStatistics(pendingSource).pendingTickets, quint64(100000));
+}
+
+void KisCompletionRegistryTest::preparedCompletionsAtCapacity_data()
+{
+    QTest::addColumn<int>("terminal");
+    for (const auto status : {KisCompletionStatus::Succeeded, KisCompletionStatus::Failed, KisCompletionStatus::Cancelled})
+        QTest::newRow(qPrintable(QString::number(int(status)))) << int(status);
+}
+
+void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
+{
+    QFETCH(int, terminal);
+    const auto status = KisCompletionStatus(terminal);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisCompletionRegistry registry(process);
+    const auto source = addSource(registry);
+    std::array<KisCompletionTicket, 5> tickets;
+    for (auto &ticket : tickets) { ticket = registry.allocatePending(source); QVERIFY(ticket.isValid()); }
+    int calls = 0;
+    KisPageReadinessSubscription first, bridge;
+    for (const auto index : {0, 3}) {
+        KisPageReadinessCallback callback([&, index] {
+            QCOMPARE(registry.status(tickets[index]), status);
+            ++calls;
+        }, process.data());
+        QCOMPARE(registry.watchTerminal(tickets[index], std::move(callback), index ? &bridge : &first),
+                 KisPageReadinessStatus::Waiting);
+    }
+    auto warm = process->reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
+    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(process.data(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.data(), filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    QVERIFY(!registry.allocatePending(source).isValid());
+    QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), quint64(0));
+    QCOMPARE(registry.sourceStatistics(source).allocatedTickets, quint64(5));
+    QCOMPARE(registry.sourceStatistics(source).readinessWaiters, quint64(2));
+    // Isolated ranges, a bridge, then closing the gap: every terminal kind
+    // completes from the original nodes while admission is actually refused.
+    for (const auto index : {2, 4, 3}) QVERIFY(registry.complete(tickets[index], status));
+    QVERIFY(registry.complete(tickets[1], KisCompletionStatus::Succeeded));
+    QVERIFY(registry.complete(tickets[0], status));
+    QCOMPARE(calls, 2);
+    QCOMPARE(registry.sourceStatistics(source).pendingTickets, quint64(0));
+    QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5));
+    QVERIFY(live() < limits.metadataArenaBytes);
+    for (const auto &ticket : tickets) QVERIFY(!registry.complete(ticket, KisCompletionStatus::Cancelled));
+    kisFreeMutationStorage(process.data(), std::exchange(filler, nullptr), fillerBytes, 1);
+    const auto next = registry.allocatePending(source);
+    QCOMPARE(next.value(), quint64(6)); // Refusal issued no hidden identity.
+    QVERIFY(registry.complete(next, KisCompletionStatus::Succeeded));
+    QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), source + 1);
+}
+
+void KisCompletionRegistryTest::registryStorageReturnsToProcessOwner()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    // Measure the parent cache after the same real source/subscription workload.
+    const auto exercise = [&](bool retain) {
+        auto registry = std::make_unique<KisCompletionRegistry>(process);
+        const auto source = addSource(*registry);
+        const auto ticket = registry->allocatePending(source);
+        KisPageReadinessSubscription subscription;
+        KisPageReadinessCallback callback([] {}, process.data());
+        if (registry->watchTerminal(ticket, std::move(callback), &subscription) != KisPageReadinessStatus::Waiting)
+            return false;
+        const auto before = live();
+        registry.reset();
+        if (live() >= before || subscription.isValid()) return false;
+        const auto weakTail = live();
+        subscription.reset();
+        return !retain || live() < weakTail;
+    };
+    QVERIFY(exercise(false));
+    const auto baseline = live();
+    QVERIFY(exercise(true));
+    QCOMPARE(live(), baseline);
+    for (const auto &bucket : process->usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
 }
 
 void KisCompletionRegistryTest::benchmark_data()

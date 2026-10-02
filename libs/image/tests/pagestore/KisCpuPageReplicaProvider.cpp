@@ -8,6 +8,7 @@
 #include "KisCpuResidentBinding_p.h"
 
 #include <QMutexLocker>
+#include <QScopeGuard>
 #include <cstring>
 #include <cstddef>
 #include <limits>
@@ -45,6 +46,7 @@ struct CpuAllocation
     };
 
     QSharedPointer<KisCpuResidentBinding> binding;
+    KisCompletionTicket retirementCompletion;
 };
 
 class CpuResidentBinding final : public KisCpuResidentBinding
@@ -101,6 +103,13 @@ public:
         if (!completion.isValid()) {
             return KisReplicaOperation::failed(operation, QStringLiteral("CPU completion allocation failed"));
         }
+        const auto retirementCompletion = completions->allocatePending(completionSource);
+        auto failCompletion = qScopeGuard([&] {
+            completions->complete(completion, KisCompletionStatus::Failed);
+            if (retirementCompletion.isValid()) completions->complete(retirementCompletion, KisCompletionStatus::Failed);
+        });
+        if (!retirementCompletion.isValid())
+            return KisReplicaOperation::failed(operation, QStringLiteral("CPU retirement completion preparation failed"));
 
         KisReplicaHandle handle;
         handle.provider = config.provider;
@@ -116,6 +125,7 @@ public:
                          byteSize};
 
         CpuAllocation allocation;
+        allocation.retirementCompletion = retirementCompletion;
         auto bytes = std::make_shared<CpuAllocation::AlignedBytes>();
         bytes->alignment = qMax<size_t>(
             size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
@@ -150,6 +160,7 @@ public:
             return KisReplicaOperation::failed(operation, QStringLiteral("CPU completion publication failed"));
         }
 
+        failCompletion.dismiss();
         KisReplicaOperation result;
         result.status = KisPageRequestStatus::Ready;
         result.operation = operation;
@@ -276,7 +287,6 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
         return KisReplicaOperation::failed(operation,
             QStringLiteral("CPU retirement %1").arg(QString::fromLatin1(retirement.failure)));
     if (!retirement.allocation->binding->retire(replica.allocationIdentity())) {
-        d->completions->complete(retirement.completion, KisCompletionStatus::Failed);
         return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
     }
     d->consumeOperation(operation);

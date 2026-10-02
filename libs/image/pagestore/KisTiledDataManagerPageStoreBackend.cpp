@@ -315,7 +315,7 @@ public:
         const auto sharedNonPayloadBudget = acquireProductNonPayloadBudget(policy, error);
         if (!sharedNonPayloadBudget)
             return false;
-        const auto completions = QSharedPointer<KisCompletionRegistry>::create();
+        const auto completions = QSharedPointer<KisCompletionRegistry>::create(sharedNonPayloadBudget);
         provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
         KisCpuResidentReplicaProviderConfig providerConfig;
         providerConfig.provider =

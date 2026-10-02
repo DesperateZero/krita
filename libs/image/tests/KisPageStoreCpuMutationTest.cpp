@@ -658,6 +658,14 @@ private Q_SLOTS:
     void historyRefusalPreservesOriginalWork();
     void retirementPreparationRollsBackAtCapacity();
     void synchronousProviderResultsAtCapacity();
+    void providerCompletionPreparationRejectsBeforePayload_data()
+    {
+        QTest::addColumn<bool>("prepareFirst");
+        QTest::newRow("operation-node-refused") << false;
+        QTest::newRow("retirement-node-refused") << true;
+    }
+    void providerCompletionPreparationRejectsBeforePayload();
+    void providerRetirementUsesPreparedCompletion();
     void writeTransferRejectsMismatchedOperation();
     void historyPreparationRevalidatesProtection();
     void retirementResultBindsAtCapacity_data()
@@ -4690,6 +4698,98 @@ void KisPageStoreCpuMutationTest::synchronousProviderResultsAtCapacity()
     QCOMPARE(owner.providerOperationCount(), qsizetype(0));
     QCOMPARE(references.loadAcquire(), 1);
     QCOMPARE(live(), limits.metadataArenaBytes);
+}
+
+void KisPageStoreCpuMutationTest::providerCompletionPreparationRejectsBeforePayload()
+{
+    QFETCH(bool, prepareFirst);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    Fixture f; f.completions = QSharedPointer<KisCompletionRegistry>::create(process);
+    QVERIFY(f.init());
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    KisPageOwnerLedger identities; QVERIFY(identities.configure(f.completions));
+    const auto prepare = [&] {
+        return f.provider->prepareWrite(identities.nextOperationId(), {key(), {1}},
+            surface.allocationDescriptor(), cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    };
+    const auto warmAllocation = prepare(); QVERIFY(warmAllocation.isValid());
+    const auto source = warmAllocation.completion.source();
+    QVERIFY(f.provider->retire(identities.nextOperationId(), warmAllocation.replica, {}).isValid());
+    auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
+    QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
+    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto before = live();
+    const auto probe = f.completions->allocatePending(source); QVERIFY(probe.isValid());
+    const auto nodeBytes = live() - before; QVERIFY(nodeBytes > 0);
+    QVERIFY(f.completions->complete(probe, KisCompletionStatus::Succeeded));
+    QCOMPARE(live(), before);
+    const auto admitted = f.completions->sourceStatistics(source);
+    const auto work = f.provider->p->payloadWork();
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - (prepareFirst ? nodeBytes : 0));
+    void *filler = kisAllocateMutationStorage(process.data(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.data(), filler, fillerBytes, 1); });
+    const auto rejected = prepare();
+    QVERIFY(!rejected.isValid());
+    QCOMPARE(f.completions->sourceStatistics(source).allocatedTickets, admitted.allocatedTickets + quint64(prepareFirst));
+    QCOMPARE(f.completions->sourceStatistics(source).pendingTickets, quint64(0));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(f.provider->p->payloadWork().defaultInitializedPages, work.defaultInitializedPages);
+    kisFreeMutationStorage(process.data(), std::exchange(filler, nullptr), fillerBytes, 1);
+    const auto retry = prepare(); QVERIFY2(retry.isValid(), qPrintable(retry.error));
+    QVERIFY(f.provider->retire(identities.nextOperationId(), retry.replica, {}).isValid());
+    QCOMPARE(f.completions->sourceStatistics(source).pendingTickets, quint64(0));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::providerRetirementUsesPreparedCompletion()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    Fixture f; f.completions = QSharedPointer<KisCompletionRegistry>::create(process);
+    QVERIFY(f.init());
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    KisPageOwnerLedger identities; QVERIFY(identities.configure(f.completions));
+    const auto allocation = f.provider->prepareWrite(identities.nextOperationId(), {key(), {1}},
+        surface.allocationDescriptor(), cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(allocation.isValid());
+    const auto source = allocation.completion.source();
+    const auto later = f.provider->prepareWrite(identities.nextOperationId(), {key(1), {1}},
+        surface.allocationDescriptor(), cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(later.isValid());
+    auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
+    QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
+    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto admitted = f.completions->sourceStatistics(source);
+    QCOMPARE(admitted.pendingTickets, quint64(2)); // Both original retirement tickets.
+    auto access = f.provider->resolveAccess(identities.nextLeaseId(), identities.nextOperationId(),
+        later.replica, cpu, KisPageAccessMode::Read);
+    QVERIFY(access.isValid());
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(process.data(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.data(), filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    const auto busy = f.provider->retire(identities.nextOperationId(), later.replica, {});
+    QVERIFY(!busy.isValid());
+    QCOMPARE(f.completions->sourceStatistics(source).allocatedTickets, admitted.allocatedTickets);
+    QCOMPARE(f.completions->sourceStatistics(source).pendingTickets, quint64(2));
+    f.provider->releaseAccess(std::move(access), {});
+    // A refusal preserved the original private ticket. Out-of-order physical
+    // retirement succeeds while the shared arena has no remaining capacity.
+    const auto retired = f.provider->retire(identities.nextOperationId(), later.replica, {});
+    QVERIFY2(retired.isValid(), qPrintable(retired.error));
+    QVERIFY(f.completions->verifyTerminal(retired.completion).succeeded());
+    QCOMPARE(f.completions->sourceStatistics(source).allocatedTickets, admitted.allocatedTickets);
+    QCOMPARE(f.completions->sourceStatistics(source).pendingTickets, quint64(1));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, allocation.replica.layout.byteSize);
+    QVERIFY(live() < limits.metadataArenaBytes);
+    QVERIFY(f.provider->retire(identities.nextOperationId(), allocation.replica, {}).isValid());
+    QCOMPARE(f.provider->retireCalls.load(), 3); // One refused call, two physical frees.
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(f.completions->sourceStatistics(source).pendingTickets, quint64(0));
+    kisFreeMutationStorage(process.data(), std::exchange(filler, nullptr), fillerBytes, 1);
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::writeTransferRejectsMismatchedOperation()

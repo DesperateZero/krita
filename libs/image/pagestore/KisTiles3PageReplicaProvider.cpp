@@ -198,6 +198,7 @@ struct Tiles3Allocation
 {
     QSharedPointer<Tiles3ResidentBinding> binding;
     quint64 physicalBacking = 0;
+    KisCompletionTicket retirementCompletion;
 
     KisTileData *tileData() const
     {
@@ -651,9 +652,13 @@ public:
                 operation,
                 QStringLiteral("tiles3 completion allocation failed"));
         }
+        const auto retirementCompletion = completions->allocatePending(completionSource);
         auto failCompletion = qScopeGuard([&]() {
             completions->complete(completion, KisCompletionStatus::Failed);
+            if (retirementCompletion.isValid()) completions->complete(retirementCompletion, KisCompletionStatus::Failed);
         });
+        if (!retirementCompletion.isValid())
+            return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 retirement completion preparation failed"));
         if (payload) {
             tileData = KisTileDataStore::instance()->createTileDataFromRows(
                 qint32(descriptor.format.pixelStride), static_cast<const quint8 *>(payload->data),
@@ -705,7 +710,7 @@ public:
                                    QStringLiteral("tiles3 physical payload budget is exhausted"));
         }
         allocations.insert(handle.allocation.slot,
-                           {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &handoffAdmission), physical});
+                           {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &handoffAdmission), physical, retirementCompletion});
         if (!completions->complete(completion,
                                    KisCompletionStatus::Succeeded)) {
             allocations.remove(handle.allocation.slot);
@@ -989,16 +994,23 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousSource(
     d->consumeOperation(operation);
     const auto completion = d->completions->allocatePending(d->completionSource);
     if (!completion.isValid()) return KisReplicaOperation::failed(operation, QStringLiteral("alias completion is unavailable"));
+    const auto retirementCompletion = d->completions->allocatePending(d->completionSource);
+    auto failCompletion = qScopeGuard([&] {
+        d->completions->complete(completion, KisCompletionStatus::Failed);
+        if (retirementCompletion.isValid()) d->completions->complete(retirementCompletion, KisCompletionStatus::Failed);
+    });
+    if (!retirementCompletion.isValid())
+        return KisReplicaOperation::failed(operation, QStringLiteral("alias retirement completion preparation failed"));
     const KisReplicaHandle handle = d->allocateHandle(targetVersion, descriptor);
     const quint64 physical = d->retainPhysical(input->tile, bytes);
     if (!physical) {
-        d->completions->complete(completion, KisCompletionStatus::Failed);
         return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias physical budget is exhausted"));
     }
     d->allocations.insert(handle.allocation.slot,
-         {QSharedPointer<Tiles3ResidentBinding>::create(input->tile, handle, &d->handoffAdmission), physical});
+         {QSharedPointer<Tiles3ResidentBinding>::create(input->tile, handle, &d->handoffAdmission), physical, retirementCompletion});
     ++d->work.adoptedPages; d->work.adoptedBytes += bytes;
     d->completions->complete(completion, KisCompletionStatus::Succeeded);
+    failCompletion.dismiss();
     return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
 }
 
@@ -1022,6 +1034,12 @@ KisReplicaHandle KisTiles3PageReplicaProvider::adoptInitialTile(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 initial tile is unavailable"));
         return {};
     }
+    const auto retirementCompletion = d->completions->allocatePending(d->completionSource);
+    if (!retirementCompletion.isValid()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("initial retirement completion preparation failed"));
+        return {};
+    }
+    auto failCompletion = qScopeGuard([&] { d->completions->complete(retirementCompletion, KisCompletionStatus::Failed); });
     const KisReplicaHandle handle = d->allocateHandle(version, descriptor);
     const quint64 physical = d->retainPhysical(tileData, byteSize);
     if (!physical) {
@@ -1029,7 +1047,8 @@ KisReplicaHandle KisTiles3PageReplicaProvider::adoptInitialTile(
         return {};
     }
     d->allocations.insert(handle.allocation.slot,
-                          {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &d->handoffAdmission), physical});
+                          {QSharedPointer<Tiles3ResidentBinding>::create(tileData, handle, &d->handoffAdmission), physical, retirementCompletion});
+    failCompletion.dismiss();
     KisPageStoreDetail::setError(error, {});
     ++d->work.adoptedPages;
     d->work.adoptedBytes += byteSize;
@@ -1096,19 +1115,16 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
         completion = retirement.completion;
         retired = retirement.allocation->tileData();
         if (!retired) {
-            d->completions->complete(completion, KisCompletionStatus::Failed);
             return KisReplicaOperation::failed(
                 operation, QStringLiteral("tiles3 retirement allocation is stale"));
         }
         if (d->residencyObserver->transitionActive(retired)) {
-            d->completions->complete(completion, KisCompletionStatus::Failed);
             return KisReplicaOperation::failed(
                 operation, QStringLiteral("tiles3 residency transition is active"));
         }
         retired->ref();
         if (!retirement.allocation->binding->retire(replica.allocationIdentity())) {
             retired->deref();
-            d->completions->complete(completion, KisCompletionStatus::Failed);
             return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 native reader still pins allocation"));
         }
         d->consumeOperation(operation);

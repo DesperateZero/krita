@@ -5,16 +5,17 @@
  */
 
 #include "KisCompletionRegistry.h"
+#include "KisPageWriteCoordinator_p.h"
 
 #include <QMutex>
 #include <QMutexLocker>
+#include <QScopeGuard>
 
 #include <boost/intrusive/set.hpp>
 #include <atomic>
 #include <limits>
 #include <new>
 #include <map>
-#include <unordered_map>
 #include <utility>
 
 namespace {
@@ -48,119 +49,111 @@ struct CompletionReadinessMap : boost::intrusive::set<CompletionReadinessRecord,
 };
 using ReadinessRecordPointer = std::unique_ptr<CompletionReadinessRecord, decltype(&CompletionReadinessRecord::dispose)>;
 
+struct CompletionInterval : boost::intrusive::set_base_hook<>
+{
+    quint64 first;
+    quint64 last;
+    KisCompletionStatus status = KisCompletionStatus::Pending;
+    CompletionInterval *releasedNext = nullptr;
+    KisMutationStorageAllocator<CompletionInterval> storage;
+    CompletionInterval(quint64 value, KisMutationStorageAllocator<CompletionInterval> allocator) noexcept
+        : first(value), last(value), storage(std::move(allocator)) {}
+    static void dispose(CompletionInterval *record) noexcept
+    {
+        auto allocator = std::move(record->storage);
+        std::destroy_at(record);
+        allocator.deallocate(record, 1);
+    }
+};
+struct IntervalLess {
+    bool operator()(const CompletionInterval &a, const CompletionInterval &b) const { return a.first < b.first; }
+    bool operator()(quint64 value, const CompletionInterval &b) const { return value < b.first; }
+    bool operator()(const CompletionInterval &a, quint64 value) const { return a.first < value; }
+};
+struct CompletionIntervals : boost::intrusive::set<CompletionInterval, boost::intrusive::compare<IntervalLess>> {
+    ~CompletionIntervals() { clear_and_dispose([](CompletionInterval *record) { CompletionInterval::dispose(record); }); }
+    void release(iterator entry, CompletionInterval *&released) noexcept
+    {
+        auto *record = &*entry;
+        erase(entry);
+        record->releasedNext = std::exchange(released, record);
+    }
+};
+void disposeIntervals(CompletionInterval *&released) noexcept
+{
+    while (released) {
+        auto *record = released;
+        released = record->releasedNext;
+        CompletionInterval::dispose(record);
+    }
+}
+
 struct CompletionSourceState
 {
     using ReadinessMap = CompletionReadinessMap;
+    explicit CompletionSourceState(KisMutationStorageAllocator<CompletionInterval> allocator)
+        : storage(std::move(allocator)) {}
+    KisMutationStorageAllocator<CompletionInterval> storage;
     KisCompletionDomain domain = KisCompletionDomain::Unknown;
     quint64 nextValue = 1;
-    // Coverage is independent of terminal status, so alternating results do
-    // not fragment the completion index. Every covered value was explicitly
-    // completed; a larger completed host ticket never closes a pending gap.
+    // Successful prefix values need no record. Other equal-status terminal
+    // neighbours coalesce; every Pending value owns its prepared terminal node.
     quint64 terminalPrefix = 0;
-    std::map<quint64, quint64> terminalRanges;
-    std::unordered_map<quint64, KisCompletionStatus> nonSuccess;
+    CompletionIntervals intervals;
     ReadinessMap readiness;
-
-    KisCompletionStatus terminalStatus(quint64 value) const
-    {
-        const auto found = nonSuccess.find(value);
-        return found == nonSuccess.end() ? KisCompletionStatus::Succeeded : found->second;
-    }
 
     KisCompletionStatus status(quint64 value) const
     {
         if (value == 0 || value >= nextValue) return KisCompletionStatus::Unknown;
-        if (value <= terminalPrefix) return terminalStatus(value);
-        if (!terminalRanges.empty()) {
-            auto last = terminalRanges.cend();
-            --last;
-            if (value >= last->first) {
-                return value <= last->second ? terminalStatus(value)
-                                             : KisCompletionStatus::Pending;
-            }
-        }
-        auto next = terminalRanges.upper_bound(value);
-        if (next != terminalRanges.cbegin()) {
+        auto next = intervals.upper_bound(value, IntervalLess{});
+        if (next != intervals.cbegin()) {
             --next;
-            if (value <= next->second) return terminalStatus(value);
+            if (value <= next->last) return next->status;
         }
-        return KisCompletionStatus::Pending;
+        return value <= terminalPrefix ? KisCompletionStatus::Succeeded : KisCompletionStatus::Pending;
     }
 
-    bool markTerminal(quint64 value)
+    bool complete(quint64 value, KisCompletionStatus terminal, CompletionInterval *&released) noexcept
     {
-        if (value == 0 || value >= nextValue || value <= terminalPrefix) return false;
-        if (value == terminalPrefix + 1) {
-            terminalPrefix = value;
-            const auto next = terminalRanges.begin();
-            if (next != terminalRanges.end() && next->first == value + 1) {
-                terminalPrefix = next->second;
-                terminalRanges.erase(next);
-            }
-            return true;
-        }
-        if (!terminalRanges.empty()) {
-            auto last = terminalRanges.end();
-            --last;
-            if (value > last->second) {
-                if (value == last->second + 1) {
-                    last->second = value;
-                } else {
-                    terminalRanges.emplace_hint(terminalRanges.cend(), value, value);
-                }
-                return true;
-            }
-            if (value >= last->first) return false;
-        }
-        auto next = terminalRanges.upper_bound(value);
-        if (next != terminalRanges.begin()) {
-            auto previous = next;
+        auto entry = intervals.find(value, IntervalLess{});
+        if (entry == intervals.end() || entry->status != KisCompletionStatus::Pending) return false;
+        entry->status = terminal;
+        if (entry != intervals.begin()) {
+            auto previous = entry;
             --previous;
-            if (value <= previous->second) return false;
-            if (previous->second + 1 == value) {
-                previous->second = value;
-                if (next != terminalRanges.end() && next->first == value + 1) {
-                    previous->second = next->second;
-                    terminalRanges.erase(next);
-                }
-                return true;
+            if (previous->status == terminal && previous->last + 1 == entry->first) {
+                previous->last = entry->last;
+                intervals.release(entry, released);
+                entry = previous;
             }
         }
-        if (next != terminalRanges.end() && next->first == value + 1) {
-            terminalRanges.emplace(value, next->second);
-            terminalRanges.erase(next);
-        } else {
-            terminalRanges.emplace(value, value);
+        auto next = entry;
+        ++next;
+        if (next != intervals.end() && next->status == terminal && entry->last + 1 == next->first) {
+            entry->last = next->last;
+            intervals.release(next, released);
+        }
+        if (entry->first <= terminalPrefix + 1 && entry->last >= terminalPrefix + 1) {
+            terminalPrefix = entry->last;
+            if (entry->status == KisCompletionStatus::Succeeded) intervals.release(entry, released);
+        }
+        next = intervals.lower_bound(terminalPrefix + 1, IntervalLess{});
+        while (next != intervals.end() && next->first == terminalPrefix + 1 &&
+               next->status != KisCompletionStatus::Pending) {
+            terminalPrefix = next->last;
+            auto completed = next++;
+            if (completed->status == KisCompletionStatus::Succeeded) intervals.release(completed, released);
         }
         return true;
-    }
-
-    bool complete(quint64 value, KisCompletionStatus terminal)
-    {
-        if (status(value) != KisCompletionStatus::Pending) return false;
-        bool preparedStatus = false;
-        try {
-            // Stage the exceptional status before publishing terminal coverage.
-            // Both container insertions have the strong exception guarantee;
-            // erase/merge/prefix advancement then require no storage. These
-            // source-owned maps are never implicitly shared with a snapshot.
-            if (terminal != KisCompletionStatus::Succeeded) {
-                preparedStatus = nonSuccess.emplace(value, terminal).second;
-                Q_ASSERT(preparedStatus);
-            }
-            if (markTerminal(value)) return true;
-        } catch (const std::bad_alloc &) {
-            // Keep Pending and its original waiter so the producer can retry.
-        }
-        if (preparedStatus) nonSuccess.erase(value);
-        if (nonSuccess.empty()) decltype(nonSuccess){}.swap(nonSuccess);
-        return false;
     }
 };
 
 class KisCompletionRegistry::Private
 {
 public:
+    explicit Private(QSharedPointer<KisBackingBudgetController> owner)
+        : budget(std::move(owner)), storage(KisMutationStorageAllocator<CompletionInterval>::retained(budget.data()))
+        , sources(std::less<quint64>{}, KisMutationStorageAllocator<std::pair<const quint64, CompletionSourceState>>(storage)) {}
     void releaseEmptyReadiness(quint64 source, quint64 value, const KisPageReadinessState *expected)
     {
         ReadinessRecordPointer released(nullptr, CompletionReadinessRecord::dispose);
@@ -176,16 +169,23 @@ public:
             found->second.readiness.erase(entry);
         } // Actual record/state/capture frees remain outside the registry gate.
     }
+    QSharedPointer<KisBackingBudgetController> budget;
+    KisMutationStorageAllocator<CompletionInterval> storage;
     mutable QMutex mutex;
     quint64 registryId = KisPageStoreDetail::allocateMonotonicId<quint64>(
         &s_nextRegistryId);
     quint64 nextSource = 1;
-    std::unordered_map<quint64, CompletionSourceState> sources;
+    std::map<quint64, CompletionSourceState, std::less<quint64>,
+        KisMutationStorageAllocator<std::pair<const quint64, CompletionSourceState>>> sources;
 };
 
-KisCompletionRegistry::KisCompletionRegistry()
-    : d(QSharedPointer<Private>::create())
+KisCompletionRegistry::KisCompletionRegistry(const QSharedPointer<KisBackingBudgetController> &processBudget)
 {
+    auto budget = QSharedPointer<KisBackingBudgetController>::create();
+    if (processBudget && !budget->configureSharedNonPayloadBudget(processBudget)) throw std::bad_alloc();
+    // The source owner is independent of any one Store. Its actual control
+    // block remains charged through late weak callbacks after body teardown.
+    d = std::allocate_shared<Private>(KisMutationStorageAllocator<Private>::retained(budget.data()), budget);
 }
 
 KisCompletionRegistry::~KisCompletionRegistry() = default;
@@ -208,7 +208,7 @@ quint64 KisCompletionRegistry::registerSource(KisCompletionDomain domain)
     }
     const quint64 source = d->nextSource;
     try {
-        const auto entry = d->sources.try_emplace(source);
+        const auto entry = d->sources.try_emplace(source, d->storage);
         entry.first->second.domain = domain;
     } catch (const std::bad_alloc &) {
         return 0;
@@ -229,7 +229,16 @@ KisCompletionTicket KisCompletionRegistry::allocatePending(quint64 source)
         sourceIt->second.nextValue == std::numeric_limits<quint64>::max()) {
         return {};
     }
-    const quint64 value = sourceIt->second.nextValue++;
+    const quint64 value = sourceIt->second.nextValue;
+    auto allocator = sourceIt->second.storage;
+    try {
+        auto *node = allocator.allocate(1);
+        auto *record = ::new (node) CompletionInterval(value, allocator);
+        sourceIt->second.intervals.insert(*record);
+    } catch (const std::bad_alloc &) {
+        return {};
+    }
+    ++sourceIt->second.nextValue;
     return KisCompletionTicket(sourceIt->second.domain, d->registryId, source, value);
 }
 
@@ -243,6 +252,8 @@ bool KisCompletionRegistry::complete(const KisCompletionTicket &ticket,
         return false;
     }
 
+    CompletionInterval *releasedIntervals = nullptr;
+    const auto freeIntervals = qScopeGuard([&] { disposeIntervals(releasedIntervals); });
     ReadinessRecordPointer released(nullptr, CompletionReadinessRecord::dispose);
     QMutexLocker locker(&d->mutex);
     auto sourceIt = d->sources.find(ticket.source());
@@ -251,7 +262,7 @@ bool KisCompletionRegistry::complete(const KisCompletionTicket &ticket,
         return false;
     }
 
-    if (!sourceIt->second.complete(ticket.value(), status)) return false;
+    if (!sourceIt->second.complete(ticket.value(), status, releasedIntervals)) return false;
     std::shared_ptr<KisPageReadinessSignal> readiness;
     const auto waiting = sourceIt->second.readiness.find(ticket.value());
     if (waiting != sourceIt->second.readiness.end()) {
@@ -260,6 +271,7 @@ bool KisCompletionRegistry::complete(const KisCompletionTicket &ticket,
         sourceIt->second.readiness.erase(waiting);
     }
     locker.unlock();
+    disposeIntervals(releasedIntervals);
     released.reset();
     if (readiness) readiness->notify();
     return true;
@@ -289,9 +301,9 @@ KisPageReadinessStatus KisCompletionRegistry::watchTerminal(const KisCompletionT
         prepared = KisPageReadinessSubscription(std::move(ready));
         if (!signal) {
             auto emptied = KisPageReadinessCallback::prepare(
-                [owner = QWeakPointer<Private>(d), sourceId = ticket.source(), value = ticket.value()]
+                [owner = std::weak_ptr<Private>(d), sourceId = ticket.source(), value = ticket.value()]
                 (const KisPageReadinessState *expected) {
-                    if (const auto state = owner.toStrongRef())
+                    if (const auto state = owner.lock())
                         state->releaseEmptyReadiness(sourceId, value, expected);
                 }, storage);
             signal = std::allocate_shared<KisPageReadinessSignal>(
@@ -362,14 +374,15 @@ KisCompletionSourceStatistics KisCompletionRegistry::sourceStatistics(quint64 so
     KisCompletionSourceStatistics result;
     result.knownSource = true;
     result.allocatedTickets = it->second.nextValue - 1;
-    result.storageRecords = quint64(it->second.terminalRanges.size()) + quint64(it->second.nonSuccess.size()) +
+    result.storageRecords = quint64(it->second.intervals.size()) +
                             quint64(it->second.terminalPrefix != 0) + quint64(it->second.readiness.size());
     result.readinessSignals = quint64(it->second.readiness.size());
     result.readinessCapacity = quint64(it->second.readiness.size());
     for (const auto &signal : it->second.readiness) result.readinessWaiters += signal.signal->subscriberCount();
     result.terminalTickets = it->second.terminalPrefix;
-    for (auto range = it->second.terminalRanges.cbegin(); range != it->second.terminalRanges.cend(); ++range) {
-        result.terminalTickets += range->second - range->first + 1;
+    for (const auto &range : it->second.intervals) {
+        if (range.status != KisCompletionStatus::Pending && range.last > it->second.terminalPrefix)
+            result.terminalTickets += range.last - qMax(range.first, it->second.terminalPrefix + 1) + 1;
     }
     result.pendingTickets = result.allocatedTickets - result.terminalTickets;
     return result;

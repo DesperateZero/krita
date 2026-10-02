@@ -408,25 +408,26 @@ KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &reque
         return KisReplicaOperation::failed(request.operation,
             QStringLiteral("%1 transfer completion allocation failed").arg(providerLabel));
     }
+    auto failCompletion = qScopeGuard([&] { completions->complete(completion, KisCompletionStatus::Failed); });
     const void *sourceData = source->acquireRead(request.source.allocationIdentity(), false);
     if (!sourceData) {
-        completions->complete(completion, KisCompletionStatus::Failed);
         return KisReplicaOperation::failed(request.operation,
             QStringLiteral("%1 transfer source is busy").arg(providerLabel));
     }
+    auto releaseSource = qScopeGuard([&] { source->releaseRead(); });
     void *targetData = target->acquireWrite(request.target.allocationIdentity());
     if (!targetData) {
-        source->releaseRead();
-        completions->complete(completion, KisCompletionStatus::Failed);
         return KisReplicaOperation::failed(request.operation,
             QStringLiteral("%1 transfer target is pinned").arg(providerLabel));
     }
     std::memcpy(targetData, sourceData, size_t(request.target.layout.byteSize));
     target->releaseWrite();
     source->releaseRead();
+    releaseSource.dismiss();
     if (!completions->complete(completion, KisCompletionStatus::Succeeded)) {
         return KisReplicaOperation::failed(request.operation,
             QStringLiteral("%1 transfer completion publication failed").arg(providerLabel));
     }
+    failCompletion.dismiss();
     return {KisPageRequestStatus::Ready, request.operation, request.target, completion, {}};
 }

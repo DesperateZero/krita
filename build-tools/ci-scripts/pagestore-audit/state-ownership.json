@@ -117,12 +117,11 @@
     },
     {
       "creation-paths": [
-        "KisTiles3PageReplicaProvider::prepareWrite",
-        "test-only KisCpuPageReplicaProvider::prepareWrite",
+        "KisTiles3PageReplicaProvider prepares allocation and retirement tickets before allocating payload or adopting an immutable/initial tile; test-only KisCpuPageReplicaProvider uses the same allocation-index lifecycle",
         "KisPageWriteCoordinator::prepareWritePlanLocked consumes KisCpuBackingHandoff for native/generic first writes with an already Ready independent CPU before"
       ],
       "current-writers": [
-        "provider-owned stable KisCpuResidentBinding; allocation index stores only a binding reference and stable slot key"
+        "provider-owned stable KisCpuResidentBinding; original allocation index retains its binding, physical key and private prepared retirement ticket"
       ],
       "fact": "physical allocation identity and payload lifetime",
       "id": "BR1-OWN-PHYSICAL-ALLOCATION",
@@ -135,8 +134,8 @@
       "status": "canonical",
       "target-authoritative-owner": "provider-owned KisCpuResidentBinding handle under its local gate",
       "terminal-paths": [
-        "provider retire",
-        "provider close",
+        "provider retire preserves its original Pending retirement ticket on reader/transition refusal; physical detach/free completes that prepared ticket without new storage admission",
+        "provider close revokes bindings and cancels unused private retirement tickets",
         "KisCpuBackingHandoff::commit retags once and converts to the existing writer reservation",
         "KisCpuBackingHandoff::reset cancels without retag; retained provider destruction is deferred outside owner gates"
       ]
@@ -218,14 +217,15 @@
     },
     {
       "creation-paths": [
-        "registerSource and allocatePending retain the original registry/source/domain/value identity",
+        "original registry Private and its shared control block, source map nodes and ticket intervals use an independent retained accounting child of the process budget; late weak storage keeps that original charge",
+        "registerSource and allocatePending prepare their actual charged nodes before issuing source/value identities; refusal issues no identity and performs no physical work",
         "watchTerminal cold-prepares the actual funded inline callback, subscriber node, signal/state control blocks and readiness record outside the registry gate; revalidation attaches prepared nodes to the winning original ticket",
         "each new subscriber/record uses its live capture accounting owner; an existing signal accepts a prepared node without allocating from its departed first payer"
       ],
       "current-writers": [
         "KisCompletionRegistry::Private"
       ],
-      "fact": "completion terminal coverage and cancellable cold notification storage",
+      "fact": "single prepared ticket/status interval authority and cancellable cold notification storage",
       "id": "BR1-OWN-COMPLETION",
       "lock-or-claim": "registry mutex owns ticket status and signal identity; registration/cleanup take registry then signal gate; cancellation drops the signal gate before requesting cleanup through a weak reference to the same Private",
       "read-only-observers": [
@@ -236,7 +236,7 @@
       "status": "canonical",
       "target-authoritative-owner": "KisCompletionRegistry::Private",
       "terminal-paths": [
-        "complete records terminal status, unlinks the original intrusive readiness record and frees it before notifying outside the registry gate",
+        "complete updates and coalesces only prepared original intervals, advances explicit terminal coverage without closing Pending gaps, and frees detached interval/readiness nodes before notifying outside the registry gate; no terminal storage admission",
         "last subscription reset rechecks exact signal identity and current emptiness before erasing its original entry; ticket status stays Pending",
         "last readiness record removal frees its actual node/state/capture outside the registry gate; weak subscriber control storage stays charged until final weak reset",
         "facade destruction releases its original Private; a cancellation can temporarily retain only that original state, while dormant subscriptions hold weak references"
