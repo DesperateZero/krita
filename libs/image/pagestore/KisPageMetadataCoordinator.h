@@ -7,12 +7,13 @@
 #ifndef KIS_PAGE_METADATA_COORDINATOR_H
 #define KIS_PAGE_METADATA_COORDINATOR_H
 
-#include <QScopedPointer>
+#include <QMutex>
 #include <QSharedPointer>
 #include <QString>
 #include <QVector>
 #include <memory>
 #include <array>
+#include <atomic>
 
 #include "KisMutationStorage_p.h"
 
@@ -478,7 +479,15 @@ private:
                                                    const KisPageTransition &transition,
                                                    KisPageMetadataReadCleanup *cleanup = nullptr);
     class Private;
-    QScopedPointer<Private> d;
+    // configure() publishes the complete immutable core once. Destruction
+    // still requires owner quiescence; acquire does not extend its lifetime.
+    std::atomic<Private *> m_core{nullptr};
+    mutable QMutex m_configurationMutex;
+    KisBackingBudgetController *m_budget = nullptr;
+    void *m_retirementDebtContext = nullptr;
+    PrepareRetirementDebt m_prepareRetirementDebt = nullptr;
+    CommitRetirementEffects m_commitRetirementDebt = nullptr;
+    FinalizeRetirementDebt m_cancelRetirementDebt = nullptr;
 };
 
 #endif // KIS_PAGE_METADATA_COORDINATOR_H

@@ -4755,6 +4755,16 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 4 * 1024 * 1024;
     auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    {
+        // A cold facade must allow the original shared-budget/limit setup
+        // before admitting its runtime core through configure().
+        KisBackingBudgetController coldBudget;
+        KisPageMetadataCoordinator cold;
+        cold.attachBackingBudget(coldBudget);
+        QVERIFY(coldBudget.configureSharedNonPayloadBudget(parent));
+        QVERIFY(coldBudget.configureLimits(limits, nullptr));
+        QVERIFY(cold.configure(shards));
+    }
     KisBackingBudgetController budget(limits);
     QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     auto storage = KisMutationStorageAllocator<char>::retained(&budget);
@@ -4785,9 +4795,11 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     KisPageMetadataCoordinator metadata;
     metadata.attachBackingBudget(budget);
     // Budget selection remains allocation-free; with one byte available the
-    // first actual authority/control allocation is refused before any shard.
+    // first actual Private allocation is refused before authority or shards.
     QCOMPARE(live(), filled);
     QVERIFY(metadata.publicationHeads().empty());
+    const auto version = pageVersion(0, 1);
+    KisPageStateSnapshot snapshot;
     for (int attempt = 0; attempt < 3; ++attempt) {
         QString error;
         QVERIFY(!metadata.configure(shards, &error));
@@ -4795,6 +4807,14 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
         QVERIFY(!metadata.isOperational());
         QCOMPARE(metadata.shardCount(), qsizetype(0));
         QCOMPARE(metadata.pageCount(), qsizetype(0));
+        QCOMPARE(metadata.pageRegistrationCount(), quint64(0));
+        QCOMPARE(metadata.shardFor(version.key), qsizetype(-1));
+        QVERIFY(metadata.pageKeys().isEmpty());
+        QVERIFY(metadata.shutdownReplicaHandles().isEmpty());
+        QVERIFY(!metadata.pageSnapshot(version.key, &snapshot));
+        QVERIFY(!metadata.cpuReadBinding(version));
+        QVERIFY(!metadata.cpuReadReplica(version).isValid());
+        QCOMPARE(metadata.metrics().acceptedTransitions, quint64(0));
         QCOMPARE(metadata.footprint().owningCapacityBytes, quint64(0));
         QCOMPARE(live(), filled);
         for (const auto &bucket : parent->usage().buckets)
@@ -4807,7 +4827,6 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     QCOMPARE(live(), baseline + requiredBytes);
     QCOMPARE(metadata.shardCount(), qsizetype(shards));
     QVERIFY(!metadata.configure(shards));
-    const auto version = pageVersion(0, 1);
     QVERIFY(metadata.registerPage(initialPageState(version, replica(version, 1, 1, 1))));
 }
 

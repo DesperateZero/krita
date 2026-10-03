@@ -2019,44 +2019,51 @@ bool cpuReadableReplica(const KisReplicaRecord &state, const KisPageVersion &ver
 class KisPageMetadataCoordinator::Private
 {
 public:
+    using Storage = KisMutationStorageAllocator<Private>;
+    Private(std::unique_ptr<KisBackingBudgetController> standalone, const Storage &allocator)
+        : standaloneBudget(std::move(standalone))
+        , storage(allocator)
+        , shards(allocator)
+    {
+    }
+
     ~Private()
     {
-        operational.store(false, std::memory_order_release);
         shards.clear();
         if (budgetAuthority) budgetAuthority->detach();
     }
 
-    MetadataShard *shardFor(const KisPageKey &key) const
+    static void destroy(Private *value) noexcept
     {
-        // configure() publishes an immutable shard directory once. Readers
-        // acquire that publication, never a process-wide configuration gate.
-        // Destruction still requires owner quiescence; this is not an RCU
-        // lifetime or permission to reconfigure the directory in place.
-        if (!operational.load(std::memory_order_acquire) || !key.isValid())
+        if (!value) return;
+        // Keep accounting through the actual free, including when the
+        // standalone controller is destroyed with the core.
+        auto allocator = value->storage;
+        std::allocator_traits<Storage>::destroy(allocator, value);
+        allocator.deallocate(value, 1);
+    }
+
+    static MetadataShard *shardFor(Private *core, const KisPageKey &key)
+    {
+        if (!core || !key.isValid())
             return nullptr;
-        return shards.at(kisStablePageKeyHash(key) % shards.size()).get();
+        return core->shards.at(kisStablePageKeyHash(key) % core->shards.size()).get();
     }
 
-    std::shared_ptr<MetadataShard> sharedShardFor(const KisPageKey &key) const
+    static std::shared_ptr<MetadataShard> sharedShardFor(Private *core, const KisPageKey &key)
     {
-        if (!operational.load(std::memory_order_acquire) || !key.isValid())
+        if (!core || !key.isValid())
             return {};
-        return shards.at(kisStablePageKeyHash(key) % shards.size());
+        return core->shards.at(kisStablePageKeyHash(key) % core->shards.size());
     }
 
-    mutable QMutex configurationMutex;
-    std::atomic<bool> operational{false};
-    KisBackingBudgetController standaloneBudget;
-    KisBackingBudgetController *backingBudget = &standaloneBudget;
+    std::unique_ptr<KisBackingBudgetController> standaloneBudget;
+    Storage storage;
     std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
     using Shards = std::vector<std::shared_ptr<MetadataShard>,
         KisMutationStorageAllocator<std::shared_ptr<MetadataShard>>>;
     Shards shards;
     QAtomicInteger<quint64> registeredPages{0};
-    void *retirementDebtContext = nullptr;
-    PrepareRetirementDebt prepareRetirementDebt = nullptr;
-    CommitRetirementEffects commitRetirementDebt = nullptr;
-    FinalizeRetirementDebt cancelRetirementDebt = nullptr;
     // Shared identity prevents a capability surviving destruction from being
     // accepted by another coordinator constructed at the same address.
     std::shared_ptr<const quint8> publicationOwner;
@@ -2300,7 +2307,8 @@ try {
     const bool detachment = kind == PreparationKind::Detachment;
     const bool recoverable = kind == PreparationKind::RecoverableWrite;
     PreparedPublication result;
-    if (!isOperational() || count < 0 || (count && !transitions && !versions && !changes)
+    auto *d = m_core.load(std::memory_order_acquire);
+    if (!d || count < 0 || (count && !transitions && !versions && !changes)
         || (!restoration && !transaction.isValid())
         || (!mutation && (!minimumEpoch.isValid() || minimumEpoch.value <= transaction.baseEpoch.value))) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
@@ -2354,7 +2362,7 @@ try {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata publication transition is invalid or repeated"));
             return result;
         }
-        std::shared_ptr<MetadataShard> shardOwner = d->sharedShardFor(transition.version.key);
+        std::shared_ptr<MetadataShard> shardOwner = Private::sharedShardFor(d, transition.version.key);
         MetadataShard *shard = shardOwner.get();
         if (!shard)
             return result;
@@ -2680,7 +2688,8 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         if (canDeferCleanup && data)
             deferredCleanup->data = std::move(data);
     });
-    if ((deferredCleanup && !canDeferCleanup) || !data || !isOperational()
+    auto *d = m_core.load(std::memory_order_acquire);
+    if ((deferredCleanup && !canDeferCleanup) || !data || !d
         || data->owner != d->publicationOwner || data->kind != kind
         || data->minimumEpoch.isValid() == mutation
         || !(data->transaction == transaction)
@@ -2815,20 +2824,19 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
     return true;
 }
 
-KisPageMetadataCoordinator::KisPageMetadataCoordinator()
-    : d(new Private)
-{
-}
+KisPageMetadataCoordinator::KisPageMetadataCoordinator() = default;
 
-KisPageMetadataCoordinator::~KisPageMetadataCoordinator() = default;
+KisPageMetadataCoordinator::~KisPageMetadataCoordinator()
+{
+    Private::destroy(m_core.exchange(nullptr, std::memory_order_acq_rel));
+}
 
 void KisPageMetadataCoordinator::attachBackingBudget(
     KisBackingBudgetController &budget)
 {
-    QMutexLocker locker(&d->configurationMutex);
-    Q_ASSERT(!d->operational.load(std::memory_order_relaxed));
-    Q_ASSERT(d->shards.empty());
-    d->backingBudget = &budget;
+    QMutexLocker locker(&m_configurationMutex);
+    Q_ASSERT(!m_core.load(std::memory_order_relaxed));
+    m_budget = &budget;
 }
 
 void KisPageMetadataCoordinator::attachRetirementDebtOwner(
@@ -2837,14 +2845,14 @@ void KisPageMetadataCoordinator::attachRetirementDebtOwner(
     CommitRetirementEffects commit,
     FinalizeRetirementDebt cancel)
 {
-    QMutexLocker locker(&d->configurationMutex);
-    Q_ASSERT(!d->operational.load(std::memory_order_relaxed));
+    QMutexLocker locker(&m_configurationMutex);
+    Q_ASSERT(!m_core.load(std::memory_order_relaxed));
     Q_ASSERT(context && prepare && commit && cancel);
-    Q_ASSERT(!d->retirementDebtContext);
-    d->retirementDebtContext = context;
-    d->prepareRetirementDebt = prepare;
-    d->commitRetirementDebt = commit;
-    d->cancelRetirementDebt = cancel;
+    Q_ASSERT(!m_retirementDebtContext);
+    m_retirementDebtContext = context;
+    m_prepareRetirementDebt = prepare;
+    m_commitRetirementDebt = commit;
+    m_cancelRetirementDebt = cancel;
 }
 
 QSharedPointer<KisCpuReadBindingLink>
@@ -2854,7 +2862,7 @@ KisPageMetadataCoordinator::installCpuReadBinding(const KisReplicaHandle &replic
     if (!provider || !replica.isValid()
         || (replica.domain != KisPageAccessDomain::CpuRam && replica.domain != KisPageAccessDomain::UmaShared))
         return {};
-    auto *shard = d->shardFor(replica.version.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), replica.version.key);
     if (!shard)
         return {};
     QMutexLocker locker(&shard->mutex);
@@ -2888,7 +2896,7 @@ KisPageMetadataCoordinator::installCpuReadBinding(const KisReplicaHandle &replic
 void KisPageMetadataCoordinator::removeCpuReadBinding(const KisReplicaHandle &replica,
                                                       const KisCpuReadBindingLink *expected)
 {
-    auto *shard = d->shardFor(replica.version.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), replica.version.key);
     if (!shard)
         return;
     QMutexLocker locker(&shard->mutex);
@@ -2900,7 +2908,7 @@ void KisPageMetadataCoordinator::removeCpuReadBinding(const KisReplicaHandle &re
 
 QSharedPointer<KisCpuReadBindingLink> KisPageMetadataCoordinator::cpuReadBinding(const KisPageVersion &version) const
 {
-    auto *shard = d->shardFor(version.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), version.key);
     if (!shard)
         return {};
     QMutexLocker locker(&shard->mutex);
@@ -2909,7 +2917,7 @@ QSharedPointer<KisCpuReadBindingLink> KisPageMetadataCoordinator::cpuReadBinding
 
 KisReplicaHandle KisPageMetadataCoordinator::cpuReadReplica(const KisPageVersion &version) const
 {
-    auto *shard = d->shardFor(version.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), version.key);
     if (!shard)
         return {};
     QMutexLocker locker(&shard->mutex);
@@ -2940,49 +2948,56 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         return false;
     }
 
-    QMutexLocker locker(&d->configurationMutex);
-    if (d->operational.load(std::memory_order_relaxed)) {
+    QMutexLocker locker(&m_configurationMutex);
+    if (m_core.load(std::memory_order_relaxed)) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata coordinator is already configured"));
         return false;
     }
     try {
-        const auto storage = KisMutationStorageAllocator<char>::retained(d->backingBudget);
-        auto authority = std::allocate_shared<MetadataBudgetAuthority>(storage, d->backingBudget);
-        Private::Shards shards(storage);
-        shards.reserve(size_t(shardCount));
-        for (qsizetype i = 0; i < shardCount; ++i) {
-            shards.push_back(std::allocate_shared<MetadataShard>(
-                storage, authority, storage));
+        auto *budget = m_budget;
+        std::unique_ptr<KisBackingBudgetController> standalone;
+        if (!budget) {
+            standalone = std::make_unique<KisBackingBudgetController>();
+            budget = standalone.get();
         }
-        auto owner = std::allocate_shared<const quint8>(storage, 0);
-        // Publish the original immutable directory and capability identity
-        // only after every actual allocation has succeeded. Refusal destroys
-        // this local candidate; a retry has no residual directory capacity.
-        d->shards = std::move(shards);
-        d->publicationOwner = std::move(owner);
-        d->budgetAuthority = std::move(authority);
+        auto storage = Private::Storage::retained(budget);
+        auto *raw = storage.allocate(1);
+        try { std::allocator_traits<Private::Storage>::construct(storage, raw, std::move(standalone), storage); }
+        catch (...) { storage.deallocate(raw, 1); throw; }
+        std::unique_ptr<Private, void (*)(Private *)> candidate(raw, &Private::destroy);
+        candidate->budgetAuthority = std::allocate_shared<MetadataBudgetAuthority>(storage, budget);
+        candidate->shards.reserve(size_t(shardCount));
+        for (qsizetype i = 0; i < shardCount; ++i) {
+            candidate->shards.push_back(std::allocate_shared<MetadataShard>(
+                storage, candidate->budgetAuthority, storage));
+        }
+        candidate->publicationOwner = std::allocate_shared<const quint8>(storage, 0);
+        // Publish the complete original core only after every allocation has
+        // succeeded. Refusal destroys the same candidate, including its body.
+        m_core.store(candidate.release(), std::memory_order_release);
     } catch (const std::bad_alloc &) {
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata shard directory storage budget was refused"));
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata configuration storage budget was refused"));
         return false;
     }
-    d->operational.store(true, std::memory_order_release);
     KisPageStoreDetail::setError(error, {});
     return true;
 }
 
 bool KisPageMetadataCoordinator::isOperational() const
 {
-    return d->operational.load(std::memory_order_acquire);
+    return m_core.load(std::memory_order_acquire) != nullptr;
 }
 
 qsizetype KisPageMetadataCoordinator::shardCount() const
 {
-    return isOperational() ? qsizetype(d->shards.size()) : 0;
+    const auto *d = m_core.load(std::memory_order_acquire);
+    return d ? qsizetype(d->shards.size()) : 0;
 }
 
 qsizetype KisPageMetadataCoordinator::shardFor(const KisPageKey &key) const
 {
-    if (!isOperational() || !key.isValid())
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d || !key.isValid())
         return -1;
     return qsizetype(kisStablePageKeyHash(key) % d->shards.size());
 }
@@ -2996,7 +3011,8 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
         return false;
     }
 
-    MetadataShard *shard = d->shardFor(initial.key);
+    auto *d = m_core.load(std::memory_order_acquire);
+    MetadataShard *shard = Private::shardFor(d, initial.key);
     if (!shard) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata coordinator is not configured"));
         return false;
@@ -3045,12 +3061,13 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
 
 quint64 KisPageMetadataCoordinator::pageRegistrationCount() const
 {
-    return d->registeredPages.loadAcquire();
+    const auto *d = m_core.load(std::memory_order_acquire);
+    return d ? d->registeredPages.loadAcquire() : 0;
 }
 
 bool KisPageMetadataCoordinator::pageSnapshot(const KisPageKey &key, KisPageStateSnapshot *snapshot) const
 {
-    MetadataShard *shard = d->shardFor(key);
+    MetadataShard *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard || !snapshot)
         return false;
     QMutexLocker locker(&shard->mutex);
@@ -3065,7 +3082,7 @@ bool KisPageMetadataCoordinator::queryMutationBase(const KisPageVersion &base,
                                                    const KisPageVersion &sealed,
                                                    bool discoverBefore, MutationBaseInfo *info) const
 {
-    auto *shard = d->shardFor(base.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), base.key);
     if (!shard || !info || (sealed.isValid() && !(sealed.key == base.key)))
         return false;
     QMutexLocker lock(&shard->mutex);
@@ -3111,7 +3128,7 @@ bool KisPageMetadataCoordinator::queryMutationBase(const KisPageVersion &base,
 bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity, VersionInfo *snapshot,
                                                  ReplicaCandidates *replicas) const
 {
-    auto *shard = d->shardFor(identity.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), identity.key);
     if (!shard || !snapshot) return false;
     for (;;) {
         QMutexLocker lock(&shard->mutex);
@@ -3146,7 +3163,7 @@ bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity,
 
 bool KisPageMetadataCoordinator::canAddTransientVersion(const KisPageVersion &target, quint32 limit) const
 {
-    auto *shard = d->shardFor(target.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), target.key);
     if (!shard)
         return limit > 0;
     QMutexLocker lock(&shard->mutex);
@@ -3172,7 +3189,7 @@ bool KisPageMetadataCoordinator::queryPublication(const KisPageKey &key,
                                                   const KisPageVersion &target,
                                                   PublicationInfo *info) const
 {
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard || !info || (target.isValid() && !(target.key == key)))
         return false;
     QMutexLocker lock(&shard->mutex);
@@ -3195,7 +3212,7 @@ KisPageMetadataCoordinator::HistorySlice
 KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVersion &after, qsizetype budget) const
 {
     HistorySlice result;
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard || budget <= 0 || (after.isValid() && !(after.key == key)))
         return result;
     QMutexLocker lock(&shard->mutex);
@@ -3247,7 +3264,7 @@ bool KisPageMetadataCoordinator::discardHistory(
     quint32 reachableMask, quint32 *removedMask)
 {
     *removedMask = 0;
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard || count < 0 || count > HistorySlice::Limit) return false;
     for (;;) {
         KisPageWorkingArray<KisPageTransitionEffect> prepared(shard->budgetAuthority->storage<char>());
@@ -3255,7 +3272,7 @@ bool KisPageMetadataCoordinator::discardHistory(
         quint64 debtCookie = 0;
         bool debtPrepared = false;
         const auto cancelDebt = qScopeGuard([&] {
-            if (debtPrepared) d->cancelRetirementDebt(d->retirementDebtContext, debtCookie);
+            if (debtPrepared) m_cancelRetirementDebt(m_retirementDebtContext, debtCookie);
         });
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
@@ -3303,9 +3320,9 @@ bool KisPageMetadataCoordinator::discardHistory(
         }
         const quint64 revision = page->revision;
         if (!prepared.empty()) {
-            if (!d->prepareRetirementDebt) { ++shard->rejectedTransitions; return false; }
+            if (!m_prepareRetirementDebt) { ++shard->rejectedTransitions; return false; }
             lock.unlock();
-            const bool accepted = d->prepareRetirementDebt(d->retirementDebtContext,
+            const bool accepted = m_prepareRetirementDebt(m_retirementDebtContext,
                 prepared.data(), qsizetype(prepared.size()), &debtCookie, nullptr);
             debtPrepared = accepted;
             lock.relock();
@@ -3335,7 +3352,7 @@ bool KisPageMetadataCoordinator::discardHistory(
         released = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (debtPrepared) {
-            d->commitRetirementDebt(d->retirementDebtContext, debtCookie,
+            m_commitRetirementDebt(m_retirementDebtContext, debtCookie,
                                     prepared.data(), qsizetype(prepared.size()));
             debtPrepared = false;
         }
@@ -3345,7 +3362,8 @@ bool KisPageMetadataCoordinator::discardHistory(
 
 KisPageMetadataCoordinator::PublicationHeads KisPageMetadataCoordinator::publicationHeads() const
 {
-    if (!d->operational.load(std::memory_order_acquire))
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d)
         return {};
     PublicationHeads result(d->budgetAuthority->storage<KisPageVersion>());
     for (const auto &shard : d->shards) {
@@ -3465,7 +3483,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
         result.rejectionReason = QStringLiteral("read protection transition identity is invalid");
         return result;
     }
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
         return result;
@@ -3517,7 +3535,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtect
         result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
         return result;
     }
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
         return result;
@@ -3620,7 +3638,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyProjectedSequen
     const KisPageKey &key, const QVector<KisPageTransition> &transitions)
 try {
     KisPageMetadataTransitionResult result;
-    auto *shard = d->shardFor(key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
         return result;
@@ -3708,20 +3726,20 @@ try {
         quint64 retirementDebtCookie = 0;
         bool retirementDebtPrepared = false;
         const auto cancelRetirementDebt = qScopeGuard([&] {
-            if (retirementDebtPrepared && d->cancelRetirementDebt) {
-                d->cancelRetirementDebt(d->retirementDebtContext,
+            if (retirementDebtPrepared && m_cancelRetirementDebt) {
+                m_cancelRetirementDebt(m_retirementDebtContext,
                                         retirementDebtCookie);
             }
         });
         if (!effects.empty()) {
-            if (!d->prepareRetirementDebt) {
+            if (!m_prepareRetirementDebt) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = QStringLiteral("retirement effect receiver is not configured");
                 return result;
             }
             QString debtError;
             lock.unlock();
-            if (!d->prepareRetirementDebt(d->retirementDebtContext,
+            if (!m_prepareRetirementDebt(m_retirementDebtContext,
                                           effects.data(), qsizetype(effects.size()),
                                           &retirementDebtCookie,
                                           &debtError)) {
@@ -3791,7 +3809,7 @@ try {
         auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (retirementDebtPrepared) {
-            d->commitRetirementDebt(d->retirementDebtContext, retirementDebtCookie,
+            m_commitRetirementDebt(m_retirementDebtContext, retirementDebtCookie,
                                     effects.data(), qsizetype(effects.size()));
             retirementDebtPrepared = false;
         }
@@ -3817,8 +3835,9 @@ QVector<KisPageKey> KisPageMetadataCoordinator::pageKeys() const
 void KisPageMetadataCoordinator::visitPageKeys(
     void *context, void (*visit)(void *, const KisPageKey &)) const
 {
-    QMutexLocker configurationLock(&d->configurationMutex);
-    if (!d->operational) return;
+    QMutexLocker configurationLock(&m_configurationMutex);
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d) return;
     for (const auto &shard : d->shards) {
         QMutexLocker shardLock(&shard->mutex);
         for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
@@ -3830,8 +3849,9 @@ QVector<KisReplicaHandle> KisPageMetadataCoordinator::shutdownReplicaHandles() c
 {
     QVector<MetadataShard *> shards;
     {
-        QMutexLocker lock(&d->configurationMutex);
-        if (!d->operational) return {};
+        QMutexLocker lock(&m_configurationMutex);
+        const auto *d = m_core.load(std::memory_order_acquire);
+        if (!d) return {};
         shards.reserve(qsizetype(d->shards.size()));
         for (const auto &shard : d->shards) shards.append(shard.get());
     }
@@ -3888,7 +3908,7 @@ bool KisPageMetadataCoordinator::queryLastUsePending(
     const KisReplicaHandle &replica, const KisCompletionTicket &completion, bool *pending) const
 {
     if (!replica.isValid() || !completion.isValid() || !pending) return false;
-    auto *shard = d->shardFor(replica.version.key);
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), replica.version.key);
     if (!shard) return false;
     QMutexLocker lock(&shard->mutex);
     *pending = false;
@@ -3922,7 +3942,9 @@ bool KisPageMetadataCoordinator::queryLastUsePending(
 qsizetype KisPageMetadataCoordinator::pageCount() const
 {
     qsizetype count = 0;
-    QMutexLocker configurationLocker(&d->configurationMutex);
+    QMutexLocker configurationLocker(&m_configurationMutex);
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d) return 0;
     for (const std::shared_ptr<MetadataShard> &shard : d->shards) {
         QMutexLocker shardLocker(&shard->mutex);
         count += shard->pages.size();
@@ -3933,7 +3955,8 @@ qsizetype KisPageMetadataCoordinator::pageCount() const
 KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
 {
     KisPageMetadataMetrics metrics;
-    if (d->operational.load(std::memory_order_acquire))
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (d)
         for (const auto &shard : d->shards) {
             QMutexLocker lock(&shard->mutex);
             metrics.acceptedTransitions += shard->acceptedTransitions;
@@ -3987,7 +4010,9 @@ KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
 KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
 {
     KisPageMetadataFootprint result;
-    QMutexLocker configurationLocker(&d->configurationMutex);
+    QMutexLocker configurationLocker(&m_configurationMutex);
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d) return result;
     for (const std::shared_ptr<MetadataShard> &shard : d->shards) {
         QMutexLocker shardLocker(&shard->mutex);
         result.versionArena += shard->arenas.versions.statistics();
