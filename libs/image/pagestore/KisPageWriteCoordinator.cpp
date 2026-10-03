@@ -27,6 +27,8 @@
 
 #ifdef Q_OS_DARWIN
 #include <malloc/malloc.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -1646,9 +1648,16 @@ size_t kisFreePageStorage(void *data, size_t alignment) noexcept
             ::operator delete(mapping.base);
             return capacity;
         }
-        const int result = munmap(mapping.base, mapping.bytes);
-        Q_ASSERT(result == 0);
-        return result == 0 ? capacity : 0;
+        if (munmap(mapping.base, mapping.bytes) != 0) {
+            // The void deleters cannot return this address to their owner.
+            // Complete the same physical release through the native VM API
+            // before dropping its fee. If both OS releases fail, returning
+            // would silently orphan a live mapping and its retained charge.
+            const auto result = mach_vm_deallocate(mach_task_self(),
+                reinterpret_cast<mach_vm_address_t>(mapping.base), mapping.bytes);
+            if (result != KERN_SUCCESS) std::terminate();
+        }
+        return capacity;
     }
     ::operator delete(data);
 #else

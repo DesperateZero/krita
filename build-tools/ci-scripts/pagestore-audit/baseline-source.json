@@ -2934,13 +2934,15 @@
         "cstdint",
         "cstring",
         "cxxabi.h",
+        "mach/mach.h",
+        "mach/mach_vm.h",
         "malloc/malloc.h",
         "mutex",
         "sys/mman.h",
         "unistd.h",
         "utility"
       ],
-      "lines": 2994,
+      "lines": 3003,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStoreDetail",
@@ -2957,7 +2959,7 @@
         "ProcessStorageState",
         "Resource"
       ],
-      "sha256": "18fd6c25457dcdc9e2ab6e06653c72e0802793d71fe7a1652aa6a79e37f9e89a",
+      "sha256": "33ec16fb3e5aefaeaa02b7fd1c90afa1d18a0bac3d9e1286d65484927d8c7fa4",
       "synchronization_declarations": 14
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -6395,6 +6397,7 @@
     "libs/image/tests/pagestore/KisPageStoreCpuSurfaceOps.h",
     "libs/image/tests/pagestore/KisPageStoreRandomAccessor.cpp",
     "libs/image/tests/pagestore/KisPageStoreRandomAccessor.h",
+    "libs/image/tests/pagestore/KisPageStoreStoragePressure.h",
     "libs/image/tests/scheduler_utils.h",
     "libs/image/tiles3/KisTilePageStoreBridge.h",
     "libs/image/tiles3/KisTiledExtentManager.cpp",
@@ -6463,8 +6466,6 @@
     "libs/vulkanbackend/tests/CMakeLists.txt",
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
-  "untracked_sources": [
-    "libs/image/tests/pagestore/KisPageStoreStoragePressure.h"
-  ],
-  "working_tree_head": "7804582f93bb1eb841b7520728169f0e228b046c"
+  "untracked_sources": [],
+  "working_tree_head": "6ddccc30979ab859060ed5a19b936d5322aaa1cb"
 }
