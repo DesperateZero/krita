@@ -9,10 +9,10 @@
 
 #include "KisPageStoreTypes.h"
 #include "KisMutationStorage_p.h"
+#include "KisPageWaitCondition_p.h"
 
 #include <QAtomicInteger>
 #include <QMutex>
-#include <QWaitCondition>
 
 #include <cstddef>
 #include <list>
@@ -124,7 +124,7 @@ private:
 
     // Guarded by the PageStore owner mutex, not m_cacheMutex.
     std::set<KisPageKey, PreparationLess, KisMutationStorageAllocator<KisPageKey>> m_preparations;
-    QWaitCondition m_preparationChanged;
+    KisPageWaitCondition m_preparationChanged;
     qsizetype m_peakPreparations = 0;
     quint64 m_preparationWaits = 0;
     quint64 m_materializationRequests = 0;

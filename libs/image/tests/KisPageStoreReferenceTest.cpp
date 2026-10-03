@@ -7596,7 +7596,7 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
 void KisPageStoreReferenceTest::writeAdmissionReleasesSubsetClaims()
 {
     QMutex mutex;
-    QWaitCondition condition;
+    KisPageWaitCondition condition;
     KisPageWriteAdmission admission(mutex, condition);
     KisMutationWriteSet writes;
     KisPageWriteIntent intent;
@@ -7699,7 +7699,7 @@ void KisPageStoreReferenceTest::mutationWriteSetBudgetFailureIsAtomic()
 void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
 {
     QMutex mutex;
-    QWaitCondition condition;
+    KisPageWaitCondition condition;
     KisPageMetadataCoordinator metadata;
     KisImageEpochReferenceModel epochs;
     KisPageOwnerLedger owner;
@@ -7916,7 +7916,7 @@ void KisPageStoreReferenceTest::writeAdmissionBudgetFailureIsAtomic()
     QFETCH(int, count);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 1;
     KisBackingBudgetController budget(limits);
-    QMutex mutex; QWaitCondition condition;
+    QMutex mutex; KisPageWaitCondition condition;
     KisPageWriteAdmission admission(mutex, condition, &budget);
     KisMutationWriteSet writes;
     for (int i = 0; i < count; ++i) {
@@ -7945,7 +7945,7 @@ void KisPageStoreReferenceTest::writeAdmissionBudgetFailureIsAtomic()
 
 void KisPageStoreReferenceTest::writeAdmissionTokenExhaustion()
 {
-    QMutex mutex; QWaitCondition condition;
+    QMutex mutex; KisPageWaitCondition condition;
     KisPageWriteAdmission admission(mutex, condition);
     KisMutationWriteSet writes;
     KisPageWriteIntent intent; intent.key = pageKey(0); writes.getOrCreate(intent);
@@ -7997,7 +7997,7 @@ void KisPageStoreReferenceTest::mutationActivityAdmissionPreservesExisting()
 void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
 {
     QMutex mutex;
-    QWaitCondition condition;
+    KisPageWaitCondition condition;
     KisPageMetadataCoordinator metadata;
     KisImageEpochReferenceModel epochs;
     KisPageOwnerLedger owner;

@@ -5,7 +5,7 @@
 #define KIS_DEFERRED_METADATA_CLEANUP_P_H
 #include <QAtomicInteger>
 #include <QMutex>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 struct DeferredMetadataCleanupStatistics {
     QAtomicInteger<quint64> deferredCandidates{0};
@@ -22,7 +22,7 @@ struct DeferredMetadataCleanupStatistics {
     QAtomicInteger<qsizetype> pendingUnits{0};
     QAtomicInteger<qsizetype> peakPendingUnits{0};
     QMutex idleMutex;
-    QWaitCondition idle;
+    KisPageWaitCondition idle;
 };
 
 template<typename T>

@@ -13,7 +13,7 @@
 
 #include <QAtomicInt>
 #include <QMutex>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <array>
 #include <map>
@@ -141,7 +141,7 @@ private:
     bool m_automaticWakeupsStopped = false;
     int m_retryDelayMs = 1;
     quint64 m_retryWakeups = 0;
-    QWaitCondition m_idle;
+    KisPageWaitCondition m_idle;
 
     quint64 m_pagesVisited = 0;
     quint64 m_foregroundPagesVisited = 0;

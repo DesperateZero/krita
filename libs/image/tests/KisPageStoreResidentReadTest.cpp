@@ -6,6 +6,7 @@
 #include <QTest>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QThread>
 #include <new>
 #include <optional>
 #include <array>
@@ -158,12 +159,18 @@ class ReadBindingProbeProvider final : public GenericOnlyProvider
 {
 public:
     using GenericOnlyProvider::GenericOnlyProvider;
+    // Fault injection belongs to this foreground read. Retirement may query
+    // the same provider after the read returns and must not enter a callback
+    // capturing the test's stack or its unsynchronized observation counters.
+    const Qt::HANDLE probeThread = QThread::currentThreadId();
     mutable int bindingCalls = 0;
     std::function<std::shared_ptr<KisCpuResidentBinding>(const KisReplicaHandle &,
         KisCpuResidentReadStatus *)> bindingProbe;
     std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
         const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const override
     {
+        if (QThread::currentThreadId() != probeThread)
+            return p->cpuResidentBinding(replica, status);
         ++bindingCalls;
         return bindingProbe ? bindingProbe(replica, status) : p->cpuResidentBinding(replica, status);
     }

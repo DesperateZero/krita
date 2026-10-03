@@ -10,7 +10,7 @@
 
 #include <QMutexLocker>
 #include <QScopeGuard>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <algorithm>
 #include <optional>
@@ -93,7 +93,7 @@ void KisPageReadCleanup::finishUnlocked(QMutexLocker<QMutex> &ownerLock)
 struct KisPageReadCoordinator::LastUseWakeContext
 {
     QMutex mutex;
-    QWaitCondition idle;
+    KisPageWaitCondition idle;
     KisPageReadCoordinator *coordinator = nullptr;
     KisPageReclamationWake wake;
     KisPageReclamationJobPointer task;

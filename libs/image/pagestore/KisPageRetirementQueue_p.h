@@ -18,7 +18,7 @@
 #include <QMutex>
 #include <QSharedPointer>
 #include <QVector>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <memory>
 
@@ -138,7 +138,7 @@ private:
     quint64 m_maximumReplicasPerRetryWake = 0;
     std::shared_ptr<KisPageRetirementWakeContext> m_wakeContext;
     QAtomicInt m_pendingNotifications{0};
-    QWaitCondition m_idle;
+    KisPageWaitCondition m_idle;
     bool m_jobScheduled = false;
     KisPageReclamationJobPointer m_task;
     bool m_closing = false;

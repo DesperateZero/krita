@@ -2039,7 +2039,7 @@ void KisPageStoreWriteReservation::operator delete(void *data) noexcept
     value.release(value.owner);
 }
 
-KisPageWriteAdmission::KisPageWriteAdmission(QMutex &ownerMutex, QWaitCondition &ownerCondition,
+KisPageWriteAdmission::KisPageWriteAdmission(QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
                                                KisBackingBudgetController *budget, const bool *operational)
     : m_ownerMutex(&ownerMutex)
     , m_ownerCondition(&ownerCondition)

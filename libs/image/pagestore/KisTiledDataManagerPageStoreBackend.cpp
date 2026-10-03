@@ -19,7 +19,6 @@
 #include <QMutexLocker>
 #include <QReadWriteLock>
 #include <QSet>
-#include <QWaitCondition>
 #include <QThread>
 #include <QScopeGuard>
 

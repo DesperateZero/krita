@@ -19,6 +19,7 @@
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPageWaitCondition_p.h"
 
 #include <QAtomicInt>
 #include <QElapsedTimer>
@@ -28,7 +29,6 @@
 #include <QScopeGuard>
 #include <QSet>
 #include <QThread>
-#include <QWaitCondition>
 
 #include <algorithm>
 #include <atomic>
@@ -627,7 +627,7 @@ public:
 
     Storage storage;
     mutable QMutex mutex;
-    QWaitCondition writeAdmissionChanged;
+    KisPageWaitCondition writeAdmissionChanged;
     std::shared_ptr<DeferredMetadataCleanupStatistics> metadataCleanupStatistics;
     void releaseGenericWrite(KisPageTransactionId id, const KisPageKey &key)
     {

@@ -18,7 +18,7 @@
 #include <QSharedPointer>
 #include <QThread>
 #include <QVector>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <boost/intrusive_ptr.hpp>
 
@@ -513,7 +513,7 @@ public:
         friend class KisPageWriteAdmission;
     };
 
-    KisPageWriteAdmission(QMutex &ownerMutex, QWaitCondition &ownerCondition,
+    KisPageWriteAdmission(QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
                           KisBackingBudgetController *budget = nullptr,
                           const bool *operational = nullptr);
     qsizetype activeNativeClaimCountLocked() const;
@@ -548,7 +548,7 @@ private:
     void release(ClaimSet &, bool lockOwner) noexcept;
 
     QMutex *m_ownerMutex = nullptr;
-    QWaitCondition *m_ownerCondition = nullptr;
+    KisPageWaitCondition *m_ownerCondition = nullptr;
     KisMutationAdmissionTable<KisPageKey, ActiveClaim> m_claims;
     const bool *m_operational = nullptr;
     quint64 m_nextClaimToken = 1;

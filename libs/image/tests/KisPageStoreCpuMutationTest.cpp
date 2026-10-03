@@ -46,7 +46,7 @@ class TestProvider final : public KisPageReplicaProvider
 public:
     std::shared_ptr<KisTiles3PageReplicaProvider> p = std::make_shared<KisTiles3PageReplicaProvider>();
     mutable int validationsUntilFailure = -1;
-    bool rejectWrite = false;
+    std::atomic<bool> rejectWrite{false};
     bool returnExistingWriteReplica = false;
     bool returnExistingRequestReplica = false;
     std::atomic<bool> rejectRetire{false};
@@ -80,7 +80,7 @@ public:
     mutable std::atomic<int> domainJournalCalls{0};
     std::function<void()> afterBackingFootprint;
     bool forwardDomainAdmission = true;
-    bool rejectAdopt = false;
+    std::atomic<bool> rejectAdopt{false};
     std::function<void()> beforeValidate;
     std::function<void()> beforeDomainAdmission;
     std::atomic<int> domainAdmissionCalls{0};

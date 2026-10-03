@@ -12,7 +12,7 @@
 #include <QMutexLocker>
 #include <QPair>
 #include <QScopeGuard>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <boost/intrusive/set.hpp>
 
@@ -530,7 +530,7 @@ public:
     KisBackingBudgetController *backingBudget = nullptr;
     BackingIndex backings;
     PhysicalBackingIndex physicalBackings;
-    QWaitCondition physicalClaimsChanged;
+    KisPageWaitCondition physicalClaimsChanged;
     PreparedBackingIndex preparedBackingChanges;
     ChargedVector<PreparedBackingChangeSlot> preparedChanges;
     ChargedVector<quint32> freePreparedChanges;

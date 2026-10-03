@@ -17,7 +17,7 @@ struct KisPageHistoryWakeContext
     KisPageHistoryCollector *collector = nullptr;
     QAtomicInt *references = nullptr;
     qsizetype activities = 0;
-    QWaitCondition idle;
+    KisPageWaitCondition idle;
 };
 
 KisPageHistoryCollector::KisPageHistoryCollector(

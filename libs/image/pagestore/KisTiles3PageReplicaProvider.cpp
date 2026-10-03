@@ -14,7 +14,7 @@
 
 #include <QMutexLocker>
 #include <QScopeGuard>
-#include <QWaitCondition>
+#include "KisPageWaitCondition_p.h"
 
 #include <atomic>
 #include <boost/intrusive/list.hpp>
@@ -619,7 +619,7 @@ public:
 
         KisBackingBudgetController m_budget;
         mutable QMutex m_mutex;
-        mutable QWaitCondition m_transitionChanged;
+        mutable KisPageWaitCondition m_transitionChanged;
         KisReplicaProviderId m_provider;
         KisReplicaProviderEpoch m_providerEpoch;
         quint64 m_nextTransition = 0;
