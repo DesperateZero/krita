@@ -1560,7 +1560,7 @@
         "utility",
         "vector"
       ],
-      "lines": 674,
+      "lines": 676,
       "member_fields": [
         "m_block",
         "m_blockCount",
@@ -1592,7 +1592,7 @@
         "Slot",
         "State"
       ],
-      "sha256": "acd1febeff5877a2ad004cb84a760a0920185a3fb3f8495073532fd9554bd7f6",
+      "sha256": "11d5448af69b8caa2e578c253c4b096fc37f1b07a1dbc550e5bbe1440b9b008c",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.cpp": {
@@ -3660,7 +3660,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12107,
+      "lines": 12111,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3722,7 +3722,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "e0bc1ada428e264db075e6a32f7d713c3a54e5a190efefb9a6608666a489a584",
+      "sha256": "3b64452a1c5b5875a8f042557a1d93579faa2ded0de0b9004b0f5ece9ae414b7",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6428,5 +6428,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "0da7ba08899344496b3528e60cb98696f5007f07"
+  "working_tree_head": "406bacb448997a2b63bf2d452a0a71d90587abdd"
 }

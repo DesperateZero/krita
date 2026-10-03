@@ -235,7 +235,7 @@ public:
         }
         quint64 byteSize() const
         {
-            return quint64(m_blockCount) * quint64(BlockBytes);
+            return quint64(m_blockCount) * blockByteSize();
         }
 
         void append(ReleasedBlocks &&other) noexcept
@@ -292,18 +292,20 @@ public:
 
     static constexpr quint64 blockByteSize()
     {
-        return quint64(BlockBytes);
+        // BlockBytes defines slot geometry. Admission and final release use
+        // the actual allocation request, including the intrusive release link.
+        return quint64(sizeof(Block));
     }
 
     bool canAttachBlocks(quint64 count) const
     {
         if (m_closed || count == 0)
             return !m_closed;
-        if (count > m_maximumBytes / quint64(BlockBytes))
+        if (count > m_maximumBytes / blockByteSize())
             return false;
         if (newDirectoryEntries(count) > std::numeric_limits<quint32>::max() / SlotsPerBlock - m_directory.size())
             return false;
-        const quint64 bytes = count * quint64(BlockBytes);
+        const quint64 bytes = count * blockByteSize();
         return m_statistics.allocatedBytes <= m_maximumBytes - bytes;
     }
 
@@ -367,8 +369,8 @@ public:
 
     bool attachPreparedBlock(PreparedBlock *prepared)
     {
-        if (!prepared || !prepared->m_block || m_closed || quint64(BlockBytes) > m_maximumBytes
-            || m_statistics.allocatedBytes > m_maximumBytes - quint64(BlockBytes)) {
+        if (!prepared || !prepared->m_block || m_closed || blockByteSize() > m_maximumBytes
+            || m_statistics.allocatedBytes > m_maximumBytes - blockByteSize()) {
             ++m_statistics.rejectedBlockAttaches;
             return false;
         }
@@ -409,7 +411,7 @@ public:
         entry.state = DirectoryState::Active;
         ++m_statistics.activeBlocks;
         ++m_statistics.attachedBlocks;
-        m_statistics.allocatedBytes += quint64(BlockBytes);
+        m_statistics.allocatedBytes += blockByteSize();
         m_statistics.freeSlots += SlotsPerBlock;
         m_statistics.directoryEntries = quint64(m_directory.size());
         m_freeBlockHint = quint32(directoryIndex);
@@ -641,10 +643,10 @@ private:
         released->m_blocks = std::move(entry.block);
         ++released->m_blockCount;
         --m_statistics.activeBlocks;
-        m_statistics.allocatedBytes -= quint64(BlockBytes);
+        m_statistics.allocatedBytes -= blockByteSize();
         m_statistics.freeSlots -= entry.freeSlots;
         m_statistics.quarantinedSlots -= entry.quarantinedSlots;
-        m_statistics.releasedBytes += quint64(BlockBytes);
+        m_statistics.releasedBytes += blockByteSize();
         entry.freeHead = InvalidOffset;
         entry.freeSlots = 0;
         entry.quarantinedSlots = 0;

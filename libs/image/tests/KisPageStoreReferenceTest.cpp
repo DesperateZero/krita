@@ -3712,8 +3712,12 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         QCOMPARE(sample.metrics.metadataArenaBlocksAttached,
                  sample.footprint.versionArena.attachedBlocks + sample.footprint.replicaArena.attachedBlocks
                      + sample.footprint.overflowArena.attachedBlocks);
-        QCOMPARE(sample.footprint.versionArena.allocatedBytes, sample.footprint.versionArena.activeBlocks * 16 * 1024);
-        QCOMPARE(sample.footprint.replicaArena.allocatedBytes, sample.footprint.replicaArena.activeBlocks * 32 * 1024);
+        using VersionArena = KisShardSlotArena<KisVersionRecord, 16 * 1024>;
+        using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>;
+        QCOMPARE(sample.footprint.versionArena.allocatedBytes,
+                 sample.footprint.versionArena.activeBlocks * VersionArena::blockByteSize());
+        QCOMPARE(sample.footprint.replicaArena.allocatedBytes,
+                 sample.footprint.replicaArena.activeBlocks * ReplicaArena::blockByteSize());
     };
     verify(k1h0);
     verify(k16h0);
