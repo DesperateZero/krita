@@ -106,7 +106,7 @@ public:
     void acknowledgeBackingDomainChange(quint64 physicalSlot,
                                         quint64 revision) override;
     bool registerBackingDomainAdmission(
-        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission,
         QString *error = nullptr) override;
     KisReplicaOperation prepareSynchronousWriteCopy(
         KisPageOperationId operation,

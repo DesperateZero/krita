@@ -222,8 +222,12 @@ private:
                                QString *error);
     void commitPreparedBackingChanges(quint64 cookie) noexcept;
     void cancelPreparedBackingChanges(quint64 cookie) noexcept;
+    explicit KisPageOwnerLedger(const KisMutationStorageAllocator<KisPageOwnerLedger> &storage);
     class Private;
-    QScopedPointer<Private> d;
+    struct PrivateReleaser { static void cleanup(Private *); };
+    QScopedPointer<Private, PrivateReleaser> d;
+    friend class KisPageStore;
+    friend class KisPageStoreCpuMutationTest;
     friend class KisPageOwnerDomainAdmission;
     friend class KisBackingClassChangeReservation;
     friend class KisPageRetirementQueue;

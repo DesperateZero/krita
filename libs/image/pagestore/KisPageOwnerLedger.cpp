@@ -8,7 +8,6 @@
 #include "KisPageRetirementRecord_p.h"
 #include "KisPageWriteCoordinator_p.h"
 
-#include <QEnableSharedFromThis>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QPair>
@@ -336,6 +335,8 @@ bool buildPhysicalBackingDelta(
 class KisPageOwnerLedger::Private
 {
 public:
+    using Storage = KisMutationStorageAllocator<Private>;
+    explicit Private(const Storage &allocator) : storage(allocator) {}
     const ProviderRegistration *registeredProvider(const ProviderKey &key) const
     {
         const auto found = providers.find(key, ProviderLess{});
@@ -518,6 +519,7 @@ public:
                                                    target, physical.byteSize());
     }
 
+    Storage storage;
     mutable QMutex mutex;
     QSharedPointer<KisCompletionRegistry> completions;
     quint64 nextValidationStamp = 1;
@@ -532,12 +534,13 @@ public:
     PreparedBackingIndex preparedBackingChanges;
     ChargedVector<PreparedBackingChangeSlot> preparedChanges;
     ChargedVector<quint32> freePreparedChanges;
-    QSharedPointer<KisPageOwnerDomainAdmission> domainAdmission;
+    std::shared_ptr<KisPageOwnerDomainAdmission> domainAdmission;
 };
 
 class KisPageOwnerDomainAdmission final
     : public KisReplicaBackingDomainAdmission
-    , public QEnableSharedFromThis<KisPageOwnerDomainAdmission>
+    , public KisReplicaBackingDomainReservation
+    , public std::enable_shared_from_this<KisPageOwnerDomainAdmission>
 {
 public:
     struct Registration {
@@ -546,11 +549,14 @@ public:
     };
     explicit KisPageOwnerDomainAdmission(KisPageOwnerLedger *owner)
         : m_owner(owner) {}
+    // A transition outside this ledger needs only the original authority
+    // lifetime. Alias this paid root instead of allocating an empty claim.
+    void commit(quint64) noexcept override {}
 
     class Reservation final : public KisReplicaBackingDomainReservation
     {
     public:
-        Reservation(QSharedPointer<KisPageOwnerDomainAdmission> owner,
+        Reservation(std::shared_ptr<KisPageOwnerDomainAdmission> owner,
                     quint64 cookie)
             : m_owner(std::move(owner)), m_cookie(cookie) {}
         ~Reservation() override
@@ -568,12 +574,12 @@ public:
         }
 
     private:
-        QSharedPointer<KisPageOwnerDomainAdmission> m_owner;
+        std::shared_ptr<KisPageOwnerDomainAdmission> m_owner;
         quint64 m_cookie = 0;
         friend class KisPageOwnerDomainAdmission;
     };
 
-    QSharedPointer<KisReplicaBackingDomainReservation> prepare(
+    std::shared_ptr<KisReplicaBackingDomainReservation> prepare(
         const KisReplicaPhysicalSlotIdentity &physical,
         quint64 bytes,
         KisPageAccessDomain sourceDomain,
@@ -606,7 +612,7 @@ public:
         auto record = owner->physicalBackings.find(physical);
         if (record == owner->physicalBackings.end()) {
             KisPageStoreDetail::setError(error, {});
-            return QSharedPointer<Reservation>::create(sharedFromThis(), 0);
+            return shared_from_this();
         }
         if (!owner->backingBudget || record->second.byteSize() != bytes
             || record->second.domain != sourceDomain
@@ -636,7 +642,9 @@ public:
         const quint64 cookie = m_nextCookie;
         // Prepare both actual records before publishing the original claim.
         // An inactive Reservation cannot reenter this gate during rollback.
-        auto terminal = QSharedPointer<Reservation>::create(QSharedPointer<KisPageOwnerDomainAdmission>{}, 0);
+        auto terminal = std::allocate_shared<Reservation>(
+            KisMutationStorageAllocator<Reservation>::retained(owner->backingBudget),
+            std::shared_ptr<KisPageOwnerDomainAdmission>{}, 0);
         Claim claim;
         claim.physical = physical;
         claim.sourceDomain = sourceDomain;
@@ -647,7 +655,7 @@ public:
         claim.reservation = std::move(reservation);
         m_claims.emplace(cookie, std::move(claim));
         record->second.domainClaim = cookie;
-        terminal->m_owner = sharedFromThis();
+        terminal->m_owner = shared_from_this();
         terminal->m_cookie = cookie;
         KisPageStoreDetail::setError(error, {});
         return terminal;
@@ -835,9 +843,26 @@ void KisBackingClassChangeReservation::release() noexcept
 }
 
 KisPageOwnerLedger::KisPageOwnerLedger()
-    : d(new Private)
+    : KisPageOwnerLedger(KisMutationStorageAllocator<KisPageOwnerLedger>{})
 {
-    d->domainAdmission = QSharedPointer<KisPageOwnerDomainAdmission>::create(this);
+}
+
+KisPageOwnerLedger::KisPageOwnerLedger(const KisMutationStorageAllocator<KisPageOwnerLedger> &storage)
+{
+    Private::Storage allocator(storage);
+    auto *raw = allocator.allocate(1);
+    try { std::allocator_traits<Private::Storage>::construct(allocator, raw, allocator); }
+    catch (...) { allocator.deallocate(raw, 1); throw; }
+    d.reset(raw);
+    d->domainAdmission = std::allocate_shared<KisPageOwnerDomainAdmission>(storage, this);
+}
+
+void KisPageOwnerLedger::PrivateReleaser::cleanup(Private *owner)
+{
+    if (!owner) return;
+    auto storage = owner->storage;
+    std::destroy_at(owner);
+    storage.deallocate(owner, 1);
 }
 
 KisPageOwnerLedger::~KisPageOwnerLedger()

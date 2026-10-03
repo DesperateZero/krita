@@ -84,6 +84,7 @@ public:
     std::function<void()> beforeDomainAdmission;
     std::atomic<int> domainAdmissionCalls{0};
     bool rejectDomainAdmission = false;
+    std::shared_ptr<KisReplicaBackingDomainAdmission> *domainAdmissionCapture = nullptr;
     KisReplicaHandle lastTarget;
     QString name() const override { return p->name(); }
     KisReplicaProviderId providerId() const override { return p->providerId(); }
@@ -196,10 +197,11 @@ public:
     void acknowledgeBackingDomainChange(quint64 slot, quint64 revision) override
     { p->acknowledgeBackingDomainChange(slot, revision); }
     bool registerBackingDomainAdmission(
-        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission,
         QString *error) override
     {
         ++domainAdmissionCalls;
+        if (domainAdmissionCapture) *domainAdmissionCapture = admission;
         if (beforeDomainAdmission) beforeDomainAdmission();
         if (rejectDomainAdmission) {
             KisPageStoreDetail::setError(error, QStringLiteral("test provider refused domain admission"));
@@ -524,6 +526,14 @@ private Q_SLOTS:
         QTest::newRow("late-captured-root") << true;
     }
     void storeRootStorageRetained();
+    void domainAdmissionStorageRetained_data()
+    {
+        QTest::addColumn<bool>("keepReservation");
+        QTest::newRow("last-strong-admission") << false;
+        QTest::newRow("late-reservation") << true;
+    }
+    void domainAdmissionStorageRetained();
+    void domainReservationControlRetained();
     void finiteBackingLimitMatrix();
     void swapInFailurePreservesDomainState_data()
     {
@@ -9549,6 +9559,165 @@ void KisPageStoreCpuMutationTest::storeRootStorageRetained()
     QCOMPARE(live(), baseline);
     parent.reset();
     QVERIFY(lifetime.isNull());
+}
+
+void KisPageStoreCpuMutationTest::domainAdmissionStorageRetained()
+{
+    QFETCH(bool, keepReservation);
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto storage = KisMutationStorageAllocator<char>::retained(parent.data());
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    QString error;
+    auto store = KisPageStore::prepareStorage(parent, &error);
+    QVERIFY2(store, qPrintable(error));
+    QVERIFY(store->configureSharedNonPayloadBudget(parent, &error));
+    QVERIFY(store->configureBackingLimits(limits, &error));
+    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    QVERIFY2(store->configure(initial, completions, 1, &error), qPrintable(error));
+    auto provider = QSharedPointer<TestProvider>::create();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {190}; config.providerEpoch = {1}; config.budgetBytes = 64 * 1024 * 1024;
+    QVERIFY2(provider->p->configure(config, completions, &error), qPrintable(error));
+    std::shared_ptr<KisReplicaBackingDomainAdmission> admission;
+    provider->domainAdmissionCapture = &admission;
+    QVERIFY(store->registerReplicaProvider(provider));
+    QVERIFY2(store->finalizeInitialization(&error), qPrintable(error));
+    QVERIFY(admission);
+    std::weak_ptr<KisReplicaBackingDomainAdmission> weak(admission);
+    const auto prepare = [&] {
+        return admission->prepare({{190}, {1}, 1}, 4096,
+                                  KisPageAccessDomain::CpuRam, 1, KisPageAccessDomain::Ssd, &error);
+    };
+    // This owner has no physical record. Its receipt aliases the paid root,
+    // keeping the same strong lifetime without return storage or admission.
+    const auto before = live();
+    auto reservation = prepare(); QVERIFY2(reservation, qPrintable(error));
+    QCOMPARE(live(), before);
+    qInfo() << "BR1_DOMAIN_NOOP_STORAGE_BYTES" << live() - before;
+    size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    auto *filler = storage.allocate(fillerBytes);
+    auto releaseFiller = qScopeGuard([&] { if (filler) storage.deallocate(filler, fillerBytes); });
+    const auto filled = live();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QVERIFY2(prepare(), qPrintable(error)); QVERIFY(error.isEmpty()); QCOMPARE(live(), filled);
+        for (const auto &bucket : parent->usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+    }
+    storage.deallocate(std::exchange(filler, nullptr), fillerBytes);
+    QCOMPARE(live(), before);
+    if (!keepReservation) reservation.reset();
+    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    parent.reset(); QVERIFY(!lifetime.isNull());
+    parent = lifetime.toStrongRef(); QVERIFY(parent);
+    store.reset(); kisDrainPageStoreReclamation();
+    QVERIFY(!weak.expired());
+    fillerBytes = size_t(limits.metadataArenaBytes - live());
+    filler = storage.allocate(fillerBytes);
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    // A detached authority rejects before allocation even at full capacity.
+    QVERIFY(!prepare()); QCOMPARE(live(), limits.metadataArenaBytes);
+    admission.reset();
+    QCOMPARE(weak.expired(), !keepReservation);
+    reservation.reset();
+    QVERIFY(weak.expired());
+    QVERIFY(live() > baseline + fillerBytes); // Provider and test still hold the paid weak control.
+    provider.reset();
+    QVERIFY(live() > baseline + fillerBytes);
+    weak.reset();
+    QCOMPARE(live(), baseline + fillerBytes);
+    storage.deallocate(std::exchange(filler, nullptr), fillerBytes);
+    QCOMPARE(live(), baseline);
+    parent.reset(); QVERIFY(lifetime.isNull());
+}
+
+void KisPageStoreCpuMutationTest::domainReservationControlRetained()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto handle = f.provider->lastTarget;
+    const auto footprint = f.provider->backingFootprint(handle);
+    QVERIFY(footprint.isValid());
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto storage = KisMutationStorageAllocator<char>::retained(parent.data());
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    std::unique_ptr<KisPageOwnerLedger> ledger;
+    {
+        KisBackingBudgetController cold;
+        QVERIFY(cold.configureSharedNonPayloadBudget(parent, &f.error));
+        // Exercise the same private constructor as product Store composition.
+        ledger.reset(new KisPageOwnerLedger(KisMutationStorageAllocator<KisPageOwnerLedger>::retained(&cold)));
+    }
+    qInfo() << "BR1_LEDGER_CONTROL_STORAGE_BYTES" << live() - baseline;
+    auto budget = std::make_unique<KisBackingBudgetController>(limits);
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(ledger->configure(f.completions)); ledger->attachBackingBudget(*budget);
+    std::shared_ptr<KisReplicaBackingDomainAdmission> admission;
+    f.provider->domainAdmissionCapture = &admission;
+    QVERIFY(ledger->registerProvider(f.provider)); QVERIFY(admission);
+    KisBackingBudgetDelta delta;
+    delta.buckets[size_t(KisBackingBudgetClass::Current)].cpuRam = handle.layout.byteSize;
+    auto charge = budget->reserve(delta, &f.error); QVERIFY(charge.isValid());
+    QVERIFY(ledger->registerBacking(handle, charge, KisBackingBudgetClass::Current, &f.error));
+    const auto prepare = [&] {
+        return admission->prepare({handle.provider, handle.providerEpoch, footprint.physicalSlot}, footprint.bytes,
+                                  footprint.domain, footprint.revision, KisPageAccessDomain::Ssd, &f.error);
+    };
+    auto reservation = prepare(); QVERIFY2(reservation, qPrintable(f.error)); reservation.reset();
+    const auto before = live();
+    reservation = prepare(); QVERIFY2(reservation, qPrintable(f.error));
+    const quint64 required = live() - before;
+    QVERIFY(required > 0);
+    qInfo() << "BR1_DOMAIN_CLAIM_STORAGE_BYTES" << required;
+    reservation.reset(); QCOMPARE(live(), before);
+    size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - required + 1);
+    auto *filler = storage.allocate(fillerBytes);
+    const auto releaseFiller = qScopeGuard([&] { if (filler) storage.deallocate(filler, fillerBytes); });
+    const auto filled = live();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        QVERIFY(!prepare()); QVERIFY(!f.error.isEmpty()); QCOMPARE(live(), filled);
+        QCOMPARE(f.provider->backingFootprint(handle).revision, footprint.revision);
+        QCOMPARE(f.provider->backingFootprint(handle).domain, footprint.domain);
+        for (const auto &bucket : parent->usage().buckets) QCOMPARE(bucket.reserved.ssd, quint64(0));
+    }
+    storage.deallocate(std::exchange(filler, nullptr), fillerBytes);
+    reservation = prepare(); QVERIFY2(reservation, qPrintable(f.error));
+    QCOMPARE(live(), before + required);
+    std::weak_ptr<KisReplicaBackingDomainReservation> weak(reservation);
+    reservation.reset(); // Cancel the real claim, leaving only return/control storage.
+    QVERIFY(weak.expired());
+    const quint64 controlBytes = live() - before;
+    QVERIFY(controlBytes > sizeof(reservation));
+    qInfo() << "BR1_DOMAIN_RESERVATION_STORAGE_BYTES" << controlBytes;
+    ledger->releaseRetiredBacking(handle);
+    ledger.reset(); admission.reset(); budget.reset();
+    f.store.reset(); kisDrainPageStoreReclamation(); f.provider.reset();
+    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    parent.reset(); QVERIFY(!lifetime.isNull());
+    parent = lifetime.toStrongRef(); QVERIFY(parent);
+    fillerBytes = size_t(limits.metadataArenaBytes - live());
+    filler = storage.allocate(fillerBytes);
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    weak.reset();
+    QCOMPARE(live(), baseline + fillerBytes);
+    storage.deallocate(std::exchange(filler, nullptr), fillerBytes);
+    QCOMPARE(live(), baseline);
+    parent.reset(); QVERIFY(lifetime.isNull());
 }
 
 void KisPageStoreCpuMutationTest::metadataArenaBudgetTracksAllocator()

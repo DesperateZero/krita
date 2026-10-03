@@ -59,7 +59,7 @@ void KisPageReplicaProvider::acknowledgeBackingDomainChange(quint64, quint64)
 {
 }
 bool KisPageReplicaProvider::registerBackingDomainAdmission(
-    const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+    const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission,
     QString *error)
 {
     const bool valid = bool(admission);

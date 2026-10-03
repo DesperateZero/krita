@@ -236,6 +236,7 @@ public:
     using Storage = KisMutationStorageAllocator<Private>;
     explicit Private(const Storage &allocator)
         : storage(allocator)
+        , owner(allocator)
         , writeAdmission(mutex, writeAdmissionChanged, &backingBudget, &operational)
         , writeCoordinator(metadata, epochs, backingBudget, owner)
         , defaultStorage(backingBudget)

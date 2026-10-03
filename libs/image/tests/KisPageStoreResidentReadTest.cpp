@@ -103,7 +103,7 @@ public:
     void acknowledgeBackingDomainChange(quint64 slot, quint64 revision) override
     { p->acknowledgeBackingDomainChange(slot, revision); }
     bool registerBackingDomainAdmission(
-        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission, QString *error) override
+        const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission, QString *error) override
     { return p->registerBackingDomainAdmission(admission, error); }
 protected:
     QSharedPointer<KisPageReplicaProvider> p;

@@ -245,10 +245,10 @@ public:
             KisMutationStorageAllocator<std::pair<KisTileData *const, Payload>>>;
         using SlotMap = std::map<quint64, Payload *, std::less<quint64>,
             KisMutationStorageAllocator<std::pair<const quint64, Payload *>>>;
-        using Admissions = std::vector<QSharedPointer<KisReplicaBackingDomainAdmission>,
-            KisMutationStorageAllocator<QSharedPointer<KisReplicaBackingDomainAdmission>>>;
-        using WeakAdmissions = std::vector<QWeakPointer<KisReplicaBackingDomainAdmission>,
-            KisMutationStorageAllocator<QWeakPointer<KisReplicaBackingDomainAdmission>>>;
+        using Admissions = std::vector<std::shared_ptr<KisReplicaBackingDomainAdmission>,
+            KisMutationStorageAllocator<std::shared_ptr<KisReplicaBackingDomainAdmission>>>;
+        using WeakAdmissions = std::vector<std::weak_ptr<KisReplicaBackingDomainAdmission>,
+            KisMutationStorageAllocator<std::weak_ptr<KisReplicaBackingDomainAdmission>>>;
     public:
         struct PreparedPayload {
             PayloadMap::node_type payload;
@@ -299,8 +299,8 @@ public:
             quint64 m_serial = 0;
             KisPageAccessDomain m_targetDomain = KisPageAccessDomain::Unknown;
         public:
-            std::vector<QSharedPointer<KisReplicaBackingDomainReservation>,
-                KisMutationStorageAllocator<QSharedPointer<KisReplicaBackingDomainReservation>>> m_reservations;
+            std::vector<std::shared_ptr<KisReplicaBackingDomainReservation>,
+                KisMutationStorageAllocator<std::shared_ptr<KisReplicaBackingDomainReservation>>> m_reservations;
         };
 
         void setProviderIdentity(KisReplicaProviderId provider,
@@ -312,19 +312,19 @@ public:
         }
 
         bool registerAdmission(
-            const QSharedPointer<KisReplicaBackingDomainAdmission> &admission, bool *singleOwner)
+            const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission, bool *singleOwner)
         {
             if (!admission)
                 return false;
             QMutexLocker locker(&m_mutex);
             for (const auto &existing : std::as_const(m_admissions)) {
-                if (existing.toStrongRef() == admission)
+                if (existing.lock() == admission)
                     return true;
             }
             // Conservative provider-wide exclusion: expiry does not prove
             // that all replicas imported by that owner have been released.
             // Do not re-enable handoff merely because an observer disappeared.
-            m_admissions.push_back(admission.toWeakRef());
+            m_admissions.push_back(admission);
             if (m_admissions.size() > 1) *singleOwner = false;
             return true;
         }
@@ -359,13 +359,13 @@ public:
                 }
                 admissions.reserve(m_admissions.size());
                 for (const auto &weak : std::as_const(m_admissions)) {
-                    auto admission = weak.toStrongRef();
+                    auto admission = weak.lock();
                     if (!admission)
                         continue;
                     admissions.push_back(std::move(admission));
                 }
                 m_admissions.erase(std::remove_if(m_admissions.begin(), m_admissions.end(),
-                    [](const auto &weak) { return weak.isNull(); }), m_admissions.end());
+                    [](const auto &weak) { return weak.expired(); }), m_admissions.end());
                 ++m_nextTransition;
                 if (!m_nextTransition) ++m_nextTransition;
                 serial = m_nextTransition;
@@ -1321,7 +1321,7 @@ void KisTiles3PageReplicaProvider::acknowledgeBackingDomainChange(
 }
 
 bool KisTiles3PageReplicaProvider::registerBackingDomainAdmission(
-    const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+    const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission,
     QString *error)
 {
     QMutexLocker locker(&d->handoffAdmission.mutex);

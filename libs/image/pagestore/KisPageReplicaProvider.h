@@ -345,7 +345,7 @@ class KRITAIMAGE_EXPORT KisReplicaBackingDomainAdmission
 {
 public:
     virtual ~KisReplicaBackingDomainAdmission() = default;
-    virtual QSharedPointer<KisReplicaBackingDomainReservation> prepare(
+    virtual std::shared_ptr<KisReplicaBackingDomainReservation> prepare(
         const KisReplicaPhysicalSlotIdentity &physical,
         quint64 bytes,
         KisPageAccessDomain sourceDomain,
@@ -419,7 +419,7 @@ public:
     // Mutable-domain providers retain weak references only. Fixed-domain
     // providers accept this no-op registration for a uniform owner path.
     virtual bool registerBackingDomainAdmission(
-        const QSharedPointer<KisReplicaBackingDomainAdmission> &admission,
+        const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission,
         QString *error = nullptr);
 
     /**
