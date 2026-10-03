@@ -163,16 +163,19 @@ void KisTiledExtentManager::Data::clear()
 
 bool KisTiledExtentManager::Data::isEmpty()
 {
+    QReadLocker lock(&m_extentLock);
     return m_count == 0;
 }
 
 qint32 KisTiledExtentManager::Data::min()
 {
+    QReadLocker lock(&m_extentLock);
     return m_min;
 }
 
 qint32 KisTiledExtentManager::Data::max()
 {
+    QReadLocker lock(&m_extentLock);
     return m_max;
 }
 
@@ -451,24 +454,24 @@ void KisTiledExtentManager::updateExtent()
     {
         QReadLocker cl(&m_colsData.m_extentLock);
 
-        if (m_colsData.isEmpty()) {
+        if (m_colsData.m_count == 0) {
             minX = 0;
             width = 0;
         } else {
-            minX = m_colsData.min() * KisTileData::WIDTH;
-            width = (m_colsData.max() + 1) * KisTileData::WIDTH - minX;
+            minX = m_colsData.m_min * KisTileData::WIDTH;
+            width = (m_colsData.m_max + 1) * KisTileData::WIDTH - minX;
         }
     }
 
     {
         QReadLocker rl(&m_rowsData.m_extentLock);
 
-        if (m_rowsData.isEmpty()) {
+        if (m_rowsData.m_count == 0) {
             minY = 0;
             height = 0;
         } else {
-            minY = m_rowsData.min() * KisTileData::HEIGHT;
-            height = (m_rowsData.max() + 1) * KisTileData::HEIGHT - minY;
+            minY = m_rowsData.m_min * KisTileData::HEIGHT;
+            height = (m_rowsData.m_max + 1) * KisTileData::HEIGHT - minY;
         }
     }
 

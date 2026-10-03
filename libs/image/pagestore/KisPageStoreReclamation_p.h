@@ -177,7 +177,11 @@ struct KisPageTreeReclamationStatistics
     quint64 passes = 0;
     quint64 maximumReferenceDropsPerPass = 0;
 };
-constexpr size_t KisPageTreeReclamationFixedStorageBytes = 4 * sizeof(std::atomic<quint64>);
+// Four tree counters, the active worker identity, and the original executor
+// handle remain in the image until unload, independently of heap teardown.
+constexpr size_t KisPageReclamationFixedStorageBytes =
+    4 * sizeof(std::atomic<quint64>) + sizeof(std::atomic<Qt::HANDLE>)
+    + sizeof(std::unique_ptr<KisPageReclamationJob>);
 KRITAIMAGE_EXPORT KisPageTreeReclamationStatistics kisPageTreeReclamationStatistics();
 
 #endif

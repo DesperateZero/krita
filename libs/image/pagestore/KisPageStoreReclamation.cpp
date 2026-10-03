@@ -477,6 +477,7 @@ private:
 ReclamationExecutor &executor()
 {
     static const auto instance = std::make_unique<ReclamationExecutor>();
+    static_assert(sizeof(instance) == sizeof(std::unique_ptr<KisPageReclamationJob>));
     return *instance;
 }
 

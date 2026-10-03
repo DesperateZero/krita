@@ -939,10 +939,9 @@ KisReplicaProviderEpoch KisTiles3PageReplicaProvider::providerEpoch() const
 
 KisReplicaCapabilities KisTiles3PageReplicaProvider::capabilities() const
 {
-    static const KisReplicaCapabilities result{{KisPageAccessDomain::CpuRam},
+    return {{KisPageAccessDomain::CpuRam},
         {{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}},
         true, true, true, true, true, true};
-    return result;
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::requestReplica(

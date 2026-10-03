@@ -20,21 +20,49 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <utility>
+
+#ifndef _MSC_VER
+#include <cxxabi.h>
+#endif
 
 namespace
 {
 
+#ifdef _MSC_VER
+constexpr size_t initializationGuardStorageBytes = sizeof(std::int32_t);
+#else
+template<class Result, class Guard>
+constexpr size_t initializationGuardBytes(Result (*)(Guard *))
+{
+    return sizeof(Guard);
+}
+constexpr size_t initializationGuardStorageBytes =
+    initializationGuardBytes(&__cxxabiv1::__cxa_guard_acquire);
+#endif
+
 struct ProcessStorageState
 {
-    QMutex gate;
-    QMutex creation;
+    static constexpr size_t fixedStorageBytes() noexcept
+    {
+        // Registry/history/epoch/ledger/provider use nine fixed identities.
+        // Original Resource/executor handles and the three local-static
+        // initialization guards occupy image storage after their heap dies.
+        return sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes
+            + KisPageReclamationFixedStorageBytes
+            + 9 * sizeof(std::atomic<quint64>)
+            + sizeof(std::shared_ptr<std::pmr::memory_resource>)
+            + 3 * initializationGuardStorageBytes;
+    }
+    std::mutex gate;
+    std::mutex creation;
     std::weak_ptr<KisBackingBudgetController> parent;
     quint64 limit = 64 * 1024 * 1024;
     bool productPolicy = false;
-    std::atomic<quint64> bytes{sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes
-                             + KisPageTreeReclamationFixedStorageBytes};
+    std::atomic<quint64> bytes{fixedStorageBytes()};
     ~ProcessStorageState()
     {
         // Free a remaining expired weak control while the accounting gate is
@@ -1560,8 +1588,7 @@ void kisReleasePageProcessStorage(size_t bytes) noexcept
         QMutexLocker gate(&state.gate);
         parent = state.parent.lock();
         const auto current = state.bytes.load(std::memory_order_relaxed);
-        Q_ASSERT(current >= sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes
-                            + KisPageTreeReclamationFixedStorageBytes + bytes);
+        Q_ASSERT(current >= ProcessStorageState::fixedStorageBytes() + bytes);
         state.bytes.store(current - bytes, std::memory_order_release);
     }
     if (parent) {
@@ -1673,6 +1700,7 @@ std::shared_ptr<std::pmr::memory_resource> kisPageProcessMemoryResource()
         bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
     };
     static const auto resource = std::allocate_shared<Resource>(KisMutationStorageAllocator<Resource>{});
+    static_assert(sizeof(resource) == sizeof(std::shared_ptr<std::pmr::memory_resource>));
     return resource;
 }
 
