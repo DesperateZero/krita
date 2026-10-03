@@ -14,6 +14,7 @@
 #include "KisTiles3PageReplicaProvider.h"
 #include "KisPageOwnerLedger.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "pagestore/KisPageStoreStoragePressure.h"
 #include "KisPageRetirementRecord_p.h"
 #include "tiles3/kis_tile_data.h"
 #include "tiles3/kis_tile_data_store.h"
@@ -546,11 +547,11 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     std::array<size_t, 3> fillerBytes{};
     const auto release = qScopeGuard([&] {
         for (size_t i = 0; i < fillers.size(); ++i)
-            kisFreeMutationStorage(&budget, fillers[i], fillerBytes[i], 1);
+            freeTestStoragePressure(&budget, fillers[i], fillerBytes[i], 1);
     });
     for (size_t i = 0; i < replicas.size(); ++i) {
         fillerBytes[i] = size_t(limits.metadataArenaBytes - live());
-        fillers[i] = kisAllocateMutationStorage(&budget, fillerBytes[i], 1);
+        fillers[i] = allocateTestStoragePressure(&budget, fillerBytes[i], 1);
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY2(ledger.registerBacking(replicas[i], reservations[i], KisBackingBudgetClass::Current,
             &f.error, &records[i]), qPrintable(f.error));
@@ -578,7 +579,7 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
     for (size_t i = 0; i < fillers.size(); ++i)
-        kisFreeMutationStorage(&budget, std::exchange(fillers[i], nullptr), fillerBytes[i], 1);
+        freeTestStoragePressure(&budget, std::exchange(fillers[i], nullptr), fillerBytes[i], 1);
     QCOMPARE(live(), baseline);
 }
 

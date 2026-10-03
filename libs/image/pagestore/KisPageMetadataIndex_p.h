@@ -168,7 +168,7 @@ public:
         return m_size;
     }
 
-    quint64 allocatedBytes() const noexcept { return quint64(m_entries.capacity()) * sizeof(Entry); }
+    quint64 allocatedBytes() const noexcept { return kisPageStorageBytes(m_entries.data(), alignof(Entry)); }
 
     Statistics statistics() const
     {

@@ -21,6 +21,10 @@
 #include <functional>
 #include <cstring>
 
+#ifdef Q_OS_DARWIN
+#include <malloc/malloc.h>
+#endif
+
 #include "KisCpuPageReplicaProvider.h"
 #include "KisCpuResidentBinding_p.h"
 #include "KisPageMetadataCoordinator.h"
@@ -935,7 +939,8 @@ void KisPageStoreResidentReadTest::coldDefaultBindingAfterMaterialization()
 void KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded()
 {
     QFETCH(bool, tiles3);
-    for (int bpp : {1, 4, 8, 16}) {
+    for (int bpp : {1, 3, 4, 8, 16}) {
+        if (tiles3 && bpp == 3) continue;
         Fixture f; QVERIFY(f.init(tiles3, bpp));
         auto oldView = f.store->captureReadView();
         auto first = oldView.tryReadResidentPage(key(-9));
@@ -947,6 +952,11 @@ void KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded()
         QCOMPARE(first.version().defaultPixelRevision, quint64(1));
         QCOMPARE(first.rowStride(), quint32(64 * bpp));
         QCOMPARE(first.byteSize(), quint64(64 * 64 * bpp));
+        quint64 allocationBytes = first.byteSize();
+#ifdef Q_OS_DARWIN
+        allocationBytes = malloc_size(first.data());
+#endif
+        QVERIFY(allocationBytes >= first.byteSize());
         auto otherScope = f.store->captureReadView();
         auto same = otherScope.tryReadResidentPage(key(7));
         QCOMPARE(same.data(), first.data());
@@ -972,7 +982,7 @@ void KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded()
         QCOMPARE(stats.registeredPages, qsizetype(0));
         QCOMPARE(stats.cachedDefaultReadBuffers, qsizetype(64));
         QVERIFY(stats.cachedDefaultReadBytes <= 8 * 1024 * 1024);
-        QCOMPARE(stats.liveDefaultReadBytes, quint64(65 * 64 * 64 * bpp));
+        QCOMPARE(stats.liveDefaultReadBytes, quint64(65) * allocationBytes);
         QCOMPARE(stats.defaultReadBuffersCreated, quint64(70));
         QCOMPARE(stats.defaultReadInitializedBytes, quint64(70 * 64 * 64 * bpp));
         QCOMPARE(stats.defaultReadCacheEvictions, quint64(6));

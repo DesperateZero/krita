@@ -26,9 +26,9 @@ struct KisCpuDefaultReadBuffer::Statistics
 KisCpuDefaultReadBuffer::~KisCpuDefaultReadBuffer()
 {
     if (data) {
-        ::operator delete(data, std::align_val_t(alignment));
-        statistics->liveBytes.fetchAndSubRelaxed(byteSize);
-        storageOwner->releaseLiveCharge(byteSize, KisBackingBudgetClass::OptionalCache);
+        kisFreePageStorage(data, alignment);
+        statistics->liveBytes.fetchAndSubRelaxed(allocationBytes);
+        storageOwner->releaseLiveCharge(allocationBytes, KisBackingBudgetClass::OptionalCache);
     }
 }
 
@@ -61,7 +61,11 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::createRead
     }
 
     KisBackingBudgetDelta requested;
-    requested.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = qint64(stride * height);
+    const size_t alignment = std::max(
+        size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
+    const size_t capacity = kisPageStorageAllocationBytes(size_t(stride * height), alignment);
+    if (capacity > size_t(std::numeric_limits<qint64>::max())) return {};
+    requested.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = qint64(capacity);
     auto reservation = budget.reserve(requested, nullptr);
     if (!reservation.isValid()) return {};
 
@@ -69,19 +73,17 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::createRead
         KisMutationStorageAllocator<KisCpuDefaultReadBuffer>::retained(&budget));
     result->rowStride = quint32(stride);
     result->byteSize = stride * height;
-    result->alignment = std::max(
-        size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
+    result->allocationBytes = capacity;
+    result->alignment = alignment;
     result->statistics = statistics;
     result->storageOwner.reset(kisMutationStorageOwner(&budget));
-    result->data = ::operator new(
-        size_t(result->byteSize), std::align_val_t(result->alignment), std::nothrow);
-    if (!result->data) return {};
+    result->data = kisAllocatePageStorage(size_t(result->byteSize), result->alignment, capacity);
 
     reservation.commit(requested);
-    result->storageOwner->retainLiveCharge(result->byteSize);
-    statistics->liveBytes.fetchAndAddRelaxed(result->byteSize);
+    result->storageOwner->retainLiveCharge(result->allocationBytes);
+    statistics->liveBytes.fetchAndAddRelaxed(result->allocationBytes);
     statistics->buffersCreated.fetchAndAddRelaxed(1);
-    statistics->initializedBytes.fetchAndAddRelaxed(result->byteSize);
+    statistics->initializedBytes.fetchAndAddRelaxed(stride * height);
     auto *bytes = static_cast<char *>(result->data);
     for (int y = 0; y < descriptor.pageExtent.height(); ++y) {
         auto *row = bytes + size_t(y) * stride;
@@ -120,7 +122,7 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::readBuffer
 
     // Each captured view keeps its own strong reference; eviction cannot
     // invalidate old defaults/guards. Oversize buffers remain scope-local.
-    if (buffer->byteSize > ReadCacheByteBudget) {
+    if (buffer->allocationBytes > ReadCacheByteBudget) {
         m_statistics->cacheOversizeBypasses.fetchAndAddRelaxed(1);
         return buffer;
     }
@@ -131,8 +133,8 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::readBuffer
     if (found != m_readBuffers.end()) return found->buffer;
     while (!m_readBuffers.empty() &&
            (m_readBuffers.size() >= size_t(ReadCacheEntryBudget) ||
-            m_readBufferBytes + buffer->byteSize > ReadCacheByteBudget)) {
-        m_readBufferBytes -= m_readBuffers.front().buffer->byteSize;
+            m_readBufferBytes + buffer->allocationBytes > ReadCacheByteBudget)) {
+        m_readBufferBytes -= m_readBuffers.front().buffer->allocationBytes;
         m_readBuffers.pop_front();
         m_statistics->cacheEvictions.fetchAndAddRelaxed(1);
     }
@@ -143,7 +145,7 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::readBuffer
         m_statistics->cacheOversizeBypasses.fetchAndAddRelaxed(1);
         return buffer;
     }
-    m_readBufferBytes += buffer->byteSize;
+    m_readBufferBytes += buffer->allocationBytes;
     return buffer;
 }
 

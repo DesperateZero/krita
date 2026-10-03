@@ -21,6 +21,7 @@
 
 #include "KisCompletionRegistry.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "pagestore/KisPageStoreStoragePressure.h"
 
 namespace {
 quint64 addSource(KisCompletionRegistry &registry)
@@ -567,8 +568,8 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     auto warm = process->reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
     const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(process.get(), fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.get(), filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(process.get(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(process.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY(!registry.allocatePending(source).isValid());
     QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), quint64(0));
@@ -584,7 +585,7 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5));
     QVERIFY(live() < limits.metadataArenaBytes);
     for (const auto &ticket : tickets) QVERIFY(!registry.complete(ticket, KisCompletionStatus::Cancelled));
-    kisFreeMutationStorage(process.get(), std::exchange(filler, nullptr), fillerBytes, 1);
+    freeTestStoragePressure(process.get(), std::exchange(filler, nullptr), fillerBytes, 1);
     const auto next = registry.allocatePending(source);
     QCOMPARE(next.value(), quint64(6)); // Refusal issued no hidden identity.
     QVERIFY(registry.complete(next, KisCompletionStatus::Succeeded));

@@ -29,6 +29,15 @@ class KisMutationStorageOwner;
 enum class KisBackingBudgetClass : quint8;
 KRITAIMAGE_EXPORT KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
 
+// One physical allocation policy for ordinary storage and arenas whose owner
+// already reserved capacity. Native size classes and exact mappings retain
+// their release facts; the fallback carries a prefix. Fund the complete
+// allocationBytes() before physical allocation.
+KRITAIMAGE_EXPORT size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept;
+KRITAIMAGE_EXPORT void *kisAllocatePageStorage(size_t bytes, size_t alignment, size_t capacity);
+KRITAIMAGE_EXPORT size_t kisPageStorageBytes(const void *data, size_t alignment) noexcept;
+KRITAIMAGE_EXPORT size_t kisFreePageStorage(void *data, size_t alignment) noexcept;
+
 // Accounting lifetime only. It neither keeps a PageStore/payload alive nor
 // grants mutation authority. Detached allocations keep their original parent
 // child registration charged until their actual last deallocation.
@@ -47,7 +56,7 @@ public:
     void deref() noexcept;
 private:
     explicit KisMutationStorageOwner(KisBackingBudgetController *controller)
-        : m_controller(controller), m_bytes(sizeof(KisMutationStorageOwner)) {}
+        : m_controller(controller), m_bytes(kisPageStorageBytes(this, alignof(KisMutationStorageOwner))) {}
     void detach(const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child) noexcept;
     void stopAllocations() noexcept;
     std::atomic<quint32> m_references{0};
@@ -65,8 +74,8 @@ inline void intrusive_ptr_release(KisMutationStorageOwner *owner) noexcept { own
 
 // Ordinary storage: the enclosing reservation/session keeps the controller
 // alive. Use retained() only for real weak-control/inert/callback tails.
-// Charge allocator-requested capacity (including buckets/directories), not
-// live element counts. Free the allocation before returning its live charge.
+// Charge complete allocation capacity, including allocator padding and any
+// fallback prefix, not live element counts. Physical free precedes release.
 KRITAIMAGE_EXPORT void *kisAllocateMutationStorage(KisBackingBudgetController *, size_t, size_t);
 KRITAIMAGE_EXPORT void kisFreeMutationStorage(KisBackingBudgetController *, void *, size_t, size_t) noexcept;
 KRITAIMAGE_EXPORT void *kisAllocatePageProcessStorage(size_t, size_t);
@@ -78,7 +87,7 @@ KRITAIMAGE_EXPORT void kisReleasePageProcessStorage(size_t) noexcept;
 KRITAIMAGE_EXPORT std::shared_ptr<std::pmr::memory_resource> kisPageProcessMemoryResource();
 
 // Compatibility facades still returned through ordinary unique_ptr/delete.
-// The allocation remembers its actual request, including its size prefix.
+// The common physical allocation retains its charged capacity.
 class KRITAIMAGE_EXPORT KisPageProcessStorageObject
 {
 public:

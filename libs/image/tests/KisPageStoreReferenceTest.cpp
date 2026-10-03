@@ -46,6 +46,7 @@
 #include "KisPageRetirementRecord_p.h"
 #include "KisPageRetirementQueue_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPageStoreStoragePressure.h"
 #include "KisTiledDataManagerPageStoreBackend.h"
 #include "KisTiles3PageReplicaProvider.h"
 #include "KisUnifiedSsdPageStore.h"
@@ -1302,8 +1303,8 @@ void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
     const quint64 headroom = kind == 0 ? 0 : kind == 3
         ? quint64(initial.manifest.size()) * sizeof(KisPageVersion) + 16384 : 8192;
     const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
-    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) freeTestStoragePressure(parent.get(), filler, bytes, 1); });
     QString error;
     QVERIFY(!model.initialize(initial, &error));
     QVERIFY(error.contains(QStringLiteral("storage admission")));
@@ -1312,7 +1313,7 @@ void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
     QVERIFY(!model.beginTransaction({1}).isValid());
     kisDrainPageStoreReclamation(); // Partial paid tree drains even under the same pressure.
     QCOMPARE(live(), before + bytes);
-    kisFreeMutationStorage(parent.get(), filler, bytes, 1); filler = nullptr;
+    freeTestStoragePressure(parent.get(), filler, bytes, 1); filler = nullptr;
     QVERIFY2(model.initialize(initial, &error), qPrintable(error));
     const auto root = model.captureCommittedRoot();
     QCOMPARE(root.pageCount(), initial.manifest.size());
@@ -1390,8 +1391,8 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
     const auto before = live();
     const quint64 headroom = kind == 4 ? quint64(2 * pages) * sizeof(KisPageVersion) + 4096 : kind == 5 ? 2048 : 0;
     const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
-    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) freeTestStoragePressure(parent.get(), filler, bytes, 1); });
     QString error;
     if (kind == 0) QVERIFY(!model.beginTransaction({1}, &error).isValid());
     else if (kind == 1) { QVERIFY(!model.captureRetainedRoot().isValid()); QVERIFY(model.validateRetainedSnapshot(retained)); }
@@ -1407,7 +1408,7 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
     if (tx.isValid()) QCOMPARE(model.activeTransaction(tx.id), tx);
     kisDrainPageStoreReclamation();
     QCOMPARE(live(), before + bytes);
-    kisFreeMutationStorage(parent.get(), filler, bytes, 1); filler = nullptr;
+    freeTestStoragePressure(parent.get(), filler, bytes, 1); filler = nullptr;
     if (kind == 0) {
         const auto next = model.beginTransaction({1}); QVERIFY(next.isValid());
         QVERIFY(model.abort(tx)); QVERIFY(model.abort(next));
@@ -1422,8 +1423,8 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
         if (kind == 2) { restore = model.prepareRestore(retained, nullptr); QVERIFY(restore.isValid()); }
         else { commit = model.prepareCommit(tx, nullptr); QVERIFY(commit.isValid()); }
         const size_t installBytes = size_t(limits.metadataArenaBytes - live());
-        void *installPressure = kisAllocateMutationStorage(parent.get(), installBytes, 1);
-        const auto unfill = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), installPressure, installBytes, 1); });
+        void *installPressure = allocateTestStoragePressure(parent.get(), installBytes, 1);
+        const auto unfill = qScopeGuard([&] { freeTestStoragePressure(parent.get(), installPressure, installBytes, 1); });
         const auto result = kind == 2 ? model.installRestore(std::move(restore), nullptr, nullptr)
                                      : model.installCommit(std::move(commit), nullptr, nullptr);
         QVERIFY(result.isCommitted());
@@ -1474,8 +1475,8 @@ void KisPageStoreReferenceTest::epochTreeTailAtCapacity()
     const auto finish = qScopeGuard([&] { if (paused) resume.release(); kisDrainPageStoreReclamation(); });
     QVERIFY(entered.tryAcquire(1, 5000));
     const size_t bytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
-    const auto free = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, bytes, 1); });
     root = {};
     QCOMPARE(kisPageTreeReclamationStatistics().foregroundNodeDestructions, before.foregroundNodeDestructions);
     QVERIFY(live() - bytes >= quint64(count) * sizeof(KisPageVersion)); // Actual nodes remain charged while blocked.
@@ -2370,8 +2371,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     // selected large real capacity refuses. All partial charges must unwind.
     const quint64 headroom = refusal ? 2048 : 0;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
-    const auto freeFiller = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { if (filler) freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
     QCOMPARE(model.activeTransaction(tx.id), tx); // Native queries export no arrays.
     QVERIFY(model.preparePublication(original)); // Identical full facts reuse the original storage.
@@ -2380,7 +2381,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QVERIFY(error.contains(QStringLiteral("storage admission")));
     QCOMPARE(model.activeTransaction(tx.id), tx);
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
-    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
+    freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     QCOMPARE(live(), acceptedBytes);
     const auto refused = model.transaction(tx.id);
     QCOMPARE(refused.changes, accepted.changes);
@@ -2391,8 +2392,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QVERIFY(candidate.isValid());
     const auto preparedBytes = live();
     const size_t installFillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *installFiller = kisAllocateMutationStorage(parent.get(), installFillerBytes, 1);
-    const auto freeInstallFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), installFiller, installFillerBytes, 1); });
+    void *installFiller = allocateTestStoragePressure(parent.get(), installFillerBytes, 1);
+    const auto freeInstallFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), installFiller, installFillerBytes, 1); });
     if (complete) QVERIFY(model.preparePublication(changed)); // Preserve the prepared root's revision.
     QVERIFY(model.installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
     QCOMPARE(live(), limits.metadataArenaBytes);
@@ -2467,7 +2468,8 @@ void KisPageStoreReferenceTest::epochTransactionPreparationRevalidatesConcurrent
     first.join(); second.join();
     QCOMPARE(int(accepted[0]) + int(accepted[1]), 1);
     QVERIFY(!errors[accepted[0] ? 1 : 0].isEmpty());
-    const auto bytes = quint64(input.proofs.size()) * sizeof(KisPageVersion);
+    const auto bytes = kisPageStorageAllocationBytes(
+        size_t(input.proofs.size()) * sizeof(KisPageVersion), alignof(KisPageVersion));
     QVERIFY(live() - before >= bytes && live() - before < bytes + 512);
     QCOMPARE(model.transaction(tx.id).changes.size(), input.proofs.size());
     QVERIFY(model.abort(tx));
@@ -3903,8 +3905,8 @@ void KisPageStoreReferenceTest::metadataReadProtectionAtCapacity()
     // Fill after preparation: paid candidate arrays need transient headroom.
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - budget.usage()
         .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam);
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
              limits.metadataArenaBytes);
     QCOMPARE(coordinator.footprint().overflowArena.freeSlots, quint64(0));
@@ -4258,15 +4260,15 @@ void KisPageStoreReferenceTest::metadataReadCleanupAfterController()
     parent = lifetime.lock();
     QVERIFY(parent);
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
-    auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+    auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     if (explicitClear) { cleanup->clear(); QVERIFY(cleanup->isEmpty()); cleanup->clear(); }
     else cleanup.reset();
     QCOMPARE(live(), baseline + fillerBytes);
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
     freeFiller.dismiss();
-    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1);
+    freeTestStoragePressure(parent.get(), filler, fillerBytes, 1);
     QCOMPARE(live(), baseline);
     parent.reset();
     QVERIFY(lifetime.expired());
@@ -4382,16 +4384,16 @@ void KisPageStoreReferenceTest::reclamationTaskRejectedPreparation()
     };
     const quint64 baseline = live();
     const size_t remaining = size_t(limits.metadataArenaBytes - baseline);
-    void *filler = kisAllocateMutationStorage(&budget, remaining, 1);
+    void *filler = allocateTestStoragePressure(&budget, remaining, 1);
     const auto releaseFiller = qScopeGuard([&] {
-        if (filler) kisFreeMutationStorage(&budget, filler, remaining, 1);
+        if (filler) freeTestStoragePressure(&budget, filler, remaining, 1);
     });
     bool invoked = false, finished = false;
     QVERIFY_EXCEPTION_THROWN(kisSchedulePageStoreReclamation([&] { invoked = true; }, &budget,
         +[](void *context) { *static_cast<bool *>(context) = true; }, &finished), std::bad_alloc);
     QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY(!invoked && !finished);
-    kisFreeMutationStorage(&budget, std::exchange(filler, nullptr), remaining, 1);
+    freeTestStoragePressure(&budget, std::exchange(filler, nullptr), remaining, 1);
     struct RejectMove {
         RejectMove() = default;
         RejectMove(RejectMove &&) { throw std::bad_alloc(); }
@@ -4440,10 +4442,10 @@ void KisPageStoreReferenceTest::preparedReclamationRunsAtCapacity()
     const quint64 taskBytes = live() - baseline;
     QVERIFY(taskBytes >= sizeof(Function));
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
     const auto release = qScopeGuard([&] {
         kisDrainPageStoreReclamation();
-        kisFreeMutationStorage(&budget, filler, fillerBytes, 1);
+        freeTestStoragePressure(&budget, filler, fillerBytes, 1);
     });
     QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY_THROWS_EXCEPTION(std::bad_alloc,
@@ -4483,8 +4485,8 @@ void KisPageStoreReferenceTest::preparedReadinessAtCapacity()
     QVERIFY(subscription.isValid());
     const quint64 preparedBytes = live();
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     for (int i = 0; i < 64; ++i) { auto retained = callback; retained(); }
     QCOMPARE(copies, 0);
@@ -4532,8 +4534,8 @@ void KisPageStoreReferenceTest::readinessRetainsOriginalPayer()
         QCOMPARE(registry.watchTerminal(ticket, KisPageReadinessCallback([&] { ++calls; }, &sibling), &second),
                  KisPageReadinessStatus::Waiting);
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
-        const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+        void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+        const auto release = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY(registry.complete(ticket, KisCompletionStatus::Succeeded));
         QCOMPARE(calls, 2);
@@ -4581,8 +4583,8 @@ void KisPageStoreReferenceTest::preparedDeadlineRearmsAtCapacity()
         return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     for (int i = 1; i <= 32; ++i) {
         QVERIFY(delay.arm(1));
@@ -4657,9 +4659,9 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
         QVERIFY(sibling.configureSharedNonPayloadBudget(parent));
         auto storage = KisMutationStorageAllocator<int>::retained(&sibling);
         const size_t remaining = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(parent.get(), remaining, 1);
+        void *filler = allocateTestStoragePressure(parent.get(), remaining, 1);
         const auto release = qScopeGuard([&] {
-            kisFreeMutationStorage(parent.get(), filler, remaining, 1);
+            freeTestStoragePressure(parent.get(), filler, remaining, 1);
         });
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY_EXCEPTION_THROWN(storage.allocate(1), std::bad_alloc);
@@ -4790,8 +4792,8 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         QCOMPARE(before.live.cpuRam, oneCapacityBatch + 63 * pageNodeBytes);
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - before.live.cpuRam);
-        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+        const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
                  limits.metadataArenaBytes);
         const auto rejected = pageVersion(64, 1);
@@ -4850,8 +4852,8 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     qInfo() << "BR1_METADATA_CONFIGURATION_BYTES" << shards << requiredBytes;
     const quint64 headroom = firstAllocation ? 1 : requiredBytes - 1;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline - headroom);
-    char *filler = storage.allocate(fillerBytes);
-    auto releaseFiller = qScopeGuard([&] { storage.deallocate(filler, fillerBytes); });
+    auto *filler = allocateTestStoragePressure(storage, fillerBytes);
+    auto releaseFiller = qScopeGuard([&] { freeTestStoragePressure(filler); });
     const auto filled = live();
     KisPageMetadataCoordinator metadata;
     metadata.attachBackingBudget(budget);
@@ -4882,7 +4884,7 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
             QCOMPARE(bucket.reserved.cpuRam, quint64(0));
     }
     releaseFiller.dismiss();
-    storage.deallocate(filler, fillerBytes);
+    freeTestStoragePressure(filler);
     QCOMPARE(live(), baseline);
     QVERIFY(metadata.configure(shards));
     QCOMPARE(live(), baseline + requiredBytes);
@@ -5001,8 +5003,8 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         QCOMPARE(live(), original);
         QVERIFY(bytes > 1);
         const size_t shortFill = size_t(limits.metadataArenaBytes - original - bytes + 1);
-        char *filler = storage.allocate(shortFill);
-        auto release = qScopeGuard([&] { storage.deallocate(filler, shortFill); });
+        auto *filler = allocateTestStoragePressure(storage, shortFill);
+        auto release = qScopeGuard([&] { freeTestStoragePressure(filler); });
         const auto filled = live();
         Arena::PreparedDirectory next(storage);
         QVERIFY_EXCEPTION_THROWN(next.prepare(arena.directoryCapacityForBlocks(1)), std::bad_alloc);
@@ -5011,13 +5013,13 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         QCOMPARE(*address, 19);
         QCOMPARE(arena.statistics().directoryEntries, quint64(1));
         release.dismiss();
-        storage.deallocate(filler, shortFill);
+        freeTestStoragePressure(filler);
         next.prepare(arena.directoryCapacityForBlocks(1));
         auto second = Arena::prepareBlock();
         const auto prepared = live();
         const size_t fullFill = size_t(limits.metadataArenaBytes - prepared);
-        filler = storage.allocate(fullFill);
-        auto releaseFull = qScopeGuard([&] { storage.deallocate(filler, fullFill); });
+        filler = allocateTestStoragePressure(storage, fullFill);
+        auto releaseFull = qScopeGuard([&] { freeTestStoragePressure(filler); });
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY(arena.installPreparedDirectory(&next, 1));
         QVERIFY(arena.attachPreparedBlock(&second));
@@ -5026,7 +5028,7 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         QCOMPARE(arena.get(id), address);
         QCOMPARE(*address, 19);
         releaseFull.dismiss();
-        storage.deallocate(filler, fullFill);
+        freeTestStoragePressure(filler);
         next = Arena::PreparedDirectory(storage); // Retired array is freed outside the gate.
 
         Arena::PreparedDirectory stale(storage), competitor(storage);
@@ -5604,7 +5606,7 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
             if (d.fill) {
                 const auto live = d.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
                 d.bytes = size_t(d.limit - live);
-                d.filler = kisAllocateMutationStorage(d.budget, d.bytes, 1);
+                d.filler = allocateTestStoragePressure(d.budget, d.bytes, 1);
             }
             return true;
         }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
@@ -5660,10 +5662,10 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     bool accepted = false;
     for (size_t headroom : {size_t(0), size_t(512), size_t(2048), size_t(8192), size_t(65536)}) {
         const size_t bytes = size_t(limits.metadataArenaBytes - live()) - headroom;
-        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
+        void *filler = allocateTestStoragePressure(&budget, bytes, 1);
         const auto free = qScopeGuard([&] {
-            kisFreeMutationStorage(&budget, filler, bytes, 1);
-            kisFreeMutationStorage(&budget, std::exchange(debt.filler, nullptr), debt.bytes, 1);
+            freeTestStoragePressure(&budget, filler, bytes, 1);
+            freeTestStoragePressure(&budget, std::exchange(debt.filler, nullptr), debt.bytes, 1);
         });
         const auto before = coordinator.metrics();
         const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
@@ -5722,8 +5724,8 @@ void KisPageStoreReferenceTest::capturedProtectionAndExactQueryAtCapacity()
     };
     const quint64 before = live();
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - before);
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     KisPageTransition claim;
     claim.kind = KisPageTransitionKind::RetainCapturedVersion;
@@ -5840,8 +5842,8 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
         return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-    const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     const auto pressure = budget.usage().backpressureCount;
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -6336,9 +6338,9 @@ void KisPageStoreReferenceTest::publicationDirectoryStorageLifetime()
     QCOMPARE(heads.size(), size_t(1));
     const auto storage = live() - before; QVERIFY(storage > 0);
     const auto fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
     {
-        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+        const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
         QCOMPARE(live(), limits.metadataArenaBytes);
         KisPageMetadataCoordinator::PublicationInfo info;
         QVERIFY(metadata->queryPublication(page.key, page.versions.last().version, &info));
@@ -6628,17 +6630,21 @@ void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
         return owner.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
     const quint64 before = live(budget);
-    constexpr quint64 candidateRoom = 64 * 1024;
+    // The warm preparation measures its real allocation high-water capacity;
+    // the original 324-page body and 4 MiB hard limit stay unchanged.
+    const quint64 candidateRoom = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].peak.cpuRam
+        - live(*parent);
+    QVERIFY(candidateRoom > 0);
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live(*parent) - candidateRoom);
-    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
     auto candidate = prepare(); QVERIFY(candidate.isValid());
-    QVERIFY(live(budget) > before && live(budget) - before < candidateRoom);
+    QVERIFY(live(budget) > before && live(budget) - before <= candidateRoom);
     qInfo() << "BR1_DETACHMENT_CANDIDATE_BYTES" << live(budget) - before;
     QCOMPARE(metadata.footprint().pageActivities, quint64(324));
     const size_t remainingBytes = size_t(limits.metadataArenaBytes - live(*parent));
-    void *remaining = kisAllocateMutationStorage(parent.get(), remainingBytes, 1);
-    const auto releaseRemaining = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), remaining, remainingBytes, 1); });
+    void *remaining = allocateTestStoragePressure(parent.get(), remainingBytes, 1);
+    const auto releaseRemaining = qScopeGuard([&] { freeTestStoragePressure(parent.get(), remaining, remainingBytes, 1); });
     QCOMPARE(live(*parent), limits.metadataArenaBytes);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (install) QVERIFY(metadata.installMutation(std::move(candidate), tx, nullptr, &cleanup));
@@ -6722,9 +6728,9 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     const quint64 before = childLive();
     const auto beforeIndexes = metadata->footprint().owningCapacityBytes;
     size_t fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
-    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
     const auto freeFiller = qScopeGuard([&] {
-        if (filler) kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1);
+        if (filler) freeTestStoragePressure(parent.get(), filler, fillerBytes, 1);
     });
     QCOMPARE(parentLive(), limits.metadataArenaBytes);
     auto refused = prepare(); QVERIFY(!refused.isValid()); QVERIFY(!refused.needsReprepare());
@@ -6732,7 +6738,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     QCOMPARE(metadata->footprint().pageActivities, quint64(0));
     KisPageStateSnapshot actual;
     QVERIFY(metadata->pageSnapshot(page.key, &actual)); comparePageRecords(actual, page);
-    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
+    freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     auto candidate = prepare(); QVERIFY(candidate.isValid());
     QVERIFY(childLive() > before);
     QCOMPARE(metadata->footprint().pageActivities, quint64(1));
@@ -6758,7 +6764,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         if (kind == 3) expected = KisPageStateMachine().apply(page, transition);
     }
     fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
-    filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
     QCOMPARE(parentLive(), limits.metadataArenaBytes);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     const bool success = outcome != 1 && (outcome != 2 || kind == 3);
@@ -6780,7 +6786,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
         QCOMPARE(metadata->footprint().overflowArena.outstandingReservations, quint64(0));
     } // A rejected candidate retains its reservations until deferred cleanup.
-    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
+    freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     if (outcome == 3) {
         metadata.reset(); budget.reset();
         QVERIFY(parentLive() > parentBaseline); // Original arenas and control storage remain physical.
@@ -7257,8 +7263,8 @@ void KisPageStoreReferenceTest::recoverableWritePreparationHonorsBudget()
         QVERIFY(metadata.registerPage(page));
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam);
-        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+        const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
                  limits.metadataArenaBytes);
         for (int attempt = 0; attempt < 2; ++attempt) {
@@ -7867,8 +7873,8 @@ void KisPageStoreReferenceTest::admissionStorageRevalidatesGrowth()
         QCOMPARE(*table.find(2), quint64(1234));
         const auto preparedBytes = bytes();
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - preparedBytes);
-        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
-        const auto releaseFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+        const auto releaseFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
         for (int churn = 0; churn < 6; ++churn) {
             // More than the former three attempts, at actual hard capacity.
             // Rebuild retains one candidate and captures current values.
@@ -7882,7 +7888,7 @@ void KisPageStoreReferenceTest::admissionStorageRevalidatesGrowth()
         QVERIFY(table.capture(stale, 1)); stale.build();
         QVERIFY(table.install(stale, 1));
         QCOMPARE(*table.find(2), quint64(1234));
-        kisFreeMutationStorage(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+        freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
         stale = {};
         QVERIFY(bytes() > controllerStorage && bytes() < preparedBytes);
         for (quint64 i = 5; i <= 1000; ++i) {
@@ -8187,9 +8193,9 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     QVERIFY2(nativeReservation.isValid(), qPrintable(error));
     QVERIFY(metadataLive() >= inputBytes); // A compact copy would lose this large original paid capacity.
     const auto fillerBytes = size_t(limits.metadataArenaBytes - metadataLive());
-    void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
     {
-        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
         QCOMPARE(metadataLive(), limits.metadataArenaBytes);
         owner.commitBackingChanges(std::move(nativeReservation));
         QCOMPARE(owner.backingClass(current), KisBackingBudgetClass::RetainedHistory);
@@ -9717,8 +9723,8 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     proof.providerValidationStamp = 77; // Refusal must not change the caller's output.
     {
         const size_t bytes = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
-        const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, bytes, 1); });
+        void *filler = allocateTestStoragePressure(&budget, bytes, 1);
+        const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, bytes, 1); });
         QVERIFY(!owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor,
                                        producerCompletion, &proof, &error));
         QVERIFY(error.contains(QStringLiteral("proof storage")));
@@ -9737,12 +9743,12 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     quint64 proofBytes = 0;
     const auto clearValidationPressure = qScopeGuard([&] {
         provider->beforeValidate = {};
-        kisFreeMutationStorage(&budget, sealFiller, sealFillerBytes, 1);
+        freeTestStoragePressure(&budget, sealFiller, sealFillerBytes, 1);
     });
     provider->beforeValidate = [&] {
         proofBytes = live() - baseline;
         sealFillerBytes = size_t(limits.metadataArenaBytes - live());
-        sealFiller = kisAllocateMutationStorage(&budget, sealFillerBytes, 1);
+        sealFiller = allocateTestStoragePressure(&budget, sealFillerBytes, 1);
     };
     QVERIFY2(
         owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor, producerCompletion, &proof, &error),
@@ -9751,7 +9757,7 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     QVERIFY(proofBytes > 0);
     QCOMPARE(live(), limits.metadataArenaBytes); // Prepared node installs after provider validation at capacity.
     provider->beforeValidate = {};
-    kisFreeMutationStorage(&budget, std::exchange(sealFiller, nullptr), sealFillerBytes, 1);
+    freeTestStoragePressure(&budget, std::exchange(sealFiller, nullptr), sealFillerBytes, 1);
     QCOMPARE(live(), baseline + proofBytes);
     KisPreparedPageProof extra;
     QVERIFY(owner.sealPreparedPage(metadata, writeVersion, transaction.id, descriptor,
@@ -9760,8 +9766,8 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     QCOMPARE(live(), baseline + 2 * proofBytes);
     {
         const size_t bytes = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(&budget, bytes, 1);
-        const auto release = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, bytes, 1); });
+        void *filler = allocateTestStoragePressure(&budget, bytes, 1);
+        const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, bytes, 1); });
         QVERIFY(owner.ownsPreparedPageProof(extra));
         QVERIFY(owner.validatePreparedPage(metadata, extra, descriptor, &error));
         QVERIFY(owner.revokePreparedPage(extra));

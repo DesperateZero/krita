@@ -25,6 +25,12 @@
 #include <mutex>
 #include <utility>
 
+#ifdef Q_OS_DARWIN
+#include <malloc/malloc.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
 #ifndef _MSC_VER
 #include <cxxabi.h>
 #endif
@@ -76,11 +82,30 @@ ProcessStorageState &processStorage()
     static ProcessStorageState state;
     return state;
 }
+#ifndef Q_OS_DARWIN
 void freePhysicalStorage(void *data, size_t alignment) noexcept
 {
     if (alignment > alignof(std::max_align_t)) ::operator delete(data, std::align_val_t(alignment));
     else ::operator delete(data);
 }
+#endif
+
+#ifdef Q_OS_DARWIN
+// Keep fixed native size classes on the common path. Large-cache reuse and
+// memalign can return more than malloc_good_size(). Align small payloads inside
+// an ordinary prepaid size class; use an exact mapping above those classes.
+// Both carry their release facts in the original allocation.
+struct PageStorageMapping { void *base; size_t bytes; };
+bool pageStorageHasPrefix(size_t bytes, size_t alignment) noexcept
+{
+    return bytes > 64 * 1024 || alignment > alignof(std::max_align_t);
+}
+#else
+size_t pageStoragePrefix(size_t alignment) noexcept
+{
+    return std::max(sizeof(size_t), alignment);
+}
+#endif
 
 // Caller keeps the original owner and its operation alive across unlocks.
 // Both callbacks run under the owner gate. required() revalidates the complete
@@ -407,10 +432,11 @@ KisBackingBudgetController::~KisBackingBudgetController()
     // State destruction above mirrors its metadata release to the parent.
     // Only then may the child identity satisfy the zero-live unregister rule.
     if (m_slotCapacity) {
+        const size_t bytes = kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot));
         m_slots.reset();
         releaseLive(KisBackingBudgetClass::MetadataArena,
                     KisPageAccessDomain::CpuRam,
-                    quint64(m_slotCapacity) * sizeof(ReservationSlot));
+                    bytes);
     }
     if (m_storageOwner) {
         m_storageOwner->detach(m_sharedNonPayloadBudget,
@@ -565,17 +591,22 @@ KisPageReadinessStatus KisBackingBudgetController::waitForChange(
         };
     };
     bool needsContext = false;
+    using DispatchTask = KisPageReclamationTask<decltype(dispatch(nullptr))>;
     const quint64 waiterFixedBytes =
-        sizeof(KisBackingBudgetWaitContext) + sizeof(KisBackingBudgetWaitState)
-        + KisBackingBudgetWaitContext::Limit * sizeof(KisBackingBudgetWaitStatePointer)
-        + sizeof(KisPageReclamationWakeState) + sizeof(KisMutationStorageOwner)
-        + sizeof(KisPageReclamationTask<decltype(dispatch(nullptr))>)
+        kisPageStorageAllocationBytes(sizeof(KisBackingBudgetWaitContext), alignof(KisBackingBudgetWaitContext))
+        + kisPageStorageAllocationBytes(sizeof(KisBackingBudgetWaitState), alignof(KisBackingBudgetWaitState))
+        + kisPageStorageAllocationBytes(KisBackingBudgetWaitContext::Limit * sizeof(KisBackingBudgetWaitStatePointer),
+                                        alignof(KisBackingBudgetWaitStatePointer))
+        + kisPageStorageAllocationBytes(sizeof(KisPageReclamationWakeState), alignof(KisPageReclamationWakeState))
+        + kisPageStorageAllocationBytes(sizeof(KisMutationStorageOwner), alignof(KisMutationStorageOwner))
+        + kisPageStorageAllocationBytes(sizeof(DispatchTask), alignof(DispatchTask))
         + KisPageReadinessCallback::storageBytesFor<decltype(wakeDispatch({}))>()
         + notify.storageBytes();
     {
         QMutexLocker lock(&m_mutex);
-        const auto controlBytes = waiterFixedBytes
-            + quint64(std::max(quint32(1), m_slotCapacity)) * sizeof(ReservationSlot);
+        const auto controlBytes = waiterFixedBytes + (m_slots
+            ? kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot))
+            : kisPageStorageAllocationBytes(sizeof(ReservationSlot), alignof(ReservationSlot)));
         if (!fitsLocked(delta, aggregate, durable, true, controlBytes)) {
             KisPageStoreDetail::setError(
                 error, QStringLiteral("budget request exceeds capacity even with no other users"));
@@ -664,8 +695,7 @@ KisPageReadinessStatus KisBackingBudgetController::waitForChange(
         lock.relock();
         if (!prepared) return KisPageReadinessStatus::Unavailable;
     }
-    const auto controlBytes = waiterFixedBytes
-        + quint64(std::max(quint32(1), m_slotCapacity)) * sizeof(ReservationSlot);
+    const auto controlBytes = waiterFixedBytes + kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot));
     if (!fitsLocked(delta, aggregate, durable, true, controlBytes)) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("budget request exceeds capacity even with no other users"));
@@ -961,10 +991,11 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
     }
     const quint32 capacity = m_slotCapacity
         ? quint32(std::min<quint64>(quint64(m_slotCapacity) * 2, maximum)) : 1;
-    const quint64 bytes = quint64(capacity) * sizeof(ReservationSlot);
-    if (bytes > quint64(std::numeric_limits<qint64>::max())
-        || bytes > std::numeric_limits<size_t>::max()) return false;
-    const quint64 oldBytes = quint64(m_slotCapacity) * sizeof(ReservationSlot);
+    const quint64 payloadBytes = quint64(capacity) * sizeof(ReservationSlot);
+    if (payloadBytes > std::numeric_limits<size_t>::max()) return false;
+    const size_t bytes = kisPageStorageAllocationBytes(size_t(payloadBytes), alignof(ReservationSlot));
+    if (bytes > size_t(std::numeric_limits<qint64>::max())) return false;
+    const size_t oldBytes = kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot));
     KisBackingBudgetDelta storageDelta;
     storageDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(bytes);
     std::array<quint64, budgetClassCount> aggregate{};
@@ -1013,7 +1044,8 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
     lock.unlock();
     decltype(m_slots) candidate;
     try {
-        candidate.reset(static_cast<ReservationSlot *>(::operator new(size_t(bytes))));
+        candidate.reset(static_cast<ReservationSlot *>(kisAllocatePageStorage(
+            size_t(payloadBytes), alignof(ReservationSlot), bytes)));
         std::uninitialized_value_construct_n(candidate.get(), capacity);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage allocation failed"));
@@ -1526,6 +1558,106 @@ void KisBackingBudgetController::release(quint64 cookie) noexcept
     commitRetaining(cookie, {}, {});
 }
 
+size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept
+{
+    constexpr size_t maximum = size_t(std::numeric_limits<qint64>::max());
+    if (!alignment || (alignment & (alignment - 1))) return size_t(-1);
+    if (bytes > maximum) return size_t(-1);
+    size_t capacity = std::max(bytes, size_t(1));
+#ifdef Q_OS_DARWIN
+    if (pageStorageHasPrefix(bytes, alignment)) {
+        const size_t mappingAlignment = std::max(alignment, alignof(PageStorageMapping));
+        if (mappingAlignment > maximum - sizeof(PageStorageMapping)) return size_t(-1);
+        const size_t prefix = sizeof(PageStorageMapping) + mappingAlignment - 1;
+        if (bytes > maximum - prefix) return size_t(-1);
+        capacity = bytes + prefix;
+    }
+    if (capacity > 64 * 1024) {
+        const long pageSize = sysconf(_SC_PAGESIZE);
+        if (pageSize <= 0 || capacity > maximum - size_t(pageSize - 1)) return size_t(-1);
+        return (capacity + size_t(pageSize - 1)) / size_t(pageSize) * size_t(pageSize);
+    }
+    if (capacity > maximum - (alignment - 1)) return size_t(-1);
+    capacity = (capacity + alignment - 1) & ~(alignment - 1);
+    const size_t rounded = malloc_good_size(capacity);
+    if (rounded < capacity || rounded > maximum) return size_t(-1);
+    capacity = rounded;
+#else
+    const size_t prefix = pageStoragePrefix(alignment);
+    if (prefix > maximum || bytes > maximum - prefix) return size_t(-1);
+    capacity = bytes + prefix;
+#endif
+    return capacity;
+}
+
+void *kisAllocatePageStorage(size_t bytes, size_t alignment, size_t capacity)
+{
+    if (!alignment || (alignment & (alignment - 1))
+        || capacity > size_t(std::numeric_limits<qint64>::max())
+        || capacity != kisPageStorageAllocationBytes(bytes, alignment)) throw std::bad_alloc();
+#ifdef Q_OS_DARWIN
+    if (pageStorageHasPrefix(bytes, alignment)) {
+        void *raw = capacity > 64 * 1024
+            ? mmap(nullptr, capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0)
+            : ::operator new(capacity);
+        if (raw == MAP_FAILED) throw std::bad_alloc();
+        const size_t mappingAlignment = std::max(alignment, alignof(PageStorageMapping));
+        const uintptr_t start = reinterpret_cast<uintptr_t>(raw) + sizeof(PageStorageMapping);
+        const uintptr_t aligned = (start + mappingAlignment - 1) & ~(mappingAlignment - 1);
+        auto *data = reinterpret_cast<std::byte *>(aligned);
+        ::new (data - sizeof(PageStorageMapping)) PageStorageMapping{raw, capacity};
+        return data;
+    }
+    return ::operator new(capacity);
+#else
+    const size_t prefix = pageStoragePrefix(alignment);
+    auto *raw = static_cast<std::byte *>(alignment > alignof(std::max_align_t)
+        ? ::operator new(capacity, std::align_val_t(alignment)) : ::operator new(capacity));
+    ::new (raw) size_t(capacity);
+    return raw + prefix;
+#endif
+}
+
+size_t kisPageStorageBytes(const void *data, size_t alignment) noexcept
+{
+    if (!data) return 0;
+#ifdef Q_OS_DARWIN
+    if (alignment <= alignof(std::max_align_t)) {
+        const size_t capacity = malloc_size(data);
+        if (capacity) return capacity;
+    }
+    return reinterpret_cast<const PageStorageMapping *>(
+        static_cast<const std::byte *>(data) - sizeof(PageStorageMapping))->bytes;
+#else
+    const auto *raw = static_cast<const std::byte *>(data) - pageStoragePrefix(alignment);
+    return *reinterpret_cast<const size_t *>(raw);
+#endif
+}
+
+size_t kisFreePageStorage(void *data, size_t alignment) noexcept
+{
+    if (!data) return 0;
+    const size_t capacity = kisPageStorageBytes(data, alignment);
+#ifdef Q_OS_DARWIN
+    if (alignment > alignof(std::max_align_t) || !malloc_size(data)) {
+        const auto mapping = *reinterpret_cast<const PageStorageMapping *>(
+            static_cast<const std::byte *>(data) - sizeof(PageStorageMapping));
+        if (malloc_size(mapping.base)) {
+            ::operator delete(mapping.base);
+            return capacity;
+        }
+        const int result = munmap(mapping.base, mapping.bytes);
+        Q_ASSERT(result == 0);
+        return result == 0 ? capacity : 0;
+    }
+    ::operator delete(data);
+#else
+    auto *raw = static_cast<std::byte *>(data) - pageStoragePrefix(alignment);
+    freePhysicalStorage(raw, alignment);
+#endif
+    return capacity;
+}
+
 quint64 kisPageProcessStorageBytes() noexcept
 {
     return processStorage().bytes.load(std::memory_order_acquire);
@@ -1570,12 +1702,12 @@ void kisReservePageProcessStorage(size_t bytes)
 
 void *kisAllocatePageProcessStorage(size_t bytes, size_t alignment)
 {
-    kisReservePageProcessStorage(bytes);
+    const size_t capacity = kisPageStorageAllocationBytes(bytes, alignment);
+    kisReservePageProcessStorage(capacity);
     try {
-        return alignment > alignof(std::max_align_t)
-            ? ::operator new(bytes, std::align_val_t(alignment)) : ::operator new(bytes);
+        return kisAllocatePageStorage(bytes, alignment, capacity);
     } catch (...) {
-        kisReleasePageProcessStorage(bytes);
+        kisReleasePageProcessStorage(capacity);
         throw;
     }
 }
@@ -1597,11 +1729,11 @@ void kisReleasePageProcessStorage(size_t bytes) noexcept
     }
 }
 
-void kisFreePageProcessStorage(void *data, size_t bytes, size_t alignment) noexcept
+void kisFreePageProcessStorage(void *data, size_t, size_t alignment) noexcept
 {
     if (!data) return;
-    freePhysicalStorage(data, alignment);
-    kisReleasePageProcessStorage(bytes);
+    const size_t capacity = kisFreePageStorage(data, alignment);
+    kisReleasePageProcessStorage(capacity);
 }
 
 std::shared_ptr<KisBackingBudgetController> kisAcquirePageStoreProcessBudget(
@@ -1677,19 +1809,12 @@ std::shared_ptr<KisBackingBudgetController> kisAcquirePageStoreBootstrapBudget(Q
 
 void *KisPageProcessStorageObject::operator new(size_t bytes)
 {
-    constexpr size_t prefix = alignof(std::max_align_t);
-    if (bytes > size_t(std::numeric_limits<qint64>::max()) - prefix) throw std::bad_alloc();
-    auto *raw = static_cast<std::byte *>(kisAllocatePageProcessStorage(bytes + prefix, prefix));
-    ::new (raw) size_t(bytes + prefix);
-    return raw + prefix;
+    return kisAllocatePageProcessStorage(bytes, alignof(std::max_align_t));
 }
 
 void KisPageProcessStorageObject::operator delete(void *data) noexcept
 {
-    if (!data) return;
-    constexpr size_t prefix = alignof(std::max_align_t);
-    auto *raw = static_cast<std::byte *>(data) - prefix;
-    kisFreePageProcessStorage(raw, *reinterpret_cast<size_t *>(raw), prefix);
+    kisFreePageProcessStorage(data, 0, alignof(std::max_align_t));
 }
 
 std::shared_ptr<std::pmr::memory_resource> kisPageProcessMemoryResource()
@@ -1724,20 +1849,21 @@ KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *bud
 
 void *KisMutationStorageOwner::allocate(size_t bytes, size_t alignment)
 {
+    const size_t capacity = kisPageStorageAllocationBytes(bytes, alignment);
     QMutexLocker lock(&m_gate);
-    if (!m_controller || !m_accepting || bytes > std::numeric_limits<quint64>::max() - m_bytes)
+    if (!m_controller || !m_accepting || capacity > std::numeric_limits<quint64>::max() - m_bytes)
         throw std::bad_alloc();
     void *data = kisAllocateMutationStorage(m_controller, bytes, alignment);
-    m_bytes += bytes;
+    m_bytes += kisPageStorageBytes(data, alignment);
     ref(); // One accounting-lifetime reference per real allocation.
     return data;
 }
 
-void KisMutationStorageOwner::deallocate(void *data, size_t bytes, size_t alignment) noexcept
+void KisMutationStorageOwner::deallocate(void *data, size_t, size_t alignment) noexcept
 {
     if (!data) return;
-    freePhysicalStorage(data, alignment);
-    releaseLiveCharge(bytes);
+    const size_t capacity = kisFreePageStorage(data, alignment);
+    releaseLiveCharge(capacity);
     deref();
 }
 
@@ -1757,7 +1883,7 @@ void KisMutationStorageOwner::releaseLiveCharge(quint64 bytes, KisBackingBudgetC
 {
     {
         QMutexLocker lock(&m_gate);
-        Q_ASSERT(m_bytes >= sizeof(KisMutationStorageOwner) + bytes);
+        Q_ASSERT(m_bytes >= kisPageStorageBytes(this, alignof(KisMutationStorageOwner)) + bytes);
         m_bytes -= bytes;
         if (m_controller)
             m_controller->releaseLive(budgetClass,
@@ -1785,14 +1911,15 @@ void KisMutationStorageOwner::stopAllocations() noexcept
 void KisMutationStorageOwner::deref() noexcept
 {
     if (m_references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
-    Q_ASSERT(!m_controller && m_bytes == sizeof(KisMutationStorageOwner));
+    const size_t capacity = kisPageStorageBytes(this, alignof(KisMutationStorageOwner));
+    Q_ASSERT(!m_controller && m_bytes == capacity);
     auto parent = std::move(m_parent);
     const quint64 child = m_child;
     this->~KisMutationStorageOwner();
-    ::operator delete(this);
+    kisFreePageStorage(this, alignof(KisMutationStorageOwner));
     if (parent) {
         parent->releaseSharedNonPayloadLive(child, KisPageAccessDomain::CpuRam,
-                                          sizeof(KisMutationStorageOwner));
+                                          capacity);
         parent->unregisterSharedNonPayloadChild(child);
     }
 }
@@ -1800,15 +1927,15 @@ void KisMutationStorageOwner::deref() noexcept
 void *kisAllocateMutationStorage(KisBackingBudgetController *budget, size_t bytes, size_t alignment)
 {
     if (!budget) return kisAllocatePageProcessStorage(bytes, alignment);
-    if (bytes > size_t(std::numeric_limits<qint64>::max()))
+    const size_t capacity = kisPageStorageAllocationBytes(bytes, alignment);
+    if (capacity > size_t(std::numeric_limits<qint64>::max()))
         throw std::bad_alloc();
     KisBackingBudgetDelta delta;
-    delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(bytes);
-    auto reservation = budget && bytes ? budget->reserve(delta, nullptr) : KisBackingBudgetReservation{};
-    if (budget && bytes && !reservation.isValid())
+    delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
+    auto reservation = budget->reserve(delta, nullptr);
+    if (!reservation.isValid())
         throw std::bad_alloc();
-    void *result = alignment > alignof(std::max_align_t)
-        ? ::operator new(bytes, std::align_val_t(alignment)) : ::operator new(bytes);
+    void *result = kisAllocatePageStorage(bytes, alignment, capacity);
     if (reservation.isValid())
         budget->commitReservation(std::move(reservation), delta);
     return result;
@@ -1821,9 +1948,8 @@ void kisFreeMutationStorage(KisBackingBudgetController *budget, void *data, size
         kisFreePageProcessStorage(data, bytes, alignment);
         return;
     }
-    freePhysicalStorage(data, alignment);
-    if (budget && bytes)
-        budget->releaseLive(KisBackingBudgetClass::MetadataArena, KisPageAccessDomain::CpuRam, quint64(bytes));
+    const size_t capacity = kisFreePageStorage(data, alignment);
+    budget->releaseLive(KisBackingBudgetClass::MetadataArena, KisPageAccessDomain::CpuRam, capacity);
 }
 
 KisMutationWriteSet::KisMutationWriteSet(KisBackingBudgetController *value)
@@ -2057,7 +2183,7 @@ void *KisPageStoreWriteReservation::operator new(size_t bytes, KisBackingBudgetC
     if (bytes > size_t(std::numeric_limits<qint64>::max()) - sizeof(Allocation)) throw std::bad_alloc();
     const size_t total = bytes + sizeof(Allocation);
     auto *allocation = static_cast<Allocation *>(kisAllocateMutationStorage(budget, total, alignof(Allocation)));
-    new (allocation) Allocation{budget, total, owner, release};
+    new (allocation) Allocation{budget, owner, release};
     retain(owner);
     return allocation + 1;
 }
@@ -2068,7 +2194,7 @@ void KisPageStoreWriteReservation::operator delete(void *data) noexcept
     auto *allocation = static_cast<Allocation *>(data) - 1;
     const auto value = *allocation;
     allocation->~Allocation();
-    kisFreeMutationStorage(value.budget, allocation, value.bytes, alignof(Allocation));
+    kisFreeMutationStorage(value.budget, allocation, 0, alignof(Allocation));
     value.release(value.owner);
 }
 
@@ -2448,7 +2574,9 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
             if (beforePinned) beforeBinding->releaseRead();
         }
     };
-    auto prepared = std::make_unique<Prepared>();
+    // Invocation-local storage needs no separate allocation. Reset below
+    // still destroys all owning members while the owner gate is open.
+    std::optional<Prepared> prepared(std::in_place);
     prepared->beforeProvider = ownerLedger->provider(before.provider, before.providerEpoch);
     // Even rejected metadata candidates can own real arena/index storage.
     // Destroy them, the before pin and provider references outside owner gates.

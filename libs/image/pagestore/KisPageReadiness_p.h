@@ -24,15 +24,15 @@ class KisPageReadinessCallback
         void (*destroy)(Data *) noexcept;
         Data *(*copy)(Data *, KisMutationStorageAllocator<std::byte>);
         KisMutationStorageAllocator<std::byte> storage;
-        size_t bytes;
-        Data(KisMutationStorageAllocator<std::byte> allocator, size_t size)
-            : storage(std::move(allocator)), bytes(size) {}
+        size_t bytes = 0;
+        explicit Data(KisMutationStorageAllocator<std::byte> allocator)
+            : storage(std::move(allocator)) {}
     };
     template<class Function> struct Capture final : Data {
         Function function;
         template<class Value>
         Capture(Value &&value, KisMutationStorageAllocator<std::byte> allocator)
-            : Data(std::move(allocator), sizeof(Capture)), function(std::forward<Value>(value))
+            : Data(std::move(allocator)), function(std::forward<Value>(value))
         {
             this->invoke = [](Data *data, const KisPageReadinessState *state) {
                 auto &function = static_cast<Capture *>(data)->function;
@@ -56,7 +56,11 @@ class KisPageReadinessCallback
         using Value = Capture<std::decay_t<Function>>;
         auto allocator = KisMutationStorageAllocator<Value>(storage);
         auto *data = allocator.allocate(1);
-        try { return ::new (data) Value(std::forward<Function>(function), std::move(storage)); }
+        try {
+            auto *value = ::new (data) Value(std::forward<Function>(function), std::move(storage));
+            value->bytes = kisPageStorageBytes(value, alignof(Value));
+            return value;
+        }
         catch (...) { allocator.deallocate(data, 1); throw; }
     }
 public:
@@ -92,8 +96,11 @@ public:
         prepared.m_data = m_data->copy(m_data, KisMutationStorageAllocator<std::byte>::retained(budget));
         swap(prepared);
     }
-    template<class Function> static constexpr size_t storageBytesFor() noexcept
-    { return sizeof(Capture<std::decay_t<Function>>); }
+    template<class Function> static size_t storageBytesFor() noexcept
+    {
+        using Value = Capture<std::decay_t<Function>>;
+        return kisPageStorageAllocationBytes(sizeof(Value), alignof(Value));
+    }
     size_t storageBytes() const noexcept { return m_data ? m_data->bytes : 0; }
     template<class T> KisMutationStorageAllocator<T> storageAllocator() const noexcept
     { return m_data ? KisMutationStorageAllocator<T>(m_data->storage) : KisMutationStorageAllocator<T>{}; }

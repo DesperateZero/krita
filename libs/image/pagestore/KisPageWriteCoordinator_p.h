@@ -343,7 +343,8 @@ private:
     // It never escapes into a caller or waiter and growth is serialized.
     ReservationSlot m_storageReservation;
     struct SlotStorageDeleter {
-        void operator()(ReservationSlot *storage) const noexcept { ::operator delete(storage); }
+        void operator()(ReservationSlot *storage) const noexcept
+        { kisFreePageStorage(storage, alignof(ReservationSlot)); }
     };
     std::unique_ptr<ReservationSlot[], SlotStorageDeleter> m_slots;
     quint32 m_slotCount = 0;
@@ -573,7 +574,6 @@ public:
 private:
     struct alignas(std::max_align_t) Allocation {
         KisBackingBudgetController *budget;
-        size_t bytes;
         void *owner;
         void (*release)(void *);
     };

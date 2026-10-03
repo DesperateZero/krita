@@ -119,6 +119,14 @@ private:
         Slot slots[SlotsPerBlock];
         std::unique_ptr<Block> nextReleased;
 
+        static void *operator new(size_t bytes)
+        {
+            return kisAllocatePageStorage(bytes, alignof(Block),
+                kisPageStorageAllocationBytes(bytes, alignof(Block)));
+        }
+        static void operator delete(void *data) noexcept
+        { kisFreePageStorage(data, alignof(Block)); }
+
         Block()
         {
             for (quint32 i = 0; i < SlotsPerBlock; ++i) {
@@ -235,7 +243,10 @@ public:
         }
         quint64 byteSize() const
         {
-            return quint64(m_blockCount) * blockByteSize();
+            quint64 bytes = 0;
+            for (const Block *block = m_blocks.get(); block; block = block->nextReleased.get())
+                bytes += kisPageStorageBytes(block, alignof(Block));
+            return bytes;
         }
 
         void append(ReleasedBlocks &&other) noexcept
@@ -290,11 +301,11 @@ public:
         return SlotsPerBlock;
     }
 
-    static constexpr quint64 blockByteSize()
+    static quint64 blockByteSize()
     {
-        // BlockBytes defines slot geometry. Admission and final release use
-        // the actual allocation request, including the intrusive release link.
-        return quint64(sizeof(Block));
+        // Slot geometry stays fixed. The original reservation also funds the
+        // retained prefix and allocator capacity before constructing a block.
+        return kisPageStorageAllocationBytes(sizeof(Block), alignof(Block));
     }
 
     bool canAttachBlocks(quint64 count) const
@@ -311,7 +322,11 @@ public:
 
     static PreparedBlock prepareBlock() noexcept
     {
-        return PreparedBlock(std::unique_ptr<Block>(new (std::nothrow) Block()));
+        try {
+            return PreparedBlock(std::unique_ptr<Block>(new Block()));
+        } catch (const std::bad_alloc &) {
+            return {};
+        }
     }
 
     quint64 directoryCapacityForBlocks(quint64 count) const
@@ -369,8 +384,10 @@ public:
 
     bool attachPreparedBlock(PreparedBlock *prepared)
     {
-        if (!prepared || !prepared->m_block || m_closed || blockByteSize() > m_maximumBytes
-            || m_statistics.allocatedBytes > m_maximumBytes - blockByteSize()) {
+        const quint64 bytes = prepared && prepared->m_block
+            ? kisPageStorageBytes(prepared->m_block.get(), alignof(Block)) : 0;
+        if (!bytes || m_closed || bytes > m_maximumBytes
+            || m_statistics.allocatedBytes > m_maximumBytes - bytes) {
             ++m_statistics.rejectedBlockAttaches;
             return false;
         }
@@ -411,7 +428,7 @@ public:
         entry.state = DirectoryState::Active;
         ++m_statistics.activeBlocks;
         ++m_statistics.attachedBlocks;
-        m_statistics.allocatedBytes += blockByteSize();
+        m_statistics.allocatedBytes += bytes;
         m_statistics.freeSlots += SlotsPerBlock;
         m_statistics.directoryEntries = quint64(m_directory.size());
         m_freeBlockHint = quint32(directoryIndex);
@@ -638,15 +655,16 @@ private:
     void detachEntry(DirectoryEntry &entry, ReleasedBlocks *released)
     {
         Q_ASSERT(released && entry.state == DirectoryState::Active && entry.usedSlots == 0);
+        const size_t bytes = kisPageStorageBytes(entry.block.get(), alignof(Block));
         if (released->isEmpty()) released->m_tail = entry.block.get();
         entry.block->nextReleased = std::move(released->m_blocks);
         released->m_blocks = std::move(entry.block);
         ++released->m_blockCount;
         --m_statistics.activeBlocks;
-        m_statistics.allocatedBytes -= blockByteSize();
+        m_statistics.allocatedBytes -= bytes;
         m_statistics.freeSlots -= entry.freeSlots;
         m_statistics.quarantinedSlots -= entry.quarantinedSlots;
-        m_statistics.releasedBytes += blockByteSize();
+        m_statistics.releasedBytes += bytes;
         entry.freeHead = InvalidOffset;
         entry.freeSlots = 0;
         entry.quarantinedSlots = 0;

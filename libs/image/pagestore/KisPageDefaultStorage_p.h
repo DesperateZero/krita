@@ -42,6 +42,9 @@ private:
 
     struct Statistics;
     size_t alignment = alignof(std::max_align_t);
+    // byteSize is the readable page span; allocator padding is charged until
+    // free but must never become readable bytes in a captured guard.
+    size_t allocationBytes = 0;
     std::shared_ptr<Statistics> statistics;
     boost::intrusive_ptr<KisMutationStorageOwner> storageOwner;
 };

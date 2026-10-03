@@ -556,7 +556,7 @@ struct MetadataKeyLess {
         < std::tie(b.key.surface.value, b.key.page.row, b.key.page.column, b.generation.value, b.defaultPixelRevision); }
 };
 
-// Observational only: rebind reports the actual library node request. The
+// Observational only: rebind reports the retained library node capacity. The
 // underlying original storage allocator remains the sole charging authority.
 template<class T>
 struct MetadataMapAllocator : KisMutationStorageAllocator<T> {
@@ -568,9 +568,17 @@ struct MetadataMapAllocator : KisMutationStorageAllocator<T> {
     template<class U> MetadataMapAllocator(const MetadataMapAllocator<U> &other)
         : Base(other), bytes(other.bytes) {}
     T *allocate(size_t count)
-    { auto *data = Base::allocate(count); bytes->fetch_add(count * sizeof(T), std::memory_order_relaxed); return data; }
+    {
+        auto *data = Base::allocate(count);
+        bytes->fetch_add(kisPageStorageBytes(data, alignof(T)), std::memory_order_relaxed);
+        return data;
+    }
     void deallocate(T *data, size_t count) noexcept
-    { Base::deallocate(data, count); bytes->fetch_sub(count * sizeof(T), std::memory_order_relaxed); }
+    {
+        const auto capacity = kisPageStorageBytes(data, alignof(T));
+        Base::deallocate(data, count);
+        bytes->fetch_sub(capacity, std::memory_order_relaxed);
+    }
     template<class U> bool operator==(const MetadataMapAllocator<U> &other) const
     { return Base::operator==(other) && bytes == other.bytes; }
     template<class U> bool operator!=(const MetadataMapAllocator<U> &other) const { return !(*this == other); }
