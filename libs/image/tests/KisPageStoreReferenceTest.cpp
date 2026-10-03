@@ -978,8 +978,10 @@ private Q_SLOTS:
     void metadataConfigurationStorageRefusal_data()
     {
         QTest::addColumn<int>("shards");
+        QTest::addColumn<bool>("firstAllocation");
         for (int count : {1, 4, 64})
-            QTest::newRow(qPrintable(QString::number(count))) << count;
+            for (bool first : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("shards%1-first%2").arg(count).arg(first))) << count << first;
     }
     void metadataConfigurationStorageRefusal();
     void metadataConfigurationLateCandidate_data()
@@ -1001,6 +1003,16 @@ private Q_SLOTS:
     void metadataReadProtectionReclaimsEmptyBlocks();
     void metadataReadProtectionDeferredCleanup_data();
     void metadataReadProtectionDeferredCleanup();
+    void metadataReadCleanupAfterController_data()
+    {
+        QTest::addColumn<bool>("acknowledge");
+        QTest::addColumn<bool>("explicitClear");
+        for (bool acknowledge : {false, true})
+            for (bool clear : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("ack%1-clear%2").arg(acknowledge).arg(clear)))
+                    << acknowledge << clear;
+    }
+    void metadataReadCleanupAfterController();
     void capturedProtectionAndExactQueryAtCapacity();
     void metadataReadProtectionReclaimerIdentity();
     void reclamationTaskStorageBeforeOwnerRelease();
@@ -4131,6 +4143,79 @@ void KisPageStoreReferenceTest::metadataReadProtectionDeferredCleanup()
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
 }
 
+void KisPageStoreReferenceTest::metadataReadCleanupAfterController()
+{
+    QFETCH(bool, acknowledge);
+    QFETCH(bool, explicitClear);
+    using Arena = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>;
+    const int count = int(Arena::slotsPerBlock()) + 7;
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 1024 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    auto budget = std::make_unique<KisBackingBudgetController>(limits);
+    QVERIFY(budget->configureSharedNonPayloadBudget(parent));
+    auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+    metadata->attachBackingBudget(*budget);
+    QVERIFY(metadata->configure(1));
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
+    auto &record = page.versions.first().replicas.first();
+    for (int i = 0; i < count; ++i) {
+        if (acknowledge) record.pendingLastUses.append(ticket);
+        else record.readLeases.append({quint64(i + 1)});
+    }
+    QVERIFY(metadata->registerPage(page));
+    const auto before = live();
+    auto cleanup = std::make_unique<KisPageMetadataReadCleanup>();
+    if (acknowledge) {
+        QVERIFY(metadata->acknowledgeLastUse(record.replica.version, record.replica,
+            completions.verifyTerminal(ticket), cleanup.get()).accepted);
+    } else {
+        KisPageTransition release;
+        release.kind = KisPageTransitionKind::ReleaseRead;
+        release.version = record.replica.version;
+        release.target = record.replica;
+        for (int i = 0; i < count; ++i) {
+            release.lease = {quint64(i + 1)};
+            QVERIFY(metadata->applyOwner(page.key, release, cleanup.get()).accepted);
+        }
+    }
+    QVERIFY(!cleanup->isEmpty());
+    QCOMPARE(live(), before);
+    metadata.reset();
+    budget.reset();
+    // Only the detached read value retains the authority and child here;
+    // no shard or publication candidate supplies the accounting lifetime.
+    QVERIFY(live() > baseline + cleanup->byteSize());
+    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    parent.reset();
+    QVERIFY(!lifetime.isNull());
+    parent = lifetime.toStrongRef();
+    QVERIFY(parent);
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    if (explicitClear) { cleanup->clear(); QVERIFY(cleanup->isEmpty()); cleanup->clear(); }
+    else cleanup.reset();
+    QCOMPARE(live(), baseline + fillerBytes);
+    QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
+    freeFiller.dismiss();
+    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1);
+    QCOMPARE(live(), baseline);
+    parent.reset();
+    QVERIFY(lifetime.isNull());
+}
+
 void KisPageStoreReferenceTest::metadataReadProtectionReclaimerIdentity()
 {
     auto initial = pageWithHistory(0);
@@ -4666,6 +4751,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
 void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
 {
     QFETCH(int, shards);
+    QFETCH(bool, firstAllocation);
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 4 * 1024 * 1024;
     auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
@@ -4691,12 +4777,17 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     QCOMPARE(live(), baseline);
     QVERIFY(requiredBytes > 1 && requiredBytes < limits.metadataArenaBytes - baseline);
     qInfo() << "BR1_METADATA_CONFIGURATION_BYTES" << shards << requiredBytes;
-    const size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline - requiredBytes + 1);
+    const quint64 headroom = firstAllocation ? 1 : requiredBytes - 1;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline - headroom);
     char *filler = storage.allocate(fillerBytes);
     auto releaseFiller = qScopeGuard([&] { storage.deallocate(filler, fillerBytes); });
     const auto filled = live();
     KisPageMetadataCoordinator metadata;
     metadata.attachBackingBudget(budget);
+    // Budget selection remains allocation-free; with one byte available the
+    // first actual authority/control allocation is refused before any shard.
+    QCOMPARE(live(), filled);
+    QVERIFY(metadata.publicationHeads().empty());
     for (int attempt = 0; attempt < 3; ++attempt) {
         QString error;
         QVERIFY(!metadata.configure(shards, &error));
@@ -8275,6 +8366,7 @@ void KisPageStoreReferenceTest::metadataDirectoryPublicationIsImmutableAndConcur
     KisPageMetadataCoordinator coordinator;
     QCOMPARE(coordinator.shardCount(), qsizetype(0));
     QCOMPARE(coordinator.shardFor(pageKey(0)), qsizetype(-1));
+    QVERIFY(coordinator.publicationHeads().empty());
     QVERIFY(!coordinator.configure(0));
     std::atomic<bool> start{false};
     std::atomic<int> failures{0};
@@ -8284,6 +8376,7 @@ void KisPageStoreReferenceTest::metadataDirectoryPublicationIsImmutableAndConcur
         threads.emplace_back([&, w]() {
             while (!start.load())
                 std::this_thread::yield();
+            bool inspectedAuthority = false;
             for (int i = 0; i < 10000; ++i) {
                 const bool ready = coordinator.isOperational();
                 const auto count = coordinator.shardCount();
@@ -8292,6 +8385,10 @@ void KisPageStoreReferenceTest::metadataDirectoryPublicationIsImmutableAndConcur
                 const auto shard = coordinator.shardFor(pageKey(i + w));
                 if (shard < -1 || shard >= 16 || (ready && (count != 16 || shard < 0)))
                     ++failures;
+                if (ready && !inspectedAuthority) {
+                    if (!coordinator.publicationHeads().empty()) ++failures;
+                    inspectedAuthority = true;
+                }
                 if (ready && coordinator.configure(8))
                     ++failures;
             }

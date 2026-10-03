@@ -32,15 +32,7 @@ class MetadataBudgetAuthority final
 {
 public:
     explicit MetadataBudgetAuthority(KisBackingBudgetController *budget)
-        : m_budget(budget) {}
-
-    void attach(KisBackingBudgetController *budget)
-    {
-        QMutexLocker locker(&m_mutex);
-        Q_ASSERT(budget);
-        m_storageOwner.reset();
-        m_budget = budget;
-    }
+        : m_budget(budget), m_storageOwner(kisMutationStorageOwner(budget)) {}
 
     void detach() noexcept
     {
@@ -55,12 +47,6 @@ public:
         if (!m_budget) {
             KisPageStoreDetail::setError(
                 error, QStringLiteral("metadata backing budget is unavailable"));
-            return {};
-        }
-        try {
-            if (!m_storageOwner) m_storageOwner.reset(kisMutationStorageOwner(m_budget));
-        } catch (const std::bad_alloc &) {
-            KisPageStoreDetail::setError(error, QStringLiteral("metadata accounting storage was refused"));
             return {};
         }
         return m_budget->reserve(delta, error);
@@ -2033,15 +2019,11 @@ bool cpuReadableReplica(const KisReplicaRecord &state, const KisPageVersion &ver
 class KisPageMetadataCoordinator::Private
 {
 public:
-    Private()
-        : budgetAuthority(
-            std::make_shared<MetadataBudgetAuthority>(&standaloneBudget)) {}
-
     ~Private()
     {
         operational.store(false, std::memory_order_release);
         shards.clear();
-        budgetAuthority->detach();
+        if (budgetAuthority) budgetAuthority->detach();
     }
 
     MetadataShard *shardFor(const KisPageKey &key) const
@@ -2065,6 +2047,7 @@ public:
     mutable QMutex configurationMutex;
     std::atomic<bool> operational{false};
     KisBackingBudgetController standaloneBudget;
+    KisBackingBudgetController *backingBudget = &standaloneBudget;
     std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
     using Shards = std::vector<std::shared_ptr<MetadataShard>,
         KisMutationStorageAllocator<std::shared_ptr<MetadataShard>>>;
@@ -2845,7 +2828,7 @@ void KisPageMetadataCoordinator::attachBackingBudget(
     QMutexLocker locker(&d->configurationMutex);
     Q_ASSERT(!d->operational.load(std::memory_order_relaxed));
     Q_ASSERT(d->shards.empty());
-    d->budgetAuthority->attach(&budget);
+    d->backingBudget = &budget;
 }
 
 void KisPageMetadataCoordinator::attachRetirementDebtOwner(
@@ -2963,12 +2946,13 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         return false;
     }
     try {
-        const auto storage = d->budgetAuthority->storage<char>();
+        const auto storage = KisMutationStorageAllocator<char>::retained(d->backingBudget);
+        auto authority = std::allocate_shared<MetadataBudgetAuthority>(storage, d->backingBudget);
         Private::Shards shards(storage);
         shards.reserve(size_t(shardCount));
         for (qsizetype i = 0; i < shardCount; ++i) {
             shards.push_back(std::allocate_shared<MetadataShard>(
-                storage, d->budgetAuthority, storage));
+                storage, authority, storage));
         }
         auto owner = std::allocate_shared<const quint8>(storage, 0);
         // Publish the original immutable directory and capability identity
@@ -2976,6 +2960,7 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         // this local candidate; a retry has no residual directory capacity.
         d->shards = std::move(shards);
         d->publicationOwner = std::move(owner);
+        d->budgetAuthority = std::move(authority);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata shard directory storage budget was refused"));
         return false;
@@ -3480,13 +3465,13 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
         result.rejectionReason = QStringLiteral("read protection transition identity is invalid");
         return result;
     }
-    if (cleanup && cleanup->m_authority && cleanup->m_authority != d->budgetAuthority) {
-        result.rejectionReason = QStringLiteral("read protection cleanup belongs to another metadata owner");
-        return result;
-    }
     auto *shard = d->shardFor(key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
+        return result;
+    }
+    if (cleanup && cleanup->m_authority && cleanup->m_authority != shard->budgetAuthority) {
+        result.rejectionReason = QStringLiteral("read protection cleanup belongs to another metadata owner");
         return result;
     }
     // Payloads and their charge leave the shard together, with no allocation.
@@ -3528,14 +3513,17 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtect
     KisPageMetadataTransitionResult result;
     const bool retain = transition.kind == KisPageTransitionKind::RetainCapturedVersion;
     if ((!retain && transition.kind != KisPageTransitionKind::ReleaseCapturedVersion)
-        || !(transition.version.key == key) || !transition.readView.isValid()
-        || (cleanup && cleanup->m_authority && cleanup->m_authority != d->budgetAuthority)) {
+        || !(transition.version.key == key) || !transition.readView.isValid()) {
         result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
         return result;
     }
     auto *shard = d->shardFor(key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
+        return result;
+    }
+    if (cleanup && cleanup->m_authority && cleanup->m_authority != shard->budgetAuthority) {
+        result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
         return result;
     }
     for (;;) {
