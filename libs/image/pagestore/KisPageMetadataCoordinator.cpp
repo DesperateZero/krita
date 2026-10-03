@@ -3420,25 +3420,18 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwner(const Kis
     if (transition.kind == KisPageTransitionKind::RetainCapturedVersion
         || transition.kind == KisPageTransitionKind::ReleaseCapturedVersion)
         return applyCapturedProtection(key, transition, cleanup);
-    return applyOwnerSequence(key, {transition});
+    return applyProjectedSequence(key, &transition, 1);
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const KisPageKey &key,
                                                                        const KisPageSnapshotArray<KisPageTransition> &transitions)
 {
-    if (transitions.isEmpty() || std::any_of(transitions.cbegin(), transitions.cend(), [](const auto &t) {
-            return !localTransition(t.kind);
-        })) {
-        KisPageMetadataTransitionResult result;
-        result.rejectionReason = QStringLiteral("owner transition is not a local metadata mutation");
-        return result;
-    }
     if (transitions.size() == 1 && transitions.first().kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, transitions.first());
     if (transitions.size() == 1 && (transitions.first().kind == KisPageTransitionKind::RetainCapturedVersion
                                   || transitions.first().kind == KisPageTransitionKind::ReleaseCapturedVersion))
         return applyCapturedProtection(key, transitions.first());
-    return applyProjectedSequence(key, transitions);
+    return applyProjectedSequence(key, transitions.constData(), transitions.size());
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
@@ -3605,9 +3598,15 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtect
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
-    const KisPageKey &key, const KisPageSnapshotArray<KisPageTransition> &transitions)
+    const KisPageKey &key, const KisPageTransition *transitions, qsizetype count)
 try {
     KisPageMetadataTransitionResult result;
+    if (count <= 0 || !transitions || std::any_of(transitions, transitions + count, [](const auto &t) {
+            return !localTransition(t.kind);
+        })) {
+        result.rejectionReason = QStringLiteral("owner transition is not a local metadata mutation");
+        return result;
+    }
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard) {
         result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
@@ -3635,7 +3634,8 @@ try {
         };
         add(input.writer.baseVersion);
         add(input.writer.target.version);
-        for (const auto &transition : transitions) {
+        for (qsizetype i = 0; i < count; ++i) {
+            const auto &transition = transitions[i];
             add(transition.baseVersion);
             add(transition.version);
             for (const auto &version : transition.versions)
@@ -3668,7 +3668,8 @@ try {
         }
         auto next = input;
         const KisPageStateMachine machine;
-        for (const auto &transition : transitions) {
+        for (qsizetype i = 0; i < count; ++i) {
+            const auto &transition = transitions[i];
             auto step = machine.applyKnownValid(std::move(next), transition);
             if (!step.accepted) {
                 ++shard->rejectedTransitions;
@@ -3786,7 +3787,7 @@ try {
             shard->backgroundLocalVersionInstalls += quint64(next.versions.size());
             shard->backgroundLocalVersionRemovals += removed;
         }
-        shard->acceptedTransitions += quint64(transitions.size());
+        shard->acceptedTransitions += quint64(count);
         result.accepted = true;
         auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();

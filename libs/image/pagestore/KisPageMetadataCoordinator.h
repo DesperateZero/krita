@@ -475,7 +475,7 @@ private:
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
     KisPageMetadataTransitionResult applyProjectedSequence(const KisPageKey &key,
-                                                   const KisPageSnapshotArray<KisPageTransition> &transitions);
+                                                   const KisPageTransition *transitions, qsizetype count);
     KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);

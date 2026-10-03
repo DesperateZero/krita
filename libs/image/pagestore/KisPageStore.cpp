@@ -648,6 +648,7 @@ public:
     bool operational = false;
     bool closing = false;
     bool closed = false;
+    bool facadeGone = false;
     bool backgroundReclamation = true;
     qsizetype activeProviderCalls = 0;
     QString closeFailure;
@@ -753,12 +754,17 @@ public:
     {
         if (!scope->cancelLocked()) {
             QMutexLocker lock(&scope->owner->mutex);
-            retainOrphanLocked(scope);
-            return;
+            if (!scope->owner->facadeGone) {
+                retainOrphanLocked(scope);
+                return;
+            }
+            const bool released = scope->cancelLocked(&lock, true);
+            Q_ASSERT(released); Q_UNUSED(released);
         }
         destroy(scope);
     }
-    static void retryOrphans(KisPageStore::Private *owner, KisPageTransactionId transaction = {})
+    static void retryOrphans(KisPageStore::Private *owner, KisPageTransactionId transaction = {},
+                             bool terminalWithoutFacade = false)
     {
         // Reuse each original scope's terminal link. Neither detaching a pass
         // nor retaining rejected cancellation needs a new allocation.
@@ -782,13 +788,20 @@ public:
             Private *scope = pending;
             pending = std::exchange(scope->nextOrphan, nullptr);
             QMutexLocker scopeLock(&scope->mutex);
-            const bool released = scope->cancelLocked();
+            const bool released = scope->cancelLocked(nullptr, terminalWithoutFacade);
             scopeLock.unlock();
             if (released) {
                 destroy(scope);
             } else {
                 QMutexLocker lock(&owner->mutex);
-                retainOrphanLocked(scope);
+                if (!owner->facadeGone) {
+                    retainOrphanLocked(scope);
+                } else {
+                    const bool terminal = scope->cancelLocked(&lock, true);
+                    Q_ASSERT(terminal); Q_UNUSED(terminal);
+                    lock.unlock();
+                    destroy(scope);
+                }
             }
         }
     }
@@ -871,7 +884,8 @@ public:
         lock.relock();
         --owner->activeProviderCalls;
     }
-    bool cancelLocked(QMutexLocker<QMutex> *heldOwnerLock = nullptr)
+    bool cancelLocked(QMutexLocker<QMutex> *heldOwnerLock = nullptr,
+                      bool terminalWithoutFacade = false)
     {
         if (state == State::Detached || !owner)
             return true;
@@ -885,15 +899,22 @@ public:
             heldOwnerLock = &*acquired;
         }
         auto &lock = *heldOwnerLock;
+        Q_ASSERT(!terminalWithoutFacade || owner->facadeGone);
         const auto retire = qScopeGuard([&] {
             releaseStorageLocked(lock);
-            owner->processRetirementsLocked(lock);
+            if (!terminalWithoutFacade) owner->processRetirementsLocked(lock);
         });
-        for (auto slot = writes.firstEntry(); slot.isValid();) {
+        // Without a facade no publication or explicit whole-owner drain can
+        // consume these declarations. The provider remains the physical owner
+        // until its last external capability/reference releases the bytes.
+        // An abandoned scope must not keep that composition root alive merely
+        // to retry an unaccepted logical cancellation indefinitely.
+        for (auto slot = writes.firstEntry(); !terminalWithoutFacade && slot.isValid();) {
             const auto next = writes.nextEntry(slot);
             auto *entry = writes.at(slot);
             if (Page *page = pageAtEntry(slot.index)) {
                 if (!cancelPageLocked(slot.index, *page)) {
+                    if (owner->facadeGone) break;
                     state = State::Failed;
                     return false;
                 }
@@ -918,7 +939,8 @@ public:
         ++owner->activeProviderCalls;
         lock.unlock();
         abandonedPages = ColdPageSet{};
-        owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
+        if (!terminalWithoutFacade)
+            owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
         lock.relock();
         --owner->activeProviderCalls;
         detachLocked(lock);
@@ -2912,6 +2934,11 @@ KisPageStore::~KisPageStore()
     d->readCoordinator.stopAutomaticWakeups();
     d->retirementQueue.stopAutomaticWakeups();
     d->historyCollector.stopAutomaticWakeups();
+    {
+        QMutexLocker lock(&d->mutex);
+        d->facadeGone = true;
+    }
+    KisPageMutationSession::Private::retryOrphans(d.data(), {}, true);
 }
 
 void KisPageStore::PrivateReleaser::cleanup(Private *owner)

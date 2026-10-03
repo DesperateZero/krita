@@ -1621,7 +1621,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4065,
+      "lines": 4066,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1655,7 +1655,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "fbb2d9ee2f9c7c0d40d798e0faa22816108f0a1a6468d22a9b46badb27327797",
+      "sha256": "f130ad34ff095fae2eb34f0b81122e99550f9614bd8772a13ad0ada397527c12",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -1722,7 +1722,7 @@
         "ReplicaCandidate",
         "VersionInfo"
       ],
-      "sha256": "51088c5b87b91bad9a61696302f6682662e3fe836b6e625df74b1fe8a62b10f0",
+      "sha256": "7b5dcceec543bc1fbe07609e55b59ce73425dc7482b7304a1f5aeea54e73369a",
       "synchronization_declarations": 2
     },
     "libs/image/pagestore/KisPageMetadataCoordinator_p.h": {
@@ -2408,7 +2408,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4746,
+      "lines": 4773,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2441,7 +2441,7 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "512b9695dadda473388d8ceb5a4e27ddffa141b49a24c3a4b5958d6b417e7a33",
+      "sha256": "28ef0f03ac10c0770112018a1ff7b524e795f7899310670cdab8ae2b7578b991",
       "synchronization_declarations": 19
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -3477,7 +3477,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 10877,
+      "lines": 10995,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3510,7 +3510,7 @@
         "TestProvider",
         "Value"
       ],
-      "sha256": "c2ad056b6da55f927591d0afd2f9f3708bee8ff470de60b6455c085d78698938",
+      "sha256": "4139f18a07456833a28a5dae721d015016ae0cf15a6019ac51a434be2ff735bd",
       "synchronization_declarations": 3
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -6430,5 +6430,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "d7e91efc39d965be49c748859fd384f91cda2c64"
+  "working_tree_head": "46eab867ed37da42921c5618cc349171454fe5c7"
 }
