@@ -2157,9 +2157,10 @@ bool KisPageWriteAdmission::releaseOneLocked(ClaimSet &claims, KisMutationWriteS
     return true;
 }
 
-bool KisPageWriteAdmission::claimAll(ClaimSet &claims, QMutexLocker<QMutex> &lock,
+KisPageWriteAdmission::Result KisPageWriteAdmission::claimAll(ClaimSet &claims, QMutexLocker<QMutex> &lock,
                                      QString *error, ClaimOrigin origin)
 {
+    bool contended = false;
     const auto required = [&]() -> std::optional<size_t> {
         if (!claims.isValid() || claims.owner != this || (m_operational && !*m_operational)) {
             KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
@@ -2171,13 +2172,14 @@ bool KisPageWriteAdmission::claimAll(ClaimSet &claims, QMutexLocker<QMutex> &loc
             const auto *found = m_claims.find(entry->key());
             if (!found) ++missing;
             else if (found->origin == ClaimOrigin::GenericWrite || found->token != claims.token) {
+                contended = true;
                 KisPageStoreDetail::setError(error, QStringLiteral("write set intersects another writer"));
                 return {};
             }
         }
         return missing;
     };
-    return admitMutationRecords(m_claims, lock, required, [&] {
+    const bool acquired = admitMutationRecords(m_claims, lock, required, [&] {
         for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
             const auto &key = claims.writeSet->at(slot)->key();
             if (!m_claims.contains(key)) {
@@ -2186,6 +2188,7 @@ bool KisPageWriteAdmission::claimAll(ClaimSet &claims, QMutexLocker<QMutex> &loc
             }
         }
     }, error);
+    return acquired ? Result::Acquired : contended ? Result::Contended : Result::Failed;
 }
 
 bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,

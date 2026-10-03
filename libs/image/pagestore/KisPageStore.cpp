@@ -1777,6 +1777,7 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
         bool mustWait = false;
         bool legacyBorrowed = legacyIntent;
         bool sameThreadReentry = false;
+        bool unmanagedConflict = false;
         for (const KisLogicalPageId &page : targets) {
             const auto conflict = d->writeAdmission.conflictLocked(
                 {surface, page}, QThread::currentThreadId());
@@ -1784,6 +1785,8 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
             legacyBorrowed |= conflict == KisPageWriteAdmission::Conflict::LegacyBorrower
                 || conflict == KisPageWriteAdmission::Conflict::LegacySameThread;
             mustWait |= conflict == KisPageWriteAdmission::Conflict::ManagedOtherThread;
+            unmanagedConflict |= conflict == KisPageWriteAdmission::Conflict::WriterOtherThread
+                || conflict == KisPageWriteAdmission::Conflict::WriterSameThread;
         }
         if (sameThreadReentry) {
             KisPageStoreDetail::setError(error, QStringLiteral("pixel operation cannot reenter its target range"));
@@ -1794,21 +1797,28 @@ std::unique_ptr<KisPageStoreWriteReservation> KisPageStore::reserveManagedRange(
             KisPageStoreDetail::setError(error, QStringLiteral("pixel operation intersects a legacy writer"));
             return {};
         }
-        if (!mustWait) break;
+        if (unmanagedConflict) {
+            KisPageStoreDetail::setError(error, QStringLiteral("write set intersects another writer"));
+            return {};
+        }
+        if (!mustWait) {
+            if (!range->admission.isValid())
+                range->admission = d->writeAdmission.beginClaimSet(range->writes);
+            const auto result = d->writeAdmission.claimAll(range->admission, lock, error,
+                KisPageWriteAdmission::ClaimOrigin::ManagedRange);
+            if (result == KisPageWriteAdmission::Result::Acquired) return range;
+            if (result == KisPageWriteAdmission::Result::Failed) return {};
+            // Growth dropped the gate and observed a new writer. Recheck the
+            // original range; no pixels or partial claim were accepted.
+            continue;
+        }
         KisPageStoreDiagnosticTimer waitPhase(
             this, KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, 0);
         waitPhase.next(KisPageStoreDiagnosticPhase::PixelOperationRangeWait, 1);
         d->writeAdmissionChanged.wait(&d->mutex);
     }
-    if (!d->operational) {
-        KisPageStoreDetail::setError(error, QStringLiteral("managed mutation store is unavailable"));
-        return {};
-    }
-    range->admission = d->writeAdmission.beginClaimSet(range->writes);
-    if (!d->writeAdmission.claimAll(range->admission, lock, error,
-                                    KisPageWriteAdmission::ClaimOrigin::ManagedRange))
-        return {};
-    return range;
+    KisPageStoreDetail::setError(error, QStringLiteral("managed mutation store is unavailable"));
+    return {};
 } catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("managed mutation storage is unavailable"));
     return {};

@@ -981,6 +981,8 @@ void KisTiledDataManagerTest::testPageStoreCommitCleanupAllowsReader()
         bool coherent = false;
     } observations[1];
     int seen[1] = {};
+    int publications = 0;
+    bool rootPublished = false;
     auto join = qScopeGuard([&] {
         for (auto &observation : observations)
             if (observation.reader.joinable()) observation.reader.join();
@@ -988,7 +990,15 @@ void KisTiledDataManagerTest::testPageStoreCommitCleanupAllowsReader()
     KisPageStoreDiagnosticRecorder recorder(true, store);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         using Phase = KisPageStoreDiagnosticPhase;
-        if (phase != Phase::CommitCleanup || seen[0]++) return;
+        if (phase == Phase::CommitRootPublication) {
+            ++publications;
+            rootPublished = true;
+            return;
+        }
+        if (phase != Phase::CommitCleanup) return;
+        // Rejected metadata installs also dispose their prepared candidates.
+        // Only accepted root cleanup must release the publication gate.
+        if (!std::exchange(rootPublished, false) || seen[0]++) return;
         constexpr int index = 0;
         auto &observation = observations[index];
         observation.reader = std::thread([&, index] {
@@ -1022,6 +1032,7 @@ void KisTiledDataManagerTest::testPageStoreCommitCleanupAllowsReader()
     for (auto &observation : observations)
         if (observation.reader.joinable()) observation.reader.join();
     QVERIFY(succeeded);
+    QCOMPARE(publications, 1);
     QCOMPARE(seen[0], 1);
     QVERIFY2(observations[0].completedInPhase, "successful commit cleanup blocked reader");
     QVERIFY(observations[0].coherent);
@@ -2810,6 +2821,89 @@ void KisTiledDataManagerTest::testPageStoreAdapterDeliveryLegacyConflict_data()
         QTest::newRow(qPrintable(QStringLiteral("mode%1-legacy%2").arg(mode).arg(legacy))) << mode << legacy;
 }
 
+void KisTiledDataManagerTest::testPageStoreClearRangeAdmission_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("partial");
+    QTest::addColumn<bool>("remove"); QTest::addColumn<bool>("history");
+    for (int bpp : {1, 4, 8, 16}) for (bool partial : {false, true})
+        for (bool remove : {false, true}) for (bool history : {false, true})
+            QTest::newRow(qPrintable(QStringLiteral("bpp%1-partial%2-remove%3-history%4")
+                .arg(bpp).arg(partial).arg(remove).arg(history))) << bpp << partial << remove << history;
+}
+
+void KisTiledDataManagerTest::testPageStoreClearRangeAdmission()
+{
+    QFETCH(int, bpp); QFETCH(bool, partial); QFETCH(bool, remove); QFETCH(bool, history);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31)), next(bpp, char(0x71));
+    KisDataManager dm(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    dm.clear(0, 0, 192, 64, reinterpret_cast<const quint8 *>(initial.constData()));
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    auto before = backend->captureReadView(); QVERIFY(before.isValid());
+    auto memento = history ? dm.getMemento() : KisMementoSP{};
+    KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+    QVector<KisLogicalPageId> changed; QString error; int calls = 0;
+    QCOMPARE(backend->writeOperation({{0, 0}}, false, [&](KisPixelWriteCursor *cursor) {
+        ++calls; cursor->moveTo(0, 0); if (!cursor->rawData()) return false;
+        std::memset(cursor->rawData(), 0x61, size_t(bpp)); return true;
+    }, &changed, &error, {}, &delivery), KisPageStoreWriteOperationResult::Succeeded);
+    QVERIFY(!delivery.isEmpty());
+    QSemaphore waiting, done;
+    bool succeeded = false, lateExcluded = false;
+    const QRect area = partial ? QRect(1, 1, 126, 62) : QRect(0, 0, 128, 64);
+    const QByteArray value = remove ? blank : next;
+    std::thread clearer([&] {
+        KisPageStoreDiagnosticRecorder recorder(true, store);
+        recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+            if (phase == KisPageStoreDiagnosticPhase::PixelOperationRangeWait) waiting.release();
+            if (phase == KisPageStoreDiagnosticPhase::MutationAdapterInstall && !lateExcluded) {
+                const auto tx = store->beginCurrentTransaction();
+                auto late = store->beginMutation(tx);
+                const bool active = late.isActive();
+                auto guard = late.beginWrite({backend->surface(), {1, 0}});
+                lateExcluded = active && !guard.isValid();
+                guard = {}; late.cancel(); store->abort(tx);
+            }
+        });
+        KisStrokeJobFailureContext failure(true);
+        dm.clear(area.x(), area.y(), area.width(), area.height(),
+                 reinterpret_cast<const quint8 *>(value.constData()));
+        succeeded = !failure.failed(); done.release();
+    });
+    const auto join = qScopeGuard([&] { delivery = {}; if (clearer.joinable()) clearer.join(); });
+    const bool blocked = waiting.tryAcquire(1, 500);
+    const bool premature = done.tryAcquire();
+    // Admission protects only the overlapping pages. An unrelated operation
+    // must finish while the original managed delivery remains held.
+    int independentCalls = 0;
+    const auto independent = dm.writePageStoreOperation({QRect(128, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+        ++independentCalls; cursor->moveTo(128, 0); if (!cursor->rawData()) return false;
+        std::memset(cursor->rawData(), 0x51, size_t(bpp)); return true;
+    }, &error);
+    delivery = {}; clearer.join();
+    QVERIFY(blocked); QVERIFY(!premature); QVERIFY(succeeded); QVERIFY(lateExcluded);
+    QCOMPARE(independent, KisPageStoreWriteOperationResult::Succeeded);
+    QCOMPARE(calls, 1); QCOMPARE(independentCalls, 1);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QByteArray expected(192 * 64 * bpp, char(0x31)), actual(expected.size(), Qt::Uninitialized);
+    std::memset(expected.data(), partial ? 0x61 : value[0], size_t(bpp));
+    std::memset(expected.data() + 128 * bpp, 0x51, size_t(bpp));
+    for (int y = area.top(); y <= area.bottom(); ++y)
+        std::memset(expected.data() + (y * 192 + area.x()) * bpp, value[0], size_t(area.width() * bpp));
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 64);
+    QCOMPARE(actual, expected);
+    // Fixed before-images survive clear and the earlier accepted write.
+    auto old = before.readResidentPage({backend->surface(), {0, 0}}); QVERIFY(old.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(old.data()), int(old.byteSize())), QByteArray(64 * 64 * bpp, char(0x31)));
+    old = {}; before = {};
+    if (history) {
+        QVERIFY(dm.tryCommit(&error)); dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 64);
+        QCOMPARE(actual, QByteArray(actual.size(), char(0x31)));
+        dm.rollforward(memento); dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 64);
+        QCOMPARE(actual, expected); dm.purgeHistory(memento);
+    }
+}
+
 void KisTiledDataManagerTest::testPageStoreAdapterDeliveryLegacyConflict()
 {
     QFETCH(int, mode); QFETCH(int, legacy);
@@ -3207,10 +3301,11 @@ void KisTiledDataManagerTest::testVoidDrawingFailure()
         dm.setDefaultPixel(&replacement);
         QCOMPARE(*dm.defaultPixel(), blank);
     }
-    if (entry == 1 || entry == 2 || entry == 4 || entry == 8)
+    if (entry == 1 || entry == 4 || entry == 8)
         QCOMPARE(store->mutationStatistics().pagesCancelled - before.pagesCancelled, quint64(1));
-    if (entry == 3 || entry == 6) {
-        // Whole-index barriers reject the existing foreign claim before work.
+    if (entry == 2 || entry == 3 || entry == 6) {
+        // Clear's whole range and whole-index barriers reject a foreign claim
+        // before any page work; planar/copy retain their partial rollback test.
         QCOMPARE(store->mutationStatistics().generationsReserved, before.generationsReserved);
         QCOMPARE(store->mutationStatistics().pagesCancelled, before.pagesCancelled);
         QCOMPARE(store->mutationStatistics().removalsCancelled, before.removalsCancelled);
@@ -3415,15 +3510,16 @@ void KisTiledDataManagerTest::testPageStoreAliasRegionFailure()
     const QRect area(1, 0, 128, 64); // partial pixel page, semantic page, failing partial page
     QVector<KisLogicalPageId> changes{{99, 99}};
     QString error;
-    QTest::ignoreMessage(QtWarningMsg, QRegularExpression("^PageStore CPU mutation acquisition failed:.*legacy mutation cannot reenter its page.*$"));
+    if (copy)
+        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("^PageStore CPU mutation acquisition failed:.*legacy mutation cannot reenter its page.*$"));
     QVERIFY(!(copy ? backend->copyFrom(*source.m_pageStoreBackend, source.m_pageStoreBackend->captureReadView(),
                                      backend->captureReadView(), area, false, &error, &changes)
                   : backend->fillRect(area, changedPixel, &error, &changes)));
     QVERIFY(changes.isEmpty());
     const auto after = store->mutationStatistics();
-    QCOMPARE(after.generationsReserved - before.generationsReserved, quint64(1));
-    QCOMPARE(after.pagesCancelled - before.pagesCancelled, quint64(1));
-    QCOMPARE(after.removalsCancelled - before.removalsCancelled, quint64(removal ? 1 : 0));
+    QCOMPARE(after.generationsReserved - before.generationsReserved, quint64(copy ? 1 : 0));
+    QCOMPARE(after.pagesCancelled - before.pagesCancelled, quint64(copy ? 1 : 0));
+    QCOMPARE(after.removalsCancelled - before.removalsCancelled, quint64(copy && removal ? 1 : 0));
     QCOMPARE(after.aliasGenerationsReserved, before.aliasGenerationsReserved); // staged only, no adoption
     QCOMPARE(store->sessionStats().committedTransactions, commits);
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(1)); // foreign writer not cancelled
@@ -4380,16 +4476,18 @@ void KisTiledDataManagerTest::testPageStoreClonePublishedBounds()
 void KisTiledDataManagerTest::testPageStoreFreshReadSelection_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("packed");
-    QTest::addColumn<bool>("warm"); QTest::addColumn<bool>("hold");
+    QTest::addColumn<bool>("warm"); QTest::addColumn<bool>("hold"); QTest::addColumn<bool>("clear");
     for (int bpp : {1, 4, 8, 16}) for (bool packed : {false, true})
-        for (bool warm : {false, true}) for (bool hold : {false, true})
-            QTest::newRow(qPrintable(QString("B%1-P%2-W%3-H%4").arg(bpp).arg(packed).arg(warm).arg(hold)))
-                << bpp << packed << warm << hold;
+        for (bool warm : {false, true}) for (bool hold : {false, true}) for (bool clear : {false, true}) {
+            if (packed && clear) continue;
+            QTest::newRow(qPrintable(QString("B%1-P%2-W%3-H%4-C%5").arg(bpp).arg(packed).arg(warm).arg(hold).arg(clear)))
+                << bpp << packed << warm << hold << clear;
+        }
 }
 
 void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
 {
-    QFETCH(int, bpp); QFETCH(bool, packed); QFETCH(bool, warm); QFETCH(bool, hold);
+    QFETCH(int, bpp); QFETCH(bool, packed); QFETCH(bool, warm); QFETCH(bool, hold); QFETCH(bool, clear);
     const QByteArray blank(bpp, 0), old(bpp, char(0x31)), value(bpp, char(0x61));
     KisTiledDataManager dm(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
     if (warm) dm.writeBytes(reinterpret_cast<const quint8 *>(old.constData()), 0, 0, 1, 1);
@@ -4442,9 +4540,10 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
             observe();
         }
     });
-    if (packed) {
+    if (packed || clear) {
         KisStrokeJobFailureContext failure(true);
-        dm.writeBytes(reinterpret_cast<const quint8 *>(value.constData()), 0, 0, 1, 1);
+        if (clear) dm.clear(0, 0, 1, 1, reinterpret_cast<const quint8 *>(value.constData()));
+        else dm.writeBytes(reinterpret_cast<const quint8 *>(value.constData()), 0, 0, 1, 1);
         QVERIFY(!failure.failed());
     } else {
         QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {

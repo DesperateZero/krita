@@ -1950,15 +1950,36 @@ bool KisTiledDataManagerPageStoreBackend::hasCurrentHistory() const
 bool KisTiledDataManagerPageStoreBackend::fillRect(
     const QRect &rect,
     const QByteArray &pixel,
-    QString *error, QVector<KisLogicalPageId> *changed) try
+    QString *error, QVector<KisLogicalPageId> *changed,
+    OperationDelivery *delivery,
+    const std::function<bool(QString *)> &prepareAdapter,
+    const AdapterCompletion &completeAdapter) try
 {
     if (changed) changed->clear();
+    if (delivery && !delivery->isEmpty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
+        return false;
+    }
     if (!isOperational() || rect.isEmpty()) return false;
     prepareChangedPageOutput(changed, rect);
     bool success = false;
     auto discardOutput = qScopeGuard([&] { if (changed && !success) changed->clear(); });
+    const qint32 firstColumn = pageCoordinate(rect.left(), KisTileData::WIDTH);
+    const qint32 lastColumn = pageCoordinate(rect.right(), KisTileData::WIDTH);
+    const qint32 firstRow = pageCoordinate(rect.top(), KisTileData::HEIGHT);
+    const qint32 lastRow = pageCoordinate(rect.bottom(), KisTileData::HEIGHT);
+    KisPageSnapshotArray<KisLogicalPageId> targets;
+    for (qint64 row = firstRow; row <= lastRow; ++row)
+        for (qint64 column = firstColumn; column <= lastColumn; ++column)
+            targets.append({qint32(column), qint32(row)});
+    // Projection clears can overlap a managed write at page granularity.
+    // Acquire all claims before any page work, where no adapter gate is held;
+    // the original batch then owns both semantic and writable page claims.
+    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
+    if (!range) return false;
     auto batch = beginMutationBatch(error);
-    if (!batch) return false;
+    if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
+    if (prepareAdapter && !prepareAdapter(error)) return false;
     auto before = captureReadView(false, error);
     KisSurfaceEpochState surfaceState;
     if (!before.resolveSurfaceState(d->surface, &surfaceState) ||
@@ -1970,10 +1991,6 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     for (int x = 0; x < KisTileData::WIDTH; ++x)
         memcpy(rowBytes.data() + x * pixel.size(), pixel.constData(), size_t(pixel.size()));
     std::shared_ptr<const KisPageReplicaSource> uniform;
-    const qint32 firstColumn = pageCoordinate(rect.left(), KisTileData::WIDTH);
-    const qint32 lastColumn = pageCoordinate(rect.right(), KisTileData::WIDTH);
-    const qint32 firstRow = pageCoordinate(rect.top(), KisTileData::HEIGHT);
-    const qint32 lastRow = pageCoordinate(rect.bottom(), KisTileData::HEIGHT);
     for (qint64 row = firstRow; row <= lastRow; ++row) {
         for (qint64 column = firstColumn; column <= lastColumn; ++column) {
             KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::FillPage, 1);
@@ -2012,7 +2029,11 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
         }
     }
     before = {};
-    success = batch->finish(error);
+    const auto publish = [&](QString *failure) {
+        return delivery ? batch->finishForAdapterDelivery(failure) : batch->finish(failure);
+    };
+    success = completeAdapter ? completeAdapter(publish, error) : publish(error);
+    if (success && delivery) delivery->m_batch = std::move(batch);
     return success;
 }
 catch (const std::bad_alloc &) {

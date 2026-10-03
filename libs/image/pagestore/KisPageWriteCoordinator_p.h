@@ -489,6 +489,7 @@ public:
         WriterOtherThread,
         WriterSameThread
     };
+    enum class Result : quint8 { Acquired, Contended, Failed };
 
     class ClaimSet final
     {
@@ -529,7 +530,9 @@ public:
     bool claimOne(ClaimSet &, KisMutationWriteSet::EntryHandle, QMutexLocker<QMutex> &, QString *error,
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
     bool releaseOneLocked(ClaimSet &, KisMutationWriteSet::EntryHandle) noexcept;
-    bool claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error,
+    // Contention observed across growth remains distinct from real storage
+    // refusal, even if that writer releases while unused growth is freed.
+    Result claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error,
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
     // Unique keys, stable under the caller's session gate. Only this range is
     // visited, not every page previously touched by a long-lived session.

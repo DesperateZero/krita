@@ -208,12 +208,17 @@ public:
                       QString *error = nullptr);
     bool hasCurrentHistory() const;
 
-    // Operation-private semantic/pixel batch. Optional changed keys are empty
-    // on failure and contain only successful deltas, for index/cache refresh;
-    // they are not a capability to read outside a newly protected View.
+    // Operation-private semantic/pixel batch. Reserve the complete rectangle
+    // before capture or pixels, outside caller tile/manager gates. The same
+    // adapter preparation/completion and retained admission as packed writes
+    // surround publication and index installation. Optional changed keys are
+    // empty on failure and contain only successful deltas.
     bool fillRect(const QRect &rect,
                   const QByteArray &pixel,
-                  QString *error = nullptr, QVector<KisLogicalPageId> *changed = nullptr);
+                  QString *error = nullptr, QVector<KisLogicalPageId> *changed = nullptr,
+                  OperationDelivery *delivery = nullptr,
+                  const std::function<bool(QString *)> &prepareAdapter = {},
+                  const AdapterCompletion &completeAdapter = {});
     // Geometry and pixels consume the same caller-selected immutable views.
     // Neither view is recaptured after compatibility range preparation.
     bool copyFrom(const KisTiledDataManagerPageStoreBackend &source,

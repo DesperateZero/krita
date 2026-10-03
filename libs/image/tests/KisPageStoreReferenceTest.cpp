@@ -7657,7 +7657,7 @@ void KisPageStoreReferenceTest::writeAdmissionReleasesSubsetClaims()
     auto foreign = admission.beginClaimSet(competing);
     QString error;
     QMutexLocker lock(&mutex);
-    QVERIFY(admission.claimAll(claims, lock, &error));
+    QCOMPARE(admission.claimAll(claims, lock, &error), KisPageWriteAdmission::Result::Acquired);
     const auto oldInline = writes.handleAt(0);
     for (int i : {0, 8, 16}) {
         const auto slot = writes.handleAt(quint32(i));
@@ -7770,15 +7770,15 @@ void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
         QMutexLocker lock(&mutex);
         firstClaims = admission.beginClaimSet(firstWrites);
         secondClaims = admission.beginClaimSet(secondWrites);
-        QVERIFY(admission.claimAll(firstClaims, lock, &error));
-        QVERIFY(!admission.claimAll(secondClaims, lock, &error));
+        QCOMPARE(admission.claimAll(firstClaims, lock, &error), KisPageWriteAdmission::Result::Acquired);
+        QCOMPARE(admission.claimAll(secondClaims, lock, &error), KisPageWriteAdmission::Result::Contended);
         QCOMPARE(admission.activeNativeClaimCountLocked()
                      + admission.activeGenericClaimCountLocked(), 2);
     }
     firstClaims.release();
     {
         QMutexLocker lock(&mutex);
-        QVERIFY(admission.claimAll(secondClaims, lock, &error));
+        QCOMPARE(admission.claimAll(secondClaims, lock, &error), KisPageWriteAdmission::Result::Acquired);
         QCOMPARE(admission.activeNativeClaimCountLocked()
                      + admission.activeGenericClaimCountLocked(), 2);
     }
@@ -7795,7 +7795,7 @@ void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
         QCOMPARE(admission.activeNativeClaimCountLocked(), 1);
         QVERIFY(!admission.claimDirectLocked(pageKey(0), genericTransaction.value, lock));
         secondClaims = admission.beginClaimSet(firstWrites);
-        QVERIFY(!admission.claimAll(secondClaims, lock, &error));
+        QCOMPARE(admission.claimAll(secondClaims, lock, &error), KisPageWriteAdmission::Result::Contended);
         firstClaims.releaseLocked();
         QVERIFY(admission.claimDirectLocked(pageKey(0), genericTransaction.value, lock));
         QCOMPARE(admission.activeGenericClaimCountLocked(), 1);
@@ -7821,7 +7821,7 @@ void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
     {
         QMutexLocker lock(&mutex);
         adapterClaims = admission.beginClaimSet(adapterWrites);
-        QVERIFY(admission.claimAll(adapterClaims, lock, &error));
+        QCOMPARE(admission.claimAll(adapterClaims, lock, &error), KisPageWriteAdmission::Result::Acquired);
     }
     KisMutationWriteSet sessionWrites = std::move(adapterWrites);
     {
@@ -7973,7 +7973,7 @@ void KisPageStoreReferenceTest::writeAdmissionBudgetFailureIsAtomic()
     claims = admission.beginClaimSet(writes);
     QVERIFY(admission.claimOne(claims, writes.handleAt(0), lock, &error));
     QVERIFY(admission.claimOne(claims, writes.handleAt(1), lock, &error));
-    QVERIFY(!admission.claimAll(claims, lock, &error));
+    QCOMPARE(admission.claimAll(claims, lock, &error), KisPageWriteAdmission::Result::Failed);
     QVERIFY(error.contains(QStringLiteral("storage")));
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(2));
     for (int i = 0; i < count; ++i) QCOMPARE(admission.pageClaimedLocked(pageKey(i)), i < 2);
@@ -8002,10 +8002,10 @@ void KisPageStoreReferenceTest::writeAdmissionTokenExhaustion()
     rejected = admission.beginClaimSet(writes);
     QVERIFY(older.isValid()); QVERIFY(last.isValid()); QVERIFY(!rejected.isValid());
     QString error;
-    QVERIFY(admission.claimAll(older, lock, &error));
-    QVERIFY(!admission.claimAll(last, lock, &error));
+    QCOMPARE(admission.claimAll(older, lock, &error), KisPageWriteAdmission::Result::Acquired);
+    QCOMPARE(admission.claimAll(last, lock, &error), KisPageWriteAdmission::Result::Contended);
     older.releaseLocked();
-    QVERIFY(admission.claimAll(last, lock, &error));
+    QCOMPARE(admission.claimAll(last, lock, &error), KisPageWriteAdmission::Result::Acquired);
     QVERIFY(!admission.beginClaimSet(writes).isValid());
     last.releaseLocked();
 }

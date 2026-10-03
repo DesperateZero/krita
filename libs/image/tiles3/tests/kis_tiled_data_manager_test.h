@@ -115,6 +115,8 @@ private Q_SLOTS:
     void testPageStoreAdapterDeliveryLifetime();
     void testPageStoreAdapterDeliveryLegacyConflict_data();
     void testPageStoreAdapterDeliveryLegacyConflict();
+    void testPageStoreClearRangeAdmission_data();
+    void testPageStoreClearRangeAdmission();
     void testPageStoreCancelledPrivateClient_data();
     void testPageStoreCancelledPrivateClient();
     void testPageStorePlanarWriteCoordinateLimits();
