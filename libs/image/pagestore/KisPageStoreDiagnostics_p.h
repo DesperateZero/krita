@@ -3,6 +3,7 @@
 #define KIS_PAGE_STORE_DIAGNOSTICS_P_H
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <QtGlobal>
 #include "kritaimage_export.h"
@@ -14,10 +15,15 @@ class KisPageStore;
 struct KisPageMetadataMetrics;
 KRITAIMAGE_EXPORT KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store);
 
+// The process storage root pays for the fixed opt-in diagnostic presence
+// counter. Profiling TLS belongs to the caller's enabled diagnostic scope.
+constexpr size_t KisPageDiagnosticFixedStorageBytes = sizeof(std::atomic<quint32>);
+
 /** Private opt-in diagnostics, not a PageStore access/publication capability.
  * A recorder belongs to one thread and must outlive every timer it captures.
- * No recorder: no clocks, allocations, atomics, or diagnostic locks. The
- * disabled TLS lookup/branch still needs a plain-run perturbation check.
+ * No enabled recorder anywhere: one relaxed atomic read, no TLS access,
+ * clocks, allocations or diagnostic locks. An enabled profiling scope may
+ * initialize platform TLS; that optional scope needs separate measurement.
  */
 enum class KisPageStoreDiagnosticPhase : quint8 {
     CommitOwnerWait,
@@ -184,6 +190,7 @@ private:
     static thread_local KisPageStoreDiagnosticRecorder *s_current;
     KisPageStoreDiagnosticRecorder *m_previous = nullptr;
     const KisPageStore *m_owner = nullptr;
+    bool m_registered = false;
     bool m_cpuAvailable = false;
     bool m_recording = true;
     quint64 m_activeTimers = 0;

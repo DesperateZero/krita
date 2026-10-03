@@ -5,6 +5,8 @@
 #include <ctime>
 
 namespace {
+std::atomic<quint32> activeDiagnosticRecorders{0};
+
 quint64 wallNow()
 {
     return quint64(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -37,18 +39,22 @@ KisPageStoreDiagnosticRecorder::KisPageStoreDiagnosticRecorder(
     m_cpuAvailable = cpuNow(&unused);
     m_previous = s_current;
     s_current = this;
+    m_registered = true;
+    activeDiagnosticRecorders.fetch_add(1, std::memory_order_relaxed);
 }
 
 KisPageStoreDiagnosticRecorder::~KisPageStoreDiagnosticRecorder()
 {
-    if (s_current != this) return;
+    if (!m_registered) return;
+    Q_ASSERT(s_current == this);
     Q_ASSERT(m_activeTimers == 0);
     s_current = m_previous;
+    activeDiagnosticRecorders.fetch_sub(1, std::memory_order_relaxed);
 }
 
 bool KisPageStoreDiagnosticRecorder::setRecording(bool recording)
 {
-    if (s_current != this || m_activeTimers != 0) return false;
+    if (!m_registered || s_current != this || m_activeTimers != 0) return false;
     m_recording = recording;
     return true;
 }
@@ -101,6 +107,7 @@ KisPageStoreDiagnosticTimer::KisPageStoreDiagnosticTimer(
     const KisPageStore *owner, KisPageStoreDiagnosticPhase phase, quint64 workItems)
     : m_phase(phase), m_workItems(workItems)
 {
+    if (!activeDiagnosticRecorders.load(std::memory_order_relaxed)) return;
     auto *recorder = KisPageStoreDiagnosticRecorder::s_current;
     if (recorder && recorder->m_recording && (!recorder->m_owner || recorder->m_owner == owner)) {
         m_recorder = recorder;

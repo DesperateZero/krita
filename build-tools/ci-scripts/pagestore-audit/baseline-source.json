@@ -2402,7 +2402,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4697,
+      "lines": 4699,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2435,7 +2435,7 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "83fe6c841387178e93848f31777d01c7e02823ddee758c72860e42d8a4f71516",
+      "sha256": "d0cc413b82804dc25a40c60c86888d63f906de9c81fe8c40bc5dc19ca5398f13",
       "synchronization_declarations": 21
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -2517,7 +2517,7 @@
         "chrono",
         "ctime"
       ],
-      "lines": 155,
+      "lines": 162,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStore",
@@ -2526,7 +2526,7 @@
         "KisPageStoreDiagnosticTimer"
       ],
       "public_types": [],
-      "sha256": "e072a119214cabdb975fa1f9c7421ed407a597dd61e2e87724c10aefeafaf18d",
+      "sha256": "b60d6169ed45ee7147e979d5a2dff586853f42ce5fe9fbf8b0c5993c84daaeb1",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreDiagnostics_p.h": {
@@ -2534,10 +2534,11 @@
       "include_edges": [
         "QtGlobal",
         "array",
+        "atomic",
         "functional",
         "kritaimage_export.h"
       ],
-      "lines": 221,
+      "lines": 228,
       "member_fields": [
         "m_activeTimers",
         "m_cpuAvailable",
@@ -2547,6 +2548,7 @@
         "m_phase",
         "m_phaseObserver",
         "m_recording",
+        "m_registered",
         "m_wallStart",
         "m_workItems"
       ],
@@ -2565,7 +2567,7 @@
         "KisPageStoreDiagnosticRecorder",
         "KisPageStoreDiagnosticTimer"
       ],
-      "sha256": "ee5b7326cd572396cabce9fb33712ae8fb82ece64373809d9ee3694682747ad2",
+      "sha256": "3f542580ad1a5c7a659946f401ee451a635d46d71837ec0c3b9cd348ba373f7f",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreIteratorReadScope.cpp": {
@@ -2918,7 +2920,7 @@
         "ProcessStorageState",
         "Resource"
       ],
-      "sha256": "42f0351ea6cdf0593370c6881a2036563701621caf9b1f4da52d0588c72f8cc9",
+      "sha256": "ba1a906dcb6045f2fade8928dbcfbf3a86a6ed7c9f6781fcceaafe522583b994",
       "synchronization_declarations": 15
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -3445,7 +3447,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 10606,
+      "lines": 10649,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3477,7 +3479,7 @@
         "TestProvider",
         "Value"
       ],
-      "sha256": "60034cb0e85c5436c4d04c32426d2537ed8a9ce9add5099b225948dacfcaedb4",
+      "sha256": "a9fb70123697420aa9cc2b3a80a433babf91f2c59e43024d8258d098f1da93da",
       "synchronization_declarations": 3
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -3628,7 +3630,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12056,
+      "lines": 12062,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3690,7 +3692,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "f46b3665db00642ab6bd1538fa6d848813256d047e7b0b660e829bac45ef2edd",
+      "sha256": "be6d0aa68f1597f4308cc81f77f337da705300ce1a48f24fc44451aa71d4dc1d",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6367,5 +6369,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "b10b2913a69604d42b51cac83ba81214d30d43de"
+  "working_tree_head": "a36e1b0ad090fb24e7cd43c22833b6026ab7c14f"
 }

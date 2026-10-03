@@ -643,6 +643,7 @@ private Q_SLOTS:
     void checkpointRejectsLiveBorrow();
     void checkpointFailurePreservesFrozenViews_data() { pixelRows(); }
     void checkpointFailurePreservesFrozenViews();
+    void checkpointCaptureRefusalKeepsAcceptedSegment();
     void checkpointDoesNotWaitForColdPreparation_data() { pixelRows(); }
     void checkpointDoesNotWaitForColdPreparation();
     void failedSealKeepsEarlierSegment();
@@ -7981,6 +7982,48 @@ void KisPageStoreCpuMutationTest::checkpointFailurePreservesFrozenViews()
     QCOMPARE(QByteArray(static_cast<const char *>(old.data()), bpp), QByteArray(bpp, char(0x51)));
     QCOMPARE(f.pixel(), QByteArray(bpp, char(0x31)));
     old = {}; frozen = {}; QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::checkpointCaptureRefusalKeepsAcceptedSegment()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
+    Fixture f;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction(); auto scope = f.begin(tx);
+    auto guard = scope.beginWrite(key()); QVERIFY(guard.isValid());
+    static_cast<quint8 *>(guard.data())[0] = 0x71; guard = {};
+    auto accepted = scope.checkpointForRead(); QVERIFY(accepted.isValid());
+    const auto sealed = f.store->mutationStatistics().pagesSealed;
+    int providerPreparations = 0;
+    const auto observePreparation = [&] { ++providerPreparations; };
+    f.provider->beforePrepareWrite = observePreparation;
+    f.provider->beforeCpuPayload = observePreparation;
+    f.provider->beforeAdopt = observePreparation;
+    f.provider->beforeTransfer = observePreparation;
+    const auto live = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live);
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    {
+        const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            QVERIFY(!scope.checkpointForRead(&f.error).isValid());
+            QVERIFY(!f.error.isEmpty()); QVERIFY(scope.isActive());
+            QCOMPARE(f.store->sessionStats().activeProviderCalls, qsizetype(0));
+            QCOMPARE(f.store->mutationStatistics().pagesSealed, sealed);
+        }
+    }
+    auto retry = scope.checkpointForRead(&f.error); QVERIFY2(retry.isValid(), qPrintable(f.error));
+    QCOMPARE(f.store->mutationStatistics().pagesSealed, sealed);
+    QCOMPARE(providerPreparations, 0);
+    auto read = retry.readResidentPage(key()); QVERIFY(read.isValid());
+    QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x71));
+    read = {}; retry = {}; QVERIFY(scope.seal());
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    read = accepted.readResidentPage(key()); QVERIFY(read.isValid());
+    QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x71));
+    read = {}; accepted = {}; QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::checkpointDoesNotWaitForColdPreparation()

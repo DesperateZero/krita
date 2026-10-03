@@ -1517,6 +1517,12 @@ void KisPageStoreReferenceTest::diagnosticRecorderIsOwnerAndThreadScoped()
 {
     using Phase = KisPageStoreDiagnosticPhase;
     KisPageStore first, second;
+    {
+        KisPageStoreDiagnosticRecorder disabled(false, &first);
+        QVERIFY(!disabled.setRecording(true));
+        KisPageStoreDiagnosticTimer ignored(&first, Phase::CommitOwnerWait, 100);
+        QCOMPARE(disabled.metrics()[size_t(Phase::CommitOwnerWait)].intervals, quint64(0));
+    }
     KisPageStoreDiagnosticRecorder outer(true, &first);
     {
         KisPageStoreDiagnosticTimer timer(&first, Phase::CommitOwnerWait, 2);

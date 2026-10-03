@@ -2296,6 +2296,12 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     // replacements, despite these discarded targets no longer being usable.
     d->releaseStorageLocked(lock);
     ++owner->activeProviderCalls;
+    // One seal owns every unlocked preparation/cleanup window. Restore the
+    // gate and its activity on exceptions as well as ordinary refusals.
+    const auto providerActivity = qScopeGuard([&] {
+        if (!lock.isLocked()) lock.relock();
+        --owner->activeProviderCalls;
+    });
     lock.unlock();
     phase.next(Phase::MutationSealPrivatePublish, quint64(privatePageCount));
     // Configuration prepares this immutable terminal ticket before any
@@ -2328,7 +2334,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     }
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
-    --owner->activeProviderCalls;
     phase.next(Phase::MutationSealInputs, pageWork);
     validateClaims();
     qsizetype sealedPageCount = privatePageCount;
@@ -2345,7 +2350,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             if (source && !hadPage)
                 ++sealedPageCount;
         }
-    ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealProofPrepare, quint64(sealedPageCount));
     if (success)
@@ -2448,7 +2452,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
         if (failure.isEmpty())
             failure = QStringLiteral("overlay installation was rejected");
     }
-    --owner->activeProviderCalls;
     owner->mutationStats.sealMetadataPreparations +=
         quint64(metadataChangeCount != 0);
     owner->mutationStats.sealMetadataRejections +=
@@ -2475,7 +2478,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     // The complete overlay is installed. Destruction and physical retirement
     // may call providers or queue large releases; keep the claims but not the
     // owner gate while doing that work.
-    ++owner->activeProviderCalls;
     lock.unlock();
     phase.next(Phase::MutationSealCleanup, pageWork);
     metadataCleanup.dispose(owner->metadataCleanupStatistics);
@@ -2488,7 +2490,6 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
-    --owner->activeProviderCalls;
     d->finishSegmentLocked(lock, !checkpoint, retainAdmission);
     if (checkpoint) {
         // scopeLock excludes the next borrow through capture. The original
@@ -2499,8 +2500,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             KisPageReadView::transactionOverlay(d->transaction.id), error);
         lock.relock();
         if (!checkpoint->isValid()) {
-            d->state = Private::State::Failed;
-            d->cancelLocked(&lock);
+            // The overlay and segment completion were already accepted.
+            // Only the read output was refused; keep this original session
+            // so a quiescent retry captures that result without replaying it.
             return false;
         }
     }
