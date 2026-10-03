@@ -66642,7 +66642,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 395,
+          "line": 416,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112766,7 +112766,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 330,
+          "line": 351,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112775,7 +112775,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 342,
+          "line": 363,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112784,7 +112784,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 432,
+          "line": 453,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -112914,7 +112914,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 268,
+          "line": 289,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112923,7 +112923,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 291,
+          "line": 312,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112932,7 +112932,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 473,
+          "line": 494,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -112941,7 +112941,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 577,
+          "line": 598,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113071,7 +113071,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 429,
+          "line": 450,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -113168,7 +113168,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 265,
+          "line": 286,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113177,7 +113177,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 281,
+          "line": 302,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113262,7 +113262,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 264,
+          "line": 285,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113271,7 +113271,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 280,
+          "line": 301,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113280,7 +113280,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 512,
+          "line": 533,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113346,7 +113346,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 410,
+          "line": 431,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113355,7 +113355,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 431,
+          "line": 452,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113413,7 +113413,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 268,
+          "line": 289,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113422,7 +113422,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 291,
+          "line": 312,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113431,7 +113431,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 330,
+          "line": 351,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113440,7 +113440,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 342,
+          "line": 363,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113449,7 +113449,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 432,
+          "line": 453,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113533,7 +113533,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 267,
+          "line": 288,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -113542,7 +113542,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 282,
+          "line": 303,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115069,7 +115069,7 @@
       "definitions": [
         {
           "column": 26,
-          "line": 470,
+          "line": 491,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115095,7 +115095,7 @@
       "definitions": [
         {
           "column": 26,
-          "line": 471,
+          "line": 492,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115231,7 +115231,7 @@
       "definitions": [
         {
           "column": 26,
-          "line": 475,
+          "line": 496,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115287,7 +115287,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 505,
+          "line": 526,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115441,7 +115441,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 486,
+          "line": 507,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115545,7 +115545,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 483,
+          "line": 504,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115595,7 +115595,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 504,
+          "line": 525,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115695,7 +115695,7 @@
       "definitions": [
         {
           "column": 51,
-          "line": 476,
+          "line": 497,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115769,7 +115769,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 481,
+          "line": 502,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115783,7 +115783,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 474,
+          "line": 495,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -115792,7 +115792,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 478,
+          "line": 499,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -115887,7 +115887,7 @@
       "definitions": [
         {
           "column": 31,
-          "line": 527,
+          "line": 548,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116005,7 +116005,7 @@
       "definitions": [
         {
           "column": 26,
-          "line": 474,
+          "line": 495,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116039,7 +116039,7 @@
           "column": 41,
           "dynamic": true,
           "implicit": false,
-          "line": 377,
+          "line": 398,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -116078,7 +116078,7 @@
           "column": 22,
           "dynamic": true,
           "implicit": false,
-          "line": 380,
+          "line": 401,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116160,7 +116160,7 @@
       "definitions": [
         {
           "column": 25,
-          "line": 539,
+          "line": 560,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116174,7 +116174,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 576,
+          "line": 597,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116196,7 +116196,7 @@
       "definitions": [
         {
           "column": 25,
-          "line": 541,
+          "line": 562,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116210,7 +116210,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 578,
+          "line": 599,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116262,7 +116262,7 @@
       "definitions": [
         {
           "column": 30,
-          "line": 548,
+          "line": 569,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116344,7 +116344,7 @@
       "definitions": [
         {
           "column": 30,
-          "line": 560,
+          "line": 581,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116480,7 +116480,7 @@
       "definitions": [
         {
           "column": 49,
-          "line": 543,
+          "line": 564,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116545,7 +116545,7 @@
       "definitions": [
         {
           "column": 30,
-          "line": 549,
+          "line": 570,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116568,7 +116568,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 540,
+          "line": 561,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -116577,7 +116577,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 545,
+          "line": 566,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -116663,7 +116663,7 @@
       "definitions": [
         {
           "column": 25,
-          "line": 540,
+          "line": 561,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -116697,7 +116697,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 285,
+          "line": 306,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212040,7 +212040,7 @@
       "definitions": [
         {
           "column": 5,
-          "line": 212,
+          "line": 233,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212060,7 +212060,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 245,
+          "line": 266,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212074,7 +212074,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 595,
+          "line": 616,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212090,7 +212090,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 232,
+          "line": 253,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212104,7 +212104,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 583,
+          "line": 604,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212120,7 +212120,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 391,
+          "line": 412,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212134,7 +212134,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 271,
+          "line": 292,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212143,7 +212143,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 294,
+          "line": 315,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212159,7 +212159,7 @@
       "definitions": [
         {
           "column": 51,
-          "line": 261,
+          "line": 282,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212173,7 +212173,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 473,
+          "line": 494,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212189,7 +212189,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 276,
+          "line": 297,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212203,7 +212203,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 577,
+          "line": 598,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212219,7 +212219,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 348,
+          "line": 369,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212233,7 +212233,7 @@
           "column": 93,
           "dynamic": false,
           "implicit": false,
-          "line": 216,
+          "line": 237,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212249,7 +212249,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 303,
+          "line": 324,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212263,7 +212263,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 228,
+          "line": 249,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212272,7 +212272,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 466,
+          "line": 487,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212288,7 +212288,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 251,
+          "line": 272,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212302,7 +212302,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 221,
+          "line": 242,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212311,7 +212311,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 229,
+          "line": 250,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212320,7 +212320,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 467,
+          "line": 488,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212336,7 +212336,7 @@
       "definitions": [
         {
           "column": 5,
-          "line": 225,
+          "line": 246,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212356,10 +212356,10 @@
           "containers": [
             {
               "name": "ReclamationThread::start",
-              "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#"
+              "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#"
             }
           ],
-          "line": 128,
+          "line": 129,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp",
           "scope": "production"
         }
@@ -212369,7 +212369,7 @@
       "definitions": [
         {
           "column": 18,
-          "line": 183,
+          "line": 202,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212389,7 +212389,7 @@
       "definitions": [
         {
           "column": 10,
-          "line": 164,
+          "line": 181,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212408,11 +212408,11 @@
         },
         {
           "caller": "ReclamationThread::start",
-          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
+          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 155,
+          "line": 172,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212421,7 +212421,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 258,
+          "line": 279,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212430,7 +212430,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 323,
+          "line": 344,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -212460,7 +212460,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 216,
+          "line": 237,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -212469,14 +212469,14 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 398,
+          "line": 419,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
       "qualified-name": "ReclamationThread::start",
       "specializations-and-overrides": [],
       "test-callers": [],
-      "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#"
+      "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#"
     },
     {
       "callback-registrations": [],
@@ -217618,7 +217618,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 283,
+          "line": 304,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -223537,7 +223537,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 287,
+          "line": 308,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225501,7 +225501,7 @@
       "definitions": [
         {
           "column": 22,
-          "line": 456,
+          "line": 477,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -225515,7 +225515,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 466,
+          "line": 487,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225524,7 +225524,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 467,
+          "line": 488,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225533,7 +225533,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 473,
+          "line": 494,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225542,7 +225542,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 577,
+          "line": 598,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225551,7 +225551,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 583,
+          "line": 604,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -225560,7 +225560,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 595,
+          "line": 616,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -231469,11 +231469,11 @@
       "production-callers": [
         {
           "caller": "ReclamationThread::start",
-          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
+          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 119,
+          "line": 120,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -231617,7 +231617,7 @@
       "definitions": [
         {
           "column": 6,
-          "line": 592,
+          "line": 613,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -232256,7 +232256,7 @@
       "definitions": [
         {
           "column": 6,
-          "line": 581,
+          "line": 602,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -233366,7 +233366,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 174,
+          "line": 193,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -233507,7 +233507,7 @@
       "definitions": [
         {
           "column": 6,
-          "line": 586,
+          "line": 607,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -233629,7 +233629,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 235,
+          "line": 256,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -233638,7 +233638,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 594,
+          "line": 615,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -234938,7 +234938,7 @@
       "definitions": [
         {
           "column": 24,
-          "line": 572,
+          "line": 593,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -235081,11 +235081,11 @@
       "production-callers": [
         {
           "caller": "ReclamationThread::start",
-          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
+          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 141,
+          "line": 156,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -235094,7 +235094,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 172,
+          "line": 189,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -235149,11 +235149,11 @@
       "production-callers": [
         {
           "caller": "ReclamationThread::start",
-          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
+          "caller-usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 122,
+          "line": 123,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -235241,7 +235241,7 @@
       "definitions": [
         {
           "column": 6,
-          "line": 464,
+          "line": 485,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -235250,17 +235250,17 @@
       "non-call-references": [
         {
           "column": 25,
-          "line": 214,
+          "line": 235,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
           "column": 32,
-          "line": 220,
+          "line": 241,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
           "column": 28,
-          "line": 227,
+          "line": 248,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -294409,7 +294409,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 298,
+          "line": 319,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -294418,7 +294418,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 340,
+          "line": 361,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -294427,7 +294427,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 408,
+          "line": 429,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -294436,7 +294436,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 556,
+          "line": 577,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -294445,7 +294445,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 568,
+          "line": 589,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -295713,7 +295713,7 @@
               "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationExecutor@F@prepareWake#$@S@KisPageReadinessCallback#*$@S@KisBackingBudgetController#"
             }
           ],
-          "line": 290,
+          "line": 311,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp",
           "scope": "production"
         }
@@ -295732,7 +295732,7 @@
       "non-call-references": [
         {
           "column": 92,
-          "line": 290,
+          "line": 311,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -295743,7 +295743,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 343,
+          "line": 364,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -295752,7 +295752,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 411,
+          "line": 432,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         },
         {
@@ -295761,7 +295761,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 558,
+          "line": 579,
           "path": "libs/image/pagestore/KisPageStoreReclamation.cpp"
         }
       ],
@@ -319964,9 +319964,9 @@
       },
       {
         "predecessors": {
-          "indirect": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
-          "production": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
-          "test": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#"
+          "indirect": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
+          "production": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
+          "test": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#"
         },
         "status": "production-boundary-reachable",
         "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@invoke#*v#S"
@@ -319974,7 +319974,7 @@
       {
         "predecessors": {
           "indirect": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@~ReclamationThread#",
-          "production": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#",
+          "production": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#",
           "test": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationExecutor@F@stopDelays#"
         },
         "status": "production-boundary-reachable",
@@ -319987,7 +319987,7 @@
           "test": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationExecutor@F@ensureClockLocked#"
         },
         "status": "production-boundary-reachable",
-        "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#"
+        "usr": "c:KisPageStoreReclamation.cpp@aN@S@ReclamationThread@F@start#*Fv(#*v)#S2_#*1$@aN@S@ReclamationThread#"
       },
       {
         "predecessors": {
@@ -325009,7 +325009,7 @@
     "libs/image/pagestore/KisPageStoreIteratorReadScope_p.h": "af4ffb3aead2b494a62a8a7917dec875bdcc506850a8fff323394a998b4a123b",
     "libs/image/pagestore/KisPageStoreMementoManager.cpp": "223481f7758516543a10cf96b3432742c0c9038e1f5ac2427cc42354b63cb2bc",
     "libs/image/pagestore/KisPageStoreMementoManager.h": "8b6dd8c92c8ae69d7bab761b693eaf22ca256bcf2596f2e812cbf911f773c724",
-    "libs/image/pagestore/KisPageStoreReclamation.cpp": "020b81f081cdc7e165c4fc319e766d9a24924d0a9c89296f0a42be99f297c2f5",
+    "libs/image/pagestore/KisPageStoreReclamation.cpp": "c11fb385d243bb7c8179a2e96fabaf065d2c5ec80ea421d5936a025654bb4c7d",
     "libs/image/pagestore/KisPageStoreReclamation_p.h": "aacf78ffdc3a4834ba0fec3b0b5ed1fb1be82671a88a6c5bf268d9e9fed1a88b",
     "libs/image/pagestore/KisPageStoreTypes.h": "18ff97d0f763d7cbc9122b48ba042f11e102a484f4d0a5664a59dace8c834ae2",
     "libs/image/pagestore/KisPageStoreWriteOperation_p.h": "5370759e9e895da6147509a41ec1bd808df778e5e7a72929698f8261138d5364",

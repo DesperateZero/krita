@@ -105,7 +105,8 @@ class ReclamationThread
 {
 public:
     ~ReclamationThread() { join(); }
-    void start(void (*function)(void *), void *context)
+    void start(void (*function)(void *), void *context,
+               [[maybe_unused]] const ReclamationThread *alreadyPaid = nullptr)
     {
 #ifdef Q_OS_DARWIN
         Q_ASSERT(!m_joinable);
@@ -137,9 +138,25 @@ public:
                 VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&information), &count, &object);
             if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
             if (query != KERN_SUCCESS || address > reinterpret_cast<mach_vm_address_t>(m_thread)
-                || actualBytes == 0 || actualBytes > nativePreparation) throw std::bad_alloc();
-            kisReleasePageProcessStorage(nativePreparation - size_t(actualBytes));
-            m_nativeBytes = size_t(actualBytes);
+                || actualBytes == 0 || actualBytes > std::numeric_limits<mach_vm_address_t>::max() - address)
+                throw std::bad_alloc();
+            // The monitor starts while the original worker remains alive.
+            // Darwin can merge their adjacent control mappings into one VM
+            // region. Exclude capacity already paid by that worker; its join
+            // follows the monitor's join, so the overlap stays funded.
+            mach_vm_size_t sharedBytes = 0;
+            if (alreadyPaid) {
+                const auto first = std::max(address, alreadyPaid->m_nativeSpanAddress);
+                const auto last = std::min(address + actualBytes,
+                    alreadyPaid->m_nativeSpanAddress + alreadyPaid->m_nativeSpanBytes);
+                if (first < last) sharedBytes = last - first;
+            }
+            const auto uniqueBytes = actualBytes - sharedBytes;
+            if (uniqueBytes == 0 || uniqueBytes > nativePreparation) throw std::bad_alloc();
+            kisReleasePageProcessStorage(nativePreparation - size_t(uniqueBytes));
+            m_nativeBytes = size_t(uniqueBytes);
+            m_nativeSpanAddress = address;
+            m_nativeSpanBytes = actualBytes;
             {
                 std::lock_guard<std::mutex> lock(m_startMutex);
                 m_accepted = true;
@@ -170,6 +187,8 @@ public:
             m_joinable = false;
         }
         if (m_nativeBytes) kisReleasePageProcessStorage(std::exchange(m_nativeBytes, 0));
+        m_nativeSpanAddress = 0;
+        m_nativeSpanBytes = 0;
         if (m_stack) {
             kisFreePageProcessStorage(m_stack, m_stackBytes, m_pageSize);
             m_stack = nullptr;
@@ -199,6 +218,8 @@ private:
     void *m_context = nullptr;
     void *m_stack = nullptr;
     size_t m_stackBytes = 0, m_pageSize = 0, m_nativeBytes = 0;
+    mach_vm_address_t m_nativeSpanAddress = 0;
+    mach_vm_size_t m_nativeSpanBytes = 0;
     std::mutex m_startMutex;
     std::condition_variable m_startChanged;
 #else
@@ -433,7 +454,7 @@ private:
                     task.reset();
                     lock.lock();
                 }
-            }, clock.get());
+            }, clock.get(), &m_worker);
             m_clock = std::move(clock);
         }
     }

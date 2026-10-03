@@ -2712,7 +2712,7 @@
         "unistd.h",
         "utility"
       ],
-      "lines": 596,
+      "lines": 617,
       "member_fields": [
         "m_accepted",
         "m_clock",
@@ -2725,6 +2725,8 @@
         "m_jobsStopping",
         "m_joinable",
         "m_monitor",
+        "m_nativeSpanAddress",
+        "m_nativeSpanBytes",
         "m_stackBytes",
         "m_startChanged",
         "m_startMutex",
@@ -2744,7 +2746,7 @@
         "WakeQueue",
         "Wakes"
       ],
-      "sha256": "020b81f081cdc7e165c4fc319e766d9a24924d0a9c89296f0a42be99f297c2f5",
+      "sha256": "c11fb385d243bb7c8179a2e96fabaf065d2c5ec80ea421d5936a025654bb4c7d",
       "synchronization_declarations": 30
     },
     "libs/image/pagestore/KisPageStoreReclamation_p.h": {
@@ -6428,5 +6430,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "406bacb448997a2b63bf2d452a0a71d90587abdd"
+  "working_tree_head": "d7e91efc39d965be49c748859fd384f91cda2c64"
 }
