@@ -127,6 +127,9 @@ public:
      * consideration of COW.
      */
     inline bool ref() const;
+    // Map traversal holds the iterator barrier for the address, but may only
+    // retain a live owner. Zero belongs to the original final free.
+    inline bool tryRef() const;
 
     /**
      * Only refs shared pointer counter.
@@ -276,8 +279,7 @@ private:
      * 0 - recently accessed
      * 1+ - not recently accessed
      */
-    //FIXME: make memory aligned
-    int m_age;
+    QAtomicInt m_age;
 
 
     /**

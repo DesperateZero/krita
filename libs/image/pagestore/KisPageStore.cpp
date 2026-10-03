@@ -185,7 +185,7 @@ public:
         // Prepare the one process worker before this root can be released.
         // configure() admits its terminal/recurring nodes before any physical
         // state; the last reference never allocates a task or a thread.
-        kisEnqueuePageStoreReclamation(nullptr);
+        if (!kisEnqueuePageStoreReclamation(nullptr)) throw std::bad_alloc();
         owner.attachBackingBudget(backingBudget);
         metadata.attachBackingBudget(backingBudget);
         epochs.attachBackingBudget(backingBudget);
@@ -2919,8 +2919,11 @@ void KisPageStore::PrivateReleaser::cleanup(Private *owner)
     if (owner && !owner->lifetimeReferences.deref()) {
         if (!owner->terminalCleanup || !owner->backgroundReclamation || kisOnPageStoreReclamationThread())
             Private::destroy(owner);
-        else
-            kisEnqueuePageStoreReclamation(owner->terminalCleanup.release());
+        else {
+            auto cleanup = std::move(owner->terminalCleanup);
+            if (kisEnqueuePageStoreReclamation(cleanup.get())) cleanup.release();
+            else Private::destroy(owner);
+        }
     }
 }
 

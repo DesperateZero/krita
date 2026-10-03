@@ -33,7 +33,9 @@ protected:
 // runnable consumes these intrusive nodes; enqueue never creates a second
 // callback capture or a per-job QRunnable.
 // A null node only prepares the process runtime at a cold composition boundary.
-KRITAIMAGE_EXPORT void kisEnqueuePageStoreReclamation(KisPageReclamationJob *job);
+// Permanent stop rejects new producers. Already accepted worker continuations
+// may finish draining; false leaves the node and its responsibility with caller.
+KRITAIMAGE_EXPORT bool kisEnqueuePageStoreReclamation(KisPageReclamationJob *job);
 struct KisPageReclamationJobDeleter {
     void operator()(KisPageReclamationJob *job) const noexcept { if (job) job->dispose(); }
 };
@@ -65,7 +67,7 @@ KisPageReclamationJobPointer kisPreparePageStoreReclamation(Function &&function,
                                     void (*finished)(void *) = nullptr,
                                     void *finishContext = nullptr)
 {
-    kisEnqueuePageStoreReclamation(nullptr);
+    if (!kisEnqueuePageStoreReclamation(nullptr)) throw std::bad_alloc();
     using Job = KisPageReclamationTask<std::decay_t<Function>>;
     auto allocator = KisMutationStorageAllocator<Job>::retained(budget);
     void *storage = allocator.allocate(1);
@@ -92,7 +94,7 @@ void kisSchedulePageStoreReclamation(Function &&function,
     auto job = kisPreparePageStoreReclamation(std::forward<Function>(function),
                                              budget, finished, finishContext);
     job->reusable = false;
-    kisEnqueuePageStoreReclamation(job.get());
+    if (!kisEnqueuePageStoreReclamation(job.get())) throw std::bad_alloc();
     job.release();
 }
 KRITAIMAGE_EXPORT bool kisOnPageStoreReclamationThread();
@@ -175,6 +177,7 @@ struct KisPageTreeReclamationStatistics
     quint64 passes = 0;
     quint64 maximumReferenceDropsPerPass = 0;
 };
+constexpr size_t KisPageTreeReclamationFixedStorageBytes = 4 * sizeof(std::atomic<quint64>);
 KRITAIMAGE_EXPORT KisPageTreeReclamationStatistics kisPageTreeReclamationStatistics();
 
 #endif

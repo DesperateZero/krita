@@ -89,10 +89,10 @@ KisTileDataPooler::KisTileDataPooler(KisTileDataStore *store, qint32 memoryLimit
     m_lastHistoricalMemoryMetric = 0;
 
     if(memoryLimit >= 0) {
-        m_memoryLimit = memoryLimit;
+        m_memoryLimit.storeRelaxed(memoryLimit);
     }
     else {
-        m_memoryLimit = MiB_TO_METRIC(KisImageConfig(true).poolLimit());
+        m_memoryLimit.storeRelaxed(MiB_TO_METRIC(KisImageConfig(true).poolLimit()));
     }
 }
 
@@ -170,7 +170,7 @@ void KisTileDataPooler::waitForWork()
 
 void KisTileDataPooler::run()
 {
-    if(!m_memoryLimit) return;
+    if(!m_memoryLimit.loadRelaxed()) return;
 
     m_shouldExitFlag = false;
 
@@ -364,7 +364,7 @@ bool KisTileDataPooler::processLists(QList<KisTileData*> &beggars,
         qint32 clonesMemory = clonesMetric(item, clonesNeeded);
 
         qint32 memoryLeft =
-            m_memoryLimit - (memoryOccupied + clonesMemory);
+            m_memoryLimit.loadRelaxed() - (memoryOccupied + clonesMemory);
 
         if(memoryLeft < 0) {
             qint32 freedMemory = tryGetMemory(donors, -memoryLeft);
@@ -372,7 +372,7 @@ bool KisTileDataPooler::processLists(QList<KisTileData*> &beggars,
 
             DEBUG_FREE_CLONE(freedMemory, memoryLeft);
 
-            if(m_memoryLimit < memoryOccupied + clonesMemory)
+            if(m_memoryLimit.loadRelaxed() < memoryOccupied + clonesMemory)
                 break;
         }
 
@@ -410,5 +410,5 @@ void KisTileDataPooler::debugTileStatistics()
 
 void KisTileDataPooler::testingRereadConfig()
 {
-    m_memoryLimit = MiB_TO_METRIC(KisImageConfig(true).poolLimit());
+    m_memoryLimit.storeRelaxed(MiB_TO_METRIC(KisImageConfig(true).poolLimit()));
 }

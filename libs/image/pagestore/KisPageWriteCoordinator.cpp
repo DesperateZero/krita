@@ -33,7 +33,8 @@ struct ProcessStorageState
     std::weak_ptr<KisBackingBudgetController> parent;
     quint64 limit = 64 * 1024 * 1024;
     bool productPolicy = false;
-    std::atomic<quint64> bytes{sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes};
+    std::atomic<quint64> bytes{sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes
+                             + KisPageTreeReclamationFixedStorageBytes};
     ~ProcessStorageState()
     {
         // Free a remaining expired weak control while the accounting gate is
@@ -529,7 +530,10 @@ KisPageReadinessStatus KisBackingBudgetController::waitForChange(
             }
             context->scheduled = true;
             intrusive_ptr_add_ref(context.get());
-            kisEnqueuePageStoreReclamation(context->task.get());
+            if (!kisEnqueuePageStoreReclamation(context->task.get())) {
+                context->scheduled = false;
+                intrusive_ptr_release(context.get());
+            }
         };
     };
     bool needsContext = false;
@@ -1556,7 +1560,8 @@ void kisReleasePageProcessStorage(size_t bytes) noexcept
         QMutexLocker gate(&state.gate);
         parent = state.parent.lock();
         const auto current = state.bytes.load(std::memory_order_relaxed);
-        Q_ASSERT(current >= sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes + bytes);
+        Q_ASSERT(current >= sizeof(ProcessStorageState) + KisPageDiagnosticFixedStorageBytes
+                            + KisPageTreeReclamationFixedStorageBytes + bytes);
         state.bytes.store(current - bytes, std::memory_order_release);
     }
     if (parent) {

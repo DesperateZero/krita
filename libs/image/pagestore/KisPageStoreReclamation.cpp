@@ -229,15 +229,17 @@ public:
         stopJobs();
     }
 
-    void enqueue(KisPageReclamationJob *job)
+    bool enqueue(KisPageReclamationJob *job)
     {
         std::lock_guard<std::mutex> lock(m_jobMutex);
+        if (m_jobsStopping && !kisOnPageStoreReclamationThread()) return false;
+        if (!job) return true;
         Q_ASSERT(job && !job->next);
-        Q_ASSERT(!m_jobsStopping || kisOnPageStoreReclamationThread());
         if (m_lastJob) m_lastJob->next = job;
         else m_firstJob = job;
         m_lastJob = job;
         m_jobChanged.notify_one();
+        return true;
     }
 
     void drainJobs()
@@ -576,10 +578,9 @@ KisPageReclamationWake kisPreparePageStoreReclamationWake(
     return result;
 }
 
-void kisEnqueuePageStoreReclamation(KisPageReclamationJob *job)
+bool kisEnqueuePageStoreReclamation(KisPageReclamationJob *job)
 {
-    auto &runtime = executor();
-    if (job) runtime.enqueue(job);
+    return executor().enqueue(job);
 }
 
 bool kisOnPageStoreReclamationThread()

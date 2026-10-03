@@ -123,6 +123,7 @@ bool pageKeyLess(const KisPageKey &lhs, const KisPageKey &rhs)
 
 using PageRoot = std::shared_ptr<const KisImageEpochPageRoot>;
 std::atomic<quint64> backgroundNodeDestructions{0};
+std::atomic<quint64> foregroundNodeDestructions{0};
 std::atomic<quint64> treeReleasePasses{0}, maximumTreeReleasePass{0};
 
 qint32 pageRootHeight(const PageRoot &root)
@@ -367,7 +368,10 @@ void KisImageEpochTreeStorage::enqueue(KisImageEpochPageRoot *node) noexcept
     last = node;
     if (!taskPin) {
         taskPin = shared_from_this();
-        kisEnqueuePageStoreReclamation(task.get());
+        if (!kisEnqueuePageStoreReclamation(task.get())) {
+            lock.unlock();
+            finished();
+        }
     }
 }
 
@@ -390,7 +394,9 @@ void KisImageEpochTreeStorage::drain() noexcept
         nodes.deallocate(node, 1);
         ++dropped;
     }
-    backgroundNodeDestructions.fetch_add(dropped, std::memory_order_relaxed);
+    auto &destructions = kisOnPageStoreReclamationThread()
+        ? backgroundNodeDestructions : foregroundNodeDestructions;
+    destructions.fetch_add(dropped, std::memory_order_relaxed);
     treeReleasePasses.fetch_add(1, std::memory_order_relaxed);
     auto maximum = maximumTreeReleasePass.load(std::memory_order_relaxed);
     while (maximum < dropped
@@ -399,17 +405,26 @@ void KisImageEpochTreeStorage::drain() noexcept
 
 void KisImageEpochTreeStorage::finished() noexcept
 {
-    std::shared_ptr<KisImageEpochTreeStorage> released;
-    QMutexLocker lock(&mutex);
-    if (first) kisEnqueuePageStoreReclamation(task.get());
-    else released = std::move(taskPin);
     // The executor cached finished/context/reusable before invocation and
     // will not touch this task again. Last owner destruction is gate-free.
+    std::shared_ptr<KisImageEpochTreeStorage> released;
+    for (;;) {
+        QMutexLocker lock(&mutex);
+        if (!first) {
+            released = std::move(taskPin);
+            return;
+        }
+        if (kisEnqueuePageStoreReclamation(task.get())) return;
+        // With the worker stopped, final destruction still uses the original
+        // iterative release list. Child frees append to the same pinned owner.
+        lock.unlock();
+        drain();
+    }
 }
 
 KisPageTreeReclamationStatistics kisPageTreeReclamationStatistics()
 {
-    return {0,
+    return {foregroundNodeDestructions.load(std::memory_order_relaxed),
             backgroundNodeDestructions.load(std::memory_order_relaxed),
             treeReleasePasses.load(std::memory_order_relaxed),
             maximumTreeReleasePass.load(std::memory_order_relaxed)};

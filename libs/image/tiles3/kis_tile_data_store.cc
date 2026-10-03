@@ -764,7 +764,7 @@ void KisTileDataStore::debugSwapAll()
 
     while (iter->hasNext()) {
         KisTileData *item = iter->next();
-        if (item->ref())
+        if (item->tryRef())
             items.append(item);
     }
     endIteration(iter);

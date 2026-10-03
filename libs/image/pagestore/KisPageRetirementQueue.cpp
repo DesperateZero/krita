@@ -111,11 +111,16 @@ void KisPageRetirementQueue::dispatchReady(
         if (references.testAndSetOrdered(count, count + 1)) break;
         count = references.loadAcquire();
     }
-    queue->m_pendingNotifications.ref();
     // The producer may still hold a provider gate. Do not acquire queue/owner
     // gates or perform retirement here; the existing executor consumes it.
     wait->inFlight = wait;
-    kisEnqueuePageStoreReclamation(wait->task.get());
+    if (kisEnqueuePageStoreReclamation(wait->task.get())) {
+        queue->m_pendingNotifications.ref();
+    } else {
+        wait->inFlight.reset();
+        lifetimeLock.unlock();
+        queue->m_releaseOwnerLifetime(queue->m_ownerLifetimeContext);
+    }
 }
 
 std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
@@ -167,8 +172,8 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
             if (wait->retryPass && context->queue == queue && context->accepting &&
                 wait->notified.fetchAndStoreOrdered(0)) {
                 wait->inFlight = std::move(pin);
-                kisEnqueuePageStoreReclamation(wait->task.get());
-                return;
+                if (kisEnqueuePageStoreReclamation(wait->task.get())) return;
+                pin = std::move(wait->inFlight);
             }
         }
         // The last active wait/task can now physically free and return its
@@ -458,7 +463,12 @@ void KisPageRetirementQueue::schedulePassLocked()
     m_jobScheduled = true;
     m_ownerLifetimeReferences.ref();
     Q_ASSERT(m_task);
-    kisEnqueuePageStoreReclamation(m_task.get());
+    if (!kisEnqueuePageStoreReclamation(m_task.get())) {
+        m_jobScheduled = false;
+        const bool alive = m_ownerLifetimeReferences.deref();
+        Q_ASSERT(alive); Q_UNUSED(alive);
+        m_idle.wakeAll();
+    }
 }
 
 void KisPageRetirementQueue::retireOrDefer(
@@ -660,7 +670,17 @@ void KisPageRetirementQueue::cancelCloseAndSchedule()
 void KisPageRetirementQueue::waitForIdle()
 {
     QMutexLocker lock(&m_mutex);
-    while (m_jobScheduled || m_pendingNotifications.loadAcquire()) m_idle.wait(&m_mutex);
+    for (;;) {
+        bool pending;
+        {
+            // Dispatch publishes the notification count only after executor
+            // acceptance while holding this gate. Observe that same handoff.
+            QMutexLocker notificationLock(m_wakeContext ? &m_wakeContext->mutex : nullptr);
+            pending = m_jobScheduled || m_pendingNotifications.loadAcquire();
+        }
+        if (!pending) return;
+        m_idle.wait(&m_mutex);
+    }
 }
 
 KisPageRetirementRecords KisPageRetirementQueue::takeForClose()

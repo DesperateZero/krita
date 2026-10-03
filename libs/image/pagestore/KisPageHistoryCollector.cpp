@@ -334,7 +334,15 @@ void KisPageHistoryCollector::scheduleLocked()
     m_ownerLifetimeReferences.ref();
     { QMutexLocker notificationLock(&m_wakeContext->mutex); ++m_wakeContext->activities; }
     Q_ASSERT(m_task);
-    kisEnqueuePageStoreReclamation(m_task.get());
+    if (!kisEnqueuePageStoreReclamation(m_task.get())) {
+        m_jobScheduled = false;
+        const bool alive = m_ownerLifetimeReferences.deref();
+        Q_ASSERT(alive); Q_UNUSED(alive);
+        QMutexLocker notificationLock(&m_wakeContext->mutex);
+        --m_wakeContext->activities;
+        m_wakeContext->idle.wakeAll();
+        m_idle.wakeAll();
+    }
 }
 
 void KisPageHistoryCollector::collectEpochBookkeepingLocked(bool rescanHistory)

@@ -16,6 +16,7 @@
 
 
 #include "kis_tile_data_store.h"
+#include <limits>
 
 
 inline quint8* KisTileData::data() const {
@@ -60,6 +61,15 @@ inline bool KisTileData::release() {
 
 inline bool KisTileData::ref() const {
     return m_refCount.ref();
+}
+
+inline bool KisTileData::tryRef() const {
+    int count = m_refCount.loadAcquire();
+    while (count > 0 && count < std::numeric_limits<int>::max()) {
+        if (m_refCount.testAndSetOrdered(count, count + 1)) return true;
+        count = m_refCount.loadAcquire();
+    }
+    return false;
 }
 
 inline bool KisTileData::deref() {
@@ -142,13 +152,13 @@ inline bool KisTileData::historical() const {
 }
 
 inline int KisTileData::age() const {
-    return m_age;
+    return m_age.loadRelaxed();
 }
 inline void KisTileData::resetAge() {
-    m_age = 0;
+    m_age.storeRelaxed(0);
 }
 inline void KisTileData::markOld() {
-    m_age++;
+    m_age.fetchAndAddRelaxed(1);
 }
 
 inline qint32 KisTileData::numUsers() const {

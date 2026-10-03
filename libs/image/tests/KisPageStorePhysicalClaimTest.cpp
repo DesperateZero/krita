@@ -5,6 +5,7 @@
 #include <QTest>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QElapsedTimer>
 #include <atomic>
 #include <thread>
 #include <memory>
@@ -89,6 +90,8 @@ class KisPageStorePhysicalClaimTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void mappedFinalReferenceCannotBeRetained_data();
+    void mappedFinalReferenceCannotBeRetained();
     void residentBindingStorageFollowsLastHandle_data();
     void residentBindingStorageFollowsLastHandle();
     void retirementReadiness_data();
@@ -135,6 +138,43 @@ private Q_SLOTS:
     }
     void ledgerAliasMembershipAtCapacity();
 };
+
+void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained_data()
+{
+    QTest::addColumn<int>("bpp");
+    for (int bpp : {1, 4, 8, 16})
+        QTest::newRow(qPrintable(QString::number(bpp))) << bpp;
+}
+
+void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained()
+{
+    QFETCH(int, bpp);
+    auto *store = KisTileDataStore::instance();
+    const auto before = store->memoryMetric();
+    const quint8 pixel[16] = {0x31};
+    auto *tile = store->createDefaultTileData(bpp, pixel);
+    QVERIFY(tile); QVERIFY(tile->ref()); // Initial cold ownership still works.
+    QVERIFY(tile->tryRef()); QCOMPARE(tile->m_refCount.loadAcquire(), 2);
+    QVERIFY(tile->deref());
+    auto *iterator = store->beginIteration();
+    std::thread releaser([&] { tile->deref(); });
+    auto release = qScopeGuard([&] {
+        if (iterator) store->endIteration(iterator);
+        if (releaser.joinable()) releaser.join();
+    });
+    QElapsedTimer timer; timer.start();
+    while (tile->m_refCount.loadAcquire() != 0 && timer.elapsed() < 5000)
+        std::this_thread::yield();
+    const int terminalCount = tile->m_refCount.loadAcquire();
+    const bool retained = tile->tryRef();
+    const int after = tile->m_refCount.loadAcquire();
+    // The original final free owns this node even if a broken map pin revives
+    // its count. Never dereference that pointer after releasing the barrier.
+    store->endIteration(iterator); iterator = nullptr;
+    releaser.join();
+    QCOMPARE(terminalCount, 0); QVERIFY(!retained); QCOMPARE(after, 0);
+    QCOMPARE(store->memoryMetric(), before);
+}
 
 void KisPageStorePhysicalClaimTest::residentBindingStorageFollowsLastHandle_data()
 {

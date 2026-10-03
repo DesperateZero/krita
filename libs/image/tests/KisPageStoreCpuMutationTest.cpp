@@ -9059,6 +9059,11 @@ void KisPageStoreCpuMutationTest::consumedGenericLeaseCanRetryAbort()
     QVERIFY(!blocked.beginWrite(key()).isValid()); QVERIFY(blocked.cancel());
     f.provider->rejectRetire = false;
     f.store->processRetirements(64); QVERIFY(f.store->waitForRetirementIdle());
+    // Idle excludes future retries. Observe the actual Debt release before
+    // asking the consumed lease to detach into this same one-page budget.
+    QTRY_COMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam,
+                 quint64(0));
+    QCOMPARE(f.store->sessionStats().activeControlWritePages, qsizetype(1));
     QVERIFY(f.store->abort(tx));
     QCOMPARE(f.store->sessionStats().activeControlWritePages, qsizetype(0));
     QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x31)));
@@ -10787,6 +10792,36 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
 void KisPageStoreCpuMutationTest::runtimeStopsAtCapacity()
 {
     kisDrainPageStoreReclamation();
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 16 * 1024 * 1024;
+    auto outer = std::make_shared<KisBackingBudgetController>(limits);
+    std::array<KisBackingBudgetReservation, 64> outerWarm;
+    for (auto &reservation : outerWarm) {
+        reservation = outer->reserve({}, nullptr); QVERIFY(reservation.isValid());
+    }
+    for (auto &reservation : outerWarm) reservation.release();
+    const auto outerBaseline = outer->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    auto parent = outer;
+    struct Pending {
+        std::unique_ptr<Fixture> fixture;
+        KisCapturedReadView captured;
+        KisCpuReadGuard guard;
+        bool releaseFacade;
+    };
+    std::vector<Pending> pending;
+    for (int bpp : {1, 4, 8, 16}) for (bool releaseFacade : {false, true}) {
+        auto f = std::make_unique<Fixture>();
+        f->providerProcessBudget = parent;
+        QVERIFY(f->store->configureSharedNonPayloadBudget(parent, &f->error));
+        QVERIFY(f->init(bpp)); QVERIFY(f->fill(0x31));
+        auto captured = f->store->captureReadView(); QVERIFY(captured.isValid());
+        auto guard = captured.readResidentPage(key()); QVERIFY(guard.isValid());
+        QVERIFY(f->fill(0x71));
+        pending.push_back({std::move(f), std::move(captured), std::move(guard), releaseFacade});
+    }
+    kisDrainPageStoreReclamation();
+    std::atomic<int> rejectedCalls{0}, rejectedFinishes{0};
+    auto rejected = kisPreparePageStoreReclamation([&] { ++rejectedCalls; }, nullptr,
+        +[](void *context) { ++*static_cast<std::atomic<int> *>(context); }, &rejectedFinishes);
     auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
     auto warm = process->reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
     std::atomic<int> calls{0};
@@ -10798,6 +10833,37 @@ void KisPageStoreCpuMutationTest::runtimeStopsAtCapacity()
     void *filler = kisAllocatePageProcessStorage(fillerBytes, 1);
     auto free = qScopeGuard([&] { kisFreePageProcessStorage(filler, fillerBytes, 1); });
     kisStopPageStoreReclamation();
+    QVERIFY(!kisEnqueuePageStoreReclamation(rejected.get()));
+    QCOMPARE(rejectedCalls.load(), 0); QCOMPARE(rejectedFinishes.load(), 0);
+    rejected.reset();
+    QVERIFY_EXCEPTION_THROWN(kisSchedulePageStoreReclamation([&] { ++rejectedCalls; }), std::bad_alloc);
+    for (auto &entry : pending) {
+        auto &f = *entry.fixture;
+        if (entry.releaseFacade) f.store.reset();
+        else QVERIFY(!f.store->closeSession(&f.error));
+        QCOMPARE(static_cast<const quint8 *>(entry.guard.data())[0], quint8(0x31));
+        entry.guard = {}; entry.captured = {};
+        if (f.store) {
+            QVERIFY(f.store->waitForRetirementIdle());
+            const auto stats = f.store->sessionStats();
+            QCOMPARE(stats.scheduledReclamationJobs, qsizetype(0));
+            f.provider->rejectRetire = true;
+            const auto retained = f.provider->memoryUsage().committedBytes;
+            for (int attempt = 0; attempt < 3; ++attempt) QVERIFY(!f.store->closeSession(&f.error));
+            QCOMPARE(f.provider->memoryUsage().committedBytes, retained);
+            f.provider->rejectRetire = false;
+            QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+            QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+            f.store.reset();
+        }
+        entry.fixture.reset();
+    }
+    QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
+    // The original parent keeps only its warmed, charged high-water slots;
+    // all participant storage and retained parent references have been freed.
+    parent.reset();
+    QCOMPARE(outer->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, outerBaseline);
+    QCOMPARE(outer.use_count(), long(1));
     QCOMPARE(calls.load(), 0); QVERIFY(!late.arm(1)); QVERIFY(!late.takeReady());
 #ifdef Q_OS_DARWIN
     QVERIFY(kisPageProcessStorageBytes() + 2 * 512 * 1024 <= before + fillerBytes);

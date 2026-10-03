@@ -249,8 +249,13 @@ void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeCon
         count = references.loadAcquire();
     }
     context->jobScheduled = true;
-    lock.unlock();
-    kisEnqueuePageStoreReclamation(context->task.get());
+    if (!kisEnqueuePageStoreReclamation(context->task.get())) {
+        context->jobScheduled = false;
+        context->accepting = false;
+        context->idle.wakeAll();
+        lock.unlock();
+        coordinator->m_releaseLifetime(coordinator->m_lifetimeContext);
+    }
 }
 
 void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeContext> &context)
@@ -352,7 +357,8 @@ void KisPageReadCoordinator::beginCloseLocked()
 void KisPageReadCoordinator::cancelCloseLocked()
 {
     m_lastUseClosing = false;
-    if (!m_backgroundReclamation || m_automaticWakeupsStopped) return;
+    if (!m_backgroundReclamation || m_automaticWakeupsStopped
+        || !kisEnqueuePageStoreReclamation(nullptr)) return;
     Q_ASSERT(m_lastUseWakeContext);
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
@@ -389,6 +395,10 @@ void KisPageReadCoordinator::waitForIdle()
     }
     if (!context) return;
     QMutexLocker lock(&context->mutex);
+    // The stopped monitor cannot dispatch dormant ready work. Its original
+    // records remain available to synchronous close/ack; only accepted jobs
+    // belong to this idle wait.
+    if (!kisEnqueuePageStoreReclamation(nullptr)) context->accepting = false;
     while (context->jobScheduled ||
            (context->accepting && !context->retryScheduled && (context->head || context->cleanupPending)))
         context->idle.wait(&context->mutex);

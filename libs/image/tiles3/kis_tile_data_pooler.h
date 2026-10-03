@@ -79,7 +79,7 @@ protected:
     KisTileDataStore *m_store;
     qint32 m_timeout;
     bool m_lastCycleHadWork;
-    qint32 m_memoryLimit;
+    QAtomicInt m_memoryLimit;
     qint32 m_lastPoolMemoryMetric;
     qint32 m_lastRealMemoryMetric;
     qint32 m_lastHistoricalMemoryMetric;
@@ -88,4 +88,3 @@ protected:
 
 
 #endif /* KIS_TILE_DATA_POOLER_H_ */
-

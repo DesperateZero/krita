@@ -2155,33 +2155,33 @@ void KisPageMetadataCoordinator::DeferredPublicationCleanup::dispose(
     lock.unlock();
     // The original candidate is the prepared terminal node. No shared job,
     // callback wrapper or per-pass task allocation follows publication.
-    kisEnqueuePageStoreReclamation(data.release());
+    if (kisEnqueuePageStoreReclamation(data.get())) data.release();
+    else data->invoke();
 }
 
 void KisPageMetadataCoordinator::PreparedPublication::Data::invoke()
 {
     const auto statistics = cleanupStatistics;
-    QElapsedTimer timer;
-    timer.start();
-    qsizetype cleared = 0;
     do {
-        cleared += clearBatch(1);
-    } while (!entries.empty() && cleared < 16 && timer.nsecsElapsed() < 1000000);
-    const quint64 elapsed = quint64(timer.nsecsElapsed());
-    statistics->passes.fetchAndAddRelaxed(1);
-    statistics->units.fetchAndAddRelaxed(quint64(cleared));
-    statistics->nanoseconds.fetchAndAddRelaxed(elapsed);
-    updateMetadataCleanupMaximum(statistics->maximumUnitsPerPass, quint64(cleared));
-    updateMetadataCleanupMaximum(statistics->maximumPassNanoseconds, elapsed);
-    {
-        QMutexLocker lock(&statistics->idleMutex);
-        const qsizetype before = statistics->pendingUnits.fetchAndSubRelaxed(cleared);
-        Q_ASSERT(before >= cleared);
-    }
-    if (!entries.empty()) {
-        kisEnqueuePageStoreReclamation(this);
-        return;
-    }
+        QElapsedTimer timer;
+        timer.start();
+        qsizetype cleared = 0;
+        do {
+            cleared += clearBatch(1);
+        } while (!entries.empty() && cleared < 16 && timer.nsecsElapsed() < 1000000);
+        const quint64 elapsed = quint64(timer.nsecsElapsed());
+        statistics->passes.fetchAndAddRelaxed(1);
+        statistics->units.fetchAndAddRelaxed(quint64(cleared));
+        statistics->nanoseconds.fetchAndAddRelaxed(elapsed);
+        updateMetadataCleanupMaximum(statistics->maximumUnitsPerPass, quint64(cleared));
+        updateMetadataCleanupMaximum(statistics->maximumPassNanoseconds, elapsed);
+        {
+            QMutexLocker lock(&statistics->idleMutex);
+            const qsizetype before = statistics->pendingUnits.fetchAndSubRelaxed(cleared);
+            Q_ASSERT(before >= cleared);
+        }
+        if (!entries.empty() && kisEnqueuePageStoreReclamation(this)) return;
+    } while (!entries.empty());
     const quint64 age = quint64(cleanupAge.nsecsElapsed());
     statistics->completedCandidates.fetchAndAddRelaxed(1);
     statistics->queueNanoseconds.fetchAndAddRelaxed(age);

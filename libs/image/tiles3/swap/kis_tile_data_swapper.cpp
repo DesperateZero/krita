@@ -216,7 +216,7 @@ qint64 KisTileDataSwapper::pass(qint64 needToFreeMetric)
                     item->markOld();
                     continue;
                 }
-                if (item->ref())
+                if (item->tryRef())
                     candidates.append(item);
             }
             strategy::endIteration(m_d->store, iter);
