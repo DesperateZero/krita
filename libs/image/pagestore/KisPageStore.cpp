@@ -233,8 +233,10 @@ void disposeDeferredMetadataCleanup(Cleanup cleanup,
 class KisPageStore::Private
 {
 public:
-    Private()
-        : writeAdmission(mutex, writeAdmissionChanged, &backingBudget, &operational)
+    using Storage = KisMutationStorageAllocator<Private>;
+    explicit Private(const Storage &allocator)
+        : storage(allocator)
+        , writeAdmission(mutex, writeAdmissionChanged, &backingBudget, &operational)
         , writeCoordinator(metadata, epochs, backingBudget, owner)
         , defaultStorage(backingBudget)
         , retirementQueue(owner, metadata, backingBudget, lifetimeReferences, this, &Private::releaseRetirementLifetime)
@@ -293,6 +295,13 @@ public:
                                            &Private::prepareRetirementDebt,
                                            &Private::commitRetirementDebt,
                                            &Private::cancelRetirementDebt);
+    }
+
+    static void destroy(Private *owner) noexcept
+    {
+        auto allocator = owner->storage;
+        std::destroy_at(owner);
+        allocator.deallocate(owner, 1);
     }
 
     static bool prepareRetirementDebt(void *context,
@@ -720,6 +729,7 @@ public:
         MutationLifetime lifetime;
     };
 
+    Storage storage;
     mutable QMutex mutex;
     QWaitCondition writeAdmissionChanged;
     QSharedPointer<DeferredMetadataCleanupStatistics> metadataCleanupStatistics =
@@ -2890,8 +2900,48 @@ KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store)
 }
 
 KisPageStore::KisPageStore()
-    : d(new Private)
+    : KisPageStore(KisMutationStorageAllocator<KisPageStore>{})
 {
+}
+
+KisPageStore::KisPageStore(const KisMutationStorageAllocator<KisPageStore> &storage)
+{
+    Private::Storage allocator(storage);
+    auto *raw = allocator.allocate(1);
+    try { std::allocator_traits<Private::Storage>::construct(allocator, raw, allocator); }
+    catch (...) { allocator.deallocate(raw, 1); throw; }
+    d.reset(raw);
+}
+
+KisPageStore::StoragePointer KisPageStore::prepareStorage(
+    const QSharedPointer<KisBackingBudgetController> &parent, QString *error)
+{
+    StoragePointer result(nullptr, &KisPageStore::destroyStorage);
+    // The internal controller must still accept the original shared/limits
+    // setup. This cold child only pays fixed root storage; its retained
+    // accounting keeps the parent and registration until the actual last free.
+    KisBackingBudgetController bootstrap;
+    if (!bootstrap.configureSharedNonPayloadBudget(parent, error)) return result;
+    try {
+        auto allocator = KisMutationStorageAllocator<KisPageStore>::retained(&bootstrap);
+        auto *raw = allocator.allocate(1);
+        try { ::new (raw) KisPageStore(allocator); }
+        catch (...) { allocator.deallocate(raw, 1); throw; }
+        result.reset(raw);
+    } catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore root storage budget was refused"));
+        return result;
+    }
+    KisPageStoreDetail::setError(error, {});
+    return result;
+}
+
+void KisPageStore::destroyStorage(KisPageStore *store) noexcept
+{
+    if (!store) return;
+    KisMutationStorageAllocator<KisPageStore> allocator(store->d->storage);
+    std::destroy_at(store);
+    allocator.deallocate(store, 1);
 }
 
 KisPageStore::~KisPageStore()
@@ -2908,7 +2958,7 @@ void KisPageStore::PrivateReleaser::cleanup(Private *owner)
 {
     if (owner && !owner->lifetimeReferences.deref()) {
         if (!owner->terminalCleanup || !owner->backgroundReclamation || kisOnPageStoreReclamationThread())
-            delete owner;
+            Private::destroy(owner);
         else
             kisEnqueuePageStoreReclamation(owner->terminalCleanup.release());
     }
@@ -3310,7 +3360,7 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     try {
         if (!d->terminalCleanup) {
             d->terminalCleanup = kisPreparePageStoreReclamation(
-                [owner = d.data()] { delete owner; }, &d->backingBudget);
+                [owner = d.data()] { Private::destroy(owner); }, &d->backingBudget);
             d->terminalCleanup->reusable = false;
         }
         d->retirementQueue.prepareTask();

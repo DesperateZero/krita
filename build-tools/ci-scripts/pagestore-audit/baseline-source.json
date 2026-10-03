@@ -2297,7 +2297,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStore.cpp": {
-      "container_declarations": 80,
+      "container_declarations": 81,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisImageEpochReferenceModel.h",
@@ -2336,7 +2336,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4741,
+      "lines": 4791,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2371,13 +2371,14 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "b61cd2f100cbd8be88ba53d7c77155303cb28eeb23740342595db1def3af34c4",
+      "sha256": "beac3578324614d938600d011818edce404ad6a9e60ab139143d12b0dcaf1171",
       "synchronization_declarations": 23
     },
     "libs/image/pagestore/KisPageStore.h": {
-      "container_declarations": 27,
+      "container_declarations": 29,
       "include_edges": [
         "KisCompletionRegistry.h",
+        "KisMutationStorage_p.h",
         "KisPageReplicaProvider.h",
         "KisPageStoreTypes.h",
         "QScopedPointer",
@@ -2386,7 +2387,7 @@
         "limits",
         "memory"
       ],
-      "lines": 629,
+      "lines": 637,
       "member_fields": [
         "m_binding",
         "m_byteSize",
@@ -2442,7 +2443,7 @@
         "PrivateReleaser",
         "QWriteLocker"
       ],
-      "sha256": "824efe2109ef4808cf0e72d96533874fcf151e4c3c47abfb7f4c04536d4036c5",
+      "sha256": "97be80b7bbbef9a6db2493b47976167e95f6bce8980c8ea9c784f1db5dcd4726",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreDiagnostics.cpp": {
@@ -3018,7 +3019,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": {
-      "container_declarations": 63,
+      "container_declarations": 62,
       "include_edges": [
         "KisPageStoreDiagnostics_p.h",
         "KisPageStoreIteratorReadScope_p.h",
@@ -3043,7 +3044,7 @@
         "tiles3/kis_tiled_data_manager.h",
         "utility"
       ],
-      "lines": 2594,
+      "lines": 2595,
       "member_fields": [
         "m_barrierPin",
         "m_batch",
@@ -3084,7 +3085,7 @@
         "ProductBackingPolicy",
         "TrimPage"
       ],
-      "sha256": "3da472bd988e061197b778fb4bf4a6b41e747f5d24b59df2fee8760a1fda46c1",
+      "sha256": "3cdb70b457c4848740119a3d2830a38ce54905e81d76aeaf83e55782fd615d2b",
       "synchronization_declarations": 8
     },
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": {
@@ -3324,7 +3325,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreCpuMutationTest.cpp": {
-      "container_declarations": 85,
+      "container_declarations": 88,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisImageEpochReferenceModel.h",
@@ -3360,7 +3361,7 @@
         "tiles3/tests/kis_tile_data_store_test_access.h",
         "vector"
       ],
-      "lines": 10196,
+      "lines": 10313,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -3391,7 +3392,7 @@
         "Terminal",
         "TestProvider"
       ],
-      "sha256": "d98687fac024140cad9cb0aedf9a7ea7780264339630dc56e9d09208e650bef5",
+      "sha256": "2200b77dae75c93e9397288edeec442a05d1e71651e64d2ffb280640e1e362e9",
       "synchronization_declarations": 3
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -6225,5 +6226,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "4c45738186bccf095b8cefd409e409c8accd637a"
+  "working_tree_head": "ec3cebba5b4652c04c856b262065dde092c938b4"
 }

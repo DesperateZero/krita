@@ -17,6 +17,7 @@
 #include "KisCompletionRegistry.h"
 #include "KisPageReplicaProvider.h"
 #include "KisPageStoreTypes.h"
+#include "KisMutationStorage_p.h"
 
 class KisPageStoreMementoManager;
 class KisBackingBudgetController;
@@ -596,6 +597,13 @@ private:
         bool legacyIntent, bool *borrowed, QString *error);
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
+    // Product composition prepares the real facade/root storage before its
+    // internal controller is configured. Reference construction stays valid.
+    using StoragePointer = std::unique_ptr<KisPageStore, void (*)(KisPageStore *)>;
+    static StoragePointer prepareStorage(
+        const QSharedPointer<KisBackingBudgetController> &parent, QString *error);
+    explicit KisPageStore(const KisMutationStorageAllocator<KisPageStore> &storage);
+    static void destroyStorage(KisPageStore *) noexcept;
     KisReadRequest acquireReadImpl(const KisPageKey &key,
                                    const KisPageReadView &view,
                                    KisPageAccessRequirement access,

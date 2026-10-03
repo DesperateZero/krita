@@ -323,7 +323,8 @@ public:
                 &nextTiles3ProviderId);
         providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
         providerConfig.budgetBytes = policy.providerBytes;
-        store.reset(new KisPageStore);
+        store = KisPageStore::prepareStorage(sharedNonPayloadBudget, error);
+        if (!store) return false;
         history.reset(new KisPageStoreMementoManager);
         return provider->configure(providerConfig, completions, error, sharedNonPayloadBudget) &&
                store->configureSharedNonPayloadBudget(sharedNonPayloadBudget, error) &&
@@ -359,7 +360,7 @@ public:
     QMutex transactionMutex;
     QReadWriteLock publicationLock;
     QSharedPointer<KisTiles3PageReplicaProvider> provider;
-    std::unique_ptr<KisPageStore> store;
+    KisPageStore::StoragePointer store{nullptr, &KisPageStore::destroyStorage};
     std::unique_ptr<KisPageStoreMementoManager> history;
     KisSurfaceId surface{1};
     KisPageTransaction anonymousTransaction;
