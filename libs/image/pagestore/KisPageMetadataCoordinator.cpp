@@ -2474,7 +2474,7 @@ try {
             if (page == entry.shardOwner->pages.end() || !entry.shardOwner->canMutate(entry.key(), page->second)
                 || page->second.revision != entry.revision) {
                 KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while preparing publication storage"));
-                result.m_conflicted = true;
+                result.m_failure = PreparedPublication::Failure::Conflict;
                 return result;
             }
             publication.arenaDemand = entry.shardOwner->records.batchDemand(publication.installRecords);
@@ -2515,6 +2515,7 @@ try {
                 ++growth.shardOwner->metadataArenaGrowthFailures;
         }
         if (!fitsBudget) {
+            result.m_failure = PreparedPublication::Failure::Storage;
             KisPageStoreDetail::setError(error, QStringLiteral("metadata arena budget is exhausted"));
             return result;
         }
@@ -2528,6 +2529,7 @@ try {
                 ++growth.shardOwner->metadataArenaGrowthFailures;
         }
         if (!prepared) {
+            result.m_failure = PreparedPublication::Failure::Storage;
             KisPageStoreDetail::setError(error, QStringLiteral("metadata arena storage allocation failed"));
             return result;
         }
@@ -2552,7 +2554,7 @@ try {
         if (!revalidate()) {
             ++growth.shardOwner->metadataArenaGrowthConflicts;
             KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication capacity"));
-            result.m_conflicted = true;
+            result.m_failure = PreparedPublication::Failure::Conflict;
             return result;
         }
 
@@ -2568,7 +2570,8 @@ try {
             const auto grown = growMetadataArenasOutsideLock(growth.shardOwner.get(), growth.totalDemand,
                 &growth.blocks, &locker, revalidate, error);
             if (grown != MetadataGrowthResult::Ready) {
-                result.m_conflicted = grown == MetadataGrowthResult::Stale;
+                result.m_failure = grown == MetadataGrowthResult::Stale
+                    ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
                 return result;
             }
             attachResult = MetadataArenaGrowth::AttachResult::Ready;
@@ -2579,6 +2582,7 @@ try {
                                               growth.physicalInsertions,
                                               &growth.reservations)) {
             ++growth.shardOwner->metadataArenaGrowthFailures;
+            result.m_failure = PreparedPublication::Failure::Storage;
             KisPageStoreDetail::setError(error, QStringLiteral("metadata publication capacity reservation failed"));
             return result;
         }
@@ -2599,7 +2603,8 @@ try {
         }
         if (!stillValid || !entry.shardOwner->reservePublicationActivity(entry.key(), error)) {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication activity"));
-            result.m_conflicted = !stillValid;
+            result.m_failure = !stillValid
+                ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
             return result;
         }
         entry.activityReservation = true;
@@ -2615,7 +2620,9 @@ try {
 }
 catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("metadata publication preparation storage was refused"));
-    return {};
+    PreparedPublication refused;
+    refused.m_failure = PreparedPublication::Failure::Storage;
+    return refused;
 }
 
 bool KisPageMetadataCoordinator::installPublication(PreparedPublication &&prepared,
@@ -3710,6 +3717,7 @@ try {
             lock.relock();
             if (!debtAccepted) {
                 ++shard->rejectedTransitions;
+                result.storageRefused = true;
                 result.rejectionReason = debtError.isEmpty()
                     ? QStringLiteral("retirement debt budget is exhausted") : debtError;
                 return result;
@@ -3736,11 +3744,13 @@ try {
         }
         if (storage != MetadataGrowthResult::Ready) {
             ++shard->rejectedTransitions;
+            result.storageRefused = true;
             result.rejectionReason = QStringLiteral("metadata arena budget is exhausted");
             return result;
         }
         const auto nextHeader = next.header();
         if (!shard->ensureActivityCapacity(key, &nextHeader, &result.rejectionReason)) {
+            result.storageRefused = true;
             result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
             return result;
         }
@@ -3791,6 +3801,7 @@ try {
 }
 catch (const std::bad_alloc &) {
     KisPageMetadataTransitionResult refused;
+    refused.storageRefused = true;
     refused.rejectionReason = QStringLiteral("metadata transition working storage was refused");
     return refused;
 }

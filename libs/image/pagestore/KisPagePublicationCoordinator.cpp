@@ -247,8 +247,9 @@ qsizetype KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
 }
 
 bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
-    QString *error)
+    QString *error, bool *storageRefused)
 {
+    if (storageRefused) *storageRefused = false;
     if (!isValid() || data->prepared) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("overlay update cannot be prepared"));
@@ -257,8 +258,10 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
     if (!data->detachments.empty()) {
         data->metadata = data->owner->m_metadata.prepareMutation(
             data->transaction, data->detachments.data(), qsizetype(data->detachments.size()), error);
-        if (!data->metadata.isValid())
+        if (!data->metadata.isValid()) {
+            if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
             return false;
+        }
     }
     data->prepared = true;
     KisPageStoreDetail::setError(error, {});
@@ -266,8 +269,9 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
 }
 
 bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepareSurfaceLocked(
-    QString *error)
+    QString *error, bool *storageRefused)
 {
+    if (storageRefused) *storageRefused = false;
     if (!isValid() || !data->prepared || data->surfacePrepared) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay surface preparation is invalid"));
         return false;
@@ -362,6 +366,7 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepareSurfaceLock
         KisPageStoreDetail::setError(error, {});
         return true;
     } catch (const std::bad_alloc &) {
+        if (storageRefused) *storageRefused = true;
         KisPageStoreDetail::setError(error, QStringLiteral("overlay surface storage preparation was refused"));
         return false;
     }
@@ -467,11 +472,8 @@ void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::cancel() noexcept
         data.reset();
         return;
     }
-    for (const Data::Change &change : std::as_const(data->changes)) {
-        if (change.replacement.proof.isValid())
-            data->owner->m_owner.revokePreparedPage(
-                change.replacement.proof);
-    }
+    // Replacements belong to their original page/lease until install accepts
+    // them. Discarding preparation releases capacity, never those proofs.
     data.reset();
 }
 
@@ -1510,8 +1512,9 @@ KisPagePublicationCoordinator::KisPreparedOverlayUpdate
 KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
     const KisPageTransaction &transaction,
     const OverlayChange *changes, size_t count,
-    QString *error)
+    QString *error, bool *storageRefused)
 {
+    if (storageRefused) *storageRefused = false;
     if (!hasActiveTransactionLocked(transaction) || !changes || !count) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
         return {};
@@ -1599,6 +1602,7 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
         KisPageStoreDetail::setError(error, {});
         return result;
     } catch (const std::bad_alloc &) {
+        if (storageRefused) *storageRefused = true;
         // The caller still owns the replacement proofs on refusal. No
         // metadata or visible overlay value has changed.
         KisPageStoreDetail::setError(error, QStringLiteral("overlay storage preparation was refused"));

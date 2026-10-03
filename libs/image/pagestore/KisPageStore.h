@@ -171,6 +171,8 @@ public:
     KisPageMutationSession &operator=(KisPageMutationSession &&) noexcept = default;
     KisPageMutationSession(const KisPageMutationSession &) = delete;
     KisPageMutationSession &operator=(const KisPageMutationSession &) = delete;
+    // Also true while the original frozen segment awaits seal preparation.
+    // During that interval only seal/checkpoint retry or cancel is allowed.
     bool isActive() const;
     // Explicit write-only footprint. Shared input must already be immutable;
     // scheduler/read dependencies remain the caller's responsibility. Conflict

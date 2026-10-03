@@ -72,6 +72,8 @@ class KisPagePublicationCoordinator final
 public:
     struct OverlayChange {
         KisPageKey key;
+        // Borrowed from the original page/lease until tryInstall accepts.
+        // The caller revokes it on terminal rejection, or retains it to retry.
         KisPreparedPageProof proof;
         bool removal = false;
     };
@@ -88,10 +90,10 @@ public:
 
         bool isValid() const;
         qsizetype metadataChangeCount() const;
-        bool prepare(QString *error);
+        bool prepare(QString *error, bool *storageRefused = nullptr);
         // Caller keeps the owner gate from this last preparation through
         // tryInstallLocked, so sibling page/extent changes cannot be lost.
-        bool prepareSurfaceLocked(QString *error);
+        bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);
         bool tryInstallLocked(
             KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
             QString *error);
@@ -186,7 +188,7 @@ public:
     KRITAIMAGE_EXPORT KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
         const KisPageTransaction &transaction,
         const OverlayChange *changes, size_t count,
-        QString *error);
+        QString *error, bool *storageRefused = nullptr);
 
     KRITAIMAGE_EXPORT DescriptorMap prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);

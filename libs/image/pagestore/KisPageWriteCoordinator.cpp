@@ -2356,6 +2356,17 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(Kis
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::publishPrivateWrite(KisPageTransition write)
 {
+    // The original private generation is the acceptance record. A later
+    // preparation refusal must not replay its already consumed writer.
+    KisPageMetadataCoordinator::VersionInfo accepted;
+    if (metadata->versionSnapshot(write.version, &accepted)
+        && accepted.version == write.version
+        && accepted.publication == KisPagePublicationState::Prepared
+        && accepted.preparedBy == write.transaction && accepted.authority == write.target) {
+        KisPageMetadataTransitionResult result;
+        result.accepted = true;
+        return result;
+    }
     write.kind = KisPageTransitionKind::BeginPublish;
     auto publish = write;
     publish.kind = KisPageTransitionKind::PublishWrite;

@@ -34,6 +34,7 @@ class KisPageRetirementQueue;
 struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
 {
     bool accepted = false;
+    bool storageRefused = false;
     QString rejectionReason;
 };
 class KisPageStore;
@@ -354,9 +355,10 @@ private:
         PreparedPublication(const PreparedPublication &) = delete;
         PreparedPublication &operator=(const PreparedPublication &) = delete;
         bool isValid() const;
-        // Revision/capacity races are retryable; invalid input and exhausted
-        // budgets are not. This is an outcome, never an install capability.
-        bool needsReprepare() const { return m_conflicted; }
+        // Outcome only, never an install capability. The original owner can
+        // retry a revision race or retain its input until capacity returns.
+        bool needsReprepare() const { return m_failure == Failure::Conflict; }
+        bool wasStorageRefused() const { return m_failure == Failure::Storage; }
         KisReplicaHandle backingAuthority(const KisPageVersion &version) const;
 
     private:
@@ -366,7 +368,8 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
-        bool m_conflicted = false;
+        enum class Failure : quint8 { None, Conflict, Storage };
+        Failure m_failure = Failure::None;
         friend class KisPageMetadataCoordinator;
         friend class DeferredPublicationCleanup;
     };

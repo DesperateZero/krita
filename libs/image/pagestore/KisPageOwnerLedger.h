@@ -196,7 +196,8 @@ public:
                           const KisPageAllocationDescriptor &descriptor,
                           const KisCompletionTicket &producerCompletion,
                           KisPreparedPageProof *proof,
-                          QString *error = nullptr);
+                          QString *error = nullptr,
+                          bool *storageRefused = nullptr);
     bool validatePreparedPage(const KisPageMetadataCoordinator &metadata,
                               const KisPreparedPageProof &proof,
                               const KisPageAllocationDescriptor &descriptor,

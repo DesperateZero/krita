@@ -2052,9 +2052,10 @@ bool KisPageOwnerLedger::sealPreparedPage(
     const KisPageAllocationDescriptor &descriptor,
     const KisCompletionTicket &producerCompletion,
     KisPreparedPageProof *proof,
-    QString *error)
+    QString *error, bool *storageRefused)
 try
 {
+    if (storageRefused) *storageRefused = false;
     if (!proof || !version.isValid() || !transaction.isValid() ||
         !descriptor.isValid() || !producerCompletion.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof request is invalid"));
@@ -2125,6 +2126,7 @@ try
 }
 catch (const std::bad_alloc &)
 {
+    if (storageRefused) *storageRefused = true;
     KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof storage was refused"));
     return false;
 }

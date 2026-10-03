@@ -821,7 +821,7 @@ public:
             qMax(owner->mutationStats.maximumPinnedPagesPerExecution, counters.maximumPins);
         Q_ASSERT(counters.activePins == 0 && counters.pinsAcquired == counters.pinsReleased);
         counters = {};
-        if (terminal) state = State::Detached;
+        state = terminal ? State::Detached : State::Active;
     }
     KisPageTransition writeTransition(KisMutationWriteSet::EntryIndex index, const Page &page) const
     {
@@ -829,12 +829,14 @@ public:
         Q_ASSERT(entry && entry->key() == page.target.version.key);
         return owner->writeCoordinator.writeTransition(*entry, transaction.id, page.source, page.target);
     }
-    bool cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page)
+    bool cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page,
+                          bool *storageRefused = nullptr)
     {
         auto *entry = writes.at(index);
         Q_ASSERT(entry && !entry->isExposed());
         page.writable.reset();
         const auto result = owner->writeCoordinator.cancelPrivateWrite(writeTransition(index, page));
+        if (storageRefused) *storageRefused = result.storageRefused;
         if (!result.accepted)
             return false;
         owner->writeCoordinator.recordCancelled(*entry);
@@ -1069,8 +1071,9 @@ public:
     bool prepareAliasLocked(const KisPageKey &key,
                             const std::shared_ptr<const KisPageReplicaSource> &source,
                             QMutexLocker<QMutex> &lock,
-                            QString *error)
+                            QString *error, bool *storageRefused = nullptr)
     {
+        if (storageRefused) *storageRefused = false;
         const auto producer = owner->owner.provider(source->provider(), source->providerEpoch());
         KisPageWriteIntent intent;
         intent.key = key;
@@ -1082,6 +1085,9 @@ public:
         const auto plan = owner->writeCoordinator.select(intent, entry);
         Page *page = plan == KisPageWritePlanKind::ReusePending ? pageAtEntry(entryIndex) : nullptr;
         Q_ASSERT(plan == KisPageWritePlanKind::SemanticOnly || page);
+        // An accepted adoption has already replaced the physical target and
+        // released its writer reservation. Keep that original result on retry.
+        if (page && !page->writable.isValid()) return true;
         const auto pending = page ? writeTransition(entryIndex, *page) : KisPageTransition{};
         KisPageTransition adoption;
         KisPageAllocationDescriptor descriptor;
@@ -1095,6 +1101,7 @@ public:
             : KisPageTransitionKind::AdoptPreparedWrite;
         auto *resources = ensurePage(*entry);
         if (!resources) {
+            if (storageRefused) *storageRefused = true;
             KisPageStoreDetail::setError(error, QStringLiteral("mutation cold storage is unavailable"));
             return false;
         }
@@ -1107,6 +1114,7 @@ public:
         if (!page) {
             try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(adoption.version, descriptor); }
             catch (const std::bad_alloc &) {
+                if (storageRefused) *storageRefused = true;
                 KisPageStoreDetail::setError(error, QStringLiteral("alias descriptor storage budget was refused"));
                 return false;
             }
@@ -1123,11 +1131,15 @@ public:
             if (!backing.retirement) return;
             lock.unlock(); backing.retirement.reset(); lock.relock();
         });
-        if (!backing.reservation.isValid()) return false;
-        ++owner->activeProviderCalls;
-        lock.unlock();
+        if (!backing.reservation.isValid()) {
+            if (storageRefused) *storageRefused = true;
+            return false;
+        }
         KisReplicaOperation allocation;
         {
+            ++owner->activeProviderCalls;
+            lock.unlock();
+            const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
             KisPageStoreDiagnosticTimer phase(diagnosticOwner, KisPageStoreDiagnosticPhase::MutationAliasPrepare, 1);
             allocation = producer->prepareSynchronousSource(adoption.operation,
                                                             source,
@@ -1136,8 +1148,6 @@ public:
                                                             KisReplicaSourceUse::ImmutableAlias,
                                                             KisPagePriority::Interactive);
         }
-        lock.relock();
-        --owner->activeProviderCalls;
         const bool reusesPendingSlot = page &&
             allocation.replica.physicalSlotIdentity() == page->target.physicalSlotIdentity();
         const bool ours = ownsPreparedReplica(allocation.replica, adoption.version, *producer)
@@ -1159,6 +1169,7 @@ public:
         adoption.target = allocation.replica;
         const auto applied = owner->metadata.applyOwner(key, adoption);
         if (!applied.accepted) {
+            if (storageRefused) *storageRefused = applied.storageRefused;
             reject();
             KisPageStoreDetail::setError(error, applied.rejectionReason);
             return false;
@@ -1180,7 +1191,7 @@ public:
     }
     KisPageMutationExecution::Private *executions = nullptr;
     Private *nextOrphan = nullptr;
-    enum class State : quint8 { Active, Failed, Detached };
+    enum class State : quint8 { Active, Sealing, Failed, Detached };
     Qt::HANDLE thread = QThread::currentThreadId();
     std::atomic<State> state{State::Detached};
     struct Counters {
@@ -1582,7 +1593,7 @@ bool KisPageMutationSession::isActive() const
     if (!d)
         return false;
     QMutexLocker lock(&d->mutex);
-    return d->state == Private::State::Active;
+    return d->state == Private::State::Active || d->state == Private::State::Sealing;
 }
 
 static_assert(sizeof(KisCpuWriteGuard) <= 128);
@@ -2261,6 +2272,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation was cancelled after a failed write"));
         return false;
     }
+    // The same original input remains sealable after preparation refusal,
+    // but cannot lend another mutable guard once publication has begun.
+    d->state = Private::State::Sealing;
     auto *owner = d->owner;
     using Phase = KisPageStoreDiagnosticPhase;
     const quint64 pageWork = quint64(d->writes.size());
@@ -2283,8 +2297,9 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             ++privatePageCount;
             continue;
         }
-        if (!d->cancelPageLocked(index, *page)) {
-            d->state = Private::State::Failed;
+        bool storageRefused = false;
+        if (!d->cancelPageLocked(index, *page, &storageRefused)) {
+            if (!storageRefused) d->state = Private::State::Failed;
             retire();
             KisPageStoreDetail::setError(error, QStringLiteral("mutation could not discard its removed target"));
             return false;
@@ -2310,9 +2325,11 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     Q_ASSERT(completion.isValid());
     QString failure;
     bool success = true;
+    bool storageRefused = false;
     const auto validateClaims = [&] {
-        if (success && !d->claimsHeldLocked()) {
+        if (!d->claimsHeldLocked()) {
             success = false;
+            storageRefused = false;
             failure = QStringLiteral("mutation claims were lost");
         }
     };
@@ -2327,6 +2344,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             d->writeTransition(index, *page));
         success = applied.accepted;
         if (!success) {
+            storageRefused = applied.storageRefused;
             failure = applied.rejectionReason.isEmpty()
                 ? QStringLiteral("private publication was rejected")
                 : applied.rejectionReason;
@@ -2343,7 +2361,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             const auto *entry = d->writes.at(index);
             const auto source = entry->initializationSource();
             const bool hadPage = d->pageAtEntry(index) != nullptr;
-            if (source && !d->prepareAliasLocked(entry->key(), source, lock, &failure)) {
+            if (source && !d->prepareAliasLocked(entry->key(), source, lock, &failure, &storageRefused)) {
                 success = false;
                 break;
             }
@@ -2357,13 +2375,19 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
             auto *page = d->pageAtEntry(slot.index);
             if (!page)
                 continue;
+            if (page->proof.isValid()) {
+                if (owner->owner.ownsPreparedPageProof(page->proof)) continue;
+                success = false;
+                failure = QStringLiteral("mutation prepared proof lost its owner");
+                break;
+            }
             if (!owner->owner.sealPreparedPage(owner->metadata,
                                                page->target.version,
                                                d->transaction.id,
                                                *page->descriptor,
                                                completion,
                                                &page->proof,
-                                               &failure)) {
+                                               &failure, &storageRefused)) {
                 success = false;
                 break;
             }
@@ -2404,28 +2428,19 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
         }
     } catch (const std::bad_alloc &) {
         success = false;
+        storageRefused = true;
         failure = QStringLiteral("overlay input storage preparation was refused");
     }
     const bool hasOverlay = success && !overlayChanges.empty();
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChanges.size()));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
-              d->transaction, overlayChanges.data(), overlayChanges.size(), &failure)
+              d->transaction, overlayChanges.data(), overlayChanges.size(), &failure, &storageRefused)
         : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
         if (failure.isEmpty())
             failure = QStringLiteral("overlay update preparation was rejected");
-    }
-    if (success && hasOverlay) {
-        // The aggregate now owns every new sealed proof. A failed prepare or
-        // install revokes them together while the former overlay stays live.
-        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
-            if (auto *page = d->pageAtEntry(
-                    slot.index)) {
-                page->proof = {};
-            }
-        }
     }
     const qsizetype metadataChangeCount = overlay.metadataChangeCount();
     lock.unlock();
@@ -2434,7 +2449,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     overlayChanges = decltype(overlayChanges){overlayChanges.get_allocator()};
     phase.next(Phase::MutationSealMetadataPrepare,
                quint64(metadataChangeCount));
-    if (success && hasOverlay && !overlay.prepare(&failure)) {
+    if (success && hasOverlay && !overlay.prepare(&failure, &storageRefused)) {
         success = false;
         if (failure.isEmpty())
             failure = QStringLiteral("overlay metadata preparation was rejected");
@@ -2443,7 +2458,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
     phase.next(Phase::MutationSealSurfacePrepare, pageWork);
-    if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure)) success = false;
+    if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure, &storageRefused)) success = false;
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims();
     if (success && hasOverlay && !overlay.tryInstallLocked(
@@ -2457,19 +2472,24 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     owner->mutationStats.sealMetadataRejections +=
         quint64(metadataChangeCount != 0 && !success);
     if (!success) {
-        // No proof/overlay has been exposed; rollback only this segment's
-        // versions, preserving previously prepared history and its proofs.
-        d->state = Private::State::Failed;
+        // Preparation borrows the original proofs until installation accepts.
+        // Capacity refusal preserves this frozen segment and its claims;
+        // semantic rejection still cancels only this segment.
+        if (!storageRefused) d->state = Private::State::Failed;
         lock.unlock();
         phase.next(Phase::MutationSealCleanup, pageWork);
         metadataCleanup.dispose(owner->metadataCleanupStatistics);
         overlay = {};
         lock.relock();
         retire();
-        d->cancelLocked(&lock);
+        if (!storageRefused) d->cancelLocked(&lock);
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation seal failed: ") + failure);
         return false;
     }
+    // Installation now owns the replacements. The original pages cease
+    // owning them only at this acceptance point, never at prepare success.
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
+        if (auto *page = d->pageAtEntry(slot.index)) page->proof = {};
     owner->mutationStats.pagesSealed += sealedCpuWrites;
     owner->synchronousHostWrites += sealedSources;
     owner->mutationStats.removalsSealed += sealedRemovals;
@@ -4503,8 +4523,6 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
                 transaction, &change, 1, nullptr);
         }
         success = overlay.isValid();
-        if (success)
-            proof = {};
     }
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     if (success) {
@@ -4515,8 +4533,10 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
     if (success) {
         success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryInstallLocked(
             &metadataCleanup, nullptr);
-        if (success)
+        if (success) {
+            proof = {};
             overlay.collectRetirementsLocked();
+        }
     }
     const auto disposeCleanup = qScopeGuard([&] {
         lock.unlock();
