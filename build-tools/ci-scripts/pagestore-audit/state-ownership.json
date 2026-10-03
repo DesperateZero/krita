@@ -550,7 +550,7 @@
         "arena close and drain",
         "coordinator destruction after owner quiescence",
         "single read-protection terminal transitions detach empty blocks into the caller-owned KisPageMetadataReadCleanup, retaining the original budget authority and charge until payload destruction; another metadata owner cannot append to that value",
-        "all MetadataArenaGrowth holders use the original paid allocator; unattached payloads are freed before reservation release; shard objects/shared controls, the immutable shard array, arena directories and publication identity use actual retained allocation fees. Configure publishes one complete local candidate and refusal frees it; MetadataBudgetAuthority retains the same accounting owner only for manually reserved block/hash capacity, while deferred shard storage releases its original shared-child fees after coordinator/controller destruction"
+        "all MetadataArenaGrowth holders use the original paid allocator; unattached payloads are freed before reservation release; shard objects/shared controls, the immutable shard array and publication identity use actual retained allocation fees. Configure publishes one complete local candidate with empty arena directories; original growth prepares geometric directory capacity outside the shard gate and moves entries without relocating payloads, retaining retired arrays in the same growth carrier until outside-gate free. A stale directory uses the original revalidate/growth loop before slot reservation. MetadataBudgetAuthority retains the same accounting owner only for manually reserved block/hash capacity; deferred shard/candidate storage releases original shared-child fees after coordinator/controller destruction"
       ]
     },
     {

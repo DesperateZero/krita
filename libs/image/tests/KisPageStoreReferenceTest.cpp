@@ -971,6 +971,7 @@ private Q_SLOTS:
     void metadataCompactRecordsRoundTrip();
     void metadataArenaGrowthCausalBaseline();
     void metadataSlotArenaGenerationAndRelease();
+    void metadataArenaDirectoryGrowthAtCapacity();
     void metadataShardSlotIndexReservations();
     void metadataShardSlotIndexGrowthAndErasure();
     void metadataOwningCapacityIsBudgeted();
@@ -985,10 +986,12 @@ private Q_SLOTS:
     {
         QTest::addColumn<int>("shards");
         QTest::addColumn<bool>("install");
+        QTest::addColumn<bool>("mutation");
         for (int count : {1, 64})
             for (bool install : {false, true})
-                QTest::newRow(qPrintable(QStringLiteral("shards%1-install%2").arg(count).arg(install)))
-                    << count << install;
+                for (bool mutation : {false, true})
+                    QTest::newRow(qPrintable(QStringLiteral("shards%1-install%2-mutation%3")
+                        .arg(count).arg(install).arg(mutation))) << count << install << mutation;
     }
     void metadataConfigurationLateCandidate();
     void metadataReadProtectionAtCapacity_data();
@@ -3990,6 +3993,9 @@ void KisPageStoreReferenceTest::metadataReadProtectionReclaimsEmptyBlocks()
     // cancellation the existing arena cleanup can reclaim it; old slot IDs
     // stay invalid when the directory is later reused.
     Arena arena(4 * Arena::blockByteSize());
+    Arena::PreparedDirectory directory;
+    directory.prepare(arena.directoryCapacityForBlocks(4));
+    QVERIFY(arena.installPreparedDirectory(&directory, 4));
     for (int i = 0; i < 4; ++i) {
         auto prepared = Arena::prepareBlock();
         QVERIFY(arena.attachPreparedBlock(&prepared));
@@ -4718,6 +4724,7 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
 {
     QFETCH(int, shards);
     QFETCH(bool, install);
+    QFETCH(bool, mutation);
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 4 * 1024 * 1024;
     auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
@@ -4734,16 +4741,37 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     metadata->attachBackingBudget(*budget);
     QVERIFY(metadata->configure(shards));
     const KisPageTransaction transaction{{74}, {1}};
-    auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
-    const auto target = replica(pageVersion(0, 2), 1, 1, 2);
-    page.versions.append({target.version, KisPagePublicationState::Prepared,
-        {{target, KisReplicaValidity::Valid, {}, {}, 0, {}}}, target, transaction.id, {}});
-    page.nextGeneration = {3};
+    using Versions = KisShardSlotArena<KisVersionRecord, 16 * 1024>;
+    auto page = mutation ? initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1))
+                         : pageWithHistory(int(4 * Versions::slotsPerBlock()) - 1);
+    const auto target = replica(mutation ? pageVersion(0, 2) : KisPageVersion{page.key, {1}, 2}, 1, 1, 2);
+    if (mutation) {
+        page.versions.append({target.version, KisPagePublicationState::Prepared,
+            {{target, KisReplicaValidity::Valid, {}, {}, 0, {}}}, target, transaction.id, {}});
+        ++page.nextGeneration.value;
+    } else {
+        page.publishedDefaultPixelRevision = 1;
+        for (auto &version : page.versions) {
+            version.version.defaultPixelRevision = 1;
+            version.authority.version = version.version;
+            for (auto &copy : version.replicas) copy.replica.version = version.version;
+        }
+    }
     QVERIFY(metadata->registerPage(page));
-    auto candidate = metadata->prepareMutation(transaction, &target.version, 1);
+    const auto directoryEntries = metadata->footprint().versionArena.directoryEntries;
+    if (!mutation) QCOMPARE(metadata->footprint().versionArena.freeSlots, quint64(0));
+    KisPageTransition transition;
+    transition.kind = mutation ? KisPageTransitionKind::CommitTransaction : KisPageTransitionKind::ReplaceDefaultPixel;
+    transition.version = target.version;
+    if (mutation) transition.transaction = transaction.id;
+    transition.imageEpoch = {2};
+    auto candidate = mutation ? metadata->prepareMutation(transaction, &target.version, 1)
+                             : metadata->preparePublication(transaction, {2}, {transition});
     QVERIFY(candidate.isValid());
+    if (!mutation) QVERIFY(metadata->footprint().versionArena.directoryEntries > directoryEntries);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-    if (install) QVERIFY(metadata->installMutation(std::move(candidate), transaction, nullptr, &cleanup));
+    if (install) QVERIFY(mutation ? metadata->installMutation(std::move(candidate), transaction, nullptr, &cleanup)
+                                 : metadata->installPublication(std::move(candidate), transaction, {2}, nullptr, &cleanup));
     metadata.reset();
     budget.reset();
     QVERIFY(live() > baseline);
@@ -4760,6 +4788,99 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     QVERIFY(cleanup.isEmpty());
     parent.reset();
     QVERIFY(lifetime.isNull());
+}
+
+void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
+{
+    using Arena = KisShardSlotArena<int, 128>;
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 64 * 1024;
+    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    KisBackingBudgetController budget(limits);
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    auto storage = KisMutationStorageAllocator<char>::retained(&budget);
+    std::array<KisBackingBudgetReservation, 8> warm;
+    for (auto &slot : warm) { slot = budget.reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : warm) slot.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const auto baseline = live();
+    {
+        Arena arena(8 * Arena::blockByteSize(), storage);
+        QCOMPARE(live(), baseline); // Empty arenas have no directory allocation.
+        Arena::PreparedDirectory first(storage);
+        first.prepare(arena.directoryCapacityForBlocks(1));
+        QVERIFY(arena.installPreparedDirectory(&first, 1));
+        auto block = Arena::prepareBlock();
+        QVERIFY(arena.attachPreparedBlock(&block));
+        const auto id = arena.emplace(19);
+        QVERIFY(id.isValid());
+        int *const address = arena.get(id);
+        QVERIFY(address);
+        for (quint32 i = 1; i < Arena::slotsPerBlock(); ++i)
+            QVERIFY(arena.emplace(int(i)).isValid());
+        const auto original = live();
+        quint64 bytes = 0;
+        {
+            Arena::PreparedDirectory measured(storage);
+            measured.prepare(arena.directoryCapacityForBlocks(1));
+            bytes = live() - original;
+        }
+        QCOMPARE(live(), original);
+        QVERIFY(bytes > 1);
+        const size_t shortFill = size_t(limits.metadataArenaBytes - original - bytes + 1);
+        char *filler = storage.allocate(shortFill);
+        auto release = qScopeGuard([&] { storage.deallocate(filler, shortFill); });
+        const auto filled = live();
+        Arena::PreparedDirectory next(storage);
+        QVERIFY_EXCEPTION_THROWN(next.prepare(arena.directoryCapacityForBlocks(1)), std::bad_alloc);
+        QCOMPARE(live(), filled);
+        QCOMPARE(arena.get(id), address);
+        QCOMPARE(*address, 19);
+        QCOMPARE(arena.statistics().directoryEntries, quint64(1));
+        release.dismiss();
+        storage.deallocate(filler, shortFill);
+        next.prepare(arena.directoryCapacityForBlocks(1));
+        auto second = Arena::prepareBlock();
+        const auto prepared = live();
+        const size_t fullFill = size_t(limits.metadataArenaBytes - prepared);
+        filler = storage.allocate(fullFill);
+        auto releaseFull = qScopeGuard([&] { storage.deallocate(filler, fullFill); });
+        QCOMPARE(live(), limits.metadataArenaBytes);
+        QVERIFY(arena.installPreparedDirectory(&next, 1));
+        QVERIFY(arena.attachPreparedBlock(&second));
+        QVERIFY(arena.emplace(20).isValid());
+        QCOMPARE(live(), limits.metadataArenaBytes); // Install allocates/frees no directory.
+        QCOMPARE(arena.get(id), address);
+        QCOMPARE(*address, 19);
+        releaseFull.dismiss();
+        storage.deallocate(filler, fullFill);
+        next = Arena::PreparedDirectory(storage); // Retired array is freed outside the gate.
+
+        Arena::PreparedDirectory stale(storage), competitor(storage);
+        stale.prepare(arena.directoryCapacityForBlocks(1));
+        competitor.prepare(arena.directoryCapacityForBlocks(3));
+        QVERIFY(arena.installPreparedDirectory(&competitor, 3));
+        for (int i = 0; i < 3; ++i) {
+            auto other = Arena::prepareBlock();
+            QVERIFY(arena.attachPreparedBlock(&other));
+        }
+        const auto competing = live();
+        QVERIFY(!arena.installPreparedDirectory(&stale, 1));
+        QCOMPARE(live(), competing);
+        QCOMPARE(arena.statistics().directoryEntries, quint64(5));
+        QCOMPARE(arena.get(id), address);
+        stale.prepare(arena.directoryCapacityForBlocks(1));
+        QVERIFY(arena.installPreparedDirectory(&stale, 1));
+        auto last = Arena::prepareBlock();
+        QVERIFY(arena.attachPreparedBlock(&last));
+        QCOMPARE(arena.get(id), address);
+        QCOMPARE(*address, 19);
+    }
+    QCOMPARE(live(), baseline);
+    for (const auto &bucket : parent->usage().buckets)
+        QCOMPARE(bucket.reserved.cpuRam, quint64(0));
 }
 
 void KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership()
@@ -4812,6 +4933,9 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
     quint32 releasedDirectoryIndex = 0;
     {
         Arena arena(oneBlockBudget);
+        Arena::PreparedDirectory directory;
+        directory.prepare(arena.directoryCapacityForBlocks(1));
+        QVERIFY(arena.installPreparedDirectory(&directory, 1));
         QVERIFY(arena.canAttachBlocks(1));
         auto candidate = Arena::prepareBlock();
         QVERIFY(candidate.isValid());
@@ -4893,6 +5017,9 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
     // is not required to run the remaining value destructors.
     {
         Arena arena(oneBlockBudget);
+        Arena::PreparedDirectory directory;
+        directory.prepare(arena.directoryCapacityForBlocks(1));
+        QVERIFY(arena.installPreparedDirectory(&directory, 1));
         auto candidate = Arena::prepareBlock();
         QVERIFY(arena.attachPreparedBlock(&candidate));
         QVERIFY(arena.emplace(21, &live).isValid());
@@ -4903,6 +5030,9 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
     // The arena intentionally delegates synchronization to the shard. This
     // stresses concurrent prepare outside the lock and attach/use under it.
     Arena concurrentArena(oneBlockBudget * 8);
+    Arena::PreparedDirectory directory;
+    directory.prepare(concurrentArena.directoryCapacityForBlocks(8));
+    QVERIFY(concurrentArena.installPreparedDirectory(&directory, 8));
     QMutex shardMutex;
     std::atomic<int> completed{0};
     std::vector<std::thread> workers;

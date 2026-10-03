@@ -176,8 +176,8 @@ struct MetadataBudgetRelease {
 };
 
 struct MetadataArenas {
-    // These are hard ceilings, not reservations. Directory storage is the
-    // only eagerly reserved metadata; all block payloads remain lazy.
+    // These are hard ceilings, not reservations. Directory and block storage
+    // are prepared lazily outside the shard gate by the same growth carrier.
     static constexpr quint64 VersionBudget = 4 * 1024 * 1024;
     static constexpr quint64 ReplicaBudget = 8 * 1024 * 1024;
     static constexpr quint64 OverflowBudget = 4 * 1024 * 1024;
@@ -285,6 +285,9 @@ struct MetadataArenaGrowthPlan {
     quint64 versionBlocks = 0;
     quint64 replicaBlocks = 0;
     quint64 overflowBlocks = 0;
+    quint64 versionDirectory = 0;
+    quint64 replicaDirectory = 0;
+    quint64 overflowDirectory = 0;
 
     bool isEmpty() const
     {
@@ -302,21 +305,20 @@ quint64 arenaBlocksRequired(const Arena &arena, quint64 slots)
     return (missing + Arena::slotsPerBlock() - 1) / Arena::slotsPerBlock();
 }
 
-MetadataArenaGrowthPlan metadataArenaGrowthPlan(const MetadataArenas &arenas, const MetadataArenaDemand &demand)
+MetadataArenaGrowthPlan metadataArenaGrowthPlan(const MetadataArenas &arenas,
+                                               const MetadataArenaDemand &demand,
+                                               bool fullDemand = false)
 {
-    return {arenaBlocksRequired(arenas.versions, demand.versions),
-            arenaBlocksRequired(arenas.replicas, demand.replicas),
-            arenaBlocksRequired(arenas.overflow, demand.overflow)};
-}
-
-MetadataArenaGrowthPlan fullMetadataArenaGrowthPlan(const MetadataArenaDemand &demand)
-{
-    const auto blocks = [](quint64 slots, quint64 slotsPerBlock) {
-        return (slots + slotsPerBlock - 1) / slotsPerBlock;
+    const auto blocks = [fullDemand](const auto &arena, quint64 slots) {
+        return fullDemand ? (slots + arena.slotsPerBlock() - 1) / arena.slotsPerBlock()
+                          : arenaBlocksRequired(arena, slots);
     };
-    return {blocks(demand.versions, VersionArena::slotsPerBlock()),
-            blocks(demand.replicas, ReplicaArena::slotsPerBlock()),
-            blocks(demand.overflow, OverflowArena::slotsPerBlock())};
+    MetadataArenaGrowthPlan plan{blocks(arenas.versions, demand.versions),
+        blocks(arenas.replicas, demand.replicas), blocks(arenas.overflow, demand.overflow)};
+    plan.versionDirectory = arenas.versions.directoryCapacityForBlocks(plan.versionBlocks);
+    plan.replicaDirectory = arenas.replicas.directoryCapacityForBlocks(plan.replicaBlocks);
+    plan.overflowDirectory = arenas.overflow.directoryCapacityForBlocks(plan.overflowBlocks);
+    return plan;
 }
 
 bool metadataArenaGrowthFitsBudget(const MetadataArenas &arenas, const MetadataArenaGrowthPlan &plan)
@@ -341,13 +343,17 @@ bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataAren
  */
 struct MetadataArenaGrowth {
     explicit MetadataArenaGrowth(KisMutationStorageAllocator<char> storage)
-        : versions(storage), replicas(storage), overflow(storage) {}
+        : versions(storage), replicas(storage), overflow(storage)
+        , versionDirectory(storage), replicaDirectory(storage), overflowDirectory(storage) {}
     // Candidate payloads are destroyed before the reservation that accounts
     // for them when preparation exits early.
     KisBackingBudgetReservation budgetReservation;
     std::vector<VersionArena::PreparedBlock, KisMutationStorageAllocator<VersionArena::PreparedBlock>> versions;
     std::vector<ReplicaArena::PreparedBlock, KisMutationStorageAllocator<ReplicaArena::PreparedBlock>> replicas;
     std::vector<OverflowArena::PreparedBlock, KisMutationStorageAllocator<OverflowArena::PreparedBlock>> overflow;
+    VersionArena::PreparedDirectory versionDirectory;
+    ReplicaArena::PreparedDirectory replicaDirectory;
+    OverflowArena::PreparedDirectory overflowDirectory;
     quint64 attachedBlocks = 0;
 
     quint64 preparedBlockCount() const
@@ -394,6 +400,13 @@ struct MetadataArenaGrowth {
         budgetReservation = authority->reserve(delta, error);
         if (!budgetReservation.isValid())
             return false;
+        try {
+            versionDirectory.prepare(plan.versionDirectory);
+            replicaDirectory.prepare(plan.replicaDirectory);
+            overflowDirectory.prepare(plan.overflowDirectory);
+        } catch (const std::bad_alloc &) {
+            return false;
+        }
         return prepareBlocks<VersionArena>(&versions, plan.versionBlocks)
             && prepareBlocks<ReplicaArena>(&replicas, plan.replicaBlocks)
             && prepareBlocks<OverflowArena>(&overflow, plan.overflowBlocks);
@@ -409,10 +422,13 @@ struct MetadataArenaGrowth {
     static AttachResult attachBlocks(Arena *arena,
                                      quint64 slots,
                                      Blocks *candidates,
+                                     typename Arena::PreparedDirectory *directory,
                                      quint64 *attachedBlocks)
     {
         Q_ASSERT(arena);
         Q_ASSERT(candidates);
+        if (!arena->installPreparedDirectory(directory, arenaBlocksRequired(*arena, slots)))
+            return AttachResult::NeedsMore;
         for (auto &candidate : *candidates) {
             if (arena->availableSlots() >= slots)
                 break;
@@ -436,15 +452,16 @@ struct MetadataArenaGrowth {
             arenas->replicas.statistics().allocatedBytes;
         const quint64 overflowBytesBefore =
             arenas->overflow.statistics().allocatedBytes;
-        const auto versionResult = attachBlocks(&arenas->versions, demand.versions, &versions, &attachedBlocks);
+        const auto versionResult = attachBlocks(&arenas->versions, demand.versions, &versions,
+                                               &versionDirectory, &attachedBlocks);
         auto result = versionResult;
         if (result == AttachResult::Ready) {
             result = attachBlocks(&arenas->replicas, demand.replicas,
-                                  &replicas, &attachedBlocks);
+                                  &replicas, &replicaDirectory, &attachedBlocks);
         }
         if (result == AttachResult::Ready) {
             result = attachBlocks(&arenas->overflow, demand.overflow,
-                                  &overflow, &attachedBlocks);
+                                  &overflow, &overflowDirectory, &attachedBlocks);
         }
         // Destroy unattached candidates before releasing their reservation.
         versions.clear();
@@ -2529,10 +2546,11 @@ try {
     // every small page. It is still self-sufficient if all observed free slots
     // are consumed before install, and all payload allocation happens here.
     for (auto &growth : data->arenaGrowth) {
-        const MetadataArenaGrowthPlan plan = fullMetadataArenaGrowthPlan(growth.totalDemand);
+        MetadataArenaGrowthPlan plan;
         bool fitsBudget = false;
         {
             QMutexLocker locker(&growth.shardOwner->mutex);
+            plan = metadataArenaGrowthPlan(growth.shardOwner->arenas, growth.totalDemand, true);
             fitsBudget = metadataArenaGrowthFitsBudget(growth.shardOwner->arenas, plan);
             if (!fitsBudget)
                 ++growth.shardOwner->metadataArenaGrowthFailures;
@@ -2551,7 +2569,7 @@ try {
                 ++growth.shardOwner->metadataArenaGrowthFailures;
         }
         if (!prepared) {
-            KisPageStoreDetail::setError(error, QStringLiteral("metadata arena block allocation failed"));
+            KisPageStoreDetail::setError(error, QStringLiteral("metadata arena storage allocation failed"));
             return result;
         }
     }
@@ -2560,24 +2578,42 @@ try {
     // unreserved arena slots/index capacity; install merely consumes tokens.
     for (auto &growth : data->arenaGrowth) {
         QMutexLocker locker(&growth.shardOwner->mutex);
-        for (const auto &entry : data->entries) {
-            if (entry.shardOwner != growth.shardOwner)
-                continue;
-            const auto page = growth.shardOwner->pages.constFind(entry.key());
-            if (page == growth.shardOwner->pages.constEnd() || !growth.shardOwner->canMutate(entry.key(), page.value())
-                || page->revision != entry.revision) {
-                ++growth.shardOwner->metadataArenaGrowthConflicts;
-                KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication capacity"));
-                result.m_conflicted = true;
-                return result;
+        const auto revalidate = [&] {
+            for (const auto &entry : data->entries) {
+                if (entry.shardOwner != growth.shardOwner)
+                    continue;
+                const auto page = growth.shardOwner->pages.constFind(entry.key());
+                if (page == growth.shardOwner->pages.constEnd() || !growth.shardOwner->canMutate(entry.key(), page.value())
+                    || page->revision != entry.revision) {
+                    return false;
+                }
             }
+            return true;
+        };
+        if (!revalidate()) {
+            ++growth.shardOwner->metadataArenaGrowthConflicts;
+            KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication capacity"));
+            result.m_conflicted = true;
+            return result;
         }
 
         const quint64 attachedBefore = growth.blocks.attachedBlocks;
-        const auto attachResult = growth.blocks.attach(
+        auto attachResult = growth.blocks.attach(
             &growth.shardOwner->arenas, &growth.shardOwner->budgetCharge,
             growth.totalDemand);
         growth.shardOwner->metadataArenaBlocksAttached += growth.blocks.attachedBlocks - attachedBefore;
+        if (attachResult == MetadataArenaGrowth::AttachResult::NeedsMore) {
+            // A different page can grow this directory during cold allocation.
+            // Continue through the original locked revalidate/growth loop;
+            // install still receives complete reserved capacity, never growth.
+            const auto grown = growMetadataArenasOutsideLock(growth.shardOwner.get(), growth.totalDemand,
+                &growth.blocks, &locker, revalidate, error);
+            if (grown != MetadataGrowthResult::Ready) {
+                result.m_conflicted = grown == MetadataGrowthResult::Stale;
+                return result;
+            }
+            attachResult = MetadataArenaGrowth::AttachResult::Ready;
+        }
         if (attachResult != MetadataArenaGrowth::AttachResult::Ready
             || !growth.shardOwner->records.reserve(growth.totalDemand,
                                               growth.exactInsertions,

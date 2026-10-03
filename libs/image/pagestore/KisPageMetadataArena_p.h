@@ -144,11 +144,36 @@ private:
         quint16 blockGeneration = 1;
         DirectoryState state = DirectoryState::Released;
     };
+    using Directory = std::vector<DirectoryEntry, KisMutationStorageAllocator<DirectoryEntry>>;
+    static_assert(std::is_nothrow_move_constructible_v<DirectoryEntry>);
 
 public:
     using Statistics = KisPageMetadataArenaStatistics;
 
     using Reservation = KisPageMetadataReservation<KisShardSlotArena>;
+
+    class PreparedDirectory
+    {
+        friend class KisShardSlotArena;
+    public:
+        explicit PreparedDirectory(KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>())
+            : m_entries(storage) {}
+        PreparedDirectory(PreparedDirectory &&) noexcept = default;
+        PreparedDirectory &operator=(PreparedDirectory &&) noexcept = default;
+        PreparedDirectory(const PreparedDirectory &) = delete;
+        PreparedDirectory &operator=(const PreparedDirectory &) = delete;
+        void prepare(quint64 capacity)
+        {
+            // Reuse/free the previous empty directory only outside the owner
+            // gate. Entries in an installed replacement were moved, not copied.
+            if (!capacity || capacity > m_entries.capacity())
+                m_entries = Directory(m_entries.get_allocator());
+            else m_entries.clear();
+            m_entries.reserve(size_t(capacity));
+        }
+    private:
+        Directory m_entries;
+    };
 
     class PreparedBlock
     {
@@ -248,16 +273,7 @@ public:
                               KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>())
         : m_maximumBytes(maximumBytes)
         , m_directory(storage)
-    {
-        // A finite budget also bounds directory growth. Reserve that small
-        // directory once, outside any later shard mutation critical section.
-        if (maximumBytes != std::numeric_limits<quint64>::max()) {
-            const quint64 maximumBlocks = maximumBytes / quint64(BlockBytes);
-            if (maximumBlocks <= quint64(std::numeric_limits<size_t>::max())) {
-                m_directory.reserve(size_t(maximumBlocks));
-            }
-        }
-    }
+    {}
 
     ~KisShardSlotArena()
     {
@@ -285,6 +301,8 @@ public:
             return !m_closed;
         if (count > m_maximumBytes / quint64(BlockBytes))
             return false;
+        if (newDirectoryEntries(count) > std::numeric_limits<quint32>::max() / SlotsPerBlock - m_directory.size())
+            return false;
         const quint64 bytes = count * quint64(BlockBytes);
         return m_statistics.allocatedBytes <= m_maximumBytes - bytes;
     }
@@ -292,6 +310,29 @@ public:
     static PreparedBlock prepareBlock() noexcept
     {
         return PreparedBlock(std::unique_ptr<Block>(new (std::nothrow) Block()));
+    }
+
+    quint64 directoryCapacityForBlocks(quint64 count) const
+    {
+        count = newDirectoryEntries(count);
+        if (count <= m_directory.capacity() - m_directory.size()) return 0;
+        const quint64 maximum = std::numeric_limits<quint32>::max() / SlotsPerBlock;
+        const quint64 required = std::min(maximum, quint64(m_directory.size()) + count);
+        return std::max(required, std::min(maximum, quint64(m_directory.capacity()) * 2));
+    }
+
+    bool installPreparedDirectory(PreparedDirectory *prepared, quint64 count) noexcept
+    {
+        Q_ASSERT(!prepared || prepared->m_entries.get_allocator() == m_directory.get_allocator());
+        count = newDirectoryEntries(count);
+        if (count <= m_directory.capacity() - m_directory.size()) return true;
+        if (!prepared || !prepared->m_entries.empty()
+            || prepared->m_entries.capacity() < m_directory.size()
+            || count > prepared->m_entries.capacity() - m_directory.size()) return false;
+        for (auto &entry : m_directory)
+            prepared->m_entries.emplace_back(std::move(entry));
+        m_directory.swap(prepared->m_entries);
+        return true;
     }
 
     Reservation reserveSlots(qsizetype count)
@@ -350,7 +391,8 @@ public:
         if (directoryIndex < 0) {
             const quint64 nextIndex = quint64(m_directory.size());
             const quint64 lastFlatIndex = (nextIndex + 1) * quint64(SlotsPerBlock);
-            if (lastFlatIndex > std::numeric_limits<quint32>::max()) {
+            if (lastFlatIndex > std::numeric_limits<quint32>::max()
+                || m_directory.size() == m_directory.capacity()) {
                 ++m_statistics.rejectedBlockAttaches;
                 return false;
             }
@@ -526,6 +568,16 @@ public:
     }
 
 private:
+    quint64 newDirectoryEntries(quint64 count) const
+    {
+        for (const auto &entry : m_directory) {
+            if (!count) break;
+            if (entry.state == DirectoryState::Released
+                && entry.blockGeneration + 1 < MaximumGeneration) --count;
+        }
+        return count;
+    }
+
     struct ResolvedSlot {
         DirectoryEntry *entry = nullptr;
         Slot *slot = nullptr;
@@ -612,7 +664,7 @@ private:
     }
 
     const quint64 m_maximumBytes;
-    std::vector<DirectoryEntry, KisMutationStorageAllocator<DirectoryEntry>> m_directory;
+    Directory m_directory;
     Statistics m_statistics;
     quint64 m_outstandingReservations = 0;
     quint32 m_freeBlockHint = 0;
