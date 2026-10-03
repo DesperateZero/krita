@@ -615,6 +615,19 @@ private Q_SLOTS:
     void mutationScopeAdmissionBudgetRejection();
     void abandonedMutationsRetainOriginalTerminalLinks_data() { pixelRows(); }
     void abandonedMutationsRetainOriginalTerminalLinks();
+    void abandonedMutationsRecoverWithoutInput_data()
+    {
+        QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("arenaFull");
+        QTest::addColumn<bool>("frozen");
+        for (int bpp : {1, 4, 8, 16}) {
+            for (bool frozen : {false, true}) {
+                const auto suffix = QStringLiteral("%1-%2").arg(bpp).arg(frozen ? "frozen" : "active");
+                QTest::newRow(qPrintable("provider-" + suffix)) << bpp << false << frozen;
+                QTest::newRow(qPrintable("arena-" + suffix)) << bpp << true << frozen;
+            }
+        }
+    }
+    void abandonedMutationsRecoverWithoutInput();
     void mutationStorageGrowthKeepsGuards_data() { pixelRows(); }
     void mutationStorageGrowthKeepsGuards();
     void mutationColdHolesAreReusedDuringSeal_data() { pixelRows(); }
@@ -7605,6 +7618,82 @@ void KisPageStoreCpuMutationTest::abandonedMutationsRetainOriginalTerminalLinks(
     QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(0));
     QCOMPARE(f.store->mutationStatistics().pagesCancelled, quint64(4));
     QCOMPARE(f.pixel(), QByteArray(bpp, char(0x31)));
+    QVERIFY(f.store->closeSession(&f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::abandonedMutationsRecoverWithoutInput()
+{
+    QFETCH(int, bpp); QFETCH(bool, arenaFull); QFETCH(bool, frozen);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
+    Fixture f;
+    KisPageBackingLimits local; local.retirementDebtBytes = 64 * 64 * bpp;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(f.store->configureBackingLimits(local));
+    QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x31));
+    auto original = f.store->captureReadView(); QVERIFY(original.isValid());
+    const auto committed = f.provider->memoryUsage().committedBytes;
+    std::atomic<int> acceptedRetirements{0};
+    f.provider->afterRetire = [&](const KisReplicaHandle &, const KisReplicaOperation &result) {
+        if (result.isValid()) ++acceptedRetirements;
+    };
+    const auto first = f.store->beginCurrentTransaction();
+    const auto second = f.store->beginCurrentTransaction();
+    auto a = f.begin(first); auto b = f.begin(second);
+    for (int i = 0; i < 4; ++i) {
+        auto guard = (i < 2 ? a : b).beginWrite(key(i)); QVERIFY(guard.isValid());
+        static_cast<char *>(guard.data())[0] = char(0x71 + i);
+    }
+    size_t fillerBytes = 0; void *filler = nullptr;
+    const auto freeFiller = [&] {
+        if (!filler) return;
+        kisFreeMutationStorage(parent.get(), std::exchange(filler, nullptr), fillerBytes, 1);
+    };
+    // Preserve normal test exit even when the no-input assertion fails. These
+    // explicit pumps belong only to failure cleanup, after the observation.
+    const auto cleanup = qScopeGuard([&] {
+        freeFiller(); f.provider->rejectRetire = false; a = {}; b = {};
+        for (int i = 0; i < 16; ++i) {
+            f.store->processRetirements(64); f.store->waitForRetirementIdle();
+            f.store->abort(first); f.store->abort(second);
+            if (!f.store->sessionStats().activeCpuWritePages) break;
+        }
+        original = {}; f.store->waitForRetirementIdle(); f.store->closeSession();
+        f.provider->afterRetire = {};
+    });
+    if (arenaFull || frozen) {
+        const auto live = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        fillerBytes = size_t(limits.metadataArenaBytes - live);
+        filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    }
+    if (frozen) {
+        QVERIFY(!a.seal(&f.error)); QVERIFY(a.isActive());
+        QVERIFY(!b.seal(&f.error)); QVERIFY(b.isActive());
+    }
+    if (!arenaFull) { freeFiller(); f.provider->rejectRetire = true; }
+    a = {}; b = {};
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(arenaFull ? 4 : 3));
+    // Keep refusal across multiple automatic wakeups; observation must not
+    // supply a new mutation, abort, close or retirement process request.
+    QTest::qWait(150);
+    QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(arenaFull ? 4 : 3));
+    QVERIFY(f.provider->memoryUsage().committedBytes > committed);
+    freeFiller(); f.provider->rejectRetire = false;
+    QTRY_COMPARE_WITH_TIMEOUT(f.store->sessionStats().activeCpuWritePages, qsizetype(0), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(f.provider->memoryUsage().committedBytes, committed, 5000);
+    QCOMPARE(f.store->mutationStatistics().pagesCancelled, quint64(4));
+    QCOMPARE(acceptedRetirements.load(), 4);
+    QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(0));
+    const auto usage = f.store->backingUsage();
+    QCOMPARE(usage.buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
+    QCOMPARE(usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
+    QCOMPARE(f.pixel(), QByteArray(bpp, char(0x31)));
+    auto old = original.readResidentPage(key()); QVERIFY(old.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(old.data()), bpp), QByteArray(bpp, char(0x31)));
+    old = {}; original = {};
+    QVERIFY(f.store->abort(first)); QVERIFY(f.store->abort(second));
     QVERIFY(f.store->closeSession(&f.error));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }

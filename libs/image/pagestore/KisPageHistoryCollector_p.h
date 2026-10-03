@@ -44,7 +44,9 @@ struct KisPageHistoryCollectorSnapshot
  *
  * All methods ending in Locked require the PageStore owner mutex. Physical
  * retirement is delegated after releasing that mutex; this service never
- * owns provider operations or publishes epoch roots.
+ * owns provider operations or publishes epoch roots. Abandoned mutations stay
+ * on the Store's original scope links and share this prepared collection pass
+ * and retry delay; their cancellation runs without the owner mutex.
  */
 class KisPageHistoryCollector final
 {
@@ -56,6 +58,8 @@ public:
     using ReleaseOwnerLifetime = void (*)(void *context);
     using RemoveDescriptor = void (*)(void *context,
                                       const KisPageVersion &version);
+    using HasAbandonedMutations = bool (*)(void *context);
+    using CollectAbandonedMutations = void (*)(void *context);
 
     KRITAIMAGE_EXPORT KisPageHistoryCollector(KisPageMetadataCoordinator &metadata,
                             KisImageEpochReferenceModel &epochs,
@@ -67,7 +71,9 @@ public:
                             bool &backgroundReclamation,
                             void *ownerContext,
                             ReleaseOwnerLifetime releaseOwnerLifetime,
-                            RemoveDescriptor removeDescriptor);
+                            RemoveDescriptor removeDescriptor,
+                            HasAbandonedMutations hasAbandonedMutations = nullptr,
+                            CollectAbandonedMutations collectAbandonedMutations = nullptr);
     KRITAIMAGE_EXPORT ~KisPageHistoryCollector();
     KRITAIMAGE_EXPORT void prepareTask(KisBackingBudgetController &budget);
 
@@ -127,6 +133,8 @@ private:
     void *m_ownerContext = nullptr;
     ReleaseOwnerLifetime m_releaseOwnerLifetime = nullptr;
     RemoveDescriptor m_removeDescriptor = nullptr;
+    HasAbandonedMutations m_hasAbandonedMutations = nullptr;
+    CollectAbandonedMutations m_collectAbandonedMutations = nullptr;
 
     WorkIndex m_work;
     boost::intrusive::list<Work> m_ready;

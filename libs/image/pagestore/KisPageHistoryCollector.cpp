@@ -31,7 +31,9 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     bool &backgroundReclamation,
     void *ownerContext,
     ReleaseOwnerLifetime releaseOwnerLifetime,
-    RemoveDescriptor removeDescriptor)
+    RemoveDescriptor removeDescriptor,
+    HasAbandonedMutations hasAbandonedMutations,
+    CollectAbandonedMutations collectAbandonedMutations)
     : m_metadata(metadata)
     , m_epochs(epochs)
     , m_retirementQueue(retirementQueue)
@@ -43,6 +45,8 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     , m_ownerContext(ownerContext)
     , m_releaseOwnerLifetime(releaseOwnerLifetime)
     , m_removeDescriptor(removeDescriptor)
+    , m_hasAbandonedMutations(hasAbandonedMutations)
+    , m_collectAbandonedMutations(collectAbandonedMutations)
 {
     static_assert(PageAdmissionBudget <= KisImageEpochReferenceModel::ReachabilityScanLimit);
     static_assert(RootVisitBudget <= KisImageEpochReferenceModel::ReachabilityRootBudget);
@@ -50,6 +54,7 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_releaseOwnerLifetime);
     Q_ASSERT(m_removeDescriptor);
+    Q_ASSERT(bool(m_hasAbandonedMutations) == bool(m_collectAbandonedMutations));
 }
 
 KisPageHistoryCollector::~KisPageHistoryCollector()
@@ -241,16 +246,27 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
     context->collector = this;
     context->references = &m_ownerLifetimeReferences;
     auto task = kisPreparePageStoreReclamation([this] {
+        bool collectAbandoned = false;
+        bool processRetirements = false;
         {
             QMutexLocker lock(&m_ownerMutex);
             m_blocked = false;
-            if (!m_closing && m_operational && !m_automaticWakeupsStopped) {
+            if (!m_closing && m_operational && m_backgroundReclamation && !m_automaticWakeupsStopped) {
                 m_epochs.collectFinishedTransactions(VersionScanBudget);
                 m_epochs.collectUnretainedRoots(VersionScanBudget);
                 m_blocked = collectPassLocked() || m_blocked;
+                collectAbandoned = m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext);
+                processRetirements = true;
             }
         }
-        if (m_backgroundReclamation) m_retirementQueue.process(8);
+        // Scope cancellation acquires scope -> owner, and can release the
+        // owner gate for provider destruction. Keep that original lock order.
+        if (collectAbandoned) m_collectAbandonedMutations(m_ownerContext);
+        if (processRetirements) m_retirementQueue.process(8);
+        if (collectAbandoned) {
+            QMutexLocker lock(&m_ownerMutex);
+            m_blocked = m_hasAbandonedMutations(m_ownerContext) || m_blocked;
+        }
     }, &budget, +[](void *value) {
         auto *collector = static_cast<KisPageHistoryCollector *>(value);
         const auto context = collector->m_wakeContext;
@@ -306,7 +322,8 @@ void KisPageHistoryCollector::scheduleLocked()
         return;
     }
     if (!m_backgroundReclamation || m_jobScheduled || !m_operational || m_retryScheduled) return;
-    if (!m_epochs.hasCollectionWork() && m_ready.empty() && !m_rescanRequested) return;
+    if (!m_epochs.hasCollectionWork() && m_ready.empty() && !m_rescanRequested
+        && !(m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext))) return;
     if (m_blocked) {
         m_retryScheduled = m_retry.arm(m_retryDelayMs);
         m_retryDelayMs = std::min(100, m_retryDelayMs * 2);

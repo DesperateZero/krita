@@ -146,7 +146,9 @@ public:
                            backgroundReclamation,
                            this,
                            &Private::releaseRetirementLifetime,
-                           &Private::removeHistoryDescriptor)
+                           &Private::removeHistoryDescriptor,
+                           &Private::hasAbandonedMutations,
+                           &Private::collectAbandonedMutations)
         , publicationCoordinator(epochs,
                                  metadata,
                                  owner,
@@ -230,6 +232,12 @@ public:
     {
         static_cast<KisPageStore::Private *>(context)->publicationCoordinator.removeDescriptorLocked(version);
     }
+
+    static bool hasAbandonedMutations(void *context)
+    {
+        return static_cast<Private *>(context)->orphanedMutations != nullptr;
+    }
+    static void collectAbandonedMutations(void *context);
 
     static bool publicationTransactionHasMutationActivity(void *context, KisPageTransactionId transaction)
     {
@@ -739,6 +747,7 @@ public:
         Q_ASSERT(!scope->nextOrphan);
         scope->nextOrphan = scope->owner->orphanedMutations;
         scope->owner->orphanedMutations = scope;
+        scope->owner->historyCollector.scheduleLocked();
     }
     static void releaseOrRetain(Private *scope)
     {
@@ -1231,6 +1240,11 @@ public:
         return data;
     }
 };
+
+void KisPageStore::Private::collectAbandonedMutations(void *context)
+{
+    KisPageMutationSession::Private::retryOrphans(static_cast<Private *>(context));
+}
 
 class KisPageMutationExecution::Private
 {
