@@ -23,7 +23,6 @@ struct HistoryRecord
     explicit HistoryRecord(KisMutationStorageAllocator<KisPageKey> storage) : changedPages(storage) {}
     KisPageTransaction transaction;
     KisRetainedImageEpochSnapshot before;
-    KisImageEpochSnapshotToken orphanedAfter;
     KisRetainedImageEpochSnapshot after;
     KisPageKeyStorage changedPages;
     bool requiresFullPageRestore = false;
@@ -46,11 +45,6 @@ bool releaseActiveHistory(KisPageStore *store, HistoryRecord &record)
         if (!store->releaseSnapshot(record.before.token))
             return false;
         record.before.token = {};
-    }
-    if (record.orphanedAfter.isValid()) {
-        if (!store->releaseSnapshot(record.orphanedAfter))
-            return false;
-        record.orphanedAfter = {};
     }
     return true;
 }
@@ -240,12 +234,9 @@ KisPageStoreMemento KisPageStoreMementoManager::commit(
         return {};
     }
     it->second.transaction = {};
-    if (!after.isValid() || !(after.snapshot.epoch == committed.epoch)) {
-        it->second.orphanedAfter = after.token;
-        KisPageStoreDetail::setError(error, QStringLiteral(
-            "PageStore after-root retention failed after commit"));
-        return {};
-    }
+    // A commit requesting retention admits the complete output before root
+    // installation. Acceptance cannot leave this history capability orphaned.
+    Q_ASSERT(after.isValid() && after.snapshot.epoch == committed.epoch);
 
     record.after = after;
     auto accepted = d->active.extract(it);

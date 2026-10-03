@@ -1097,7 +1097,8 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::commit(const KisPageTrans
 }
 
 KisImageEpochReferenceModel::PreparedCommit
-KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure) try
+KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
+                                          bool retainAfter) try
 {
     KisImageEpochCommitResult localFailure;
     KisImageEpochCommitResult &result = failure ? *failure : localFailure;
@@ -1223,6 +1224,16 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
 
     surfaces.reset();
     preparedNode = prepareEpochNode(d->roots, root.epoch().value);
+    PreparedCommit candidate;
+    if (retainAfter) {
+        const auto token = KisPageStoreDetail::allocateMonotonicId<KisImageEpochSnapshotToken>(&s_nextSnapshotToken);
+        if (!token.isValid()) {
+            result.error = QStringLiteral("image epoch snapshot identity space is exhausted");
+            return {};
+        }
+        candidate.m_retainedAfter = describeRetainedRoot(root, token, false);
+        candidate.m_retentionNode = prepareEpochNode(d->retainedSnapshots, token.value, root.epoch());
+    }
     locker.relock();
     transactionIt = d->transactions.find(transaction.id.value);
     if (!(d->current.epoch() == current.epoch()) || transactionIt == d->transactions.end()
@@ -1235,7 +1246,6 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     // through root(), retention, transaction bases, or reachability queries.
     d->roots.insert(std::move(preparedNode));
     ++d->reservedRootCount;
-    PreparedCommit candidate;
     candidate.m_owner = d;
     candidate.m_root = root;
     candidate.m_transaction = transaction.id;
@@ -1249,14 +1259,20 @@ catch (const std::bad_alloc &) {
 
 KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCommit &&candidate,
                                                                      void *context,
-                                                                     InstallMetadataFunction installMetadata)
+                                                                     InstallMetadataFunction installMetadata,
+                                                                     KisRetainedImageEpochSnapshot *retainedAfter)
 {
     // Consume even on rejection; cancellation must run after the mutex unlock.
     PreparedCommit consumed(std::move(candidate));
     KisImageEpochCommitResult result;
+    if (retainedAfter) *retainedAfter = {};
     const auto d = std::atomic_load(&m_core);
     if (!consumed.isValid() || consumed.m_owner != d) {
         result.error = QStringLiteral("prepared epoch candidate has a different owner or was consumed");
+        return result;
+    }
+    if (bool(retainedAfter) != consumed.m_retainedAfter.isValid()) {
+        result.error = QStringLiteral("prepared epoch retention output does not match its admission");
         return result;
     }
     QMutexLocker locker(&d->mutex);
@@ -1271,6 +1287,15 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCom
     }
     if (!installReservedRoot(consumed, context, installMetadata, &result))
         return result;
+
+    if (retainedAfter) {
+        Q_ASSERT(!consumed.m_retentionNode.empty());
+        const auto inserted = d->retainedSnapshots.insert(std::move(consumed.m_retentionNode));
+        Q_ASSERT(inserted.inserted);
+        Q_UNUSED(inserted);
+        ++d->roots.find(root.epoch().value)->second.retainedSnapshots;
+        *retainedAfter = std::move(consumed.m_retainedAfter);
+    }
 
     const KisPageTransaction transaction = transactionIt->second.transaction;
     transactionIt->second.state = KisPageTransactionState::Committed;
@@ -1410,30 +1435,37 @@ KisImageEpochRootSnapshot KisImageEpochReferenceModel::captureCommittedRoot() co
     return d->current;
 }
 
+KisRetainedImageEpochSnapshot KisImageEpochReferenceModel::describeRetainedRoot(
+    const KisImageEpochRootSnapshot &root, KisImageEpochSnapshotToken token, bool completeManifest)
+{
+    KisRetainedImageEpochSnapshot retained;
+    retained.token = token;
+    if (completeManifest) {
+        retained.snapshot = root.snapshot();
+    } else {
+        retained.snapshot.epoch = root.epoch();
+        retained.snapshot.graphRevision = root.graphRevision();
+        retained.snapshot.defaultPixelRevision = root.defaultPixelRevision();
+        retained.snapshot.extentRevision = root.extentRevision();
+        retained.snapshot.propertyRevision = root.propertyRevision();
+        retained.snapshot.surfaces = root.surfaces();
+    }
+    if (!completeManifest)
+        retained.pageCount = root.pageCount();
+    return retained;
+}
+
 KisRetainedImageEpochSnapshot KisImageEpochReferenceModel::retainRootLocked(
     const KisImageEpochRootSnapshot &root,
     bool completeManifest, QMutexLocker<QMutex> &locker)
 {
     const auto d = std::atomic_load(&m_core);
     const auto retainedRoot = root;
-    KisRetainedImageEpochSnapshot retained;
-    retained.token = KisPageStoreDetail::allocateMonotonicId<KisImageEpochSnapshotToken>(&s_nextSnapshotToken);
-    if (!retained.token.isValid())
-        return {};
+    const auto token = KisPageStoreDetail::allocateMonotonicId<KisImageEpochSnapshotToken>(&s_nextSnapshotToken);
+    if (!token.isValid()) return {};
     locker.unlock();
-    auto prepared = prepareEpochNode(d->retainedSnapshots, retained.token.value, retainedRoot.epoch());
-    if (completeManifest) {
-        retained.snapshot = retainedRoot.snapshot();
-    } else {
-        retained.snapshot.epoch = retainedRoot.epoch();
-        retained.snapshot.graphRevision = retainedRoot.graphRevision();
-        retained.snapshot.defaultPixelRevision = retainedRoot.defaultPixelRevision();
-        retained.snapshot.extentRevision = retainedRoot.extentRevision();
-        retained.snapshot.propertyRevision = retainedRoot.propertyRevision();
-        retained.snapshot.surfaces = retainedRoot.surfaces();
-    }
-    if (!completeManifest)
-        retained.pageCount = retainedRoot.pageCount();
+    auto prepared = prepareEpochNode(d->retainedSnapshots, token.value, retainedRoot.epoch());
+    auto retained = describeRetainedRoot(retainedRoot, token, completeManifest);
     locker.relock();
     if (!d->admitsRoot(retainedRoot.epoch().value)) {
         locker.unlock();

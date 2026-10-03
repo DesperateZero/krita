@@ -1122,9 +1122,19 @@ private Q_SLOTS:
     void preparedMetadataPublicationIsBoundAndOneShot();
     void preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges();
     void metadataInstallationPrecedesRootAndRejectsAtomically();
+    void preparedEpochCandidateIsInvisibleAndSingleUse_data()
+    {
+        QTest::addColumn<bool>("retainAfter");
+        QTest::newRow("root") << false;
+        QTest::newRow("root-and-retention") << true;
+    }
     void preparedEpochCandidateIsInvisibleAndSingleUse();
     void preparedEpochCandidateRejectsChangedInputs_data();
     void preparedEpochCandidateRejectsChangedInputs();
+    void preparedEpochCandidateOwnerAndLifetime_data()
+    {
+        preparedEpochCandidateIsInvisibleAndSingleUse_data();
+    }
     void preparedEpochCandidateOwnerAndLifetime();
     void epochTransactionStorageAtCapacity_data()
     {
@@ -2495,6 +2505,7 @@ void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChange
 
 void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
 {
+    QFETCH(bool, retainAfter);
     using Candidate = KisImageEpochReferenceModel::PreparedCommit;
     static_assert(!std::is_copy_constructible<Candidate>::value, "candidate is single-use");
     static_assert(!std::is_copy_constructible<KisImageEpochReferenceModel>::value, "owner cannot be copied");
@@ -2503,6 +2514,7 @@ void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
     initial.manifest = {pageVersion(0, 1)};
+    initial.surfaces = {surfaceEpochState()};
     KisImageEpochReferenceModel model;
     QVERIFY(model.initialize(initial));
     const auto tx = model.beginTransaction({1});
@@ -2515,9 +2527,10 @@ void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
     pages.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
     QVERIFY(model.prepare(pages));
     KisImageEpochCommitResult failure;
-    auto candidate = model.prepareCommit(tx, &failure);
+    auto candidate = model.prepareCommit(tx, &failure, retainAfter);
     QVERIFY2(candidate.isValid(), qPrintable(failure.error));
     QCOMPARE(model.rootCount(), qsizetype(1));
+    QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
     QCOMPARE(model.captureCommittedRoot().epoch(), initial.epoch);
     QVERIFY(!model.root({2}).isValid());
     QVERIFY(!model.retainSnapshot({2}).isValid());
@@ -2531,13 +2544,22 @@ void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
         ++calls;
         return epoch == KisImageEpochId{2};
     };
-    const auto installed =
-        model.installCommit(std::move(moved), &install, invokeEpochCallback<decltype(install)>);
+    KisRetainedImageEpochSnapshot retained;
+    const auto installed = model.installCommit(std::move(moved), &install,
+        invokeEpochCallback<decltype(install)>, retainAfter ? &retained : nullptr);
     QVERIFY(installed.isCommitted());
     QVERIFY(!moved.isValid());
     QCOMPARE(calls, 1);
     QCOMPARE(installed.root.epoch(), KisImageEpochId{2});
     QCOMPARE(model.rootCount(), qsizetype(2));
+    QCOMPARE(retained.isValid(), retainAfter);
+    QCOMPARE(model.retainedSnapshotCount(), qsizetype(retainAfter));
+    if (retainAfter) {
+        QCOMPARE(retained.snapshot.epoch, installed.root.epoch());
+        QCOMPARE(retained.snapshot.surfaces, initial.surfaces);
+        QCOMPARE(retained.pageCount, installed.root.pageCount());
+        QVERIFY(retained.snapshot.manifest.isEmpty());
+    }
     auto reinstall = [&](KisImageEpochId) {
         ++calls;
         return true;
@@ -2551,20 +2573,38 @@ void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
     KisPageVersion actual;
     QVERIFY(model.captureCommittedRoot().resolve(pageKey(0), &actual));
     QCOMPARE(actual, pageVersion(0, 2));
+    const auto next = model.beginTransaction(installed.root.epoch());
+    KisPreparedPageSet nextPages;
+    nextPages.transaction = next.id;
+    nextPages.proofs = {preparedProof(pageVersion(0, 3), next.id, ticket, 2)};
+    QVERIFY(model.prepare(nextPages));
+    QVERIFY(model.commit(next).isCommitted());
+    model.collectUnretainedRoots();
+    QCOMPARE(model.root(installed.root.epoch()).isValid(), retainAfter);
+    if (retainAfter) {
+        QVERIFY(model.releaseSnapshot(retained.token));
+        QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
+        QCOMPARE(model.collectUnretainedRoots(), qsizetype(1));
+    }
 }
 
 void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs_data()
 {
     QTest::addColumn<int>("change");
-    QTest::newRow("reprepare") << 0;
-    QTest::newRow("abort-and-collect") << 1;
-    QTest::newRow("intervening-disjoint-commit") << 2;
-    QTest::newRow("metadata-reject") << 3;
+    QTest::addColumn<bool>("retainAfter");
+    for (bool retainAfter : {false, true}) {
+        const QString suffix = retainAfter ? QStringLiteral("-retention") : QString();
+        QTest::newRow(qPrintable(QStringLiteral("reprepare") + suffix)) << 0 << retainAfter;
+        QTest::newRow(qPrintable(QStringLiteral("abort-and-collect") + suffix)) << 1 << retainAfter;
+        QTest::newRow(qPrintable(QStringLiteral("intervening-disjoint-commit") + suffix)) << 2 << retainAfter;
+        QTest::newRow(qPrintable(QStringLiteral("metadata-reject") + suffix)) << 3 << retainAfter;
+    }
 }
 
 void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs()
 {
     QFETCH(int, change);
+    QFETCH(bool, retainAfter);
     KisImageEpochSnapshot initial;
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
@@ -2580,7 +2620,7 @@ void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs()
     pages.transaction = tx.id;
     pages.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
     QVERIFY(model.prepare(pages));
-    auto candidate = model.prepareCommit(tx, nullptr);
+    auto candidate = model.prepareCommit(tx, nullptr, retainAfter);
     QVERIFY(candidate.isValid());
     if (change == 0) {
         pages.proofs = {preparedProof(pageVersion(0, 3), tx.id, ticket, 2)};
@@ -2603,10 +2643,13 @@ void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs()
         ++calls;
         return false;
     };
-    const auto rejected =
-        model.installCommit(std::move(candidate), &reject, invokeEpochCallback<decltype(reject)>);
+    KisRetainedImageEpochSnapshot retained;
+    const auto rejected = model.installCommit(std::move(candidate), &reject,
+        invokeEpochCallback<decltype(reject)>, retainAfter ? &retained : nullptr);
     QVERIFY(!rejected.isCommitted());
     QVERIFY(!candidate.isValid());
+    QVERIFY(!retained.isValid());
+    QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
     QCOMPARE(calls, change == 3 ? 1 : 0);
     QCOMPARE(rejected.status, change == 3 ? KisImageEpochCommitStatus::Rejected : KisImageEpochCommitStatus::Conflict);
     QCOMPARE(model.rootCount(), roots);
@@ -2625,6 +2668,7 @@ void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs()
 
 void KisPageStoreReferenceTest::preparedEpochCandidateOwnerAndLifetime()
 {
+    QFETCH(bool, retainAfter);
     using Candidate = KisImageEpochReferenceModel::PreparedCommit;
     Candidate orphan;
     KisImageEpochSnapshot initial;
@@ -2643,12 +2687,13 @@ void KisPageStoreReferenceTest::preparedEpochCandidateOwnerAndLifetime()
         pages.transaction = tx.id;
         pages.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
         QVERIFY(model.prepare(pages));
-        orphan = model.prepareCommit(tx, nullptr);
+        orphan = model.prepareCommit(tx, nullptr, retainAfter);
         QVERIFY(orphan.isValid());
         // Move assignment must cancel its previously reserved slot.
-        orphan = model.prepareCommit(tx, nullptr);
+        orphan = model.prepareCommit(tx, nullptr, retainAfter);
         QVERIFY(orphan.isValid());
         QCOMPARE(model.rootCount(), qsizetype(1));
+        QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
         QCOMPARE(model.collectUnretainedRoots(), qsizetype(0));
     }
     QVERIFY(orphan.isValid());

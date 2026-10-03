@@ -241,7 +241,7 @@ private:
         KisPreparedMutationCommit(const KisPreparedMutationCommit &) = delete;
         KisPreparedMutationCommit &operator=(const KisPreparedMutationCommit &) = delete;
         bool isValid() const;
-        bool tryInstall();
+        bool tryInstall(KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
 
     private:
         class Data;

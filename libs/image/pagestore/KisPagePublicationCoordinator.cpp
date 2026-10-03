@@ -518,7 +518,7 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::isValid() const
         && (data->epoch.isValid() != data->restoreEpoch.isValid()) && data->completion.isValid();
 }
 
-bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall()
+bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall(KisRetainedImageEpochSnapshot *retainedAfter)
 {
     if (!isValid()) {
         cancel();
@@ -544,7 +544,7 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall()
     };
     candidate.result = candidate.restoreEpoch.isValid()
         ? owner.m_epochs.installRestore(std::move(candidate.restoreEpoch), &candidate, installMetadata)
-        : owner.m_epochs.installCommit(std::move(candidate.epoch), &candidate, installMetadata);
+        : owner.m_epochs.installCommit(std::move(candidate.epoch), &candidate, installMetadata, retainedAfter);
 
     if (candidate.result.isCommitted()) {
         owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation));
@@ -1068,7 +1068,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         diagnostic.next(Phase::CommitEpochPrepare, pageWork);
         KisImageEpochCommitResult candidateFailure;
         auto &rootCandidate = preparedCommit.data->epoch;
-        rootCandidate = m_epochs.prepareCommit(transaction, &candidateFailure);
+        rootCandidate = m_epochs.prepareCommit(transaction, &candidateFailure, bool(retainedAfter));
         diagnostic.next(Phase::CommitPublishOwnerWait, pageWork);
         ownerLock.relock();
         diagnostic.next(Phase::CommitPublicationRevalidate, pageWork);
@@ -1124,16 +1124,13 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
 
         diagnostic.next(Phase::CommitRoot, pageWork);
         diagnostic.next(Phase::CommitMetadataApply, publicationTransitionCount);
-        const bool installed = preparedCommit.tryInstall();
+        const bool installed = preparedCommit.tryInstall(retainedAfter);
         const bool metadataRejected =
             preparedCommit.data->result.status == KisImageEpochCommitStatus::Rejected;
         const KisImageEpochCommitResult committed = preparedCommit.data->result;
         auto metadataCleanup = std::move(preparedCommit.data->metadataCleanup);
         if (installed)
             diagnostic.next(Phase::CommitRootPublication, pageWork);
-        if (committed.isCommitted() && retainedAfter) {
-            *retainedAfter = m_epochs.retainSnapshot(committed.root.epoch());
-        }
         ownerLock.unlock();
         // The backend's original selector was hidden before commit. Once
         // root/metadata installation succeeds, readers can select that root

@@ -8,6 +8,7 @@
 #define KIS_IMAGE_EPOCH_REFERENCE_MODEL_H
 
 #include <array>
+#include <map>
 #include <memory>
 #include <QMutex>
 #include <QMutexLocker>
@@ -213,6 +214,8 @@ private:
     bool installInitialization(std::shared_ptr<Private> &&);
     static bool matchesRetainedRootMetadata(const KisImageEpochRootSnapshot &,
                                             const KisRetainedImageEpochSnapshot &);
+    static KisRetainedImageEpochSnapshot describeRetainedRoot(
+        const KisImageEpochRootSnapshot &, KisImageEpochSnapshotToken, bool completeManifest);
     KisRetainedImageEpochSnapshot retainRootLocked(const KisImageEpochRootSnapshot &,
                                                     bool completeManifest, QMutexLocker<QMutex> &);
     KisRetainedImageEpochSnapshot captureCurrentRetainedRootLocked(bool completeManifest);
@@ -248,6 +251,12 @@ private:
         PreparedCommit &operator=(const PreparedCommit &) = delete;
 
     private:
+        using RetentionRegistry = std::map<quint64, KisImageEpochId, std::less<quint64>,
+            KisMutationStorageAllocator<std::pair<const quint64, KisImageEpochId>>>;
+        // Prepared before visibility changes. Install transfers this exact
+        // paid node and output; rejection frees them with the original candidate.
+        RetentionRegistry::node_type m_retentionNode;
+        KisRetainedImageEpochSnapshot m_retainedAfter;
         KisPageTransactionId m_transaction;
         quint64 m_revision = 0;
         friend class KisImageEpochReferenceModel;
@@ -257,13 +266,15 @@ private:
     // candidate may be retried or replaced without replaying an incremental delta.
     bool preparePublication(const KisPreparedPageSet &preparedPages, QString *error = nullptr);
     bool prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error);
-    PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure);
+    PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
+                                 bool retainAfter = false);
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);
     bool installReservedRoot(PreparedRootReservation &candidate, void *context,
                              InstallMetadataFunction installMetadata,
                              KisImageEpochCommitResult *result);
     KisImageEpochCommitResult
-    installCommit(PreparedCommit &&candidate, void *context, InstallMetadataFunction installMetadata);
+    installCommit(PreparedCommit &&candidate, void *context, InstallMetadataFunction installMetadata,
+                  KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
     PreparedRootReservation prepareRestore(const KisRetainedImageEpochSnapshot &retained,
                                            KisImageEpochCommitResult *failure);
     KisImageEpochCommitResult

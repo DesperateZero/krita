@@ -69,6 +69,9 @@ public:
     ~DefaultBudgetScope()
     {
         release();
+        // Managers created in this scope have already exited, but their
+        // charged terminal cleanup may still hold the old process policy.
+        kisDrainPageStoreReclamation();
         config.setMemoryHardLimitPercent(hard);
         config.setMemorySoftLimitPercent(soft);
         config.setMemoryPoolLimitPercent(pool);
@@ -3670,6 +3673,7 @@ void KisTiledDataManagerTest::testPageStoreHistoryClearStagesAbsence()
     const QByteArray changedPixel(pixelSize, char(0x6e));
     KisTiledDataManager dm(pixelSize,
         reinterpret_cast<const quint8 *>(defaultPixel.constData()));
+    QVERIFY(dm.m_pageStoreBackend && dm.m_pageStoreBackend->isOperational());
     KisPageStore *store = dm.m_pageStoreBackend->store();
     QVERIFY(store);
     const QRect initialRect(0, 0, 128, 128);
