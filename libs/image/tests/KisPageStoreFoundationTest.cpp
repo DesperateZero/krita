@@ -1285,7 +1285,7 @@ void KisPageStoreFoundationTest::ssdProviderDoesNotAdvertiseDurabilityBeforeBr3(
 {
     KisUnifiedSsdPageStore provider;
     const KisReplicaCapabilities capabilities = provider.capabilities();
-    QVERIFY(!capabilities.domains.contains(KisPageAccessDomain::Ssd));
+    QVERIFY(!capabilities.supportsStorageDomain(KisPageAccessDomain::Ssd));
 
     KisPageVersion version;
     version.key.surface = KisSurfaceId{1};

@@ -8,6 +8,7 @@
 #ifndef _KIS_VLINE_ITERATOR_H_
 #define _KIS_VLINE_ITERATOR_H_
 
+#include <memory>
 #include "kis_base_iterator.h"
 #include "kritaimage_export.h"
 #include "kis_iterator_ng.h"
@@ -29,7 +30,7 @@ public:
 
 public:
     KisVLineIterator2(KisDataManager *dataManager, qint32 x, qint32 y, qint32 h, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *completeListener,
-                      QSharedPointer<const KisPageStoreIteratorReadScope> scope = {});
+                      std::shared_ptr<const KisPageStoreIteratorReadScope> scope = {});
     ~KisVLineIterator2() override;
 
     void resetPixelPos() override;

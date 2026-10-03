@@ -15,6 +15,13 @@
 #include <QReadWriteLock>
 #include <QSharedPointer>
 #include <QVector>
+#include <memory>
+#include <memory_resource>
+#include <atomic>
+#include <vector>
+#include <boost/intrusive/list.hpp>
+#include <boost/intrusive/set.hpp>
+#include <boost/intrusive_ptr.hpp>
 #include "kis_tile_data_interface.h"
 
 #include "kis_tile_data_pooler.h"
@@ -35,15 +42,49 @@ public:
     virtual void commit(quint64 revision) noexcept = 0;
 };
 
-class KRITAIMAGE_EXPORT KisTileDataResidencyObserver
+class KRITAIMAGE_EXPORT KisTileDataResidencyObserver : public std::pmr::memory_resource
 {
 public:
     virtual ~KisTileDataResidencyObserver() = default;
-    virtual QSharedPointer<KisTileDataResidencyTransition>
+    virtual std::shared_ptr<KisTileDataResidencyTransition>
         prepareResidencyChange(KisTileData *tileData,
                                const KisTileDataResidencyState &source,
                                bool targetResident,
                                QString *error) = 0;
+protected:
+    void *do_allocate(size_t bytes, size_t alignment) override {
+        return std::pmr::new_delete_resource()->allocate(bytes, alignment);
+    }
+    void do_deallocate(void *data, size_t bytes, size_t alignment) override {
+        std::pmr::new_delete_resource()->deallocate(data, bytes, alignment);
+    }
+    bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override {
+        return this == &other;
+    }
+};
+
+// Retains the original observer's allocation lifetime, including shared-control
+// deallocation. It grants no residency or registration authority.
+template<class T> struct KisTileResidencyStorageAllocator {
+    using value_type = T;
+    using propagate_on_container_move_assignment = std::true_type;
+    std::shared_ptr<KisTileDataResidencyObserver> owner;
+    KisTileResidencyStorageAllocator() = default;
+    explicit KisTileResidencyStorageAllocator(std::shared_ptr<KisTileDataResidencyObserver> value)
+        : owner(std::move(value)) {}
+    template<class U> KisTileResidencyStorageAllocator(const KisTileResidencyStorageAllocator<U> &other)
+        : owner(other.owner) {}
+    T *allocate(size_t count) {
+        if (count > size_t(-1) / sizeof(T)) throw std::bad_alloc();
+        auto *resource = owner ? static_cast<std::pmr::memory_resource *>(owner.get()) : std::pmr::new_delete_resource();
+        return static_cast<T *>(resource->allocate(count * sizeof(T), alignof(T)));
+    }
+    void deallocate(T *data, size_t count) noexcept {
+        auto *resource = owner ? static_cast<std::pmr::memory_resource *>(owner.get()) : std::pmr::new_delete_resource();
+        resource->deallocate(data, count * sizeof(T), alignof(T));
+    }
+    template<class U> bool operator==(const KisTileResidencyStorageAllocator<U> &other) const noexcept { return owner == other.owner; }
+    template<class U> bool operator!=(const KisTileResidencyStorageAllocator<U> &other) const noexcept { return !(*this == other); }
 };
 
 struct KRITAIMAGE_EXPORT KisTileDataResidencyState
@@ -59,6 +100,7 @@ struct KRITAIMAGE_EXPORT KisTileDataResidencyState
  */
 class KRITAIMAGE_EXPORT KisTileDataStore
 {
+    struct ResidencyObservers;
 public:
     KisTileDataStore();
     ~KisTileDataStore();
@@ -190,26 +232,63 @@ public:
     // Sparse observers are installed only for PageStore-owned physical
     // payloads. Swap work reports the exact changed tile after releasing its
     // storage lock; ordinary tiles pay no per-object state cost.
+    using PreparedResidencyObserver = boost::intrusive_ptr<ResidencyObservers>;
+    PreparedResidencyObserver prepareResidencyObserver(
+        const std::shared_ptr<KisTileDataResidencyObserver> &observer);
     bool registerResidencyObserver(
-        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer,
-        KisTileDataResidencyState *initialState = nullptr);
+        KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer,
+        KisTileDataResidencyState *initialState = nullptr,
+        PreparedResidencyObserver prepared = {});
     void unregisterResidencyObserver(
-        KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer);
+        KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer);
 
 private:
-    struct ResidencyObservers {
+    struct ResidencyObserverRegistration : boost::intrusive::list_base_hook<> {
+        std::shared_ptr<KisTileDataResidencyObserver> observer;
+        explicit ResidencyObserverRegistration(std::shared_ptr<KisTileDataResidencyObserver> value)
+            : observer(std::move(value)) {}
+        static void dispose(ResidencyObserverRegistration *value) noexcept {
+            auto storage = value->observer;
+            std::destroy_at(value);
+            storage->deallocate(value, sizeof(*value), alignof(ResidencyObserverRegistration));
+        }
+    };
+    struct ResidencyObservers : boost::intrusive::set_base_hook<> {
+        KisTileData *tile;
+        std::shared_ptr<KisTileDataResidencyObserver> storageOwner;
+        std::atomic<quint32> references{1};
         bool resident = false;
         quint64 revision = 0;
         quint64 observersRevision = 0;
-        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
+        boost::intrusive::list<ResidencyObserverRegistration> observers;
+        ResidencyObservers(KisTileData *value, std::shared_ptr<KisTileDataResidencyObserver> storage)
+            : tile(value), storageOwner(std::move(storage)) {}
+        ~ResidencyObservers() { observers.clear_and_dispose(&ResidencyObserverRegistration::dispose); }
+        friend void intrusive_ptr_add_ref(ResidencyObservers *value) noexcept { value->references.fetch_add(1, std::memory_order_relaxed); }
+        friend void intrusive_ptr_release(ResidencyObservers *value) noexcept {
+            if (value->references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+            auto storage = value->storageOwner;
+            std::destroy_at(value);
+            storage->deallocate(value, sizeof(*value), alignof(ResidencyObservers));
+        }
+    };
+    struct ResidencyLess {
+        bool operator()(const ResidencyObservers &a, const ResidencyObservers &b) const { return std::less<KisTileData *>{}(a.tile, b.tile); }
+        bool operator()(KisTileData *a, const ResidencyObservers &b) const { return std::less<KisTileData *>{}(a, b.tile); }
+        bool operator()(const ResidencyObservers &a, KisTileData *b) const { return std::less<KisTileData *>{}(a.tile, b); }
+    };
+    struct ResidencyTable : boost::intrusive::set<ResidencyObservers, boost::intrusive::compare<ResidencyLess>> {
+        ~ResidencyTable() { clear_and_dispose([](ResidencyObservers *value) { intrusive_ptr_release(value); }); }
+        auto find(KisTileData *tile) { return boost::intrusive::set<ResidencyObservers, boost::intrusive::compare<ResidencyLess>>::find(tile, ResidencyLess{}); }
     };
     struct PreparedResidencyChange {
+        boost::intrusive_ptr<ResidencyObservers> registration;
         bool valid = false;
         bool sourceResident = false;
         quint64 sourceRevision = 0;
         quint64 observersRevision = 0;
-        QVector<QSharedPointer<KisTileDataResidencyObserver>> observers;
-        QVector<QSharedPointer<KisTileDataResidencyTransition>> transitions;
+        std::vector<std::shared_ptr<KisTileDataResidencyObserver>, KisTileResidencyStorageAllocator<std::shared_ptr<KisTileDataResidencyObserver>>> observers;
+        std::vector<std::shared_ptr<KisTileDataResidencyTransition>, KisTileResidencyStorageAllocator<std::shared_ptr<KisTileDataResidencyTransition>>> transitions;
     };
 
     PreparedResidencyChange prepareResidencyChange(KisTileData *td,
@@ -265,7 +344,7 @@ private:
     ConcurrentMap<int, KisTileData*> m_tileDataMap;
     QReadWriteLock m_iteratorLock;
     QMutex m_residencyObserverLock;
-    QHash<KisTileData *, ResidencyObservers> m_residencyObservers;
+    ResidencyTable m_residencyObservers;
     QMutex m_residentMemoryAdmissionLock;
     quint64 m_reservedResidentBytes = 0;
     quint64 m_residentHardLimitBytes = 0;

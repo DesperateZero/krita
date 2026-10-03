@@ -252,7 +252,7 @@
           "KisShardSlotIndex::cancelReservation"
         ]
       },
-      "evidence": "KisPageMetadataCoordinator stores a 96-byte compact page directory, sparse slot-referenced activity records, compact version/replica records and overflow nodes as authority. It owns one exact-version and one physical-slot index per shard, projects touched records through the reference state machine, and reconstructs full snapshots only at diagnostic or boundary APIs. Index insertion requires an explicit capacity token and page ordering is intrusive.",
+      "evidence": "Compact page/activity/binding indices now use actual paid allocator-backed map nodes; exact/physical indices use prepared paid vectors. Actual rebind request sizes replace the owning-hash estimator. Compact slot records remain sole version authority; public oracle arrays and format bytes use finite process allocation with COW semantics. Incremental cleanup returns the same Entry's publication activity before dropping its shard.",
       "id": "metadata-compact-records",
       "manifest-entries": [
         "BR1-PS-METADATA-RECORDS-020"
@@ -286,7 +286,7 @@
           "KisPageStoreReadScopeStatistics.capturedReadViewReleases"
         ]
       },
-      "evidence": "KisPageReadCoordinator is the sole owner of generic read requests, active read leases, pending last-use records and captured-view release accounting. Both generic and native superseded overlays use historical collection; cancellation and failed read resolution also trigger it. No Store callback owns a separate superseded-prepared cleanup protocol.",
+      "evidence": "KisPageReadCoordinator owns original requests, leases, last-use records and captured release accounting. Current cold/provider/Registry roots, process bootstrap, source/read caches and public COW values use actual finite allocation owners; exact hard-full refusal retains original inputs and weak/control tails stay charged to actual free. Close moves original Ledger retirement records without Qt copies or dynamic diagnostics. Current Darwin executor/clock and explicit worker/monitor stacks plus measured pthread mappings are paid before callbacks; permanent stop joins them and late handle release returns actual fees. Framework/global allocator and non-Darwin native qualification remain separate.",
       "id": "read-coordinator",
       "manifest-entries": [
         "BR1-PS-STORE-READ-018"
@@ -296,7 +296,9 @@
         "KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFacade",
         "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges",
         "KisPageStoreCpuMutationTest::supersededOverlayUsesHistoricalLifetime",
-        "KisPageStoreResidentReadTest::concurrentCommitAndRead"
+        "KisPageStoreResidentReadTest::concurrentCommitAndRead",
+        "KisPageStoreCpuMutationTest::processStorageRejectsAndRetains",
+        "KisPageStoreCpuMutationTest::runtimeStopsAtCapacity"
       ],
       "status": "existing"
     },

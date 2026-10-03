@@ -16,20 +16,20 @@
 #include "kis_assert.h"
 #include "kis_global.h"
 #include "kis_debug.h"
+#include "pagestore/KisMutationStorage_p.h"
 
 KisTiledExtentManager::Data::Data()
     : m_min(qint32_MAX), m_max(qint32_MIN), m_count(0)
 {
     QWriteLocker lock(&m_migrationLock);
-    m_capacity = InitialBufferSize;
+    m_capacity = 0;
     m_offset = 1;
-    m_buffer = new QAtomicInt[m_capacity];
 }
 
 KisTiledExtentManager::Data::~Data()
 {
     QWriteLocker lock(&m_migrationLock);
-    delete[] m_buffer;
+    m_buffer.reset();
 }
 
 bool KisTiledExtentManager::Data::add(qint32 index)
@@ -114,12 +114,13 @@ bool KisTiledExtentManager::Data::remove(qint32 index)
     return needsUpdateExtent;
 }
 
-void KisTiledExtentManager::Data::replace(const QVector<qint32> &indexes)
+void KisTiledExtentManager::Data::replace(const QVector<QPoint> &indexes, bool columns)
 {
-    const auto bounds = std::minmax_element(indexes.cbegin(), indexes.cend());
-    if (!indexes.isEmpty()) prepare(*bounds.first, *bounds.second);
     QWriteLocker lock(&m_migrationLock);
-    if (!indexes.isEmpty() && !covers(*bounds.first, *bounds.second)) throw std::bad_alloc();
+    for (const auto &point : indexes) {
+        const auto index = columns ? point.x() : point.y();
+        if (!covers(index, index)) throw std::bad_alloc();
+    }
     QWriteLocker l(&m_extentLock);
 
     for (qint32 i = 0; i < m_capacity; ++i) {
@@ -130,9 +131,7 @@ void KisTiledExtentManager::Data::replace(const QVector<qint32> &indexes)
     m_max = qint32_MIN;
     m_count = 0;
 
-    Q_FOREACH (const qint32 index, indexes) {
-        unsafeAdd(index);
-    }
+    for (const auto &point : indexes) unsafeAdd(columns ? point.x() : point.y());
 }
 
 void KisTiledExtentManager::Data::takePrepared(Data &prepared) noexcept
@@ -193,7 +192,22 @@ void KisTiledExtentManager::Data::unsafeAdd(qint32 index)
 
 void KisTiledExtentManager::Data::Growth::allocate()
 {
-    if (capacity) buffer = std::make_unique<QAtomicInt[]>(size_t(capacity));
+    if (!capacity) return;
+    const size_t bytes = size_t(capacity) * sizeof(QAtomicInt);
+    const auto &resource = buffer.get_deleter().resource;
+    auto *data = static_cast<QAtomicInt *>(resource
+        ? resource->allocate(bytes, alignof(QAtomicInt)) : ::operator new(bytes));
+    std::uninitialized_value_construct_n(data, size_t(capacity));
+    buffer.get_deleter().count = size_t(capacity);
+    buffer.reset(data);
+}
+
+void KisTiledExtentManager::Data::Growth::DeleteBuffer::operator()(QAtomicInt *data) const noexcept
+{
+    if (!data) return;
+    std::destroy_n(data, count);
+    if (resource) resource->deallocate(data, count * sizeof(QAtomicInt), alignof(QAtomicInt));
+    else ::operator delete(data);
 }
 
 bool KisTiledExtentManager::Data::covers(qint32 first, qint32 last) const
@@ -205,11 +219,12 @@ KisTiledExtentManager::Data::Growth KisTiledExtentManager::Data::planGrowth(
     qint32 first, qint32 last) const
 {
     Growth growth;
+    growth.buffer.get_deleter().resource = m_buffer.get_deleter().resource;
     if (covers(first, last)) return growth;
     qint64 low = std::min(-qint64(m_offset), qint64(first));
     const qint64 high = std::max(qint64(m_capacity) - m_offset - 1, qint64(last));
     const qint64 required = high - low + 1;
-    qint64 capacity = m_capacity;
+    qint64 capacity = std::max(InitialBufferSize, m_capacity);
     while (capacity < required) capacity *= 2;
     // Leave the new slack on the side that grew. Otherwise every small
     // negative-coordinate insertion shifts the full old buffer and doubles
@@ -244,9 +259,7 @@ void KisTiledExtentManager::Data::install(
         growth.buffer[start + i].storeRelaxed(m_buffer[i].loadRelaxed());
     // Move the old allocation into the caller's private candidate. Its owner
     // destroys it after releasing every migration/extent lock.
-    QAtomicInt *old = m_buffer;
-    m_buffer = growth.buffer.release();
-    growth.buffer.reset(old);
+    m_buffer.swap(growth.buffer);
     std::swap(m_capacity, growth.capacity);
     std::swap(m_offset, growth.offset);
 }
@@ -315,6 +328,21 @@ KisTiledExtentManager::KisTiledExtentManager()
     m_currentExtent = QRect();
 }
 
+void *KisTiledExtentManager::operator new(size_t bytes)
+{ return KisPageProcessStorageObject::operator new(bytes); }
+void KisTiledExtentManager::operator delete(void *data) noexcept
+{ KisPageProcessStorageObject::operator delete(data); }
+
+bool KisTiledExtentManager::configureStorage(std::shared_ptr<std::pmr::memory_resource> resource)
+{
+    QWriteLocker cols(&m_colsData.m_migrationLock);
+    QWriteLocker rows(&m_rowsData.m_migrationLock);
+    if (!resource || m_colsData.m_buffer || m_rowsData.m_buffer || m_colsData.m_count || m_rowsData.m_count) return false;
+    m_colsData.m_buffer.get_deleter().resource = resource;
+    m_rowsData.m_buffer.get_deleter().resource = std::move(resource);
+    return true;
+}
+
 bool KisTiledExtentManager::prepareTileRange(const QRect &tileRange) try
 {
     if (tileRange.isEmpty()) return true;
@@ -376,25 +404,19 @@ void KisTiledExtentManager::notifyTileRemoved(qint32 col, qint32 row)
 
 void KisTiledExtentManager::replaceTileStats(const QVector<QPoint> &indexes)
 {
-    QVector<qint32> colsIndexes;
-    QVector<qint32> rowsIndexes;
-
-    Q_FOREACH (const QPoint &index, indexes) {
-        colsIndexes.append(index.x());
-        rowsIndexes.append(index.y());
-    }
-
     if (!indexes.isEmpty()) {
-        const auto cols = std::minmax_element(colsIndexes.cbegin(), colsIndexes.cend());
-        const auto rows = std::minmax_element(rowsIndexes.cbegin(), rowsIndexes.cend());
-        const qint64 width = qint64(*cols.second) - *cols.first + 1;
-        const qint64 height = qint64(*rows.second) - *rows.first + 1;
+        const auto cols = std::minmax_element(indexes.cbegin(), indexes.cend(),
+            [](const QPoint &a, const QPoint &b) { return a.x() < b.x(); });
+        const auto rows = std::minmax_element(indexes.cbegin(), indexes.cend(),
+            [](const QPoint &a, const QPoint &b) { return a.y() < b.y(); });
+        const qint64 width = qint64(cols.second->x()) - cols.first->x() + 1;
+        const qint64 height = qint64(rows.second->y()) - rows.first->y() + 1;
         if (width > std::numeric_limits<qint32>::max() || height > std::numeric_limits<qint32>::max() ||
-            !prepareTileRange(QRect(*cols.first, *rows.first, qint32(width), qint32(height))))
+            !prepareTileRange(QRect(cols.first->x(), rows.first->y(), qint32(width), qint32(height))))
             throw std::bad_alloc();
     }
-    m_colsData.replace(colsIndexes);
-    m_rowsData.replace(rowsIndexes);
+    m_colsData.replace(indexes, true);
+    m_rowsData.replace(indexes, false);
     updateExtent();
 }
 

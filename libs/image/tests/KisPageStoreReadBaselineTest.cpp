@@ -25,16 +25,16 @@
 namespace {
 bool configureStore(KisPageStore &store, int pages, QString *error, bool tiles3 = false, int bpp = 1)
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    QSharedPointer<KisPageReplicaProvider> provider;
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    std::shared_ptr<KisPageReplicaProvider> provider;
     if (tiles3) {
-        auto native = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+        auto native = std::make_shared<KisTiles3PageReplicaProvider>();
         KisCpuResidentReplicaProviderConfig config;
         config.provider = {175}; config.providerEpoch = {1}; config.budgetBytes = 128 * 1024 * 1024;
         if (!native->configure(config, completions, error)) return false;
         provider = native;
     } else {
-        auto memory = QSharedPointer<KisCpuPageReplicaProvider>::create();
+        auto memory = std::make_shared<KisCpuPageReplicaProvider>();
         KisCpuResidentReplicaProviderConfig config;
         config.provider = {175}; config.providerEpoch = {1}; config.budgetBytes = 128 * 1024 * 1024;
         if (!memory->configure(config, completions, error)) return false;

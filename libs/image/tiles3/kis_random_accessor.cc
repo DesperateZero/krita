@@ -42,7 +42,7 @@ void KisRandomAccessor2::releaseWriteCache()
     }
     m_tilesCacheSize = 0;
     m_data = nullptr; m_oldData = nullptr;
-    m_readScope.clear();
+    m_readScope.reset();
 }
 
 void KisRandomAccessor2::moveTo(qint32 x, qint32 y)

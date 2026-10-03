@@ -56,7 +56,7 @@ public:
     mutable QMutex mutex;
     KisVulkanCoordinatorState state = KisVulkanCoordinatorState::Unconfigured;
     KisVulkanCoordinatorConfig config;
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     quint64 completionSource = 0;
     QString lastFailure;
 };
@@ -70,7 +70,7 @@ KisVulkanSubmissionCoordinator::~KisVulkanSubmissionCoordinator() = default;
 
 bool KisVulkanSubmissionCoordinator::configure(
     const KisVulkanCoordinatorConfig &config,
-    const QSharedPointer<KisCompletionRegistry> &completionRegistry,
+    const std::shared_ptr<KisCompletionRegistry> &completionRegistry,
     QString *error)
 {
     QMutexLocker locker(&d->mutex);

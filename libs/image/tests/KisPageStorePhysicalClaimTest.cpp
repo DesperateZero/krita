@@ -40,8 +40,8 @@ KisPageAllocationDescriptor descriptor(int bpp)
 // The stable resident binding owns the sole TileData ref when idle.
 struct Fixture
 {
-    QSharedPointer<KisCompletionRegistry> completions = QSharedPointer<KisCompletionRegistry>::create();
-    QSharedPointer<KisTiles3PageReplicaProvider> provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+    std::shared_ptr<KisCompletionRegistry> completions = std::make_shared<KisCompletionRegistry>();
+    std::shared_ptr<KisTiles3PageReplicaProvider> provider = std::make_shared<KisTiles3PageReplicaProvider>();
     std::shared_ptr<KisCpuResidentBinding> binding;
     KisReplicaHandle replica;
     KisPageAllocationDescriptor desc;
@@ -147,13 +147,13 @@ void KisPageStorePhysicalClaimTest::residentBindingStorageFollowsLastHandle()
 {
     QFETCH(int, bpp); QFETCH(int, outcome);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
-    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto process = std::make_shared<KisBackingBudgetController>(limits);
     auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
     QVERIFY(first.isValid() && second.isValid()); first.release(); second.release();
     const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto baseline = live();
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig config;
     config.provider = {200}; config.providerEpoch = {1}; config.budgetBytes = 1024 * 1024;
     const auto desc = descriptor(bpp);
@@ -438,7 +438,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     QVERIFY(ledger.commitBackingHandoff(std::move(accounting))); writer.reset(); physical.reset();
     auto source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source);
     auto alias = f.provider->prepareSynchronousSource({620}, source, {key(1), {1}}, f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
-    QVERIFY(alias.isValid()); source.clear(); reservation = budget.reserve(initial, &f.error);
+    QVERIFY(alias.isValid()); source.reset(); reservation = budget.reserve(initial, &f.error);
     QVERIFY(ledger.registerBacking(alias.replica, reservation, KisBackingBudgetClass::Current));
     if (swapped) QVERIFY(f.swap());
     QVector<KisPageTransitionEffect> effects; KisPageTransitionEffect effect; effect.replica = target; effects.append(effect);
@@ -500,7 +500,7 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
             QVERIFY(result.isValid()); replicas[i] = result.replica;
         }
     }
-    source.clear();
+    source.reset();
     QCOMPARE(f.provider->memoryUsage().committedBytes, committed);
     std::array<void *, 3> fillers{};
     std::array<size_t, 3> fillerBytes{};
@@ -881,7 +881,7 @@ void KisPageStorePhysicalClaimTest::revokedWriterReservation()
     auto writer = KisCpuWriteBindingReservation::acquire(f.binding, f.replica.allocationIdentity()); QVERIFY(writer.isValid());
     auto *bytes = pinned ? static_cast<quint8 *>(writer.pinResident()) : nullptr;
     if (pinned) { QVERIFY(bytes); bytes[0] = 0x76; }
-    f.provider.clear(); // revoke may not free a borrowed pointer/token's backing
+    f.provider.reset(); // revoke may not free a borrowed pointer/token's backing
     if (pinned) QCOMPARE(bytes[0], quint8(0x76));
     writer.unpin();
     KisCpuResidentReadStatus status;
@@ -1040,16 +1040,16 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffGuards()
     bool rawPin = blocker == 6 && f.tile->tryBlockSwapping();
     if (blocker == 7) f.tile->ref();
     if (blocker == 8) f.tile->acquire();
-    QSharedPointer<const KisPageReplicaSource> source;
+    std::shared_ptr<const KisPageReplicaSource> source;
     if (blocker == 9 || blocker == 10)
         source = f.provider->captureCompletedTileSource(f.desc, f.tile);
     auto alias = blocker == 10 ? f.provider->prepareSynchronousSource({62}, source, {key(1), {1}},
         f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal) : KisReplicaOperation{};
-    if (blocker == 10) source.clear(); // The alias alone must exclude transfer.
-    QSharedPointer<KisTiles3PageReplicaProvider> foreign;
+    if (blocker == 10) source.reset(); // The alias alone must exclude transfer.
+    std::shared_ptr<KisTiles3PageReplicaProvider> foreign;
     KisReplicaHandle foreignAlias;
     if (blocker == 11) {
-        foreign = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+        foreign = std::make_shared<KisTiles3PageReplicaProvider>();
         QVERIFY(foreign->configure({{201}, {1}, 16 * 1024 * 1024}, f.completions));
         foreignAlias = foreign->adoptInitialTile({key(1), {1}}, f.desc, f.tile);
     }
@@ -1081,9 +1081,9 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffGuards()
     candidate.reset();
     QVERIFY(f.provider->validate(f.replica, f.desc)); // No retag on rejection/cancel.
     if (generic.isValid()) f.provider->releaseAccess(std::move(generic), {});
-    parked.reset(); source.clear();
+    parked.reset(); source.reset();
     if (alias.isValid()) QVERIFY(f.provider->retire({63}, alias.replica, {}).isValid());
-    foreign.clear();
+    foreign.reset();
     if (blocker == 12) {
         KisTileData *clone = nullptr;
         QVERIFY(f.tile->m_clonesStack.pop(clone)); delete clone;
@@ -1237,14 +1237,14 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffConcurrentConsumers()
 void KisPageStorePhysicalClaimTest::physicalBackingHandoffRetainsProvider()
 {
     Fixture f; QVERIFY(f.init());
-    auto weak = f.provider.toWeakRef();
+    std::weak_ptr<KisTiles3PageReplicaProvider> weak = f.provider;
     auto candidate = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
-    f.provider.clear();
-    QVERIFY(!weak.isNull()); QVERIFY(candidate.tryClaim());
+    f.provider.reset();
+    QVERIFY(!weak.expired()); QVERIFY(candidate.tryClaim());
     auto writer = candidate.commit(); QVERIFY(writer.isValid());
     auto *bytes = static_cast<quint8 *>(writer.pinResident()); QVERIFY(bytes); bytes[0] = 0x69;
-    QVERIFY(!weak.isNull());
-    candidate.reset(); QVERIFY(weak.isNull()); // Revocation is deferred past consumption.
+    QVERIFY(!weak.expired());
+    candidate.reset(); QVERIFY(weak.expired()); // Revocation is deferred past consumption.
     QCOMPARE(bytes[0], quint8(0x69)); // Existing resident holder is still alive.
     writer.unpin();
     KisCpuResidentReadStatus status;

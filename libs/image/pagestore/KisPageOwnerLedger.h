@@ -21,6 +21,7 @@ class KisBackingBudgetReservation;
 class KisBackingBudgetWaiter;
 class KisPageOwnerDomainAdmission;
 class KisPageOwnerLedger;
+struct KisPageRetirementRecords;
 enum class KisBackingBudgetClass : quint8;
 
 struct KisBackingClassChange
@@ -86,7 +87,7 @@ public:
     KisPageOwnerLedger();
     ~KisPageOwnerLedger();
 
-    bool configure(const QSharedPointer<KisCompletionRegistry> &completions,
+    bool configure(const std::shared_ptr<KisCompletionRegistry> &completions,
                    QString *error = nullptr);
     void attachBackingBudget(KisBackingBudgetController &budget);
     bool registerBacking(const KisReplicaHandle &replica,
@@ -112,8 +113,8 @@ public:
                                          QString *error = nullptr);
     bool synchronizeBackingDomains(QString *error = nullptr);
     KisBackingClassChangeReservation prepareBackingChanges(
-        QVector<KisBackingClassChange> changes,
-        const QVector<KisPageTransitionEffect> &retirementEffects,
+        KisPageSnapshotArray<KisBackingClassChange> changes,
+        const KisPageSnapshotArray<KisPageTransitionEffect> &retirementEffects,
         QString *error = nullptr);
     void commitBackingChanges(KisBackingClassChangeReservation &&reservation) noexcept;
     // Freeze a sole, resident physical owner and reserve ActivePending plus
@@ -142,12 +143,12 @@ public:
     void cancelRetirementDebt(quint64 cookie) noexcept;
     void releaseRetiredBacking(const KisReplicaHandle &replica) noexcept;
 
-    bool registerProvider(const QSharedPointer<KisPageReplicaProvider> &provider,
+    bool registerProvider(const std::shared_ptr<KisPageReplicaProvider> &provider,
                           QString *error = nullptr);
-    QSharedPointer<KisPageReplicaProvider> provider(
+    std::shared_ptr<KisPageReplicaProvider> provider(
         KisReplicaProviderId provider,
         KisReplicaProviderEpoch epoch) const;
-    QSharedPointer<KisPageReplicaProvider> providerFor(
+    std::shared_ptr<KisPageReplicaProvider> providerFor(
         KisPageAccessRequirement access) const;
 
     KisPageRequestId nextRequestId();
@@ -204,6 +205,7 @@ public:
 
 private:
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
+    KisPageRetirementRecords takeShutdownRetirementRecords();
     // Original publication storage moves into the prepared ledger slot. The
     // allocator must belong to this ledger's backing budget.
     KisBackingClassChangeReservation prepareBackingChanges(

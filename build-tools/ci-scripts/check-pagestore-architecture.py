@@ -1295,10 +1295,11 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if contract not in index_text:
                 errors.append(f"R2/M3 shard slot index contract is missing: {contract}")
         for contract in (
-            "std::unique_ptr<Entry[]> m_entries",
-            "std::make_unique<Entry[]>",
+            "std::vector<Entry, KisMutationStorageAllocator<Entry>> m_entries",
+            "entries.resize(size_t(2 * capacity))",
+            "entries(m_entries.get_allocator())",
             "m_entries[bucket] = Entry{key, slot}",
-            "bytesPerCapacitySlot",
+            "allocatedBytes()",
         ):
             if contract not in index_text:
                 errors.append(f"R2/M4 preconstructed slot index contract is missing: {contract}")
@@ -1333,7 +1334,10 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "consumePublicationActivity",
             "static_assert(sizeof(MetadataPage) <= 96)",
             "static_assert(sizeof(MetadataPageActivity) <= 96)",
-            "QHash<KisPageKey, MetadataPageActivity> activities",
+            "MetadataMap<KisPageKey, MetadataPageActivity> activities",
+            "MetadataMap<KisPageKey, MetadataPage> pages",
+            "MetadataMap<KisPageVersion, std::shared_ptr<KisCpuReadBindingLink>> cpuBindings",
+            "struct MetadataMapAllocator : KisMutationStorageAllocator<T>",
             "assignHeader",
             "installReservedHeader",
             "projectReplica",
@@ -1360,7 +1364,6 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct VersionRecords",
             "shared_ptr<VersionRecords>",
             "std::list<",
-            "std::map<",
             "preparedByTransaction",
             "mutableVersions",
             "KisPageStateSnapshot header;",
@@ -1369,6 +1372,13 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(
                     f"R2/M3 retained a forbidden per-page snapshot/container: {forbidden}"
                 )
+        # The sole map type is the allocator-backed shard directory. A page
+        # still cannot own a version/snapshot map or another map definition.
+        paid_map = "using MetadataMap = std::map<Key, Value, MetadataKeyLess, MetadataMapAllocator<std::pair<const Key, Value>>>;"
+        if paid_map not in metadata_text or "std::map<" in metadata_text.replace(paid_map, ""):
+            errors.append("CP1 metadata restored an unqualified owning map")
+        if any(old in metadata_text for old in ("MetadataOwnedCapacity", "MetadataOwnedHash", "QHash<")):
+            errors.append("CP1 metadata restored its estimated/Qt owning capacity")
         if "ensureArenaCapacity" in metadata_text:
             errors.append("R2/M2 retained shard-lock-local arena block growth")
         if "KisPageMetadataCoordinator::apply(" in metadata_text:
@@ -1468,13 +1478,14 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisMutationStorageAllocator<std::pair<const KisPageKey, EntryHandle>>",
             "static_assert(sizeof(KisPageWriteIntent) <= 32)",
             "static_assert(sizeof(KisMutationPageEntry) <= 104)",
-            "QSharedPointer<const KisPageReplicaSource> initialization",
+            "std::shared_ptr<const KisPageReplicaSource> initialization",
         ):
             if contract not in write_header:
                 errors.append(f"BR1 converged write schema is missing: {contract}")
         entry_begin = write_header.find("KisMutationPageEntry final")
         entry_end = write_header.find("KisMutationWriteSet final", entry_begin)
         entry_text = write_header[entry_begin:entry_end]
+        entry_text = entry_text.replace("std::shared_ptr<const KisPageReplicaSource>", "")
         for forbidden in (
             "KisPageTransition",
             "KisPageAllocationDescriptor",

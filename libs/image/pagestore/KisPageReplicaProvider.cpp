@@ -68,13 +68,13 @@ bool KisPageReplicaProvider::registerBackingDomainAdmission(
     return valid;
 }
 bool KisPageReplicaProvider::copySynchronousSourceToCpu(
-    const QSharedPointer<const KisPageReplicaSource> &, const KisPageAllocationDescriptor &,
+    const std::shared_ptr<const KisPageReplicaSource> &, const KisPageAllocationDescriptor &,
     void *, quint32, quint64)
 {
     return false;
 }
 KisReplicaOperation KisPageReplicaProvider::prepareSynchronousSource(
-    KisPageOperationId operation, const QSharedPointer<const KisPageReplicaSource> &,
+    KisPageOperationId operation, const std::shared_ptr<const KisPageReplicaSource> &,
     const KisPageVersion &, const KisPageAllocationDescriptor &,
     KisReplicaSourceUse, KisPagePriority)
 {

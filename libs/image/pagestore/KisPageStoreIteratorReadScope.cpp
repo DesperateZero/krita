@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <memory>
 #include "KisPageStoreIteratorReadScope_p.h"
 #include <algorithm>
 #include <utility>
@@ -16,7 +17,7 @@ KisPageStoreReadPage::KisPageStoreReadPage(KisPageStore *store, const KisCapture
         status != KisCpuResidentReadStatus::BindingUnavailable) {
         KisPageStoreDetail::setError(error, status == KisCpuResidentReadStatus::Busy
             ? QStringLiteral("CPU resident access is locally busy; retry after the writer releases")
-            : QStringLiteral("resident read rejected (status %1)").arg(int(status)));
+            : QStringLiteral("resident read was rejected"));
         return;
     }
     const KisPageAccessRequirement cpu{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
@@ -71,7 +72,7 @@ KisPageStoreReadPage KisPageStoreIteratorReadScope::readPage(
     return {m_store, before && m_before.isValid() ? m_before : m_current,
             {m_surface, {column, row}}, error};
 }
-KisPageStoreReadCursor::KisPageStoreReadCursor(QSharedPointer<const KisPageStoreIteratorReadScope> scope)
+KisPageStoreReadCursor::KisPageStoreReadCursor(std::shared_ptr<const KisPageStoreIteratorReadScope> scope)
     : m_scope(std::move(scope)) {}
 KisPageStoreReadPair KisPageStoreReadCursor::read(qint32 column, qint32 row, QString *error)
 {

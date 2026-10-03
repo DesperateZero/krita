@@ -28,14 +28,16 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <map>
 #include <utility>
 
 namespace {
 
+template<class Key, class Value>
+using StorageMap = std::map<Key, Value, std::less<Key>,
+    KisMutationStorageAllocator<std::pair<const Key, Value>>>;
+
 std::atomic<quint64> nextTiles3ProviderId{0x4000000000000000ULL};
-QMutex productNonPayloadBudgetMutex;
-QWeakPointer<KisBackingBudgetController> productNonPayloadBudget;
-quint64 productNonPayloadBudgetBytes = 0;
 
 qint32 pageCoordinate(qint32 pixel, qint32 pageExtent)
 {
@@ -50,15 +52,26 @@ struct ProductBackingPolicy
     KisPageBackingLimits limits;
 };
 
-bool configMiBToBytes(int value, const char *name, quint64 *bytes,
+void prepareChangedPageOutput(QVector<KisLogicalPageId> *output, const QRect &rect)
+{
+    if (!output) return;
+    const auto columns = quint64(qint64(pageCoordinate(rect.right(), KisTileData::WIDTH)) -
+        pageCoordinate(rect.left(), KisTileData::WIDTH) + 1);
+    const auto rows = quint64(qint64(pageCoordinate(rect.bottom(), KisTileData::HEIGHT)) -
+        pageCoordinate(rect.top(), KisTileData::HEIGHT) + 1);
+    if (columns > quint64(std::numeric_limits<qsizetype>::max()) / rows) throw std::bad_alloc();
+    output->reserve(qsizetype(columns * rows));
+    if (quint64(output->capacity()) < columns * rows) throw std::bad_alloc();
+}
+
+bool configMiBToBytes(int value, quint64 *bytes,
                       QString *error)
 {
     constexpr quint64 bytesPerMiB = quint64(1) << 20;
     if (!bytes || value < 0
         || quint64(value) > std::numeric_limits<quint64>::max() / bytesPerMiB) {
         KisPageStoreDetail::setError(
-            error, QStringLiteral("PageStore %1 limit is invalid")
-                       .arg(QString::fromLatin1(name)));
+            error, QStringLiteral("PageStore configured memory limit is invalid"));
         return false;
     }
     *bytes = quint64(value) * bytesPerMiB;
@@ -76,9 +89,9 @@ bool deriveProductBackingPolicy(ProductBackingPolicy *policy, QString *error)
     quint64 ramBytes = 0;
     quint64 poolBytes = 0;
     quint64 swapBytes = 0;
-    if (!configMiBToBytes(config.tilesHardLimit(), "RAM", &ramBytes, error)
-        || !configMiBToBytes(config.poolLimit(), "pool", &poolBytes, error)
-        || !configMiBToBytes(config.maxSwapSize(), "swap", &swapBytes, error)) {
+    if (!configMiBToBytes(config.tilesHardLimit(), &ramBytes, error)
+        || !configMiBToBytes(config.poolLimit(), &poolBytes, error)
+        || !configMiBToBytes(config.maxSwapSize(), &swapBytes, error)) {
         return false;
     }
     if (swapBytes > std::numeric_limits<quint64>::max() - ramBytes
@@ -111,27 +124,11 @@ bool deriveProductBackingPolicy(ProductBackingPolicy *policy, QString *error)
     return true;
 }
 
-QSharedPointer<KisBackingBudgetController> acquireProductNonPayloadBudget(
+std::shared_ptr<KisBackingBudgetController> acquireProductNonPayloadBudget(
     const ProductBackingPolicy &policy,
     QString *error)
 {
-    QMutexLocker lock(&productNonPayloadBudgetMutex);
-    auto budget = productNonPayloadBudget.toStrongRef();
-    if (budget) {
-        if (productNonPayloadBudgetBytes != policy.limits.metadataArenaBytes) {
-            KisPageStoreDetail::setError(
-                error, QStringLiteral("PageStore memory configuration changed while product stores are active"));
-            return {};
-        }
-        return budget;
-    }
-
-    KisPageBackingLimits sharedLimits;
-    sharedLimits.metadataArenaBytes = policy.limits.metadataArenaBytes;
-    budget = QSharedPointer<KisBackingBudgetController>::create(sharedLimits);
-    productNonPayloadBudget = budget;
-    productNonPayloadBudgetBytes = sharedLimits.metadataArenaBytes;
-    return budget;
+    return kisAcquirePageStoreProcessBudget(policy.limits.metadataArenaBytes, error);
 }
 
 bool updateSnapshotDerivedExtent(KisImageEpochSnapshot *snapshot,
@@ -183,14 +180,14 @@ bool updateSnapshotDerivedExtent(KisImageEpochSnapshot *snapshot,
 
 }
 
-class KisTiledDataManagerPageStoreLease final : public KisTilePageStoreLease
+class KisTiledDataManagerPageStoreLease final : public KisTilePageStoreLease, public KisPageProcessStorageObject
 {
 public:
     KisTiledDataManagerPageStoreLease(
         KisTiledDataManagerPageStoreBackend *backend,
         KisTileData *tile,
         KisCpuWriteGuard &&guard,
-        QSharedPointer<KisTiledDataManagerPageStoreWriteBatch::Private> batch);
+        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch);
     KisTiledDataManagerPageStoreLease(
         KisTiledDataManagerPageStoreBackend *backend,
         KisTileData *tile, const KisPageTransaction &transaction,
@@ -263,6 +260,7 @@ public:
     }
 
 private:
+    friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreWriteBatch::Private;
     // Only the cold clear barrier needs a second residency pin. The native
     // claim can then end while the legacy raw pointer remains valid until
@@ -298,16 +296,17 @@ private:
     Qt::HANDLE m_thread = QThread::currentThreadId();
     KisTiledDataManagerPageStoreLease *m_previous = nullptr;
     KisTiledDataManagerPageStoreLease *m_next = nullptr;
-    QSharedPointer<KisTiledDataManagerPageStoreWriteBatch::Private> m_batch;
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> m_batch;
     TileLease m_readCache;
     KisCpuWriteGuard m_native;
     KisPageMutationSession m_ownedMutation;
 };
 
-class KisTiledDataManagerPageStoreBackend::Private
+class KisTiledDataManagerPageStoreBackend::Private : public KisPageProcessStorageObject
 {
 public:
     bool prepareStore(const KisImageEpochSnapshot &initial, QString *error)
+    try
     {
         ProductBackingPolicy policy;
         if (!deriveProductBackingPolicy(&policy, error))
@@ -315,8 +314,11 @@ public:
         const auto sharedNonPayloadBudget = acquireProductNonPayloadBudget(policy, error);
         if (!sharedNonPayloadBudget)
             return false;
-        const auto completions = QSharedPointer<KisCompletionRegistry>::create(sharedNonPayloadBudget);
-        provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+        KisBackingBudgetController coldStorage;
+        if (!coldStorage.configureSharedNonPayloadBudget(sharedNonPayloadBudget, error)) return false;
+        const auto storage = KisMutationStorageAllocator<char>::retained(&coldStorage);
+        const auto completions = std::allocate_shared<KisCompletionRegistry>(storage, sharedNonPayloadBudget, storage);
+        provider = std::allocate_shared<KisTiles3PageReplicaProvider>(storage, storage);
         KisCpuResidentReplicaProviderConfig providerConfig;
         providerConfig.provider =
             KisPageStoreDetail::allocateMonotonicId<KisReplicaProviderId>(
@@ -325,13 +327,18 @@ public:
         providerConfig.budgetBytes = policy.providerBytes;
         store = KisPageStore::prepareStorage(sharedNonPayloadBudget, error);
         if (!store) return false;
-        history.reset(new KisPageStoreMementoManager);
+        history = std::allocate_shared<KisPageStoreMementoManager>(storage, storage);
         return provider->configure(providerConfig, completions, error, sharedNonPayloadBudget) &&
                store->configureSharedNonPayloadBudget(sharedNonPayloadBudget, error) &&
                store->configureBackingLimits(policy.limits, error) &&
                store->configure(initial, completions, 64, error) &&
                store->configureDerivedPageExtent(surface) &&
                store->registerReplicaProvider(provider);
+    }
+    catch (const std::bad_alloc &)
+    {
+        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore root storage preparation was refused"));
+        return false;
     }
 
     bool finalizeStore(QString *error)
@@ -359,9 +366,9 @@ public:
     mutable QMutex mutex;
     QMutex transactionMutex;
     QReadWriteLock publicationLock;
-    QSharedPointer<KisTiles3PageReplicaProvider> provider;
+    std::shared_ptr<KisTiles3PageReplicaProvider> provider;
     KisPageStore::StoragePointer store{nullptr, &KisPageStore::destroyStorage};
-    std::unique_ptr<KisPageStoreMementoManager> history;
+    std::shared_ptr<KisPageStoreMementoManager> history;
     KisSurfaceId surface{1};
     KisPageTransaction anonymousTransaction;
     quint64 anonymousClients = 0;
@@ -373,16 +380,19 @@ public:
     HistoryMutationPhase historyMutationPhase = HistoryMutationPhase::None;
     KisPageMutationSession historyMutation;
     KisMementoSP currentMemento;
-    QHash<const KisMemento *, KisPageStoreMemento> mementos;
-    QSet<KisTiledDataManagerPageStoreLease *> anonymousLeases;
-    QHash<Qt::HANDLE, QWeakPointer<KisTiledDataManagerPageStoreWriteBatch::Private>> cpuMutationBatches;
+    StorageMap<const KisMemento *, KisPageStoreMemento> mementos;
+    KisTiledDataManagerPageStoreLease *anonymousLeases = nullptr;
+    StorageMap<Qt::HANDLE, std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>> cpuMutationBatches;
     // Configuration is published once and the backend/store lifetime is
     // owned by KisTiledDataManager.  Tile lookup is a production hot path,
     // so readers must not serialize on the control-plane mutex merely to
     // discover that PageStore is enabled.
     std::atomic_bool operational{false};
-    QByteArray uniformPixel;
-    QSharedPointer<const KisPageReplicaSource> uniformSource;
+    KisPageByteArray uniformPixel;
+    std::shared_ptr<const KisPageReplicaSource> uniformSource;
+    const std::shared_ptr<const KisPageStoreIteratorReadScope> failedReadScope =
+        std::allocate_shared<KisPageStoreIteratorReadScope>(
+            KisMutationStorageAllocator<KisPageStoreIteratorReadScope>{});
 };
 
 class KisTiledDataManagerPageStoreWriteBatch::Private
@@ -421,13 +431,13 @@ public:
     quint64 clients = 1;
     Qt::HANDLE thread = QThread::currentThreadId();
     KisPageMutationSession mutation;
-    QHash<KisTileData *, QSharedPointer<const KisPageReplicaSource>> sources;
+    StorageMap<KisTileData *, std::shared_ptr<const KisPageReplicaSource>> sources;
 };
 
 KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
     KisTiledDataManagerPageStoreBackend *backend, KisTileData *tile,
     KisCpuWriteGuard &&guard,
-    QSharedPointer<KisTiledDataManagerPageStoreWriteBatch::Private> batch)
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch)
     : m_backend(backend), m_tileData(tile), m_batch(std::move(batch)),
       m_native(std::move(guard))
 {
@@ -479,7 +489,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::cancelForBarrier(QString *
     sources.clear();
     QMutexLocker lock(&backend->d->mutex);
     const auto slot = backend->d->cpuMutationBatches.find(thread);
-    if (slot != backend->d->cpuMutationBatches.end() && slot.value().toStrongRef().data() == this)
+    if (slot != backend->d->cpuMutationBatches.end() && slot->second.lock().get() == this)
         backend->d->cpuMutationBatches.erase(slot);
     backend = nullptr;
     clients = 0;
@@ -489,7 +499,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::cancelForBarrier(QString *
     return true;
 }
 
-class KisTiledDataManagerIteratorWriteScope::Private
+class KisTiledDataManagerIteratorWriteScope::Private : public KisPageProcessStorageObject
 {
 public:
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
@@ -501,6 +511,15 @@ KisTiledDataManagerIteratorWriteScope::KisTiledDataManagerIteratorWriteScope()
 }
 
 KisTiledDataManagerIteratorWriteScope::~KisTiledDataManagerIteratorWriteScope() = default;
+
+void *KisTiledDataManagerIteratorWriteScope::operator new(size_t bytes)
+{
+    return KisPageProcessStorageObject::operator new(bytes);
+}
+void KisTiledDataManagerIteratorWriteScope::operator delete(void *data) noexcept
+{
+    KisPageProcessStorageObject::operator delete(data);
+}
 
 bool KisTiledDataManagerIteratorWriteScope::finish()
 {
@@ -520,7 +539,7 @@ KisTiledDataManagerPageStoreWriteBatch(
     KisTiledDataManagerPageStoreBackend *backend,
     const KisPageTransaction &transaction,
     bool owned)
-    : d(new Private)
+    : d(std::allocate_shared<Private>(KisMutationStorageAllocator<Private>{}))
 {
     d->backend = backend;
     d->transaction = transaction;
@@ -528,7 +547,7 @@ KisTiledDataManagerPageStoreWriteBatch(
 }
 
 KisTiledDataManagerPageStoreWriteBatch::
-KisTiledDataManagerPageStoreWriteBatch(QSharedPointer<Private> shared)
+KisTiledDataManagerPageStoreWriteBatch(std::shared_ptr<Private> shared)
     : d(std::move(shared))
 {
 }
@@ -615,7 +634,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     // can join that transaction while its last foreign guard is still
     // cancelling it, poisoning the next operation.
     QMutexLocker lock(&backend->d->mutex);
-    backend->d->cpuMutationBatches.remove(thread);
+    backend->d->cpuMutationBatches.erase(thread);
     backend = nullptr;
     return !failed;
 }
@@ -625,7 +644,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::replaceFullTile(
     qint32 row,
     KisTileData *tileData,
     bool sparseDefault,
-    QString *error)
+    QString *error) try
 {
     if (!d->backend || !d->transaction.isValid() || d->failed) {
         KisPageStoreDetail::setError(error, QStringLiteral(
@@ -636,18 +655,24 @@ bool KisTiledDataManagerPageStoreWriteBatch::replaceFullTile(
     bool staged = d->mutation.reserveLegacyMutationPage(key, error);
     if (staged && sparseDefault) staged = d->mutation.removePage(key, error);
     else if (staged) {
-        auto source = d->sources.value(tileData);
+        const auto found = d->sources.find(tileData);
+        auto source = found != d->sources.end() ? found->second : std::shared_ptr<const KisPageReplicaSource>{};
         if (!source) {
             const auto overlay = KisPageReadView::transactionOverlay(d->transaction.id);
             KisSurfaceEpochState state;
             if (d->backend->store()->resolveSurfaceState(key.surface, overlay, &state))
                 source = d->backend->d->provider->captureCompletedTileSource(state.allocationDescriptor(), tileData, error);
-            if (source) d->sources.insert(tileData, source);
+            if (source) d->sources.emplace(tileData, source);
         }
         staged = source && d->mutation.aliasPage(key, source, error);
     }
     if (!staged) d->failed = true;
     return staged;
+}
+catch (const std::bad_alloc &) {
+    d->failed = true;
+    KisPageStoreDetail::setError(error, QStringLiteral("tile source directory storage was refused"));
+    return false;
 }
 
 KisTiledDataManagerPageStoreBackend::KisTiledDataManagerPageStoreBackend()
@@ -668,7 +693,7 @@ KisTiledDataManagerPageStoreBackend::~KisTiledDataManagerPageStoreBackend()
 bool KisTiledDataManagerPageStoreBackend::configure(
     quint32 pixelSize,
     const quint8 *defaultPixel,
-    QString *error)
+    QString *error) try
 {
     if (pixelSize == 0 || !defaultPixel) {
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore format is invalid"));
@@ -688,7 +713,7 @@ bool KisTiledDataManagerPageStoreBackend::configure(
     surface.format.profileFingerprint = QByteArrayLiteral("tiles3-datamanager");
     surface.format.channelOrder = QByteArrayLiteral("RAW");
     surface.format.packing = QByteArrayLiteral("interleaved");
-    surface.format.defaultPixel = QByteArray(
+    surface.format.defaultPixel = KisPageByteArray(
         reinterpret_cast<const char *>(defaultPixel), qsizetype(pixelSize));
     surface.format.channelCount = 1;
     surface.format.pixelStride = pixelSize;
@@ -728,10 +753,14 @@ bool KisTiledDataManagerPageStoreBackend::configure(
     KisPageStoreDetail::setError(error, {});
     return true;
 }
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 format storage preparation was refused"));
+    return false;
+}
 
 bool KisTiledDataManagerPageStoreBackend::configureClone(
     const KisTiledDataManagerPageStoreBackend &source,
-    QString *error)
+    QString *error) try
 {
     QMutexLocker sourceTransactionLocker(&source.d->transactionMutex);
     KisPageStore *sourceStore = nullptr;
@@ -851,6 +880,11 @@ bool KisTiledDataManagerPageStoreBackend::configureClone(
     return true;
 }
 
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 clone storage preparation was refused"));
+    return false;
+}
+
 bool KisTiledDataManagerPageStoreBackend::isOperational() const
 {
     return d->operational.load(std::memory_order_acquire);
@@ -867,6 +901,11 @@ KisSurfaceId KisTiledDataManagerPageStoreBackend::surface() const
     return d->surface;
 }
 
+std::shared_ptr<std::pmr::memory_resource> KisTiledDataManagerPageStoreBackend::extentStorage() const
+{
+    return kisPageProcessMemoryResource();
+}
+
 KisTiles3PayloadWork KisTiledDataManagerPageStoreBackend::payloadWork() const
 {
     return d->operational.load(std::memory_order_acquire)
@@ -874,39 +913,53 @@ KisTiles3PayloadWork KisTiledDataManagerPageStoreBackend::payloadWork() const
 }
 
 std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
-KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error)
+KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error) try
 {
     {
         QMutexLocker lock(&d->mutex);
-        if (d->cpuMutationBatches.contains(QThread::currentThreadId())) {
+        if (d->cpuMutationBatches.find(QThread::currentThreadId()) != d->cpuMutationBatches.end()) {
             KisPageStoreDetail::setError(error, QStringLiteral("nested native CPU batch is not supported"));
             return {};
         }
     }
+    StorageMap<Qt::HANDLE, std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>> preparedIndex;
+    preparedIndex.emplace(QThread::currentThreadId(), std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{});
+    auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
+        new KisTiledDataManagerPageStoreWriteBatch(nullptr, {}, false));
     bool owned = false;
     const KisPageTransaction transaction = writableTransaction(&owned, error);
     if (!transaction.isValid()) return {};
-    auto mutation = d->store->beginMutation(transaction, error);
-    if (!mutation.isActive()) {
+    const auto returnTransaction = qScopeGuard([&] {
         if (owned) abortOwnedTransaction(transaction);
-        return {};
-    }
-    auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
-        new KisTiledDataManagerPageStoreWriteBatch(this, transaction, owned));
+    });
+    auto mutation = d->store->beginMutation(transaction, error);
+    if (!mutation.isActive()) return {};
+    batch->d->backend = this;
+    batch->d->transaction = transaction;
+    batch->d->owned = std::exchange(owned, false);
     batch->d->mutation = std::move(mutation);
+    preparedIndex.begin()->second = batch->d;
     QMutexLocker lock(&d->mutex);
-    d->cpuMutationBatches.insert(batch->d->thread, batch->d.toWeakRef());
+    const auto inserted = d->cpuMutationBatches.insert(preparedIndex.extract(preparedIndex.begin()));
+    if (!inserted.inserted) return {};
     return batch;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 mutation batch storage preparation was refused"));
+    return {};
 }
 
 std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
-KisTiledDataManagerPageStoreBackend::beginIteratorMutationScope(QString *error)
+KisTiledDataManagerPageStoreBackend::beginIteratorMutationScope(QString *error) try
 {
+    auto scope = std::unique_ptr<KisTiledDataManagerIteratorWriteScope>(
+        new KisTiledDataManagerIteratorWriteScope);
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
     {
         QMutexLocker lock(&d->mutex);
-        auto shared = d->cpuMutationBatches
-                          .value(QThread::currentThreadId()).toStrongRef();
+        const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
+        auto shared = slot != d->cpuMutationBatches.end() ? slot->second.lock() : nullptr;
         if (shared) {
             // Zero clients means the last scope has started terminal sealing.
             // Keep the map entry as a barrier, but never revive that batch.
@@ -915,10 +968,10 @@ KisTiledDataManagerPageStoreBackend::beginIteratorMutationScope(QString *error)
                     "iterator cannot join the current native CPU batch"));
                 return {};
             }
-            ++shared->clients;
-            KisPageStoreDetail::setError(error, {});
             batch.reset(new KisTiledDataManagerPageStoreWriteBatch(
                 std::move(shared)));
+            ++batch->d->clients;
+            KisPageStoreDetail::setError(error, {});
         }
     }
 
@@ -930,10 +983,13 @@ KisTiledDataManagerPageStoreBackend::beginIteratorMutationScope(QString *error)
             batch->d->iteratorScope = true;
         }
     }
-    auto scope = std::unique_ptr<KisTiledDataManagerIteratorWriteScope>(
-        new KisTiledDataManagerIteratorWriteScope);
     scope->d->batch = std::move(batch);
     return scope;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 iterator scope storage preparation was refused"));
+    return {};
 }
 
 KisPageTransaction KisTiledDataManagerPageStoreBackend::writableTransaction(
@@ -1056,7 +1112,7 @@ bool KisTiledDataManagerPageStoreBackend::pruneDefaultPreparedPages(
         return false;
     }
     const quint32 pixelStride = state.format.pixelStride;
-    const QByteArray defaultPixel = state.format.defaultPixel;
+    const auto &defaultPixel = state.format.defaultPixel;
     for (const KisPreparedPageProof &proof : prepared.proofs) {
         if (!(proof.authority.version.key.surface == d->surface)) continue;
         KisPageAllocationDescriptor descriptor;
@@ -1116,48 +1172,61 @@ void KisTiledDataManagerPageStoreBackend::registerAnonymousLease(
     KisTiledDataManagerPageStoreLease *lease)
 {
     QMutexLocker locker(&d->mutex);
-    if (lease) d->anonymousLeases.insert(lease);
+    if (lease) {
+        lease->m_next = d->anonymousLeases;
+        if (d->anonymousLeases) d->anonymousLeases->m_previous = lease;
+        d->anonymousLeases = lease;
+    }
 }
 
 void KisTiledDataManagerPageStoreBackend::unregisterAnonymousLease(
     KisTiledDataManagerPageStoreLease *lease)
 {
     QMutexLocker locker(&d->mutex);
-    d->anonymousLeases.remove(lease);
+    if (lease->m_previous) lease->m_previous->m_next = lease->m_next;
+    else d->anonymousLeases = lease->m_next;
+    if (lease->m_next) lease->m_next->m_previous = lease->m_previous;
+    lease->m_previous = lease->m_next = nullptr;
 }
 
 bool KisTiledDataManagerPageStoreBackend::cancelAnonymousLeasesForBarrier(
     QString *error)
 {
-    QVector<KisTiledDataManagerPageStoreLease *> leases;
-    QVector<QSharedPointer<KisTiledDataManagerPageStoreWriteBatch::Private>> batches;
     {
         QMutexLocker locker(&d->mutex);
         // clear is an externally sequenced operation, not permission to
         // cancel another running worker or a reentrant native operation.
         for (auto it = d->cpuMutationBatches.cbegin(); it != d->cpuMutationBatches.cend(); ++it) {
-            auto batch = it.value().toStrongRef();
+            auto batch = it->second.lock();
             if (!batch || !batch->iteratorScope || batch->clients == 0 ||
                 batch->thread != QThread::currentThreadId()) {
                 KisPageStoreDetail::setError(error, QStringLiteral("clear requires the other CPU batches to finish"));
                 return false;
             }
-            batches.append(std::move(batch));
         }
-        leases.reserve(d->anonymousLeases.size());
-        for (KisTiledDataManagerPageStoreLease *lease :
-             std::as_const(d->anonymousLeases)) {
+        for (auto *lease = d->anonymousLeases; lease; lease = lease->m_next) {
             if (!lease->belongsToCurrentThread()) {
                 KisPageStoreDetail::setError(error, QStringLiteral("clear requires the foreign tile writer to finish"));
                 return false;
             }
-            leases.append(lease);
         }
     }
-    for (const auto &batch : std::as_const(batches)) {
+    for (;;) {
+        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch;
+        {
+            QMutexLocker locker(&d->mutex);
+            if (d->cpuMutationBatches.empty()) break;
+            batch = d->cpuMutationBatches.begin()->second.lock();
+        }
         if (!batch->cancelForBarrier(error)) return false;
     }
-    for (KisTiledDataManagerPageStoreLease *lease : std::as_const(leases)) {
+    for (;;) {
+        KisTiledDataManagerPageStoreLease *lease;
+        {
+            QMutexLocker locker(&d->mutex);
+            lease = d->anonymousLeases;
+        }
+        if (!lease) break;
         if (!lease->cancelForBarrier()) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "tiles3 PageStore write barrier cancellation failed"));
@@ -1166,7 +1235,7 @@ bool KisTiledDataManagerPageStoreBackend::cancelAnonymousLeasesForBarrier(
     }
     QMutexLocker locker(&d->mutex);
     if (d->anonymousTransaction.isValid() || d->anonymousClients != 0 ||
-        !d->anonymousLeases.isEmpty() || d->store->sessionStats().activeCpuWritePages != 0) {
+        d->anonymousLeases || d->store->sessionStats().activeCpuWritePages != 0) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "tiles3 PageStore write barrier still owns clients"));
         return false;
@@ -1175,9 +1244,9 @@ bool KisTiledDataManagerPageStoreBackend::cancelAnonymousLeasesForBarrier(
     return true;
 }
 
-QSharedPointer<const KisPageStoreIteratorReadScope>
+std::shared_ptr<const KisPageStoreIteratorReadScope>
 KisTiledDataManagerPageStoreBackend::captureIteratorReadScope(
-    bool writable, QString *error, QSharedPointer<const KisPageStoreIteratorReadScope> existing) const
+    bool writable, QString *error, std::shared_ptr<const KisPageStoreIteratorReadScope> existing) const try
 {
     if (existing) {
         if (existing->m_store == d->store.get() && existing->m_surface == d->surface &&
@@ -1186,9 +1255,9 @@ KisTiledDataManagerPageStoreBackend::captureIteratorReadScope(
             return existing;
         }
         KisPageStoreDetail::setError(error, QStringLiteral("iterator scope belongs to a different owner or access mode"));
-        return QSharedPointer<KisPageStoreIteratorReadScope>::create(); // fail closed
+        return d->failedReadScope;
     }
-    auto result = QSharedPointer<KisPageStoreIteratorReadScope>::create();
+    auto result = std::allocate_shared<KisPageStoreIteratorReadScope>(KisMutationStorageAllocator<KisPageStoreIteratorReadScope>{});
     if (!writable && hasCurrentThreadIteratorWrites()) {
         result->m_store = d->store.get();
         result->m_surface = d->surface;
@@ -1231,6 +1300,10 @@ KisTiledDataManagerPageStoreBackend::captureIteratorReadScope(
         result->m_store = nullptr;
     }
     return result;
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("iterator read scope storage was refused"));
+    return d->failedReadScope;
 }
 
 KisCapturedReadView KisTiledDataManagerPageStoreBackend::captureReadView(
@@ -1299,8 +1372,8 @@ bool KisTiledDataManagerPageStoreBackend::hasCurrentThreadIteratorWrites() const
     // The explicit iterator mutation scope is also the single same-thread
     // discovery source for unpublished compatibility bytes.
     QMutexLocker locker(&d->mutex);
-    const auto batch = d->cpuMutationBatches
-                           .value(QThread::currentThreadId()).toStrongRef();
+    const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
+    const auto batch = slot != d->cpuMutationBatches.end() ? slot->second.lock() : nullptr;
     return batch && batch->iteratorScope && !batch->failed && batch->clients != 0;
 }
 
@@ -1471,7 +1544,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     qint32 row,
     bool writable,
     bool oldData,
-    TileLease *readCache)
+    TileLease *readCache) try
 {
     // A read view that names a transaction must remain valid until PageStore
     // has converted it into an active read capability. Readers share this
@@ -1479,7 +1552,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     QReadLocker publicationLocker(
         writable ? nullptr : &d->publicationLock);
     KisPageStore *pageStore = nullptr;
-    QSharedPointer<KisTiles3PageReplicaProvider> provider;
+    std::shared_ptr<KisTiles3PageReplicaProvider> provider;
     KisPageReadView readView;
     {
         QMutexLocker locker(&d->mutex);
@@ -1505,10 +1578,11 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     }
 
     KisPageMutationSession *mutation = nullptr;
-    QSharedPointer<KisTiledDataManagerPageStoreWriteBatch::Private> batch;
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch;
     {
         QMutexLocker lock(&d->mutex);
-        batch = d->cpuMutationBatches.value(QThread::currentThreadId()).toStrongRef();
+        const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
+        batch = slot != d->cpuMutationBatches.end() ? slot->second.lock() : nullptr;
         if (batch && (batch->failed || batch->clients == 0)) return {};
         mutation = batch ? &batch->mutation : nullptr;
     }
@@ -1534,10 +1608,12 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     const KisPageTransaction transaction =
         writableTransaction(&ownsTransaction, &transactionError);
     if (!transaction.isValid()) return {};
+    auto returnClient = qScopeGuard([&] {
+        if (ownsTransaction) abortOwnedTransaction(transaction);
+    });
     auto native = pageStore->beginMutation(transaction, &transactionError);
     if (!native.reserveLegacyMutationPage(key, &transactionError)) {
         native.cancel();
-        if (ownsTransaction) abortOwnedTransaction(transaction);
         return {};
     }
     auto guard = native.beginWrite(key, &transactionError);
@@ -1545,7 +1621,6 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     if (!tile) {
         guard = {};
         native.cancel();
-        if (ownsTransaction) abortOwnedTransaction(transaction);
         return {};
     }
     TileLease futureRead;
@@ -1556,19 +1631,21 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
         if (!futureRead) {
             guard = {};
             native.cancel();
-            if (ownsTransaction) abortOwnedTransaction(transaction);
             return {};
         }
     }
-    return std::make_unique<KisTiledDataManagerPageStoreLease>(
+    auto lease = std::make_unique<KisTiledDataManagerPageStoreLease>(
         this, tile, transaction, ownsTransaction,
         std::move(native), std::move(guard), std::move(futureRead));
+    ownsTransaction = false;
+    return lease;
 }
+catch (const std::bad_alloc &) { return {}; }
 
 KisMementoSP KisTiledDataManagerPageStoreBackend::beginHistory(
     const quint8 *defaultPixel,
     quint32 pixelSize,
-    QString *error)
+    QString *error) try
 {
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
@@ -1577,15 +1654,23 @@ KisMementoSP KisTiledDataManagerPageStoreBackend::beginHistory(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore history is unavailable"));
         return {};
     }
+    KisMementoSP candidate = new KisMemento(nullptr);
+    candidate->saveOldDefaultPixel(defaultPixel, pixelSize);
+    const auto prepared = d->mementos.emplace(candidate.data(), KisPageStoreMemento{}).first;
     const KisPageStoreHistoryTransaction transaction =
         d->history->begin(error);
     if (!transaction.isValid()) {
+        d->mementos.erase(prepared);
         return {};
     }
     d->activeHistory = transaction;
-    d->currentMemento = new KisMemento(nullptr);
-    d->currentMemento->saveOldDefaultPixel(defaultPixel, pixelSize);
+    d->currentMemento = std::move(candidate);
     return d->currentMemento;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("tiles3 history storage preparation was refused"));
+    return {};
 }
 
 bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
@@ -1594,7 +1679,7 @@ bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
     if (!owner || d->currentMemento != owner || !d->activeHistory.isValid() ||
-        !d->operational || !d->cpuMutationBatches.isEmpty() || !d->anonymousLeases.isEmpty()) {
+        !d->operational || !d->cpuMutationBatches.empty() || d->anonymousLeases) {
         KisPageStoreDetail::setError(error, QStringLiteral("history mutation owner is unavailable"));
         return false;
     }
@@ -1614,13 +1699,13 @@ bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
     return true;
 }
 
-QVector<KisLogicalPageId> KisTiledDataManagerPageStoreBackend::historyChangedPages(
+KisPageSnapshotArray<KisLogicalPageId> KisTiledDataManagerPageStoreBackend::historyChangedPages(
     const KisPageTransaction &transaction) const
 {
     // Original canonical history delta, not a second touched-page authority.
     // Called only at a checkpoint/terminal boundary, never per dab.
     const auto prepared = d->store->preparedPages(transaction);
-    QVector<KisLogicalPageId> pages;
+    KisPageSnapshotArray<KisLogicalPageId> pages;
     pages.reserve(prepared.proofs.size() + prepared.removedPages.size());
     for (const auto &proof : prepared.proofs)
         if (proof.authority.version.key.surface == d->surface)
@@ -1631,7 +1716,7 @@ QVector<KisLogicalPageId> KisTiledDataManagerPageStoreBackend::historyChangedPag
 }
 
 KisCapturedReadView KisTiledDataManagerPageStoreBackend::checkpointHistoryMutation(
-    const KisMementoSP &owner, QVector<KisLogicalPageId> *changed, QString *error)
+    const KisMementoSP &owner, QVector<KisLogicalPageId> *changed, QString *error) try
 {
     if (changed) changed->clear();
     QMutexLocker transactionLocker(&d->transactionMutex);
@@ -1648,11 +1733,15 @@ KisCapturedReadView KisTiledDataManagerPageStoreBackend::checkpointHistoryMutati
     if (view.isValid() && changed) *changed = historyChangedPages(transaction);
     return view;
 }
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("checkpoint output storage was refused"));
+    return {};
+}
 
 bool KisTiledDataManagerPageStoreBackend::commitHistory(
     const quint8 *defaultPixel,
     quint32 pixelSize,
-    QString *error, QVector<KisLogicalPageId> *changed)
+    QString *error, QVector<KisLogicalPageId> *changed) try
 {
     if (changed) changed->clear();
     QMutexLocker transactionLocker(&d->transactionMutex);
@@ -1704,7 +1793,9 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
         dirtyExtent |= QRect(int(x), int(y), KisTileData::WIDTH, KisTileData::HEIGHT);
     }
     d->currentMemento->setExtent(dirtyExtent);
-    d->mementos.insert(d->currentMemento.data(), committed);
+    const auto stored = d->mementos.find(d->currentMemento.data());
+    KIS_ASSERT(stored != d->mementos.end());
+    stored->second = committed;
     d->activeHistory = {};
     d->currentMemento.clear();
     auto completedMutation = std::move(d->historyMutation);
@@ -1712,6 +1803,10 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     locker.unlock();
     completedMutation = {};
     return true;
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("history output storage was refused"));
+    return false;
 }
 
 bool KisTiledDataManagerPageStoreBackend::abortHistory(QString *error)
@@ -1787,6 +1882,7 @@ bool KisTiledDataManagerPageStoreBackend::abortHistory(
                          d->history->abort(d->activeHistory, error);
     if (!aborted) return false;
     d->activeHistory = {};
+    d->mementos.erase(d->currentMemento.data());
     d->currentMemento.clear();
     auto cancelledMutation = std::move(d->historyMutation);
     d->historyMutationPhase = Private::HistoryMutationPhase::None;
@@ -1811,7 +1907,8 @@ bool KisTiledDataManagerPageStoreBackend::restoreHistory(
     if (!memento) return false;
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
-    const KisPageStoreMemento stored = d->mementos.value(memento.data());
+    const auto entry = d->mementos.find(memento.data());
+    const KisPageStoreMemento stored = entry != d->mementos.end() ? entry->second : KisPageStoreMemento{};
     if (!stored.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore memento is unknown"));
         return false;
@@ -1838,9 +1935,10 @@ bool KisTiledDataManagerPageStoreBackend::purgeHistory(
     }
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
-    const KisPageStoreMemento stored = d->mementos.value(memento.data());
+    const auto entry = d->mementos.find(memento.data());
+    const KisPageStoreMemento stored = entry != d->mementos.end() ? entry->second : KisPageStoreMemento{};
     if (!stored.isValid() || !d->history->purge(stored, error)) return false;
-    d->mementos.remove(memento.data());
+    d->mementos.erase(memento.data());
     return true;
 }
 
@@ -1853,11 +1951,13 @@ bool KisTiledDataManagerPageStoreBackend::hasCurrentHistory() const
 bool KisTiledDataManagerPageStoreBackend::fillRect(
     const QRect &rect,
     const QByteArray &pixel,
-    QString *error, QVector<KisLogicalPageId> *changed)
+    QString *error, QVector<KisLogicalPageId> *changed) try
 {
     if (changed) changed->clear();
-    QVector<KisLogicalPageId> changedPages;
     if (!isOperational() || rect.isEmpty()) return false;
+    prepareChangedPageOutput(changed, rect);
+    bool success = false;
+    auto discardOutput = qScopeGuard([&] { if (changed && !success) changed->clear(); });
     auto batch = beginMutationBatch(error);
     if (!batch) return false;
     auto before = captureReadView(false, error);
@@ -1867,10 +1967,10 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 fill surface is invalid"));
         return false;
     }
-    QByteArray rowBytes(KisTileData::WIDTH * pixel.size(), Qt::Uninitialized);
+    std::vector<char, KisMutationStorageAllocator<char>> rowBytes(size_t(KisTileData::WIDTH * pixel.size()));
     for (int x = 0; x < KisTileData::WIDTH; ++x)
         memcpy(rowBytes.data() + x * pixel.size(), pixel.constData(), size_t(pixel.size()));
-    QSharedPointer<const KisPageReplicaSource> uniform;
+    std::shared_ptr<const KisPageReplicaSource> uniform;
     const qint32 firstColumn = pageCoordinate(rect.left(), KisTileData::WIDTH);
     const qint32 lastColumn = pageCoordinate(rect.right(), KisTileData::WIDTH);
     const qint32 firstRow = pageCoordinate(rect.top(), KisTileData::HEIGHT);
@@ -1898,7 +1998,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                     if (!batch->d->mutation.reserveLegacyMutationPage(key, error) ||
                         !batch->d->mutation.aliasPage(key, uniform, error)) return false;
                 }
-                if (changed) changedPages.append(key.page);
+                if (changed) changed->append(key.page);
                 continue;
             }
             auto lease = acquireTile(key.page.column, key.page.row, true, false);
@@ -1907,20 +2007,24 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
             const int x = affected.left() - pageRect.left(), y = affected.top() - pageRect.top();
             for (int row = 0; row < affected.height(); ++row)
                 memcpy(bytes + (qsizetype(y + row) * KisTileData::WIDTH + x) * pixel.size(),
-                       rowBytes.constData(), size_t(affected.width() * pixel.size()));
+                       rowBytes.data(), size_t(affected.width() * pixel.size()));
             lease->markDirty(); if (!lease->finish()) return false;
-            if (changed) changedPages.append(key.page);
+            if (changed) changed->append(key.page);
         }
     }
     before = {};
-    const bool success = batch->finish(error);
-    if (success && changed) *changed = std::move(changedPages);
+    success = batch->finish(error);
     return success;
+}
+catch (const std::bad_alloc &) {
+    if (changed) changed->clear();
+    KisPageStoreDetail::setError(error, QStringLiteral("fill storage preparation was refused"));
+    return false;
 }
 
 template<typename Operation>
 KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMutationOperation(
-    const QSet<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,
+    const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,
     Operation &&operation,
     QVector<KisLogicalPageId> *changed, QString *error, const KisMementoSP &historyOwner,
     OperationDelivery *delivery,
@@ -1939,10 +2043,10 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     KisPageStoreDiagnosticTimer phase(store(), Phase::PixelOperationPreflight, quint64(targets.size()));
     {
         QMutexLocker lock(&d->mutex);
-        const auto slot = d->cpuMutationBatches.constFind(
+        const auto slot = d->cpuMutationBatches.find(
             QThread::currentThreadId());
         if (slot != d->cpuMutationBatches.cend()) {
-            const auto existing = slot.value().toStrongRef();
+            const auto existing = slot->second.lock();
             if (existing && existing->iteratorScope && !existing->failed
                 && existing->clients != 0) {
                 KisPageStoreDetail::setError(
@@ -1953,16 +2057,15 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
             return Result::Failed;
         }
     }
-    QVector<KisLogicalPageId> preparedChanged;
     phase.next(Phase::PixelOperationStoragePrepare, quint64(targets.size()));
     try {
         // Keep this buffer unique until delivery: no Qt detach or growth may
         // occur while recording the result, particularly after publication.
         if (changed) {
-            preparedChanged.reserve(targets.size());
+            changed->reserve(targets.size());
             // Reserving an empty Qt container can leave it empty on allocator
             // refusal without throwing. Do not enter pixels with no storage.
-            if (preparedChanged.capacity() < targets.size()) {
+            if (changed->capacity() < targets.size()) {
                 KisPageStoreDetail::setError(error, QStringLiteral("pixel operation changed-page output is unavailable"));
                 return Result::Failed;
             }
@@ -2035,7 +2138,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     if (!operation(execution, transaction, state, error)) return Result::Failed;
     phase.next(Phase::PixelOperationChangedExport, quint64(targets.size()));
     const qsizetype touched = execution.finishPreparedWrites(
-        changed ? &preparedChanged : nullptr, error);
+        changed, error);
     if (touched < 0) {
         KisPageStoreDetail::setError(error, QStringLiteral("pixel operation changed-page export is unavailable"));
         return Result::Failed;
@@ -2043,7 +2146,6 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     // Completion consumes the exact operation delta while it surrounds the
     // original publication. Restore the caller's empty-on-failure contract if
     // publication or prepared adapter installation rejects.
-    if (changed) changed->swap(preparedChanged);
     phase.next(Phase::PixelOperationFinish, quint64(touched));
     // The manager's short completion owns the existing adapter gate. For a
     // standalone operation it surrounds publication and prepared installation;
@@ -2084,14 +2186,18 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     QVector<KisLogicalPageId> *changed, QString *error, const KisMementoSP &historyOwner,
     OperationDelivery *delivery,
     const std::function<bool(QString *)> &prepareAdapter,
-    const AdapterCompletion &completeAdapter)
+    const AdapterCompletion &completeAdapter) try
 {
     if (!operation) {
         if (changed) changed->clear();
         KisPageStoreDetail::setError(error, QStringLiteral("pixel operation callback is absent"));
         return KisPageStoreWriteOperationResult::Failed;
     }
-    const QSet<KisLogicalPageId> targets(pages.cbegin(), pages.cend());
+    KisPageSnapshotArray<KisLogicalPageId> targets(pages.cbegin(), pages.cend());
+    std::sort(targets.begin(), targets.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.row, a.column) < std::tie(b.row, b.column);
+    });
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
     return runCpuMutationOperation(targets, legacyIntent, true,
         [&](KisPageMutationExecution &mutation, const KisPageTransaction &, const KisSurfaceEpochState &state,
             QString *error) {
@@ -2100,7 +2206,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     class BoundedCursor final : public KisPixelWriteCursor {
     public:
         BoundedCursor(KisPageMutationExecution &mutation, KisSurfaceId surface, quint32 pixelSize,
-                       const QSet<KisLogicalPageId> &targets)
+                       const KisPageSnapshotArray<KisLogicalPageId> &targets)
             : mutation(mutation), surface(surface), pixelSize(pixelSize), targets(targets) {}
         void moveTo(qint32 x, qint32 y) override {
             if (failed) return;
@@ -2134,7 +2240,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
         KisPageMutationExecution &mutation;
         KisSurfaceId surface;
         quint32 pixelSize;
-        const QSet<KisLogicalPageId> &targets;
+        const KisPageSnapshotArray<KisLogicalPageId> &targets;
         KisLogicalPageId current;
         QPoint position;
         KisCpuWriteGuard guard;
@@ -2151,13 +2257,18 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     return true;
     }, changed, error, historyOwner, delivery, prepareAdapter, completeAdapter);
 }
+catch (const std::bad_alloc &) {
+    if (changed) changed->clear();
+    KisPageStoreDetail::setError(error, QStringLiteral("pixel operation storage was refused"));
+    return KisPageStoreWriteOperationResult::Failed;
+}
 
 KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes(
     const quint8 *data, qint32 x, qint32 y, qint32 width, qint32 height,
     qint32 dataRowStride, bool legacyIntent, QVector<KisLogicalPageId> *changed, QString *error,
     OperationDelivery *delivery,
     const std::function<bool(QString *)> &prepareAdapter,
-    const AdapterCompletion &completeAdapter)
+    const AdapterCompletion &completeAdapter) try
 {
     using Result = KisPageStoreWriteOperationResult;
     if (changed) changed->clear();
@@ -2172,14 +2283,14 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
         return Result::Failed;
     }
     const QRect rect(x, y, width, height);
-    QVector<KisLogicalPageId> pages;
+    KisPageSnapshotArray<KisLogicalPageId> pages;
     for (qint64 row = pageCoordinate(y, KisTileData::HEIGHT);
          row <= pageCoordinate(rect.bottom(), KisTileData::HEIGHT); ++row)
         for (qint64 col = pageCoordinate(x, KisTileData::WIDTH);
              col <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++col)
             pages.append({qint32(col), qint32(row)});
 
-    const QSet<KisLogicalPageId> targets(pages.cbegin(), pages.cend());
+    const auto &targets = pages;
     return runCpuMutationOperation(targets, legacyIntent, false,
         [&](KisPageMutationExecution &mutation, const KisPageTransaction &transaction,
             const KisSurfaceEpochState &state, QString *error) {
@@ -2248,9 +2359,14 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
         return true;
     }, changed, error, {}, delivery, prepareAdapter, completeAdapter);
 }
+catch (const std::bad_alloc &) {
+    if (changed) changed->clear();
+    KisPageStoreDetail::setError(error, QStringLiteral("packed write storage was refused"));
+    return KisPageStoreWriteOperationResult::Failed;
+}
 
-QSharedPointer<const KisPageReplicaSource> KisTiledDataManagerPageStoreBackend::uniformSourceFor(
-    const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error)
+std::shared_ptr<const KisPageReplicaSource> KisTiledDataManagerPageStoreBackend::uniformSourceFor(
+    const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error) try
 {
     {
         QMutexLocker lock(&d->mutex);
@@ -2268,15 +2384,21 @@ QSharedPointer<const KisPageReplicaSource> KisTiledDataManagerPageStoreBackend::
     d->uniformPixel = pixel; d->uniformSource = source;
     return source;
 }
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("uniform source cache storage was refused"));
+    return {};
+}
 
 bool KisTiledDataManagerPageStoreBackend::copyFrom(
     const KisTiledDataManagerPageStoreBackend &source,
     const KisCapturedReadView &sourceView, const KisCapturedReadView &targetView,
-    const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed)
+    const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed) try
 {
     if (changed) changed->clear();
-    QVector<KisLogicalPageId> changedPages;
     if (!isOperational() || !source.isOperational() || rect.isEmpty()) return false;
+    prepareChangedPageOutput(changed, rect);
+    bool success = false;
+    auto discardOutput = qScopeGuard([&] { if (changed && !success) changed->clear(); });
     KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::CopyPrepare, 1);
     // The caller already selected both views for bounds and adapter capacity.
     // Keep those original capabilities for every source and destination page.
@@ -2309,13 +2431,13 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 } else {
                     // Use the frozen default value directly; building a second
                     // shared default read buffer would duplicate initialization.
-                    auto backing = uniformSourceFor(targetState.allocationDescriptor(), sourceState.format.defaultPixel, error);
+                    auto backing = uniformSourceFor(targetState.allocationDescriptor(), sourceState.format.defaultPixel.view(), error);
                     auto previous = targetView.readResidentPage(to);
                     if (backing && d->provider->sourceMatchesReadGuard(backing, previous)) continue;
                     if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
                         !batch->d->mutation.aliasPage(to, backing, error)) return false;
                 }
-                if (changed) changedPages.append(to.page);
+                if (changed) changed->append(to.page);
                 continue;
             }
             KisPageStoreReadPage input(source.store(), sourceView, from, error);
@@ -2327,7 +2449,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 auto previous = targetView.readResidentPage(to);
                 if (!sourceVersion.isDefaultPixel() && !targetVersion.isDefaultPixel() &&
                     previous.isValid() && input.data() == previous.data()) continue;
-                QSharedPointer<const KisPageReplicaSource> backing;
+                std::shared_ptr<const KisPageReplicaSource> backing;
                 if (input.nativeGuard().isValid())
                     backing = d->provider->captureCpuReadSource(input.nativeGuard(), targetState.allocationDescriptor(), error);
                 else if (input.genericLease())
@@ -2336,7 +2458,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 if (backing && d->provider->sourceMatchesReadGuard(backing, previous)) continue;
                 if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
                     !batch->d->mutation.aliasPage(to, backing, error)) return false;
-                if (changed) changedPages.append(to.page);
+                if (changed) changed->append(to.page);
                 continue;
             }
             auto lease = acquireTile(to.page.column, to.page.row, true, false);
@@ -2348,13 +2470,17 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 memcpy(bytes + offset + y * rowStride, input.data() + offset + y * rowStride,
                        size_t(affected.width() * pixelSize));
             lease->markDirty(); if (!lease->finish()) return false;
-            if (changed) changedPages.append(to.page);
+            if (changed) changed->append(to.page);
         }
     }
     phase.next(KisPageStoreDiagnosticPhase::CopyFinish, 1);
-    const bool success = batch->finish(error);
-    if (success && changed) *changed = std::move(changedPages);
+    success = batch->finish(error);
     return success;
+}
+catch (const std::bad_alloc &) {
+    if (changed) changed->clear();
+    KisPageStoreDetail::setError(error, QStringLiteral("copy storage preparation was refused"));
+    return false;
 }
 
 KisTileData *KisTiledDataManagerPageStoreBackend::tileDataForReadPage(const KisPageStoreReadPage &read) const
@@ -2425,11 +2551,11 @@ bool KisTiledDataManagerPageStoreBackend::removePages(
 
 bool KisTiledDataManagerPageStoreBackend::trimToRect(
     const QRect &rect,
-    QString *error)
+    QString *error) try
 {
     {
         QMutexLocker lock(&d->mutex);
-        if (d->cpuMutationBatches.contains(QThread::currentThreadId())) {
+        if (d->cpuMutationBatches.find(QThread::currentThreadId()) != d->cpuMutationBatches.end()) {
             // Reject before joining the anonymous transaction: cancelling a
             // newly joined client would also poison its still-live parent.
             KisPageStoreDetail::setError(error, QStringLiteral("trim cannot nest inside a native CPU batch"));
@@ -2452,7 +2578,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         QRect extent;
         QRect kept;
     };
-    QVector<TrimPage> changes;
+    KisPageSnapshotArray<TrimPage> changes;
     const auto pages = allocatedPages();
     for (const auto &page : pages) {
         const qint64 x = qint64(page.column) * KisTileData::WIDTH;
@@ -2524,6 +2650,11 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
     return batch->finish(error);
 }
 
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("trim storage preparation was refused"));
+    return false;
+}
+
 QVector<KisLogicalPageId>
 KisTiledDataManagerPageStoreBackend::allocatedPages() const
 {
@@ -2540,11 +2671,11 @@ KisTiledDataManagerPageStoreBackend::allocatedPages() const
                 ? d->anonymousTransaction : KisPageTransaction());
     }
 
-    QSet<KisPageKey> visiblePages;
+    KisPageKeyStorage visiblePages;
     const KisImageEpochSnapshot snapshot = pageStore->captureCommittedEpoch();
     for (const KisPageVersion &version : snapshot.manifest) {
         if (version.key.surface == d->surface) {
-            visiblePages.insert(version.key);
+            visiblePages.push_back(version.key);
         }
     }
     if (overlayTransaction.isValid()) {
@@ -2552,11 +2683,16 @@ KisTiledDataManagerPageStoreBackend::allocatedPages() const
             pageStore->preparedPages(overlayTransaction);
         if (prepared.isValid()) {
             for (const KisPageKey &key : prepared.removedPages) {
-                if (key.surface == d->surface) visiblePages.remove(key);
+                if (key.surface == d->surface) {
+                    const auto found = std::find(visiblePages.begin(), visiblePages.end(), key);
+                    if (found != visiblePages.end()) visiblePages.erase(found);
+                }
             }
             for (const KisPreparedPageProof &proof : prepared.proofs) {
                 if (proof.authority.version.key.surface == d->surface) {
-                    visiblePages.insert(proof.authority.version.key);
+                    const auto &key = proof.authority.version.key;
+                    if (std::find(visiblePages.cbegin(), visiblePages.cend(), key) == visiblePages.cend())
+                        visiblePages.push_back(key);
                 }
             }
         }

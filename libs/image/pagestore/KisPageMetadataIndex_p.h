@@ -40,11 +40,7 @@ public:
     using Reservation = KisPageMetadataReservation<KisShardSlotIndex>;
     using Statistics = KisPageMetadataIndexStatistics;
 
-    // Two buckets per admitted entry plus one for the old array during a
-    // doubling prepare. This bounds both retained storage and growth overlap.
-    static constexpr quint64 bytesPerCapacitySlot() { return 3 * sizeof(Entry); }
-
-    KisShardSlotIndex() = default;
+    explicit KisShardSlotIndex(KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>{}) : m_entries(storage) {}
     KisShardSlotIndex(const KisShardSlotIndex &) = delete;
     KisShardSlotIndex &operator=(const KisShardSlotIndex &) = delete;
 
@@ -72,9 +68,9 @@ public:
             }
             capacity *= 2;
         }
-        std::unique_ptr<Entry[]> entries;
+        decltype(m_entries) entries(m_entries.get_allocator());
         try {
-            entries = std::make_unique<Entry[]>(size_t(2 * capacity));
+            entries.resize(size_t(2 * capacity));
         } catch (const std::bad_alloc &) {
             ++m_rejectedReservations;
             return false;
@@ -172,6 +168,8 @@ public:
         return m_size;
     }
 
+    quint64 allocatedBytes() const noexcept { return quint64(m_entries.capacity()) * sizeof(Entry); }
+
     Statistics statistics() const
     {
         return {quint64(m_size),
@@ -198,7 +196,7 @@ private:
         return bucket;
     }
 
-    std::unique_ptr<Entry[]> m_entries;
+    std::vector<Entry, KisMutationStorageAllocator<Entry>> m_entries;
     const size_t m_seed = QHashSeed::globalSeed();
     qsizetype m_capacity = 0;
     qsizetype m_size = 0;

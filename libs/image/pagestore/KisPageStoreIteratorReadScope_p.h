@@ -2,6 +2,7 @@
 #ifndef KIS_PAGE_STORE_ITERATOR_READ_SCOPE_P_H
 #define KIS_PAGE_STORE_ITERATOR_READ_SCOPE_P_H
 
+#include <memory>
 #include "KisPageStore.h"
 #include <array>
 #include <optional>
@@ -79,7 +80,7 @@ struct KisPageStoreReadPair
 class KRITAIMAGE_EXPORT KisPageStoreReadCursor
 {
 public:
-    explicit KisPageStoreReadCursor(QSharedPointer<const KisPageStoreIteratorReadScope> scope);
+    explicit KisPageStoreReadCursor(std::shared_ptr<const KisPageStoreIteratorReadScope> scope);
     KisPageStoreReadPair read(qint32 column, qint32 row, QString *error = nullptr);
 private:
     static constexpr size_t Capacity = 4;
@@ -87,7 +88,7 @@ private:
         qint32 column = 0, row = 0;
         KisPageStoreReadPage current, before;
     };
-    QSharedPointer<const KisPageStoreIteratorReadScope> m_scope;
+    std::shared_ptr<const KisPageStoreIteratorReadScope> m_scope;
     std::array<Entry, Capacity> m_entries;
     std::array<size_t, Capacity> m_order{{0, 1, 2, 3}};
 };

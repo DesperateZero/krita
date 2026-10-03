@@ -87,7 +87,7 @@ KisCpuBackingHandoff &KisCpuBackingHandoff::operator=(KisCpuBackingHandoff &&oth
     return *this;
 }
 KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
-    const QSharedPointer<KisPageReplicaProvider> &provider, const KisReplicaHandle &source,
+    const std::shared_ptr<KisPageReplicaProvider> &provider, const KisReplicaHandle &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor)
 {
     KisCpuBackingHandoff result;
@@ -119,26 +119,25 @@ void KisCpuBackingHandoff::reset() noexcept
     if (m_claimed) m_binding->finishHandoff(nullptr);
     m_claimed = false;
     m_binding.reset();
-    m_provider.clear();
+    m_provider.reset();
     m_source = {}; m_target = {};
 }
 
 bool KisCpuResidentProviderState::configure(
     const KisCpuResidentReplicaProviderConfig &requested,
-    const QSharedPointer<KisCompletionRegistry> &registry,
-    const QString &providerLabel, QString *error)
+    const std::shared_ptr<KisCompletionRegistry> &registry,
+    QString *error)
 {
-    const auto fail = [error, &providerLabel](const char *reason) {
-        KisPageStoreDetail::setError(
-            error, QStringLiteral("%1 provider %2").arg(providerLabel, QString::fromLatin1(reason)));
+    const auto fail = [error](const QString &reason) {
+        KisPageStoreDetail::setError(error, reason);
         return false;
     };
     if (!requested.isValid() || !registry || !registry->isOperational())
-        return fail("configuration is invalid");
+        return fail(QStringLiteral("provider configuration is invalid"));
     QMutexLocker locker(&mutex);
-    if (config.isValid()) return fail("is already configured");
+    if (config.isValid()) return fail(QStringLiteral("provider is already configured"));
     const quint64 source = registry->registerSource(KisCompletionDomain::CpuJob);
-    if (!source) return fail("completion source registration failed");
+    if (!source) return fail(QStringLiteral("provider completion source registration failed"));
     config = requested;
     completions = registry;
     completionSource = source;
@@ -399,26 +398,26 @@ void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
 }
 
 KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
-    const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
+    const std::shared_ptr<KisCompletionRegistry> &completions, quint64 completionSource,
     const std::shared_ptr<KisCpuResidentBinding> &source,
-    const std::shared_ptr<KisCpuResidentBinding> &target, const QString &providerLabel)
+    const std::shared_ptr<KisCpuResidentBinding> &target)
 {
     const KisCompletionTicket completion = completions->allocatePending(completionSource);
     if (!completion.isValid()) {
         return KisReplicaOperation::failed(request.operation,
-            QStringLiteral("%1 transfer completion allocation failed").arg(providerLabel));
+            QStringLiteral("transfer completion allocation failed"));
     }
     auto failCompletion = qScopeGuard([&] { completions->completePrepared(completion, KisCompletionStatus::Failed); });
     const void *sourceData = source->acquireRead(request.source.allocationIdentity(), false);
     if (!sourceData) {
         return KisReplicaOperation::failed(request.operation,
-            QStringLiteral("%1 transfer source is busy").arg(providerLabel));
+            QStringLiteral("transfer source is busy"));
     }
     auto releaseSource = qScopeGuard([&] { source->releaseRead(); });
     void *targetData = target->acquireWrite(request.target.allocationIdentity());
     if (!targetData) {
         return KisReplicaOperation::failed(request.operation,
-            QStringLiteral("%1 transfer target is pinned").arg(providerLabel));
+            QStringLiteral("transfer target is pinned"));
     }
     std::memcpy(targetData, sourceData, size_t(request.target.layout.byteSize));
     target->releaseWrite();

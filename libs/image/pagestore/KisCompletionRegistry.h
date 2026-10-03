@@ -74,7 +74,8 @@ private:
 class KRITAIMAGE_EXPORT KisCompletionRegistry
 {
 public:
-    explicit KisCompletionRegistry(const QSharedPointer<KisBackingBudgetController> &processBudget = {});
+    explicit KisCompletionRegistry(const std::shared_ptr<KisBackingBudgetController> &processBudget = {},
+        const KisMutationStorageAllocator<KisCompletionRegistry> &storage = KisMutationStorageAllocator<KisCompletionRegistry>{});
     ~KisCompletionRegistry();
     KisCompletionRegistry(const KisCompletionRegistry &) = delete;
     KisCompletionRegistry &operator=(const KisCompletionRegistry &) = delete;

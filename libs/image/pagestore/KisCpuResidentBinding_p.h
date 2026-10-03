@@ -110,8 +110,8 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
     static constexpr quint64 OperationReplayWindow = 4096;
 
     bool configure(const KisCpuResidentReplicaProviderConfig &requested,
-                   const QSharedPointer<KisCompletionRegistry> &registry,
-                   const QString &providerLabel, QString *error);
+                   const std::shared_ptr<KisCompletionRegistry> &registry,
+                   QString *error);
     bool operationAvailable(KisPageOperationId operation) const
     {
         if (!operation.isValid()) return false;
@@ -142,7 +142,7 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
 
     KisCpuResidentReplicaProviderConfig config;
     mutable QMutex mutex;
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     quint64 completionSource = 0;
     quint64 nextSlot = 1;
     quint64 committedBytes = 0;
@@ -160,9 +160,9 @@ KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLease
 KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
     const std::shared_ptr<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
 KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
-    const QSharedPointer<KisCompletionRegistry> &completions, quint64 completionSource,
+    const std::shared_ptr<KisCompletionRegistry> &completions, quint64 completionSource,
     const std::shared_ptr<KisCpuResidentBinding> &source,
-    const std::shared_ptr<KisCpuResidentBinding> &target, const QString &providerLabel);
+    const std::shared_ptr<KisCpuResidentBinding> &target);
 
 template<typename Allocation>
 struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
@@ -173,7 +173,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
     struct Retirement {
         Iterator allocation;
         KisCompletionTicket completion;
-        const char *failure = nullptr;
+        QString failure;
     };
 
     bool owns(const KisReplicaHandle &handle) const
@@ -235,25 +235,23 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
             ? std::shared_ptr<KisCpuResidentBinding>{} : found->second.binding;
     }
 
-    KisReplicaOperation transfer(const KisReplicaTransferRequest &request,
-                                 const QString &providerLabel)
+    KisReplicaOperation transfer(const KisReplicaTransferRequest &request)
     {
-        const auto fail = [&request, &providerLabel](const char *reason) {
-            return KisReplicaOperation::failed(request.operation,
-                QStringLiteral("%1 transfer %2").arg(providerLabel, QString::fromLatin1(reason)));
+        const auto fail = [&request](const QString &reason) {
+            return KisReplicaOperation::failed(request.operation, reason);
         };
         if (!request.isSameProviderTransfer() || !owns(request.source) ||
             !owns(request.target) || !operationAvailable(request.operation))
-            return fail("request is invalid");
+            return fail(QStringLiteral("transfer request is invalid"));
         consumeOperation(request.operation);
         const auto source = findExactAllocation(request.source);
         const auto target = findExactAllocation(request.target);
         if (source == allocations.end() || target == allocations.end() ||
             !request.source.layout.matches(request.descriptor) ||
             !request.target.layout.matches(request.descriptor) ||
-            !source->second.binding || !target->second.binding) return fail("allocation is stale");
+            !source->second.binding || !target->second.binding) return fail(QStringLiteral("transfer allocation is stale"));
         return kisTransferCpuBinding(request, completions, completionSource,
-                                     source->second.binding, target->second.binding, providerLabel);
+                                     source->second.binding, target->second.binding);
     }
 
     Retirement beginRetirement(KisPageOperationId operation,
@@ -261,15 +259,15 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
                                const KisCompletionTicket &lastUse)
     {
         if (!owns(replica) || !operationAvailable(operation))
-            return {allocations.end(), {}, "request is invalid"};
+            return {allocations.end(), {}, QStringLiteral("retirement request is invalid")};
         if (lastUse.isValid()) {
             const auto status = completions->status(lastUse);
             if (status == KisCompletionStatus::Unknown || status == KisCompletionStatus::Pending)
-                return {allocations.end(), {}, "last use is incomplete"};
+                return {allocations.end(), {}, QStringLiteral("retirement last use is incomplete")};
         }
         const auto allocation = findExactAllocation(replica);
         if (allocation == allocations.end())
-            return {allocation, {}, "allocation is stale"};
+            return {allocation, {}, QStringLiteral("retirement allocation is stale")};
         // Cold allocation prepared this terminal capacity before physical
         // adoption. A refusal to retire keeps the same private ticket Pending.
         const auto completion = allocation->second.retirementCompletion;
@@ -328,7 +326,7 @@ public:
     KisCpuBackingHandoff &operator=(KisCpuBackingHandoff &&other) noexcept;
     KisCpuBackingHandoff(const KisCpuBackingHandoff &) = delete;
     KisCpuBackingHandoff &operator=(const KisCpuBackingHandoff &) = delete;
-    static KisCpuBackingHandoff prepare(const QSharedPointer<KisPageReplicaProvider> &provider,
+    static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
                                         const KisReplicaHandle &source, const KisPageVersion &target,
                                         const KisPageAllocationDescriptor &descriptor);
     bool isValid() const { return bool(m_binding); }
@@ -338,7 +336,7 @@ public:
     KisCpuWriteBindingReservation commit() noexcept;
     void reset() noexcept;
 private:
-    QSharedPointer<KisPageReplicaProvider> m_provider;
+    std::shared_ptr<KisPageReplicaProvider> m_provider;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
     KisReplicaHandle m_source;
     KisReplicaHandle m_target;
@@ -351,7 +349,7 @@ class KisCpuReadBindingLink
 {
 public:
     KisCpuReadBindingLink(const KisReplicaHandle &handle,
-                         const QSharedPointer<KisPageReplicaProvider> &provider)
+                         const std::shared_ptr<KisPageReplicaProvider> &provider)
         : replica(handle), m_provider(provider) {}
     std::shared_ptr<KisCpuResidentBinding> resolve(KisCpuResidentReadStatus *status = nullptr) const
     {
@@ -369,7 +367,7 @@ public:
     }
     const KisReplicaHandle replica;
 private:
-    QSharedPointer<KisPageReplicaProvider> m_provider;
+    std::shared_ptr<KisPageReplicaProvider> m_provider;
     mutable std::once_flag m_once;
     mutable std::shared_ptr<KisCpuResidentBinding> m_binding;
     mutable KisCpuResidentReadStatus m_status = KisCpuResidentReadStatus::BindingUnavailable;

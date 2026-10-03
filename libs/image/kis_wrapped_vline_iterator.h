@@ -7,6 +7,7 @@
 #ifndef __KIS_WRAPPED_VLINE_ITERATOR_H
 #define __KIS_WRAPPED_VLINE_ITERATOR_H
 
+#include <memory>
 #include "kis_iterator_ng.h"
 #include "kis_wrapped_rect.h"
 
@@ -39,7 +40,7 @@ public:
                                          qint32 offsetX, qint32 offsetY,
                                          bool writable,
                                          KisIteratorCompleteListener *completeListener,
-                                         const QSharedPointer<const KisPageStoreIteratorReadScope> &scope) {
+                                         const std::shared_ptr<const KisPageStoreIteratorReadScope> &scope) {
 
         return new KisVLineIterator2(dataManager,
                                      rc.x(), rc.y(),

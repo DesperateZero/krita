@@ -21,6 +21,7 @@
 #include "KisPageStateMachine.h"
 
 class KisCpuReadBindingLink;
+struct DeferredMetadataCleanupStatistics;
 class KisPageHistoryCollector;
 class KisPageOwnerLedger;
 class KisBackingBudgetController;
@@ -201,8 +202,8 @@ public:
 
     bool registerPage(const KisPageStateSnapshot &initial, QString *error = nullptr);
     bool pageSnapshot(const KisPageKey &key, KisPageStateSnapshot *snapshot) const;
-    QVector<KisPageKey> pageKeys() const;
-    QVector<KisReplicaHandle> shutdownReplicaHandles() const;
+    KisPageSnapshotArray<KisPageKey> pageKeys() const;
+    KisPageSnapshotArray<KisReplicaHandle> shutdownReplicaHandles() const;
     KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion);
@@ -313,18 +314,18 @@ private:
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion,
                                                KisPageMetadataReadCleanup *cleanup);
-    KisPageMetadataTransitionResult applyOwnerSequence(const KisPageKey &key, const QVector<KisPageTransition> &transitions);
+    KisPageMetadataTransitionResult applyOwnerSequence(const KisPageKey &key, const KisPageSnapshotArray<KisPageTransition> &transitions);
     // Directory invalidation, not a read-side counter. PageStore samples it
     // under its registration gate around a whole-directory default/restore
     // plan; per-page revision claims alone cannot detect a newly added key.
     quint64 pageRegistrationCount() const;
-    QSharedPointer<KisCpuReadBindingLink> installCpuReadBinding(const KisReplicaHandle &replica,
-                                                                const QSharedPointer<KisPageReplicaProvider> &provider);
+    std::shared_ptr<KisCpuReadBindingLink> installCpuReadBinding(const KisReplicaHandle &replica,
+                                                                const std::shared_ptr<KisPageReplicaProvider> &provider);
     // A stale reader may only evict its own candidate. Retirement omits
     // expected to invalidate every cached selection of this exact replica.
     void removeCpuReadBinding(const KisReplicaHandle &replica,
                               const KisCpuReadBindingLink *expected = nullptr);
-    QSharedPointer<KisCpuReadBindingLink> cpuReadBinding(const KisPageVersion &version) const;
+    std::shared_ptr<KisCpuReadBindingLink> cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;
@@ -361,7 +362,6 @@ private:
     private:
         class Data;
         struct DataDeleter {
-            KisMutationStorageAllocator<Data> storage;
             void operator()(Data *value) const noexcept;
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
@@ -388,6 +388,7 @@ private:
         // not a byte or hard wall-time guarantee for one unit.
         qsizetype pendingWorkUnits() const;
         qsizetype clearBatch(qsizetype maximumWorkUnits);
+        void dispose(const std::shared_ptr<DeferredMetadataCleanupStatistics> &statistics);
 
     private:
         PreparedPublication::DataPointer data;
@@ -395,10 +396,10 @@ private:
     };
     PreparedPublication preparePublication(const KisPageTransaction &transaction,
                                            KisImageEpochId minimumEpoch,
-                                           const QVector<KisPageTransition> &transitions,
+                                           const KisPageSnapshotArray<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
-                                           const QVector<KisPageTransition> &transitions,
+                                           const KisPageSnapshotArray<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
     struct PublicationChange {
         KisPageTransitionKind kind;
@@ -471,7 +472,7 @@ private:
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
     KisPageMetadataTransitionResult applyProjectedSequence(const KisPageKey &key,
-                                                   const QVector<KisPageTransition> &transitions);
+                                                   const KisPageSnapshotArray<KisPageTransition> &transitions);
     KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);

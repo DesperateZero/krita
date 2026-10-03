@@ -176,7 +176,7 @@ public:
     // scheduler/read dependencies remain the caller's responsibility. Conflict
     // and storage rejection occur before execution and preserve older work.
     KisPageMutationExecution borrowExecution(KisSurfaceId,
-        const QSet<KisLogicalPageId> &pages, QString *error = nullptr);
+        const KisPageSnapshotArray<KisLogicalPageId> &pages, QString *error = nullptr);
     // Private semantic absence. No pixel allocation, generation or overlay
     // publication occurs here. Repeated removal coalesces; a subsequent write
     // starts from the current surface default, reusing any pending backing.
@@ -185,7 +185,7 @@ public:
     // allocation or proof until seal/first pixel write; repeated aliases replace
     // the input. A following partial write initializes independent backing.
     bool aliasPage(const KisPageKey &key,
-                   const QSharedPointer<const KisPageReplicaSource> &source,
+                   const std::shared_ptr<const KisPageReplicaSource> &source,
                    QString *error = nullptr);
     KisCpuWriteGuard beginWrite(const KisPageKey &key, QString *error = nullptr);
     // Mode controls first preparation (including a staged alias's source
@@ -370,7 +370,7 @@ private:
     std::shared_ptr<KisCapturedReadView::Private> m_scope;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
     const void *m_data = nullptr;
-    QSharedPointer<const KisCpuDefaultReadBuffer> m_defaultBuffer;
+    std::shared_ptr<const KisCpuDefaultReadBuffer> m_defaultBuffer;
     KisPageVersion m_version;
     QSize m_pageExtent;
     quint32 m_rowStride = 0;
@@ -443,13 +443,13 @@ public:
     bool waitForRetirementIdle();
 
     bool configure(const KisImageEpochSnapshot &initialEpoch,
-                   const QSharedPointer<KisCompletionRegistry> &completions,
+                   const std::shared_ptr<KisCompletionRegistry> &completions,
                    qsizetype metadataShardCount,
                    QString *error = nullptr);
 
-    bool registerReplicaProvider(const QSharedPointer<KisPageReplicaProvider> &provider);
-    bool registerTransferBridge(const QSharedPointer<KisPageReplicaTransferBridge> &bridge);
-    bool registerExactGenerationArchive(const QSharedPointer<KisExactGenerationArchive> &archive);
+    bool registerReplicaProvider(const std::shared_ptr<KisPageReplicaProvider> &provider);
+    bool registerTransferBridge(const std::shared_ptr<KisPageReplicaTransferBridge> &bridge);
+    bool registerExactGenerationArchive(const std::shared_ptr<KisExactGenerationArchive> &archive);
     bool adoptInitialPage(const KisPageVersion &version,
                           const KisPageAllocationDescriptor &descriptor,
                           const KisReplicaHandle &authority,
@@ -576,7 +576,7 @@ private:
     // Generic stores keep their caller-supplied surface metadata contract.
     bool configureDerivedPageExtent(KisSurfaceId surface);
     bool configureSharedNonPayloadBudget(
-        const QSharedPointer<KisBackingBudgetController> &budget,
+        const std::shared_ptr<KisBackingBudgetController> &budget,
         QString *error);
     // The backend has already hidden its anonymous selector under this lock.
     // Release it after successful root installation, before deferred cleanup.
@@ -593,7 +593,7 @@ private:
     // before a transaction/session or captured input is exposed. The owned
     // write set and claims move intact into the resulting mutation session.
     std::unique_ptr<KisPageStoreWriteReservation> reserveManagedRange(
-        KisSurfaceId surface, const QSet<KisLogicalPageId> &targets,
+        KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
         bool legacyIntent, bool *borrowed, QString *error);
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
@@ -601,9 +601,10 @@ private:
     // internal controller is configured. Reference construction stays valid.
     using StoragePointer = std::unique_ptr<KisPageStore, void (*)(KisPageStore *)>;
     static StoragePointer prepareStorage(
-        const QSharedPointer<KisBackingBudgetController> &parent, QString *error);
+        const std::shared_ptr<KisBackingBudgetController> &parent, QString *error);
     explicit KisPageStore(const KisMutationStorageAllocator<KisPageStore> &storage);
     static void destroyStorage(KisPageStore *) noexcept;
+    KisMutationStorageAllocator<char> storageAllocator() const;
     KisReadRequest acquireReadImpl(const KisPageKey &key,
                                    const KisPageReadView &view,
                                    KisPageAccessRequirement access,
@@ -621,9 +622,9 @@ private:
      * operations instead.
      */
     KisImageEpochCommitTicket restoreRetainedEpochDelta(const KisRetainedImageEpochSnapshot &retained,
-                                                        const QVector<KisPageKey> &changedPages);
+                                                        const KisPageKeyStorage &changedPages);
     KisRetainedImageEpochSnapshot captureRetainedEpochRoot();
-    bool releaseSnapshotDelta(KisImageEpochSnapshotToken token, const QVector<KisPageKey> &changedPages);
+    bool releaseSnapshotDelta(KisImageEpochSnapshotToken token, const KisPageKeyStorage &changedPages);
     class Private;
     static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {

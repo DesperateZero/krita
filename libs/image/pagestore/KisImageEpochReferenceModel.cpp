@@ -423,9 +423,9 @@ bool KisImageEpochRootSnapshot::isValid() const
     return m_validated;
 }
 
-QVector<KisPageVersion> KisImageEpochRootSnapshot::manifest() const
+KisPageSnapshotArray<KisPageVersion> KisImageEpochRootSnapshot::manifest() const
 {
-    QVector<KisPageVersion> result;
+    KisPageSnapshotArray<KisPageVersion> result;
     result.reserve(pageRootCount(m_pageRoot));
     appendPageRoot(m_pageRoot, [&](const auto &version) { result.append(version); });
     return result;
@@ -500,10 +500,10 @@ bool KisImageEpochRootSnapshot::surfaceState(KisSurfaceId surface, KisSurfaceEpo
         && m_surfaces && resolveSurface(*m_surfaces, surface, state);
 }
 
-QVector<KisSurfaceEpochState> KisImageEpochRootSnapshot::surfaces() const
+KisPageSnapshotArray<KisSurfaceEpochState> KisImageEpochRootSnapshot::surfaces() const
 {
-    return m_surfaces ? QVector<KisSurfaceEpochState>(m_surfaces->begin(), m_surfaces->end())
-                      : QVector<KisSurfaceEpochState>{};
+    return m_surfaces ? KisPageSnapshotArray<KisSurfaceEpochState>(m_surfaces->begin(), m_surfaces->end())
+                      : KisPageSnapshotArray<KisSurfaceEpochState>{};
 }
 
 size_t KisImageEpochRootSnapshot::surfaceCount() const
@@ -631,7 +631,7 @@ struct EpochRootRecord {
 class KisImageEpochReferenceModel::Private
 {
 public:
-    Private(KisBackingBudgetController *controller, std::unique_ptr<KisBackingBudgetController> standalone,
+    Private(KisBackingBudgetController *controller, std::shared_ptr<KisBackingBudgetController> standalone,
             KisMutationStorageAllocator<Private> storage)
         : standaloneBudget(std::move(standalone)), budget(controller),
           roots(std::less<quint64>{}, storage), transactions(std::less<quint64>{}, storage),
@@ -759,7 +759,7 @@ public:
     }
     mutable QMutex mutex;
     // Declared before paid storage so the standalone controller exits last.
-    std::unique_ptr<KisBackingBudgetController> standaloneBudget;
+    std::shared_ptr<KisBackingBudgetController> standaloneBudget;
     KisBackingBudgetController *budget = nullptr;
     std::shared_ptr<KisImageEpochTreeStorage> treeStorage;
     quint64 nextEpoch = 1;
@@ -855,8 +855,15 @@ KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &
 
     auto *budget = m_budget;
     locker.unlock();
-    auto standalone = budget ? nullptr : std::make_unique<KisBackingBudgetController>();
-    if (!budget) budget = standalone.get();
+    std::shared_ptr<KisBackingBudgetController> standalone;
+    if (!budget) {
+        const auto parent = kisAcquirePageStoreBootstrapBudget(error);
+        if (!parent) return {};
+        standalone = std::allocate_shared<KisBackingBudgetController>(
+            KisMutationStorageAllocator<KisBackingBudgetController>{});
+        if (!standalone->configureSharedNonPayloadBudget(parent, error)) return {};
+        budget = standalone.get();
+    }
     const auto storage = KisMutationStorageAllocator<Private>::retained(budget);
     auto d = std::allocate_shared<Private>(storage, budget, std::move(standalone), storage);
     d->treeStorage = std::allocate_shared<KisImageEpochTreeStorage>(storage, storage);
@@ -1669,10 +1676,10 @@ void KisImageEpochReferenceModel::endReachabilityScan(quint64 cookie)
     }
 }
 
-QSet<KisPageVersion> KisImageEpochReferenceModel::reachablePageVersions(const QVector<KisPageKey> &registeredKeys,
+KisPageSnapshotArray<KisPageVersion> KisImageEpochReferenceModel::reachablePageVersions(const KisPageSnapshotArray<KisPageKey> &registeredKeys,
                                                                         quint64 *visitedRoots) const
 {
-    QSet<KisPageVersion> result;
+    KisPageSnapshotArray<KisPageVersion> result;
     if (visitedRoots)
         *visitedRoots = 0;
     const auto d = std::atomic_load(&m_core);
@@ -1688,13 +1695,19 @@ QSet<KisPageVersion> KisImageEpochReferenceModel::reachablePageVersions(const QV
         for (const KisPageKey &key : registeredKeys) {
             KisPageVersion version;
             if (root->second.root.resolve(key, &version))
-                result.insert(version);
+                result.append(version);
         }
     };
     // The original protected list already visits each admitted root once;
     // counted ownership now lives in those same root records.
     for (quint64 epoch = d->protectedHead; epoch; epoch = d->roots.find(epoch)->second.nextProtected)
         visit(epoch);
+    const auto less = [](const KisPageVersion &a, const KisPageVersion &b) {
+        return std::tie(a.key.surface.value, a.key.page.row, a.key.page.column, a.generation.value, a.defaultPixelRevision)
+            < std::tie(b.key.surface.value, b.key.page.row, b.key.page.column, b.generation.value, b.defaultPixelRevision);
+    };
+    std::sort(result.begin(), result.end(), less);
+    result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;
 }
 
@@ -1732,9 +1745,9 @@ KisPageTransactionSnapshot KisImageEpochReferenceModel::transaction(KisPageTrans
     delta = found->second.delta;
     locker.unlock();
     if (delta) {
-        result.changes = QVector<KisPageVersion>(delta->changes.begin(), delta->changes.end());
-        result.surfaceChanges = QVector<KisSurfaceEpochChange>(delta->surfaceChanges.begin(), delta->surfaceChanges.end());
-        result.removedPages = QVector<KisPageKey>(delta->removedPages.begin(), delta->removedPages.end());
+        result.changes = KisPageSnapshotArray<KisPageVersion>(delta->changes.begin(), delta->changes.end());
+        result.surfaceChanges = KisPageSnapshotArray<KisSurfaceEpochChange>(delta->surfaceChanges.begin(), delta->surfaceChanges.end());
+        result.removedPages = KisPageSnapshotArray<KisPageKey>(delta->removedPages.begin(), delta->removedPages.end());
     }
     return result;
 }

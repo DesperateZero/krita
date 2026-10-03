@@ -9,7 +9,7 @@
 
 #include <QString>
 #include <QSharedPointer>
-#include <QVector>
+#include <boost/container/static_vector.hpp>
 
 #include "KisPageStoreTypes.h"
 #include "KisMutationStorage_p.h"
@@ -55,8 +55,10 @@ struct KRITAIMAGE_EXPORT KisReplicaCapabilities
     // domains describe allocatable storage; consumerAccess lists exact views
     // available for every allocation in the matching domain. Keeping the
     // pairs explicit avoids inventing a domain x access-kind cross product.
-    QVector<KisPageAccessDomain> domains;
-    QVector<KisPageAccessRequirement> consumerAccess;
+    // Valid capabilities have at most four domains and four access kinds per
+    // domain. Inline storage makes capability discovery safe at hard full.
+    boost::container::static_vector<KisPageAccessDomain, 4> domains;
+    boost::container::static_vector<KisPageAccessRequirement, 16> consumerAccess;
     // Every operation returns a registry-terminal completion before returning.
     // False means the provider requires the async coordinator path.
     bool synchronousOperations = false;
@@ -80,11 +82,11 @@ struct KRITAIMAGE_EXPORT KisReplicaCapabilities
 
     bool isValid() const
     {
-        if (domains.isEmpty()) return false;
-        for (qsizetype i = 0; i < domains.size(); ++i) {
+        if (domains.empty()) return false;
+        for (size_t i = 0; i < domains.size(); ++i) {
             const KisPageAccessDomain domain = domains.at(i);
             if (domain == KisPageAccessDomain::Unknown) return false;
-            for (qsizetype j = 0; j < i; ++j) {
+            for (size_t j = 0; j < i; ++j) {
                 if (domain == domains.at(j)) return false;
             }
 
@@ -98,10 +100,10 @@ struct KRITAIMAGE_EXPORT KisReplicaCapabilities
                 return false;
             }
         }
-        for (qsizetype i = 0; i < consumerAccess.size(); ++i) {
+        for (size_t i = 0; i < consumerAccess.size(); ++i) {
             const KisPageAccessRequirement access = consumerAccess.at(i);
-            if (!access.isValid() || !domains.contains(access.domain)) return false;
-            for (qsizetype j = 0; j < i; ++j) {
+            if (!access.isValid() || !supportsStorageDomain(access.domain)) return false;
+            for (size_t j = 0; j < i; ++j) {
                 if (access == consumerAccess.at(j)) return false;
             }
         }
@@ -109,22 +111,24 @@ struct KRITAIMAGE_EXPORT KisReplicaCapabilities
             KisPageAccessDomain::UmaShared, KisPageAccessKind::CpuPointer};
         if (synchronousWriteCopy &&
             (!synchronousOperations ||
-             (!consumerAccess.contains({KisPageAccessDomain::CpuRam,
+             (!supports({KisPageAccessDomain::CpuRam,
                                          KisPageAccessKind::CpuPointer}) &&
-              !consumerAccess.contains(umaCpu)))) return false;
+              !supports(umaCpu)))) return false;
         if (nativeCpuMutation && (!synchronousWriteCopy ||
-            !consumerAccess.contains({KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}))) return false;
+            !supports({KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}))) return false;
         if (backgroundRetirement && !synchronousOperations) return false;
         if (synchronousSourceAdoption && !nativeCpuMutation) return false;
         if (synchronousCpuPayload && (!synchronousOperations ||
-            !consumerAccess.contains({KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}))) return false;
+            !supports({KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}))) return false;
         return true;
     }
 
     bool supports(KisPageAccessRequirement access) const
     {
-        return access.isValid() && consumerAccess.contains(access);
+        return access.isValid() && std::find(consumerAccess.cbegin(), consumerAccess.cend(), access) != consumerAccess.cend();
     }
+    bool supportsStorageDomain(KisPageAccessDomain domain) const noexcept
+    { return std::find(domains.cbegin(), domains.cend(), domain) != domains.cend(); }
 };
 
 // Borrowed rows for one complete logical page, not an alias/retention or a
@@ -444,14 +448,14 @@ public:
     // Only terminal success is usable; no visibility/root change is implied.
     virtual KisReplicaOperation prepareSynchronousSource(
         KisPageOperationId operation,
-        const QSharedPointer<const KisPageReplicaSource> &source,
+        const std::shared_ptr<const KisPageReplicaSource> &source,
         const KisPageVersion &targetVersion,
         const KisPageAllocationDescriptor &descriptor,
         KisReplicaSourceUse use, KisPagePriority priority);
     // Synchronous initialization of an already owner-authorized CPU span.
     // The caller holds its writable guard throughout; no lease/publication.
     virtual bool copySynchronousSourceToCpu(
-        const QSharedPointer<const KisPageReplicaSource> &source,
+        const std::shared_ptr<const KisPageReplicaSource> &source,
         const KisPageAllocationDescriptor &descriptor, void *destination,
         quint32 rowStride, quint64 byteSize);
 
@@ -479,8 +483,8 @@ public:
     virtual bool supports(const KisReplicaTransferRequest &request) const = 0;
     virtual KisReplicaOperation transfer(
         const KisReplicaTransferRequest &request,
-        const QSharedPointer<KisPageReplicaProvider> &sourceProvider,
-        const QSharedPointer<KisPageReplicaProvider> &targetProvider,
+        const std::shared_ptr<KisPageReplicaProvider> &sourceProvider,
+        const std::shared_ptr<KisPageReplicaProvider> &targetProvider,
         KisPagePriority priority) = 0;
 };
 

@@ -53,13 +53,14 @@ class KRITAIMAGE_EXPORT KisTiles3PageReplicaProvider final
     : public KisPageReplicaProvider
 {
 public:
-    KisTiles3PageReplicaProvider();
+    explicit KisTiles3PageReplicaProvider(
+        const KisMutationStorageAllocator<KisTiles3PageReplicaProvider> &storage = KisMutationStorageAllocator<KisTiles3PageReplicaProvider>{});
     ~KisTiles3PageReplicaProvider() override;
 
     bool configure(const KisCpuResidentReplicaProviderConfig &config,
-                   const QSharedPointer<KisCompletionRegistry> &completions,
+                   const std::shared_ptr<KisCompletionRegistry> &completions,
                    QString *error = nullptr,
-                   const QSharedPointer<KisBackingBudgetController> &processBudget = {});
+                   const std::shared_ptr<KisBackingBudgetController> &processBudget = {});
 
     QString name() const override;
     KisReplicaProviderId providerId() const override;
@@ -122,13 +123,13 @@ public:
     // Capturing is a COW-user reference, not a borrowed pointer or RAM pin.
     // The no-swap-in route accepts only allocator-guaranteed alignment (at
     // most pointer alignment); stricter contracts require another route.
-    QSharedPointer<const KisPageReplicaSource> captureCompletedTileSource(
+    std::shared_ptr<const KisPageReplicaSource> captureCompletedTileSource(
         const KisPageAllocationDescriptor &descriptor, KisTileData *tileData,
         QString *error = nullptr);
-    QSharedPointer<const KisPageReplicaSource> captureCpuReadSource(
+    std::shared_ptr<const KisPageReplicaSource> captureCpuReadSource(
         const KisCpuReadGuard &guard, const KisPageAllocationDescriptor &descriptor,
         QString *error = nullptr);
-    bool sourceMatchesReadGuard(const QSharedPointer<const KisPageReplicaSource> &source,
+    bool sourceMatchesReadGuard(const std::shared_ptr<const KisPageReplicaSource> &source,
                                 const KisCpuReadGuard &guard) const;
     KisTileData *tileDataForCpuReadGuard(const KisCpuReadGuard &guard) const;
     TileLease acquireTileReadCache(const KisCpuReadGuard &guard, TileLease reuse = {}) const;
@@ -138,11 +139,11 @@ public:
     // The KisTile wrapper owns the cached storage's immutable/COW reference.
     TileLease prepareTileReadCache(const KisCpuWriteGuard &guard, TileLease reuse = {}) const;
     KisReplicaOperation prepareSynchronousSource(
-        KisPageOperationId operation, const QSharedPointer<const KisPageReplicaSource> &source,
+        KisPageOperationId operation, const std::shared_ptr<const KisPageReplicaSource> &source,
         const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
         KisReplicaSourceUse use, KisPagePriority priority) override;
     bool copySynchronousSourceToCpu(
-        const QSharedPointer<const KisPageReplicaSource> &source,
+        const std::shared_ptr<const KisPageReplicaSource> &source,
         const KisPageAllocationDescriptor &descriptor, void *destination,
         quint32 rowStride, quint64 byteSize) override;
 
@@ -164,7 +165,8 @@ public:
 
 private:
     class Private;
-    QScopedPointer<Private> d;
+    struct PrivateReleaser { static void cleanup(Private *); };
+    QScopedPointer<Private, PrivateReleaser> d;
 };
 
 #endif // KIS_TILES3_PAGE_REPLICA_PROVIDER_H

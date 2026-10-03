@@ -148,7 +148,7 @@ public:
     bool resolveSurfaceLocked(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     KRITAIMAGE_EXPORT bool ensureVirtualDefaultLocked(const KisPageVersion &, const KisSurfaceEpochState &, QString *error);
-    KRITAIMAGE_EXPORT bool prepareDefaultRevisionsLocked(const QVector<KisSurfaceEpochState> &surfaces, QString *error);
+    KRITAIMAGE_EXPORT bool prepareDefaultRevisionsLocked(const KisPageSnapshotArray<KisSurfaceEpochState> &surfaces, QString *error);
     KRITAIMAGE_EXPORT bool configureDerivedExtentLocked(KisSurfaceId surface);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
@@ -170,7 +170,7 @@ public:
                                            QMutexLocker<QMutex> &ownerLock,
                                            QWriteLocker *publicationLock = nullptr);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
-                                                         const QVector<KisPageKey> *changedPages,
+                                                         const KisPageKeyStorage *changedPages,
                                                          const KisPageStore *diagnosticOwner,
                                                          QMutexLocker<QMutex> &ownerLock);
     bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,

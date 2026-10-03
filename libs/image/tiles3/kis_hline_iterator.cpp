@@ -4,11 +4,12 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <memory>
 #include "kis_hline_iterator.h"
 
 
 KisHLineIterator2::KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint32 y, qint32 w, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *completionListener,
-                                  QSharedPointer<const KisPageStoreIteratorReadScope> scope)
+                                  std::shared_ptr<const KisPageStoreIteratorReadScope> scope)
     : KisBaseIterator(dataManager, writable, completionListener, std::move(scope)),
       m_offsetX(offsetX),
       m_offsetY(offsetY)

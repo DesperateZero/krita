@@ -1869,16 +1869,16 @@ void KisTiledDataManagerTest::testExtentStoragePreparation()
             QCOMPARE(extent.extent(), original);
         }
     }
-    auto *cols = extent.m_colsData.m_buffer;
-    auto *rows = extent.m_rowsData.m_buffer;
+    auto *cols = extent.m_colsData.m_buffer.get();
+    auto *rows = extent.m_rowsData.m_buffer.get();
     const auto colCapacity = extent.m_colsData.m_capacity, rowCapacity = extent.m_rowsData.m_capacity;
     for (int i = 0; i < 1000; ++i) QVERIFY(extent.prepareTileRange(QRect(-1000, -1000, 2001, 2001)));
-    QCOMPARE(extent.m_colsData.m_buffer, cols); QCOMPARE(extent.m_rowsData.m_buffer, rows);
+    QCOMPARE(extent.m_colsData.m_buffer.get(), cols); QCOMPARE(extent.m_rowsData.m_buffer.get(), rows);
     // A valid first axis cannot leak an active geometry change when the
     // second axis cannot be represented. No enormous allocation is attempted.
     QVERIFY(!extent.prepareTileRange(QRect(100000, std::numeric_limits<qint32>::max(), 1, 1)));
     QVERIFY(!extent.prepareTileRange(QRect(std::numeric_limits<qint32>::min(), 100000, 1, 1)));
-    QCOMPARE(extent.m_colsData.m_buffer, cols); QCOMPARE(extent.m_rowsData.m_buffer, rows);
+    QCOMPARE(extent.m_colsData.m_buffer.get(), cols); QCOMPARE(extent.m_rowsData.m_buffer.get(), rows);
     QCOMPARE(extent.m_colsData.m_capacity, colCapacity); QCOMPARE(extent.m_rowsData.m_capacity, rowCapacity);
     QCOMPARE(extent.extent(), original);
     extent.notifyTileRemoved(0, 0); QCOMPARE(extent.extent(), QRect());

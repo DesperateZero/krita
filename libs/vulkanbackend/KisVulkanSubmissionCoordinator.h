@@ -158,7 +158,7 @@ public:
     ~KisVulkanSubmissionCoordinator();
 
     bool configure(const KisVulkanCoordinatorConfig &config,
-                   const QSharedPointer<KisCompletionRegistry> &completionRegistry,
+                   const std::shared_ptr<KisCompletionRegistry> &completionRegistry,
                    QString *error = nullptr);
 
     KisVulkanCoordinatorState state() const;

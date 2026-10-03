@@ -6,8 +6,6 @@
 
 #include "KisPageStateMachine_p.h"
 
-#include <QSet>
-
 #include <algorithm>
 #include <limits>
 
@@ -190,7 +188,7 @@ auto applyPolicy(State current, const KisPageTransition &transition,
     if (validateBoundaryInvariants) {
         QString currentFailure;
         if (!validate(current, &currentFailure)) {
-            result.rejectionReason = QStringLiteral("invalid current state: %1").arg(currentFailure);
+            result.rejectionReason = currentFailure;
             return result;
         }
     }
@@ -979,7 +977,7 @@ auto applyPolicy(State current, const KisPageTransition &transition,
     if (validateBoundaryInvariants) {
         QString nextFailure;
         if (!validate(result.next, &nextFailure)) {
-            return reject(QStringLiteral("transition violates invariant: %1").arg(nextFailure));
+            return reject(nextFailure);
         }
     }
     for (const KisPageTransitionEffect &effect : result.effects) {
@@ -996,10 +994,15 @@ auto applyPolicy(State current, const KisPageTransition &transition,
 } // namespace
 
 KisPageTransitionResult KisPageStateMachine::apply(
-    const KisPageStateSnapshot &current, const KisPageTransition &transition) const
+    const KisPageStateSnapshot &current, const KisPageTransition &transition) const try
 {
     return applyPolicy(current, transition, true,
         [this](const KisPageStateSnapshot &state, QString *reason) { return validateInvariants(state, reason); });
+}
+catch (const std::bad_alloc &) {
+    auto refused = transitionResult(current);
+    refused.rejectionReason = QStringLiteral("oracle transition storage was refused");
+    return refused;
 }
 
 KisPageWorkingResult KisPageStateMachine::applyKnownValid(
@@ -1033,18 +1036,27 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
     int unpublishedCount = 0;
     KisPageVersion unpublishedVersion;
     quint64 maximumGeneration = 0;
-    QSet<KisPageVersion> versionIdentities;
-    QSet<quint64> leases;
-    QSet<quint64> operations;
-    QSet<KisReplicaPhysicalSlotIdentity> allocations;
+    // The compatibility oracle scans its immutable input directly. Validation
+    // must also work at hard full: it owns no duplicate identity directories.
+    auto replicaCount = [&state](auto predicate) {
+        qsizetype count = 0;
+        for (const auto &version : state.versions)
+            for (const auto &replica : version.replicas) count += predicate(replica);
+        return count;
+    };
+    auto operationCount = [&replicaCount](KisPageOperationId operation) {
+        return replicaCount([operation](const auto &replica) {
+            return replica.activeOperation == operation;
+        });
+    };
 
     for (const KisPageVersionStateSnapshot &version : state.versions) {
         if (!version.version.isValid() || !(version.version.key == state.key)) {
             return fail(QStringLiteral("version belongs to another page"));
         }
-        if (versionIdentities.contains(version.version))
+        if (std::count_if(state.versions.cbegin(), state.versions.cend(),
+                         [&version](const auto &value) { return value.version == version.version; }) != 1)
             return fail(QStringLiteral("page version identity is duplicated"));
-        versionIdentities.insert(version.version);
         maximumGeneration = qMax(maximumGeneration, version.version.generation.value);
 
         if (version.publication == KisPagePublicationState::Published) {
@@ -1071,12 +1083,11 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
         } else if (version.preparedBy.isValid()) {
             return fail(QStringLiteral("non-prepared version retains a transaction"));
         }
-        QSet<quint64> viewTokens;
         for (const auto token : version.capturedReadViews) {
-            if (!token.isValid() || viewTokens.contains(token.value) ||
+            if (!token.isValid() || std::count(version.capturedReadViews.cbegin(),
+                    version.capturedReadViews.cend(), token) != 1 ||
                 version.publication == KisPagePublicationState::Retiring)
                 return fail(QStringLiteral("captured version protection is invalid or duplicated"));
-            viewTokens.insert(token.value);
         }
 
         for (const KisReplicaStateSnapshot &replica : version.replicas) {
@@ -1091,9 +1102,8 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
                 return fail(QStringLiteral("replica operation state is inconsistent"));
             }
             if (replica.activeOperation.isValid()) {
-                if (operations.contains(replica.activeOperation.value))
+                if (operationCount(replica.activeOperation) != 1)
                     return fail(QStringLiteral("active operation identity is duplicated"));
-                operations.insert(replica.activeOperation.value);
             }
             if (!replica.readLeases.isEmpty() &&
                 replica.validity != KisReplicaValidity::Valid) {
@@ -1106,9 +1116,10 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
             for (KisPageLeaseId lease : replica.readLeases) {
                 if (!lease.isValid())
                     return fail(QStringLiteral("read lease identity is invalid"));
-                if (leases.contains(lease.value))
+                if (replicaCount([lease](const auto &value) {
+                        return std::count(value.readLeases.cbegin(), value.readLeases.cend(), lease);
+                    }) != 1)
                     return fail(QStringLiteral("read lease identity is duplicated"));
-                leases.insert(lease.value);
             }
             for (const KisCompletionTicket &lastUse : replica.pendingLastUses) {
                 if (!lastUse.isValid()) {
@@ -1116,9 +1127,10 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
                 }
             }
             const auto physical = replica.replica.physicalSlotIdentity();
-            if (allocations.contains(physical))
+            if (replicaCount([physical](const auto &value) {
+                    return value.replica.physicalSlotIdentity() == physical;
+                }) != 1)
                 return fail(QStringLiteral("replica physical allocation slot is aliased"));
-            allocations.insert(physical);
         }
 
         const bool needsAuthority =
@@ -1159,9 +1171,8 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
         if (unpublishedCount != 1 || !(unpublishedVersion == state.writer.target.version)) {
             return fail(QStringLiteral("writer does not uniquely own the unpublished generation"));
         }
-        if (operations.contains(state.writer.operation.value))
+        if (operationCount(state.writer.operation))
             return fail(QStringLiteral("writer operation identity is duplicated"));
-        operations.insert(state.writer.operation.value);
         const KisPageVersionStateSnapshot *base = state.findVersion(state.writer.baseVersion);
         const KisPageVersionStateSnapshot *write = state.findVersion(state.writer.target.version);
         const KisReplicaStateSnapshot *target = write
@@ -1187,7 +1198,8 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
     } else if (!state.authorityHandoff.isValid()) {
         return fail(QStringLiteral("authority handoff identity is incomplete"));
     } else {
-        if (operations.contains(state.authorityHandoff.operation.value))
+        if (operationCount(state.authorityHandoff.operation) ||
+            (state.writer.isValid() && state.writer.operation == state.authorityHandoff.operation))
             return fail(QStringLiteral("authority handoff operation identity is duplicated"));
         const KisPageVersionStateSnapshot *version =
             state.findVersion(state.authorityHandoff.source.version);

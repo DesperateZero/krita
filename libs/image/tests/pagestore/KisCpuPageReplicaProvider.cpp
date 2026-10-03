@@ -179,10 +179,10 @@ KisCpuPageReplicaProvider::~KisCpuPageReplicaProvider()
 
 bool KisCpuPageReplicaProvider::configure(
     const KisCpuResidentReplicaProviderConfig &config,
-    const QSharedPointer<KisCompletionRegistry> &completions,
+    const std::shared_ptr<KisCompletionRegistry> &completions,
     QString *error)
 {
-    return d->configure(config, completions, QStringLiteral("CPU"), error);
+    return d->configure(config, completions, error);
 }
 
 QString KisCpuPageReplicaProvider::name() const
@@ -240,7 +240,7 @@ KisReplicaOperation KisCpuPageReplicaProvider::transfer(
 {
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
-    return d->transfer(request, QStringLiteral("CPU"));
+    return d->transfer(request);
 }
 
 KisReplicaAccess KisCpuPageReplicaProvider::resolveAccess(
@@ -280,9 +280,8 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
 {
     QMutexLocker locker(&d->mutex);
     auto retirement = d->beginRetirement(operation, replica, lastUse);
-    if (retirement.failure)
-        return KisReplicaOperation::failed(operation,
-            QStringLiteral("CPU retirement %1").arg(QString::fromLatin1(retirement.failure)));
+    if (!retirement.failure.isEmpty())
+        return KisReplicaOperation::failed(operation, retirement.failure);
     if (!retirement.allocation->second.binding->retire(replica.allocationIdentity())) {
         return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
     }

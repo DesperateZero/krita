@@ -151,11 +151,11 @@ surfaceEpochState(KisSurfaceId surface = KisSurfaceId{1}, quint64 defaultPixelRe
 }
 
 bool configureCapturedViewStore(KisPageStore &store,
-                                QSharedPointer<KisCpuPageReplicaProvider> *provider,
+                                std::shared_ptr<KisCpuPageReplicaProvider> *provider,
                                 QString *error)
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    *provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    *provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig config;
     config.provider = {170};
     config.providerEpoch = {1};
@@ -301,7 +301,7 @@ enum class FakeFailurePoint : quint8 {
 class FakeCpuReplicaProvider final : public KisPageReplicaProvider
 {
 public:
-    explicit FakeCpuReplicaProvider(const QSharedPointer<KisCompletionRegistry> &completions)
+    explicit FakeCpuReplicaProvider(const std::shared_ptr<KisCompletionRegistry> &completions)
         : m_completions(completions)
     {
         const KisCompletionDomain source = KisCompletionDomain::CpuJob;
@@ -632,7 +632,7 @@ private:
         return {KisPageRequestStatus::Pending, operation, handle, ticket, {}};
     }
 
-    QSharedPointer<KisCompletionRegistry> m_completions;
+    std::shared_ptr<KisCompletionRegistry> m_completions;
     quint64 m_completionSource = 0;
     mutable QMutex m_mutex;
     quint64 m_epoch = 1;
@@ -664,8 +664,8 @@ public:
     }
 
     KisReplicaOperation transfer(const KisReplicaTransferRequest &request,
-                                 const QSharedPointer<KisPageReplicaProvider> &sourceProvider,
-                                 const QSharedPointer<KisPageReplicaProvider> &targetProvider,
+                                 const std::shared_ptr<KisPageReplicaProvider> &sourceProvider,
+                                 const std::shared_ptr<KisPageReplicaProvider> &targetProvider,
                                  KisPagePriority priority) override
     {
         Q_UNUSED(request);
@@ -682,7 +682,7 @@ private:
 class FakeAsyncExactArchive final : public KisExactGenerationArchive
 {
 public:
-    explicit FakeAsyncExactArchive(const QSharedPointer<KisCompletionRegistry> &completions)
+    explicit FakeAsyncExactArchive(const std::shared_ptr<KisCompletionRegistry> &completions)
         : m_completions(completions)
     {
         const KisCompletionDomain source = KisCompletionDomain::IoOperation;
@@ -818,7 +818,7 @@ private:
         KisCompletionTicket completion;
     };
 
-    QSharedPointer<KisCompletionRegistry> m_completions;
+    std::shared_ptr<KisCompletionRegistry> m_completions;
     quint64 m_completionSource = 0;
     mutable QMutex m_mutex;
     QHash<quint64, Entry> m_pending;
@@ -828,7 +828,7 @@ private:
 class ReentrantProbeCpuProvider final : public KisPageReplicaProvider
 {
 public:
-    explicit ReentrantProbeCpuProvider(const QSharedPointer<KisPageReplicaProvider> &delegate)
+    explicit ReentrantProbeCpuProvider(const std::shared_ptr<KisPageReplicaProvider> &delegate)
         : m_delegate(delegate)
     {
     }
@@ -945,7 +945,7 @@ public:
     }
 
 private:
-    QSharedPointer<KisPageReplicaProvider> m_delegate;
+    std::shared_ptr<KisPageReplicaProvider> m_delegate;
 };
 
 } // namespace
@@ -1274,7 +1274,7 @@ void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
     QFETCH(int, kind);
     kisDrainPageStoreReclamation();
     KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     KisBackingBudgetController budget; QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     const auto warm = KisMutationStorageAllocator<KisPageVersion>::retained(&budget);
     Q_UNUSED(warm);
@@ -1291,8 +1291,8 @@ void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
     const quint64 headroom = kind == 0 ? 0 : kind == 3
         ? quint64(initial.manifest.size()) * sizeof(KisPageVersion) + 16384 : 8192;
     const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
-    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
     QString error;
     QVERIFY(!model.initialize(initial, &error));
     QVERIFY(error.contains(QStringLiteral("storage admission")));
@@ -1301,7 +1301,7 @@ void KisPageStoreReferenceTest::epochInitializationStorageRefusal()
     QVERIFY(!model.beginTransaction({1}).isValid());
     kisDrainPageStoreReclamation(); // Partial paid tree drains even under the same pressure.
     QCOMPARE(live(), before + bytes);
-    kisFreeMutationStorage(parent.data(), filler, bytes, 1); filler = nullptr;
+    kisFreeMutationStorage(parent.get(), filler, bytes, 1); filler = nullptr;
     QVERIFY2(model.initialize(initial, &error), qPrintable(error));
     const auto root = model.captureCommittedRoot();
     QCOMPARE(root.pageCount(), initial.manifest.size());
@@ -1312,7 +1312,7 @@ void KisPageStoreReferenceTest::epochInitializationPublishesOnce()
 {
     kisDrainPageStoreReclamation();
     KisPageBackingLimits limits; limits.metadataArenaBytes = 8 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> slots;
     for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : slots) slot.release();
@@ -1349,7 +1349,7 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
     QFETCH(int, kind);
     kisDrainPageStoreReclamation();
     KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     KisBackingBudgetController budget; QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     KisImageEpochReferenceModel model; model.attachBackingBudget(budget);
     KisImageEpochSnapshot initial;
@@ -1379,8 +1379,8 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
     const auto before = live();
     const quint64 headroom = kind == 4 ? quint64(2 * pages) * sizeof(KisPageVersion) + 4096 : kind == 5 ? 2048 : 0;
     const size_t bytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
-    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
     QString error;
     if (kind == 0) QVERIFY(!model.beginTransaction({1}, &error).isValid());
     else if (kind == 1) { QVERIFY(!model.captureRetainedRoot().isValid()); QVERIFY(model.validateRetainedSnapshot(retained)); }
@@ -1396,7 +1396,7 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
     if (tx.isValid()) QCOMPARE(model.activeTransaction(tx.id), tx);
     kisDrainPageStoreReclamation();
     QCOMPARE(live(), before + bytes);
-    kisFreeMutationStorage(parent.data(), filler, bytes, 1); filler = nullptr;
+    kisFreeMutationStorage(parent.get(), filler, bytes, 1); filler = nullptr;
     if (kind == 0) {
         const auto next = model.beginTransaction({1}); QVERIFY(next.isValid());
         QVERIFY(model.abort(tx)); QVERIFY(model.abort(next));
@@ -1411,8 +1411,8 @@ void KisPageStoreReferenceTest::epochRootStorageRefusal()
         if (kind == 2) { restore = model.prepareRestore(retained, nullptr); QVERIFY(restore.isValid()); }
         else { commit = model.prepareCommit(tx, nullptr); QVERIFY(commit.isValid()); }
         const size_t installBytes = size_t(limits.metadataArenaBytes - live());
-        void *installPressure = kisAllocateMutationStorage(parent.data(), installBytes, 1);
-        const auto unfill = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), installPressure, installBytes, 1); });
+        void *installPressure = kisAllocateMutationStorage(parent.get(), installBytes, 1);
+        const auto unfill = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), installPressure, installBytes, 1); });
         const auto result = kind == 2 ? model.installRestore(std::move(restore), nullptr, nullptr)
                                      : model.installCommit(std::move(commit), nullptr, nullptr);
         QVERIFY(result.isCommitted());
@@ -1427,7 +1427,7 @@ void KisPageStoreReferenceTest::epochTreeTailAtCapacity()
     QFETCH(bool, controllerGone);
     kisDrainPageStoreReclamation();
     KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> slots;
     for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : slots) slot.release();
@@ -1463,8 +1463,8 @@ void KisPageStoreReferenceTest::epochTreeTailAtCapacity()
     const auto finish = qScopeGuard([&] { if (paused) resume.release(); kisDrainPageStoreReclamation(); });
     QVERIFY(entered.tryAcquire(1, 5000));
     const size_t bytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.data(), bytes, 1);
-    const auto free = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, bytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), bytes, 1);
+    const auto free = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, bytes, 1); });
     root = {};
     QCOMPARE(kisPageTreeReclamationStatistics().foregroundNodeDestructions, before.foregroundNodeDestructions);
     QVERIFY(live() - bytes >= quint64(count) * sizeof(KisPageVersion)); // Actual nodes remain charged while blocked.
@@ -1572,7 +1572,7 @@ void KisPageStoreReferenceTest::capturedReadViewFreezesPagesAndSurfaceDefault()
     static_assert(!std::is_copy_constructible<KisPageStore>::value, "canonical facade must not become copyable");
     static_assert(sizeof(KisPageStore) == sizeof(void *), "keep the original facade ABI");
     KisPageStore store;
-    QSharedPointer<KisCpuPageReplicaProvider> provider;
+    std::shared_ptr<KisCpuPageReplicaProvider> provider;
     QString error;
     QVERIFY2(configureCapturedViewStore(store, &provider, &error), qPrintable(error));
     QVERIFY(commitCapturedViewFill(store, 2, 0x21, &error));
@@ -1633,7 +1633,7 @@ void KisPageStoreReferenceTest::capturedReadViewFreezesPagesAndSurfaceDefault()
 void KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFacade()
 {
     auto store = std::make_unique<KisPageStore>();
-    QSharedPointer<KisCpuPageReplicaProvider> provider;
+    std::shared_ptr<KisCpuPageReplicaProvider> provider;
     QString error;
     QVERIFY(configureCapturedViewStore(*store, &provider, &error));
     const auto retained = store->captureRetainedEpoch();
@@ -1655,7 +1655,7 @@ void KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFac
     QVERIFY(!store->captureReadView(selected, &error).isValid());
     QVERIFY(exact.resolvePageVersion(pageKey(0), &version));
     KisPageStore foreign;
-    QSharedPointer<KisCpuPageReplicaProvider> foreignProvider;
+    std::shared_ptr<KisCpuPageReplicaProvider> foreignProvider;
     QVERIFY(configureCapturedViewStore(foreign, &foreignProvider, &error));
     QVERIFY(!foreign.acquireReadInView(pageKey(0), captured, cpu, KisPagePriority::Normal).isValid());
     const auto transaction = store->beginCurrentTransaction();
@@ -1676,21 +1676,21 @@ void KisPageStoreReferenceTest::capturedReadViewValidatesSelectorsAndOutlivesFac
     exact = {};
     auto moved = std::move(captured);
     QVERIFY(!captured.isValid());
-    const QWeakPointer<KisCpuPageReplicaProvider> weak(provider);
-    provider.clear();
+    const std::weak_ptr<KisCpuPageReplicaProvider> weak(provider);
+    provider.reset();
     store.reset();
-    QVERIFY(!weak.isNull());
+    QVERIFY(!weak.expired());
     QVERIFY(moved.resolvePageVersion(pageKey(0), &version));
     moved = {};
     kisDrainPageStoreReclamation();
-    QVERIFY(weak.isNull());
+    QVERIFY(weak.expired());
 }
 
 void KisPageStoreReferenceTest::capturedReadViewReleasesChangedPagesOnly()
 {
     for (int pageCount : {16, 256}) {
         KisPageStore store;
-        QSharedPointer<KisCpuPageReplicaProvider> provider;
+        std::shared_ptr<KisCpuPageReplicaProvider> provider;
         QString error;
         QVERIFY(configureCapturedViewStore(store, &provider, &error));
         QVERIFY(commitCapturedViewFill(store, pageCount, 0x31, &error));
@@ -1725,7 +1725,7 @@ void KisPageStoreReferenceTest::capturedReadViewReleaseSkipsReachableHistory()
 {
     for (int pageCount : {16, 256}) {
         KisPageStore store;
-        QSharedPointer<KisCpuPageReplicaProvider> provider;
+        std::shared_ptr<KisCpuPageReplicaProvider> provider;
         QString error;
         QVERIFY(configureCapturedViewStore(store, &provider, &error));
         QVERIFY(commitCapturedViewFill(store, pageCount, 0x31, &error));
@@ -1789,7 +1789,7 @@ void KisPageStoreReferenceTest::capturedReadViewBenchmark()
     const qint64 durationMs = durationText.isEmpty() ? 0 : durationText.toLongLong(&validDuration);
     QVERIFY(validDuration && durationMs >= 0 && durationMs <= 10000);
     KisPageStore store;
-    QSharedPointer<KisCpuPageReplicaProvider> provider;
+    std::shared_ptr<KisCpuPageReplicaProvider> provider;
     QString error;
     QVERIFY(configureCapturedViewStore(store, &provider, &error));
     QVERIFY(commitCapturedViewFill(store, pages, 0x31, &error));
@@ -1880,7 +1880,7 @@ void KisPageStoreReferenceTest::capturedReadViewBenchmark()
 void KisPageStoreReferenceTest::capturedReadViewIsCoherentDuringConcurrentCommits()
 {
     KisPageStore store;
-    QSharedPointer<KisCpuPageReplicaProvider> provider;
+    std::shared_ptr<KisCpuPageReplicaProvider> provider;
     QString error;
     QVERIFY(configureCapturedViewStore(store, &provider, &error));
     QVERIFY(commitCapturedViewFill(store, 2, 0x11, &error));
@@ -1910,8 +1910,8 @@ void KisPageStoreReferenceTest::currentTransactionPinsBaseWithoutManifestExport(
 {
     KisPageStore store;
     QVERIFY(!store.beginCurrentTransaction().isValid());
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig config;
     config.provider = KisReplicaProviderId{168};
     config.providerEpoch = KisReplicaProviderEpoch{1};
@@ -2309,7 +2309,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
 {
     QFETCH(bool, complete); QFETCH(int, refusal);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     KisBackingBudgetController budget;
     QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     KisImageEpochReferenceModel model;
@@ -2353,8 +2353,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     // selected large real capacity refuses. All partial charges must unwind.
     const quint64 headroom = refusal ? 2048 : 0;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - headroom);
-    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
-    const auto freeFiller = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    const auto freeFiller = qScopeGuard([&] { if (filler) kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
     QCOMPARE(model.activeTransaction(tx.id), tx); // Native queries export no arrays.
     QVERIFY(model.preparePublication(original)); // Identical full facts reuse the original storage.
@@ -2363,7 +2363,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QVERIFY(error.contains(QStringLiteral("storage admission")));
     QCOMPARE(model.activeTransaction(tx.id), tx);
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
-    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     QCOMPARE(live(), acceptedBytes);
     const auto refused = model.transaction(tx.id);
     QCOMPARE(refused.changes, accepted.changes);
@@ -2374,8 +2374,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QVERIFY(candidate.isValid());
     const auto preparedBytes = live();
     const size_t installFillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *installFiller = kisAllocateMutationStorage(parent.data(), installFillerBytes, 1);
-    const auto freeInstallFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), installFiller, installFillerBytes, 1); });
+    void *installFiller = kisAllocateMutationStorage(parent.get(), installFillerBytes, 1);
+    const auto freeInstallFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), installFiller, installFillerBytes, 1); });
     if (complete) QVERIFY(model.preparePublication(changed)); // Preserve the prepared root's revision.
     QVERIFY(model.installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
     QCOMPARE(live(), limits.metadataArenaBytes);
@@ -2390,7 +2390,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
 void KisPageStoreReferenceTest::epochTransactionStorageRetainsOriginalOwner()
 {
     KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> slots;
     for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : slots) slot.release();
@@ -4151,7 +4151,7 @@ void KisPageStoreReferenceTest::metadataReadCleanupAfterController()
     const int count = int(Arena::slotsPerBlock()) + 7;
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> warm;
     for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : warm) slot.release();
@@ -4196,24 +4196,24 @@ void KisPageStoreReferenceTest::metadataReadCleanupAfterController()
     // Only the detached read value retains the authority and child here;
     // no shard or publication candidate supplies the accounting lifetime.
     QVERIFY(live() > baseline + cleanup->byteSize());
-    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    const std::weak_ptr<KisBackingBudgetController> lifetime(parent);
     parent.reset();
-    QVERIFY(!lifetime.isNull());
-    parent = lifetime.toStrongRef();
+    QVERIFY(!lifetime.expired());
+    parent = lifetime.lock();
     QVERIFY(parent);
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
-    auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     if (explicitClear) { cleanup->clear(); QVERIFY(cleanup->isEmpty()); cleanup->clear(); }
     else cleanup.reset();
     QCOMPARE(live(), baseline + fillerBytes);
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
     freeFiller.dismiss();
-    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1);
+    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1);
     QCOMPARE(live(), baseline);
     parent.reset();
-    QVERIFY(lifetime.isNull());
+    QVERIFY(lifetime.expired());
 }
 
 void KisPageStoreReferenceTest::metadataReadProtectionReclaimerIdentity()
@@ -4452,7 +4452,7 @@ void KisPageStoreReferenceTest::readinessRetainsOriginalPayer()
 {
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 64 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     auto warm1 = parent->reserve({}, nullptr), warm2 = parent->reserve({}, nullptr);
     QVERIFY(warm1.isValid() && warm2.isValid()); warm1.release(); warm2.release();
     const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
@@ -4476,8 +4476,8 @@ void KisPageStoreReferenceTest::readinessRetainsOriginalPayer()
         QCOMPARE(registry.watchTerminal(ticket, KisPageReadinessCallback([&] { ++calls; }, &sibling), &second),
                  KisPageReadinessStatus::Waiting);
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
-        const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+        void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+        const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY(registry.complete(ticket, KisCompletionStatus::Succeeded));
         QCOMPARE(calls, 2);
@@ -4494,7 +4494,7 @@ void KisPageStoreReferenceTest::readinessRetainsOriginalPayer()
 
 void KisPageStoreReferenceTest::retainedDeadlineInFlightAfterController()
 {
-    auto parent = QSharedPointer<KisBackingBudgetController>::create();
+    auto parent = std::make_shared<KisBackingBudgetController>();
     auto child = std::make_unique<KisBackingBudgetController>();
     QVERIFY(child->configureSharedNonPayloadBudget(parent));
     QSemaphore entered, resume, finished;
@@ -4505,12 +4505,12 @@ void KisPageStoreReferenceTest::retainedDeadlineInFlightAfterController()
     QVERIFY(entered.tryAcquire(1, 5000));
     delay.reset();
     child.reset();
-    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    const std::weak_ptr<KisBackingBudgetController> lifetime(parent);
     parent.reset();
-    QVERIFY(!lifetime.isNull());
+    QVERIFY(!lifetime.expired());
     resume.release();
     QVERIFY(finished.tryAcquire(1, 5000));
-    QTRY_VERIFY(lifetime.isNull());
+    QTRY_VERIFY(lifetime.expired());
 }
 
 void KisPageStoreReferenceTest::preparedDeadlineRearmsAtCapacity()
@@ -4568,7 +4568,7 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
 {
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 32 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     auto warm1 = parent->reserve({}, nullptr);
     auto warm2 = parent->reserve({}, nullptr);
     QVERIFY(warm1.isValid() && warm2.isValid());
@@ -4601,9 +4601,9 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
         QVERIFY(sibling.configureSharedNonPayloadBudget(parent));
         auto storage = KisMutationStorageAllocator<int>::retained(&sibling);
         const size_t remaining = size_t(limits.metadataArenaBytes - live());
-        void *filler = kisAllocateMutationStorage(parent.data(), remaining, 1);
+        void *filler = kisAllocateMutationStorage(parent.get(), remaining, 1);
         const auto release = qScopeGuard([&] {
-            kisFreeMutationStorage(parent.data(), filler, remaining, 1);
+            kisFreeMutationStorage(parent.get(), filler, remaining, 1);
         });
         QCOMPARE(live(), limits.metadataArenaBytes);
         QVERIFY_EXCEPTION_THROWN(storage.allocate(1), std::bad_alloc);
@@ -4621,16 +4621,16 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
             KisMutationStorageAllocator<Value>::retained(&child), &destroyed);
         weak = strong;
     }
-    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    const std::weak_ptr<KisBackingBudgetController> lifetime(parent);
     parent.reset();
-    QVERIFY(!lifetime.isNull()); // Original parent survives; no replacement pool.
+    QVERIFY(!lifetime.expired()); // Original parent survives; no replacement pool.
     weak.reset();
-    QVERIFY(lifetime.isNull());
+    QVERIFY(lifetime.expired());
 }
 
 void KisPageStoreReferenceTest::retainedStorageConcurrentTeardown()
 {
-    auto parent = QSharedPointer<KisBackingBudgetController>::create();
+    auto parent = std::make_shared<KisBackingBudgetController>();
     auto warm = parent->reserve({}, nullptr);
     auto warmSibling = parent->reserve({}, nullptr);
     QVERIFY(warm.isValid() && warmSibling.isValid());
@@ -4660,7 +4660,7 @@ void KisPageStoreReferenceTest::retainedStorageConcurrentTeardown()
 
 void KisPageStoreReferenceTest::retainedWakeInFlightAfterController()
 {
-    auto parent = QSharedPointer<KisBackingBudgetController>::create();
+    auto parent = std::make_shared<KisBackingBudgetController>();
     auto child = std::make_unique<KisBackingBudgetController>();
     QVERIFY(child->configureSharedNonPayloadBudget(parent));
     QSemaphore entered, resume, finished;
@@ -4672,18 +4672,19 @@ void KisPageStoreReferenceTest::retainedWakeInFlightAfterController()
     QVERIFY(entered.tryAcquire(1, 5000));
     wake.reset();
     child.reset();
-    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    const std::weak_ptr<KisBackingBudgetController> lifetime(parent);
     parent.reset();
-    QVERIFY(!lifetime.isNull());
+    QVERIFY(!lifetime.expired());
     resume.release();
     QVERIFY(finished.tryAcquire(1, 5000));
-    QTRY_VERIFY(lifetime.isNull());
+    QTRY_VERIFY(lifetime.expired());
 }
 
 void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
 {
     QString error;
     quint64 oneCapacityBatch = 0;
+    quint64 pageNodeBytes = 0;
     {
         KisBackingBudgetController budget;
         std::array<KisBackingBudgetReservation, 8> slots;
@@ -4703,6 +4704,10 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         QVERIFY(footprint.owningCapacityBytes > 0);
         QCOMPARE(footprint.exactVersionIndex.capacity, quint64(64));
         QCOMPARE(footprint.physicalSlotIndex.capacity, quint64(64));
+        const auto second = pageVersion(1, 1);
+        QVERIFY(metadata.registerPage(initialPageState(second, replica(second, 1, 1, 2))));
+        pageNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - oneCapacityBatch;
+        QVERIFY(pageNodeBytes > 0); // Actual page map node, without another arena/index batch.
     }
 
     KisPageBackingLimits limits;
@@ -4727,7 +4732,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         }
         const auto before = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        QCOMPARE(before.live.cpuRam, oneCapacityBatch);
+        QCOMPARE(before.live.cpuRam, oneCapacityBatch + 63 * pageNodeBytes);
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - before.live.cpuRam);
         void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
         const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
@@ -4736,7 +4741,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         const auto rejected = pageVersion(64, 1);
         QVERIFY(!metadata.registerPage(
             initialPageState(rejected, replica(rejected, 1, 1, 65)), &error));
-        QVERIFY(error.contains(QStringLiteral("budget")));
+        QVERIFY(error.contains(QStringLiteral("storage")) || error.contains(QStringLiteral("budget")));
         QCOMPARE(metadata.pageCount(), qsizetype(64));
         const auto after = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
@@ -4754,7 +4759,7 @@ void KisPageStoreReferenceTest::metadataConfigurationStorageRefusal()
     QFETCH(bool, firstAllocation);
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 4 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     {
         // A cold facade must allow the original shared-budget/limit setup
         // before admitting its runtime core through configure().
@@ -4837,7 +4842,7 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     QFETCH(bool, mutation);
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 4 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> warm;
     for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : warm) slot.release();
@@ -4886,10 +4891,10 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     budget.reset();
     QVERIFY(live() > baseline);
     const auto retained = live();
-    const QWeakPointer<KisBackingBudgetController> lifetime(parent);
+    const std::weak_ptr<KisBackingBudgetController> lifetime(parent);
     parent.reset();
-    QVERIFY(!lifetime.isNull());
-    parent = lifetime.toStrongRef();
+    QVERIFY(!lifetime.expired());
+    parent = lifetime.lock();
     QVERIFY(parent);
     if (install) QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
     else candidate = {};
@@ -4897,7 +4902,7 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     QCOMPARE(live(), baseline);
     QVERIFY(cleanup.isEmpty());
     parent.reset();
-    QVERIFY(lifetime.isNull());
+    QVERIFY(lifetime.expired());
 }
 
 void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
@@ -4905,7 +4910,7 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
     using Arena = KisShardSlotArena<int, 128>;
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 64 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     KisBackingBudgetController budget(limits);
     QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     auto storage = KisMutationStorageAllocator<char>::retained(&budget);
@@ -6212,7 +6217,7 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
 void KisPageStoreReferenceTest::publicationDirectoryStorageLifetime()
 {
     KisPageBackingLimits limits; limits.metadataArenaBytes = 256 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> warm;
     for (auto &slot : warm) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : warm) slot.release();
@@ -6228,9 +6233,9 @@ void KisPageStoreReferenceTest::publicationDirectoryStorageLifetime()
     QCOMPARE(heads.size(), size_t(1));
     const auto storage = live() - before; QVERIFY(storage > 0);
     const auto fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
     {
-        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+        const auto freeFiller = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
         QCOMPARE(live(), limits.metadataArenaBytes);
         KisPageMetadataCoordinator::PublicationInfo info;
         QVERIFY(metadata->queryPublication(page.key, page.versions.last().version, &info));
@@ -6499,7 +6504,7 @@ void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
 {
     QFETCH(bool, install);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     KisBackingBudgetController budget(limits);
     QVERIFY(budget.configureSharedNonPayloadBudget(parent));
     KisPageMetadataCoordinator metadata;
@@ -6522,15 +6527,15 @@ void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
     const quint64 before = live(budget);
     constexpr quint64 candidateRoom = 64 * 1024;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live(*parent) - candidateRoom);
-    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); });
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); });
     auto candidate = prepare(); QVERIFY(candidate.isValid());
     QVERIFY(live(budget) > before && live(budget) - before < candidateRoom);
     qInfo() << "BR1_DETACHMENT_CANDIDATE_BYTES" << live(budget) - before;
     QCOMPARE(metadata.footprint().pageActivities, quint64(324));
     const size_t remainingBytes = size_t(limits.metadataArenaBytes - live(*parent));
-    void *remaining = kisAllocateMutationStorage(parent.data(), remainingBytes, 1);
-    const auto releaseRemaining = qScopeGuard([&] { kisFreeMutationStorage(parent.data(), remaining, remainingBytes, 1); });
+    void *remaining = kisAllocateMutationStorage(parent.get(), remainingBytes, 1);
+    const auto releaseRemaining = qScopeGuard([&] { kisFreeMutationStorage(parent.get(), remaining, remainingBytes, 1); });
     QCOMPARE(live(*parent), limits.metadataArenaBytes);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (install) QVERIFY(metadata.installMutation(std::move(candidate), tx, nullptr, &cleanup));
@@ -6556,7 +6561,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     QFETCH(int, kind);
     QFETCH(int, outcome);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
-    auto parent = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
     std::array<KisBackingBudgetReservation, 8> parentSlots;
     for (auto &slot : parentSlots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
     for (auto &slot : parentSlots) slot.release();
@@ -6612,10 +6617,11 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         return budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
     const quint64 before = childLive();
+    const auto beforeIndexes = metadata->footprint().owningCapacityBytes;
     size_t fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
-    void *filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    void *filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
     const auto freeFiller = qScopeGuard([&] {
-        if (filler) kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1);
+        if (filler) kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1);
     });
     QCOMPARE(parentLive(), limits.metadataArenaBytes);
     auto refused = prepare(); QVERIFY(!refused.isValid()); QVERIFY(!refused.needsReprepare());
@@ -6623,7 +6629,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     QCOMPARE(metadata->footprint().pageActivities, quint64(0));
     KisPageStateSnapshot actual;
     QVERIFY(metadata->pageSnapshot(page.key, &actual)); comparePageRecords(actual, page);
-    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     auto candidate = prepare(); QVERIFY(candidate.isValid());
     QVERIFY(childLive() > before);
     QCOMPARE(metadata->footprint().pageActivities, quint64(1));
@@ -6649,7 +6655,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         if (kind == 3) expected = KisPageStateMachine().apply(page, transition);
     }
     fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
-    filler = kisAllocateMutationStorage(parent.data(), fillerBytes, 1);
+    filler = kisAllocateMutationStorage(parent.get(), fillerBytes, 1);
     QCOMPARE(parentLive(), limits.metadataArenaBytes);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     const bool success = outcome != 1 && (outcome != 2 || kind == 3);
@@ -6671,7 +6677,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
         QCOMPARE(metadata->footprint().overflowArena.outstandingReservations, quint64(0));
     } // A rejected candidate retains its reservations until deferred cleanup.
-    kisFreeMutationStorage(parent.data(), filler, fillerBytes, 1); filler = nullptr;
+    kisFreeMutationStorage(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     if (outcome == 3) {
         metadata.reset(); budget.reset();
         QVERIFY(parentLive() > parentBaseline); // Original arenas and control storage remain physical.
@@ -6682,7 +6688,11 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         QCOMPARE(metadata->footprint().versionArena.outstandingReservations, quint64(0));
         QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
         QCOMPARE(metadata->footprint().overflowArena.outstandingReservations, quint64(0));
-        QCOMPARE(childLive(), before + readerStorage);
+        // A successful recoverable write retains its actual activity node.
+        // Refused/cancelled candidates must release that same sparse node.
+        const auto retainedIndexBytes = metadata->footprint().owningCapacityBytes - beforeIndexes;
+        if (!success || kind != 1) QCOMPARE(retainedIndexBytes, quint64(0));
+        QCOMPARE(childLive(), before + readerStorage + retainedIndexBytes);
         metadata.reset(); budget.reset();
         QCOMPARE(parentLive(), parentBaseline);
     }
@@ -7195,7 +7205,7 @@ void KisPageStoreReferenceTest::sharedNonPayloadBudgetBoundsStoresAndReleases()
     {
         KisPageBackingLimits tinyLimits;
         tinyLimits.metadataArenaBytes = 1;
-        auto tiny = QSharedPointer<KisBackingBudgetController>::create(tinyLimits);
+        auto tiny = std::make_shared<KisBackingBudgetController>(tinyLimits);
         KisBackingBudgetController rejected;
         QString tinyError;
         QVERIFY(!rejected.configureSharedNonPayloadBudget(tiny, &tinyError));
@@ -7208,7 +7218,7 @@ void KisPageStoreReferenceTest::sharedNonPayloadBudgetBoundsStoresAndReleases()
 
     KisPageBackingLimits sharedLimits;
     sharedLimits.metadataArenaBytes = 8192;
-    auto shared = QSharedPointer<KisBackingBudgetController>::create(sharedLimits);
+    auto shared = std::make_shared<KisBackingBudgetController>(sharedLimits);
     auto firstWarm = shared->reserve({}, nullptr);
     auto secondWarm = shared->reserve({}, nullptr);
     QVERIFY(firstWarm.isValid() && secondWarm.isValid());
@@ -7522,7 +7532,7 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     struct Source final : KisPageReplicaSource {
         Source() : KisPageReplicaSource({1}, {1}, allocationDescriptor()) {}
     };
-    entry.setInitializationSource(QSharedPointer<Source>::create());
+    entry.setInitializationSource(std::make_shared<Source>());
     QVERIFY(!writes.erase(slot));
     entry.setInitializationSource({});
     QVERIFY(writes.erase(slot));
@@ -7732,7 +7742,8 @@ void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
 
 void KisPageStoreReferenceTest::admissionStorageRevalidatesGrowth()
 {
-    KisBackingBudgetController budget;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 256 * 1024;
+    KisBackingBudgetController budget(limits);
     auto accountingSlot = budget.reserve({}, nullptr);
     QVERIFY(accountingSlot.isValid()); accountingSlot.release();
     const quint64 controllerStorage = budget.usage().buckets[
@@ -7751,8 +7762,26 @@ void KisPageStoreReferenceTest::admissionStorageRevalidatesGrowth()
         stale.build();
         QVERIFY(!table.install(stale));
         QCOMPARE(*table.find(2), quint64(1234));
+        const auto preparedBytes = bytes();
+        const size_t fillerBytes = size_t(limits.metadataArenaBytes - preparedBytes);
+        void *filler = kisAllocateMutationStorage(&budget, fillerBytes, 1);
+        const auto releaseFiller = qScopeGuard([&] { kisFreeMutationStorage(&budget, filler, fillerBytes, 1); });
+        for (int churn = 0; churn < 6; ++churn) {
+            // More than the former three attempts, at actual hard capacity.
+            // Rebuild retains one candidate and captures current values.
+            QVERIFY(table.capture(stale, 1));
+            stale.build();
+            *table.find(2) += 1; table.changed();
+            QVERIFY(!table.install(stale, 1));
+            QCOMPARE(bytes(), limits.metadataArenaBytes);
+        }
+        *table.find(2) = 1234; table.changed();
+        QVERIFY(table.capture(stale, 1)); stale.build();
+        QVERIFY(table.install(stale, 1));
+        QCOMPARE(*table.find(2), quint64(1234));
+        kisFreeMutationStorage(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
         stale = {};
-        QCOMPARE(bytes(), controllerStorage);
+        QVERIFY(bytes() > controllerStorage && bytes() < preparedBytes);
         for (quint64 i = 5; i <= 1000; ++i) {
             if (!table.canInsert(1)) {
                 auto growth = table.planGrowth(1);
@@ -7930,8 +7959,8 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     limits.residentHistoryBytes.cpuRam = 4096;
     KisBackingBudgetController budget(limits);
     owner.attachBackingBudget(budget);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = {1};
     providerConfig.providerEpoch = {1};
@@ -8150,7 +8179,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     QVERIFY(!defaults.readBuffer(surfaceEpochState({1}, 2)));
     defaults.clearReadCache();
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::OptionalCache)].live.cpuRam, 4096u);
-    firstDefault.clear();
+    firstDefault.reset();
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::OptionalCache)].live.cpuRam, 0u);
     QVERIFY(defaults.readBuffer(surfaceEpochState({1}, 2)));
 }
@@ -8700,7 +8729,7 @@ void KisPageStoreReferenceTest::materializationOracleAndPublicationGuards()
 
 void KisPageStoreReferenceTest::fakeCpuProviderSupportsReorderingAndFailure()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     FakeCpuReplicaProvider provider(completions);
     QVERIFY(provider.capabilities().isValid());
 
@@ -8860,7 +8889,7 @@ void KisPageStoreReferenceTest::fakeCpuProviderSupportsReorderingAndFailure()
 
 void KisPageStoreReferenceTest::productionCpuProviderPreservesFormatDefaultAndCowBytes()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     KisCpuPageReplicaProvider provider;
     KisCpuResidentReplicaProviderConfig config;
     config.provider = KisReplicaProviderId{41};
@@ -8961,8 +8990,8 @@ void KisPageStoreReferenceTest::productionCpuProviderPreservesFormatDefaultAndCo
 
 void KisPageStoreReferenceTest::tiles3ProviderUsesExistingTileStoreBehindLeases()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{81};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -9042,7 +9071,7 @@ void KisPageStoreReferenceTest::tiles3NativeCopyPreservesSourceAndRejectsInvalid
 {
     const KisPageAccessRequirement cpu{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
     for (int bpp : {4, 8, 16}) {
-        auto completions = QSharedPointer<KisCompletionRegistry>::create();
+        auto completions = std::make_shared<KisCompletionRegistry>();
         KisTiles3PageReplicaProvider provider;
         auto descriptor = allocationDescriptor();
         descriptor.format.pixelStride = bpp;
@@ -9153,7 +9182,7 @@ void KisPageStoreReferenceTest::tiles3NativeCopyPreservesSourceAndRejectsInvalid
 
 void KisPageStoreReferenceTest::tiles3SourceSurvivesFailedPreparation()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     KisTiles3PageReplicaProvider provider;
     const auto descriptor = allocationDescriptor();
     QVERIFY(provider.configure({{82}, {1}, descriptor.minimumByteSize()}, completions));
@@ -9193,17 +9222,17 @@ void KisPageStoreReferenceTest::tiles3SourceSurvivesFailedPreparation()
     QCOMPARE(provider.tileDataForLease(lease), tile);
     provider.releaseAccess(std::move(access), {});
     QVERIFY(provider.retire({1006}, adopted.replica, {}).isValid());
-    input.clear();
+    input.reset();
     // Source and allocation ownership were both released exactly once.
     QVERIFY(!tile->deref());
 }
 
 void KisPageStoreReferenceTest::pageStoreNativeCopyIsLockExternalRetainedAndFailClosed()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto native = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto native = std::make_shared<KisTiles3PageReplicaProvider>();
     QVERIFY(native->configure({{83}, {1}, 1024 * 1024}, completions));
-    auto provider = QSharedPointer<ReentrantProbeCpuProvider>::create(native);
+    auto provider = std::make_shared<ReentrantProbeCpuProvider>(native);
     provider->enableNativeCopy = true;
     const auto descriptor = allocationDescriptor();
     const auto initialVersion = pageVersion(1, 1);
@@ -9299,7 +9328,7 @@ void KisPageStoreReferenceTest::pageStoreNativeCopyIsLockExternalRetainedAndFail
 
 void KisPageStoreReferenceTest::cpuProviderPreserves4_8_16ByteFormats()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     KisCpuPageReplicaProvider provider;
     KisCpuResidentReplicaProviderConfig config;
     config.provider = KisReplicaProviderId{76};
@@ -9362,8 +9391,8 @@ void KisPageStoreReferenceTest::cpuProviderPreserves4_8_16ByteFormats()
 
 void KisPageStoreReferenceTest::ownerLedgerVerifiesTerminalProviderIdentity()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     QVERIFY(provider->configure({{51}, {1}, 1024 * 1024}, completions));
     KisPageOwnerLedger owner; QVERIFY(owner.configure(completions));
     QVERIFY(owner.registerProvider(provider));
@@ -9378,7 +9407,7 @@ void KisPageStoreReferenceTest::ownerLedgerVerifiesTerminalProviderIdentity()
     auto foreign = result; foreign.replica.providerEpoch.value++;
     QVERIFY(!owner.verifyTerminalProviderResult(operation, foreign).isValid());
     auto unknown = result;
-    auto other = QSharedPointer<KisCompletionRegistry>::create();
+    auto other = std::make_shared<KisCompletionRegistry>();
     unknown.completion = other->allocatePending(other->registerSource(KisCompletionDomain::CpuJob));
     QVERIFY(other->complete(unknown.completion, KisCompletionStatus::Succeeded));
     QVERIFY(!owner.verifyTerminalProviderResult(operation, unknown).isValid());
@@ -9408,8 +9437,8 @@ void KisPageStoreReferenceTest::ownerLedgerVerifiesTerminalProviderIdentity()
 
 void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<FakeCpuReplicaProvider>::create(completions);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<FakeCpuReplicaProvider>(completions);
     KisBackingBudgetController budget;
     KisPageOwnerLedger owner;
     QVERIFY(owner.configure(completions));
@@ -9475,8 +9504,8 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
 
 void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{51};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -9671,7 +9700,7 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
     QVERIFY(!owner.revokePreparedPage(proof));
     QCOMPARE(committed.root.snapshot().manifest.first().generation.value, quint64(2));
 
-    auto ambiguousProvider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto ambiguousProvider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig ambiguousConfig = providerConfig;
     ambiguousConfig.provider = KisReplicaProviderId{52};
     QVERIFY2(ambiguousProvider->configure(ambiguousConfig, completions, &error), qPrintable(error));
@@ -9681,8 +9710,8 @@ void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()
 
 void KisPageStoreReferenceTest::pageStoreCpuFacadeCommitsCowWithoutMixedEpoch()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{61};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -9712,8 +9741,8 @@ void KisPageStoreReferenceTest::pageStoreCpuFacadeCommitsCowWithoutMixedEpoch()
     KisPageStore store;
     QVERIFY2(store.configure(initial, completions, 4, &error), qPrintable(error));
     QVERIFY(!store.isOperational());
-    auto asyncBridge = QSharedPointer<StubTransferBridge>::create(false);
-    auto syncBridge = QSharedPointer<StubTransferBridge>::create(true);
+    auto asyncBridge = std::make_shared<StubTransferBridge>(false);
+    auto syncBridge = std::make_shared<StubTransferBridge>(true);
     QVERIFY(!store.registerTransferBridge(asyncBridge));
     QVERIFY(store.registerTransferBridge(syncBridge));
     QVERIFY(!store.registerTransferBridge(syncBridge));
@@ -9885,8 +9914,8 @@ void KisPageStoreReferenceTest::pageStoreCpuFacadeCommitsCowWithoutMixedEpoch()
 
 void KisPageStoreReferenceTest::pageStoreChainsRepeatedWritesWithinTransaction()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{62};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10021,7 +10050,8 @@ void KisPageStoreReferenceTest::pageStoreChainsRepeatedWritesWithinTransaction()
     const KisRetainedImageEpochSnapshot retained = store.captureRetainedEpoch();
     QVERIFY(retained.isValid());
     QVERIFY(!store.closeSession(&error));
-    QVERIFY(error.contains(QStringLiteral("snapshots=1")));
+    QCOMPARE(error, QStringLiteral("PageStore session still owns capabilities"));
+    QVERIFY(store.sessionStats().hasOutstandingCapabilities());
     QVERIFY(store.releaseSnapshot(retained.token));
 
     KisReadRequest closeBlockedRequest =
@@ -10030,7 +10060,8 @@ void KisPageStoreReferenceTest::pageStoreChainsRepeatedWritesWithinTransaction()
     KisReadLease closeBlockedRead = store.resolve(closeBlockedRequest, closeBlockedRequest.readiness);
     QVERIFY(closeBlockedRead.isValid());
     QVERIFY(!store.closeSession(&error));
-    QVERIFY(error.contains(QStringLiteral("readLeases=1")));
+    QCOMPARE(error, QStringLiteral("PageStore session still owns capabilities"));
+    QVERIFY(store.sessionStats().hasOutstandingCapabilities());
     store.release(std::move(closeBlockedRead));
 
     QVERIFY2(store.closeSession(&error), qPrintable(error));
@@ -10046,8 +10077,8 @@ void KisPageStoreReferenceTest::pageStoreChainsRepeatedWritesWithinTransaction()
 
 void KisPageStoreReferenceTest::pageStoreLeaseOutlivesOwnerSafely()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{63};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10106,15 +10137,15 @@ void KisPageStoreReferenceTest::pageStoreLeaseOutlivesOwnerSafely()
 
 void KisPageStoreReferenceTest::pageStoreCallsProviderOutsideGlobalLock()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto delegate = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto delegate = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{64};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
     providerConfig.budgetBytes = 1024 * 1024;
     QString error;
     QVERIFY2(delegate->configure(providerConfig, completions, &error), qPrintable(error));
-    auto provider = QSharedPointer<ReentrantProbeCpuProvider>::create(delegate);
+    auto provider = std::make_shared<ReentrantProbeCpuProvider>(delegate);
 
     KisPageAllocationDescriptor descriptor = allocationDescriptor();
     descriptor.initialization = KisPageInitialization::DefaultPixel;
@@ -10208,15 +10239,15 @@ void KisPageStoreReferenceTest::pageStoreCallsProviderOutsideGlobalLock()
 
 void KisPageStoreReferenceTest::pageStoreShutdownRetriesFailedReplicaRetirement()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto delegate = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto delegate = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{66};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
     providerConfig.budgetBytes = 1024 * 1024;
     QString error;
     QVERIFY2(delegate->configure(providerConfig, completions, &error), qPrintable(error));
-    auto provider = QSharedPointer<ReentrantProbeCpuProvider>::create(delegate);
+    auto provider = std::make_shared<ReentrantProbeCpuProvider>(delegate);
 
     KisPageAllocationDescriptor descriptor = allocationDescriptor();
     descriptor.initialization = KisPageInitialization::DefaultPixel;
@@ -10245,7 +10276,7 @@ void KisPageStoreReferenceTest::pageStoreShutdownRetriesFailedReplicaRetirement(
 
     provider->failNextRetire = true;
     QVERIFY(!store.closeSession(&error));
-    QVERIFY(error.contains(QStringLiteral("retirement failed")));
+    QCOMPARE(error, QStringLiteral("PageStore shutdown retirement is pending"));
     QVERIFY(!store.isOperational());
     KisPageStoreSessionStats stats = store.sessionStats();
     QVERIFY(!stats.closed);
@@ -10262,8 +10293,8 @@ void KisPageStoreReferenceTest::pageStoreShutdownRetriesFailedReplicaRetirement(
 
 void KisPageStoreReferenceTest::cpuAccessSessionScopesOldAndWritablePageLeases()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{65};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10378,8 +10409,8 @@ void KisPageStoreReferenceTest::cpuAccessSessionScopesOldAndWritablePageLeases()
 
 void KisPageStoreReferenceTest::pageStoreMementoOwnsBeforeAfterRetentionAndPurge()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{76};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10486,8 +10517,8 @@ void KisPageStoreReferenceTest::pageStoreMementoOwnsBeforeAfterRetentionAndPurge
 
 void KisPageStoreReferenceTest::cpuSurfaceOpsPreserveRectCopyAndSparseClear()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{77};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10578,8 +10609,8 @@ void KisPageStoreReferenceTest::cpuSurfaceOpsPreserveRectCopyAndSparseClear()
 
 void KisPageStoreReferenceTest::sparseDefaultPageFirstWriteAndUndoStayVersioned()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{66};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10751,8 +10782,8 @@ void KisPageStoreReferenceTest::sparseDefaultPageFirstWriteAndUndoStayVersioned(
 
 void KisPageStoreReferenceTest::virtualDefaultRemovalPreservesReaderAndDefaultRevision()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig config;
     config.provider = KisReplicaProviderId{166};
     config.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10850,8 +10881,8 @@ void KisPageStoreReferenceTest::virtualDefaultRemovalPreservesReaderAndDefaultRe
 
 void KisPageStoreReferenceTest::surfaceDefaultAndExtentMutateAtomicallyWithEpoch()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{67};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10951,8 +10982,8 @@ void KisPageStoreReferenceTest::surfaceDefaultAndExtentMutateAtomicallyWithEpoch
 
 void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorityOnFailure()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{69};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -10960,7 +10991,7 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
     QString error;
     QVERIFY2(provider->configure(providerConfig, completions, &error), qPrintable(error));
 
-    auto archive = QSharedPointer<KisUnifiedSsdPageStore>::create();
+    auto archive = std::make_shared<KisUnifiedSsdPageStore>();
     KisLegacySwapArchiveConfig archiveConfig;
     archiveConfig.archive = KisReplicaProviderId{70};
     archiveConfig.epoch = KisReplicaProviderEpoch{1};
@@ -11067,15 +11098,15 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
 
 void KisPageStoreReferenceTest::asyncArchiveCompletionCancellationAndShutdownAreFailClosed()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{73};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
     providerConfig.budgetBytes = 1024 * 1024;
     QString error;
     QVERIFY2(provider->configure(providerConfig, completions, &error), qPrintable(error));
-    auto archive = QSharedPointer<FakeAsyncExactArchive>::create(completions);
+    auto archive = std::make_shared<FakeAsyncExactArchive>(completions);
     QVERIFY(archive->isOperational());
 
     KisImageEpochSnapshot initial;
@@ -11258,8 +11289,8 @@ void KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithin
 
 void KisPageStoreReferenceTest::checkpointRoundTripPreservesWideFormatAndSparseDefaults()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{74};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -11334,8 +11365,8 @@ void KisPageStoreReferenceTest::checkpointRoundTripPreservesWideFormatAndSparseD
     KisPageStoreCheckpoint rejected;
     QVERIFY(!KisPageStoreCheckpointCodec::decode(corrupted, &rejected, &error));
 
-    auto reopenedCompletions = QSharedPointer<KisCompletionRegistry>::create();
-    auto reopenedProvider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto reopenedCompletions = std::make_shared<KisCompletionRegistry>();
+    auto reopenedProvider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig reopenedProviderConfig;
     reopenedProviderConfig.provider = KisReplicaProviderId{75};
     reopenedProviderConfig.providerEpoch = KisReplicaProviderEpoch{1};
@@ -11368,8 +11399,8 @@ void KisPageStoreReferenceTest::checkpointRoundTripPreservesWideFormatAndSparseD
 
 void KisPageStoreReferenceTest::randomAccessorMatchesTiles3AcrossNegativePageBoundary()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{68};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};

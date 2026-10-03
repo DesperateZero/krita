@@ -8,16 +8,16 @@
 #define KIS_PAGE_DEFAULT_STORAGE_P_H
 
 #include "KisPageStoreTypes.h"
+#include "KisMutationStorage_p.h"
 
 #include <QAtomicInteger>
-#include <QHash>
 #include <QMutex>
-#include <QSet>
-#include <QSharedPointer>
 #include <QWaitCondition>
 
 #include <cstddef>
-#include <deque>
+#include <list>
+#include <set>
+#include <tuple>
 
 class KisBackingBudgetController;
 
@@ -42,8 +42,8 @@ private:
 
     struct Statistics;
     size_t alignment = alignof(std::max_align_t);
-    QSharedPointer<Statistics> statistics;
-    KisBackingBudgetController *budget = nullptr;
+    std::shared_ptr<Statistics> statistics;
+    boost::intrusive_ptr<KisMutationStorageOwner> storageOwner;
 };
 
 struct KisPageDefaultStorageSnapshot
@@ -77,7 +77,8 @@ public:
     static constexpr quint64 ReadCacheByteBudget = 8 * 1024 * 1024;
     static constexpr qsizetype PreparationEntryBudget = 64;
 
-    explicit KisPageDefaultStorage(KisBackingBudgetController &budget);
+    explicit KisPageDefaultStorage(KisBackingBudgetController &budget,
+        const KisMutationStorageAllocator<KisPageDefaultStorage> &storage = KisMutationStorageAllocator<KisPageDefaultStorage>{});
     ~KisPageDefaultStorage() = default;
 
     KisPageDefaultStorage(const KisPageDefaultStorage &) = delete;
@@ -85,7 +86,7 @@ public:
     KisPageDefaultStorage(KisPageDefaultStorage &&) = delete;
     KisPageDefaultStorage &operator=(KisPageDefaultStorage &&) = delete;
 
-    QSharedPointer<const KisCpuDefaultReadBuffer> readBuffer(
+    std::shared_ptr<const KisCpuDefaultReadBuffer> readBuffer(
         const KisSurfaceEpochState &surface);
     void clearReadCache();
 
@@ -99,21 +100,30 @@ public:
 
 private:
     using ReadCacheKey = QPair<quint64, quint64>;
+    struct ReadCacheEntry {
+        ReadCacheKey key;
+        std::shared_ptr<const KisCpuDefaultReadBuffer> buffer;
+    };
+    struct PreparationLess {
+        bool operator()(const KisPageKey &a, const KisPageKey &b) const {
+            return std::tie(a.surface.value, a.page.row, a.page.column)
+                 < std::tie(b.surface.value, b.page.row, b.page.column);
+        }
+    };
 
-    static QSharedPointer<const KisCpuDefaultReadBuffer> createReadBuffer(
+    static std::shared_ptr<const KisCpuDefaultReadBuffer> createReadBuffer(
         const KisSurfaceEpochState &surface,
-        const QSharedPointer<KisCpuDefaultReadBuffer::Statistics> &statistics,
+        const std::shared_ptr<KisCpuDefaultReadBuffer::Statistics> &statistics,
         KisBackingBudgetController &budget);
 
     mutable QMutex m_cacheMutex;
-    QHash<ReadCacheKey, QSharedPointer<const KisCpuDefaultReadBuffer>> m_readBuffers;
-    std::deque<ReadCacheKey> m_readBufferOrder;
+    std::list<ReadCacheEntry, KisMutationStorageAllocator<ReadCacheEntry>> m_readBuffers;
     quint64 m_readBufferBytes = 0;
-    QSharedPointer<KisCpuDefaultReadBuffer::Statistics> m_statistics;
+    std::shared_ptr<KisCpuDefaultReadBuffer::Statistics> m_statistics;
     KisBackingBudgetController &m_budget;
 
     // Guarded by the PageStore owner mutex, not m_cacheMutex.
-    QSet<KisPageKey> m_preparations;
+    std::set<KisPageKey, PreparationLess, KisMutationStorageAllocator<KisPageKey>> m_preparations;
     QWaitCondition m_preparationChanged;
     qsizetype m_peakPreparations = 0;
     quint64 m_preparationWaits = 0;

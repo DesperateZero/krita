@@ -44,7 +44,8 @@ struct KRITAIMAGE_EXPORT KisPageStoreMemento
 class KRITAIMAGE_EXPORT KisPageStoreMementoManager
 {
 public:
-    KisPageStoreMementoManager();
+    explicit KisPageStoreMementoManager(
+        const KisMutationStorageAllocator<KisPageStoreMementoManager> &storage = KisMutationStorageAllocator<KisPageStoreMementoManager>{});
     ~KisPageStoreMementoManager();
 
     KisPageStoreMementoManager(const KisPageStoreMementoManager &) = delete;
@@ -74,7 +75,8 @@ private:
         bool before,
         QString *error);
     class Private;
-    QScopedPointer<Private> d;
+    struct PrivateReleaser { static void cleanup(Private *); };
+    QScopedPointer<Private, PrivateReleaser> d;
 };
 
 #endif // KIS_PAGE_STORE_MEMENTO_MANAGER_H

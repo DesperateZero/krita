@@ -151,8 +151,14 @@ struct CompletionSourceState
 class KisCompletionRegistry::Private
 {
 public:
-    explicit Private(QSharedPointer<KisBackingBudgetController> owner)
-        : budget(std::move(owner)), storage(KisMutationStorageAllocator<CompletionInterval>::retained(budget.data()))
+    static KisMutationStorageAllocator<CompletionInterval> prepareStorage(
+        KisBackingBudgetController &budget, const std::shared_ptr<KisBackingBudgetController> &process)
+    {
+        if (process && !budget.configureSharedNonPayloadBudget(process)) throw std::bad_alloc();
+        return KisMutationStorageAllocator<CompletionInterval>::retained(&budget);
+    }
+    explicit Private(const std::shared_ptr<KisBackingBudgetController> &process)
+        : storage(prepareStorage(budget, process))
         , sources(std::less<quint64>{}, KisMutationStorageAllocator<std::pair<const quint64, CompletionSourceState>>(storage)) {}
     void releaseEmptyReadiness(quint64 source, quint64 value, const KisPageReadinessState *expected)
     {
@@ -169,7 +175,7 @@ public:
             found->second.readiness.erase(entry);
         } // Actual record/state/capture frees remain outside the registry gate.
     }
-    QSharedPointer<KisBackingBudgetController> budget;
+    KisBackingBudgetController budget;
     KisMutationStorageAllocator<CompletionInterval> storage;
     mutable QMutex mutex;
     quint64 registryId = KisPageStoreDetail::allocateMonotonicId<quint64>(
@@ -179,13 +185,18 @@ public:
         KisMutationStorageAllocator<std::pair<const quint64, CompletionSourceState>>> sources;
 };
 
-KisCompletionRegistry::KisCompletionRegistry(const QSharedPointer<KisBackingBudgetController> &processBudget)
+KisCompletionRegistry::KisCompletionRegistry(const std::shared_ptr<KisBackingBudgetController> &processBudget,
+    const KisMutationStorageAllocator<KisCompletionRegistry> &storage)
 {
-    auto budget = QSharedPointer<KisBackingBudgetController>::create();
-    if (processBudget && !budget->configureSharedNonPayloadBudget(processBudget)) throw std::bad_alloc();
-    // The source owner is independent of any one Store. Its actual control
-    // block remains charged through late weak callbacks after body teardown.
-    d = std::allocate_shared<Private>(KisMutationStorageAllocator<Private>::retained(budget.data()), budget);
+    const auto parent = processBudget ? processBudget : kisAcquirePageStoreBootstrapBudget();
+    if (!parent) throw std::bad_alloc();
+    if (storage.budget) {
+        d = std::allocate_shared<Private>(storage, parent);
+    } else {
+        KisBackingBudgetController coldStorage;
+        if (!coldStorage.configureSharedNonPayloadBudget(parent)) throw std::bad_alloc();
+        d = std::allocate_shared<Private>(KisMutationStorageAllocator<Private>::retained(&coldStorage), parent);
+    }
 }
 
 KisCompletionRegistry::~KisCompletionRegistry() = default;

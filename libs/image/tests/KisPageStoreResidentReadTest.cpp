@@ -66,7 +66,7 @@ KisPageAllocationDescriptor descriptor(int bpp = 4)
 class GenericOnlyProvider : public KisPageReplicaProvider
 {
 public:
-    explicit GenericOnlyProvider(QSharedPointer<KisPageReplicaProvider> value) : p(std::move(value)) {}
+    explicit GenericOnlyProvider(std::shared_ptr<KisPageReplicaProvider> value) : p(std::move(value)) {}
     QString name() const override { return p->name(); }
     KisReplicaProviderId providerId() const override { return p->providerId(); }
     KisReplicaProviderEpoch providerEpoch() const override { return p->providerEpoch(); }
@@ -106,7 +106,7 @@ public:
         const std::shared_ptr<KisReplicaBackingDomainAdmission> &admission, QString *error) override
     { return p->registerBackingDomainAdmission(admission, error); }
 protected:
-    QSharedPointer<KisPageReplicaProvider> p;
+    std::shared_ptr<KisPageReplicaProvider> p;
 };
 
 // Exercise the real coordinator while another caller grows both indexes or
@@ -175,7 +175,7 @@ public:
 class BlockingReadProvider final : public KisPageReplicaProvider
 {
 public:
-    explicit BlockingReadProvider(QSharedPointer<KisPageReplicaProvider> value)
+    explicit BlockingReadProvider(std::shared_ptr<KisPageReplicaProvider> value)
         : p(std::move(value))
     {
     }
@@ -241,33 +241,33 @@ public:
     }
 
 private:
-    QSharedPointer<KisPageReplicaProvider> p;
+    std::shared_ptr<KisPageReplicaProvider> p;
     mutable std::mutex mutex;
     std::condition_variable changed;
     int blockedRequests = 0;
     bool released = false;
 };
 
-QSharedPointer<KisPageReplicaProvider> makeProvider(bool tiles3,
-    const QSharedPointer<KisCompletionRegistry> &completions, QString *error)
+std::shared_ptr<KisPageReplicaProvider> makeProvider(bool tiles3,
+    const std::shared_ptr<KisCompletionRegistry> &completions, QString *error)
 {
     if (tiles3) {
-        auto p = QSharedPointer<KisTiles3PageReplicaProvider>::create();
+        auto p = std::make_shared<KisTiles3PageReplicaProvider>();
         KisCpuResidentReplicaProviderConfig c;
         c.provider = {180}; c.providerEpoch = {1}; c.budgetBytes = 64 * 1024 * 1024;
-        return p->configure(c, completions, error) ? p : QSharedPointer<KisPageReplicaProvider>{};
+        return p->configure(c, completions, error) ? p : std::shared_ptr<KisPageReplicaProvider>{};
     }
-    auto p = QSharedPointer<KisCpuPageReplicaProvider>::create();
+    auto p = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig c;
     c.provider = {180}; c.providerEpoch = {1}; c.budgetBytes = 64 * 1024 * 1024;
-    return p->configure(c, completions, error) ? p : QSharedPointer<KisPageReplicaProvider>{};
+    return p->configure(c, completions, error) ? p : std::shared_ptr<KisPageReplicaProvider>{};
 }
 
 struct Fixture
 {
     std::unique_ptr<KisPageStore> store = std::make_unique<KisPageStore>();
-    QSharedPointer<KisCompletionRegistry> completions = QSharedPointer<KisCompletionRegistry>::create();
-    QSharedPointer<KisPageReplicaProvider> provider;
+    std::shared_ptr<KisCompletionRegistry> completions = std::make_shared<KisCompletionRegistry>();
+    std::shared_ptr<KisPageReplicaProvider> provider;
     QString error;
     int bpp = 4;
     bool resolveProbe = false;
@@ -276,9 +276,9 @@ struct Fixture
         bpp = pixelSize;
         provider = makeProvider(tiles3, completions, &error);
         if (!provider) return false;
-        if (resolveProbe) provider = QSharedPointer<ReadResolveProbeProvider>::create(provider);
-        else if (readProbe) provider = QSharedPointer<ReadBindingProbeProvider>::create(provider);
-        else if (genericOnly) provider = QSharedPointer<GenericOnlyProvider>::create(provider);
+        if (resolveProbe) provider = std::make_shared<ReadResolveProbeProvider>(provider);
+        else if (readProbe) provider = std::make_shared<ReadBindingProbeProvider>(provider);
+        else if (genericOnly) provider = std::make_shared<GenericOnlyProvider>(provider);
         const auto d = descriptor(bpp);
         KisSurfaceEpochState s;
         s.surface = {1}; s.format = d.format;
@@ -367,7 +367,7 @@ void KisPageStoreResidentReadTest::bindingStorageFailureUnlocks_data()
 void KisPageStoreResidentReadTest::bindingStorageFailureUnlocks()
 {
     QFETCH(int, path);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     QString error; auto provider = makeProvider(false, completions, &error); QVERIFY(provider);
     auto op = provider->requestReplica({900}, {key(0), {1}}, descriptor(), cpu.domain,
         KisPageAccessMode::Read, KisPagePriority::Normal); QVERIFY(op.isValid());
@@ -411,7 +411,7 @@ void KisPageStoreResidentReadTest::resolveStorageBeforePin()
     QFETCH(bool, tiles3); QFETCH(int, bpp); QFETCH(bool, retry);
     Fixture f; f.resolveProbe = true;
     QVERIFY(f.init(tiles3, bpp)); QVERIFY(f.fill(1, 0x58));
-    const auto provider = qSharedPointerDynamicCast<ReadResolveProbeProvider>(f.provider);
+    const auto provider = std::dynamic_pointer_cast<ReadResolveProbeProvider>(f.provider);
     const auto request = f.store->acquireRead(key(0), {}, cpu, KisPagePriority::Normal);
     QVERIFY(request.isValid());
     provider->next = ReadResolveProbeProvider::ThrowBeforePin;
@@ -449,7 +449,7 @@ void KisPageStoreResidentReadTest::resolveSurvivesConcurrentIndexGrowth()
     QFETCH(bool, tiles3); QFETCH(int, bpp);
     Fixture f; f.resolveProbe = true;
     QVERIFY(f.init(tiles3, bpp)); QVERIFY(f.fill(1, 0x6b));
-    const auto provider = qSharedPointerDynamicCast<ReadResolveProbeProvider>(f.provider);
+    const auto provider = std::dynamic_pointer_cast<ReadResolveProbeProvider>(f.provider);
     const auto request = f.store->acquireRead(key(0), {}, cpu, KisPagePriority::Normal);
     QVERIFY(request.isValid());
     provider->next = ReadResolveProbeProvider::BlockAfterPin;
@@ -500,7 +500,7 @@ void KisPageStoreResidentReadTest::capturedReadRetriesStaleBinding()
     QFETCH(int, bpp); QFETCH(int, mode); QFETCH(bool, wait); QFETCH(bool, reportStatus);
     Fixture f; QVERIFY2(f.init(true, bpp, false, true), qPrintable(f.error));
     QVERIFY2(f.fill(1, 0x31), qPrintable(f.error));
-    auto provider = qSharedPointerDynamicCast<ReadBindingProbeProvider>(f.provider); QVERIFY(provider);
+    auto provider = std::dynamic_pointer_cast<ReadBindingProbeProvider>(f.provider); QVERIFY(provider);
     auto retained = f.store->captureReadView();
     KisPageVersion oldVersion; QVERIFY(retained.resolvePageVersion(key(0), &oldVersion));
     // Freeze G, then publish another current generation. Every retry below
@@ -595,9 +595,9 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag_data()
 void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
 {
     QFETCH(int, bpp); QFETCH(bool, warm); QFETCH(bool, publish); QFETCH(bool, crossProvider);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
-    auto provider = QSharedPointer<KisTiles3PageReplicaProvider>::create();
-    auto beforeProvider = crossProvider ? QSharedPointer<KisTiles3PageReplicaProvider>::create() : provider;
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
+    auto beforeProvider = crossProvider ? std::make_shared<KisTiles3PageReplicaProvider>() : provider;
     QVERIFY(provider->configure({{180}, {1}, 16 * 1024 * 1024}, completions));
     if (crossProvider) QVERIFY(beforeProvider->configure({{181}, {1}, 16 * 1024 * 1024}, completions));
     auto desc = descriptor(bpp); desc.format.defaultPixel.fill(char(0x31));
@@ -607,7 +607,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     auto a = provider->requestReplica({1}, version, desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
     auto b = beforeProvider->requestReplica({2}, version, desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
     QVERIFY(a.isValid()); QVERIFY(b.isValid());
-    const auto process = QSharedPointer<KisBackingBudgetController>::create();
+    const auto process = std::make_shared<KisBackingBudgetController>();
     { auto first = process->reserve({}, nullptr), second = process->reserve({}, nullptr);
       QVERIFY(first.isValid() && second.isValid()); }
     { KisBackingBudgetController warm; QVERIFY(warm.configureSharedNonPayloadBudget(process)); }
@@ -699,7 +699,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     QCOMPARE(KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, stale), selected);
     metadata.removeCpuReadBinding(b.replica);
     auto newer = metadata.installCpuReadBinding(b.replica, beforeProvider); QVERIFY(newer); QVERIFY(newer != selected);
-    QSharedPointer<KisCpuReadBindingLink> concurrent;
+    std::shared_ptr<KisCpuReadBindingLink> concurrent;
     std::thread late([&] { concurrent = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, selected); });
     late.join(); QCOMPARE(concurrent, newer); QCOMPARE(metadata.cpuReadBinding(version), newer);
     QVERIFY(!KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, target.version, stale));
@@ -727,11 +727,11 @@ void KisPageStoreResidentReadTest::defaultMaterializationAdmissionIsBounded()
     constexpr int requestCount = preparationBudget + 1;
     const int expectedActive = std::min(preparationBudget, distinctPages);
 
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     QString error;
     const auto backing = makeProvider(false, completions, &error);
     QVERIFY2(backing, qPrintable(error));
-    const auto provider = QSharedPointer<BlockingReadProvider>::create(backing);
+    const auto provider = std::make_shared<BlockingReadProvider>(backing);
 
     const auto allocation = descriptor(4);
     KisSurfaceEpochState surface;
@@ -1042,19 +1042,19 @@ void KisPageStoreResidentReadTest::guardLifetimeAndHistory()
     auto fresh = f.store->captureReadView();
     auto survivor = fresh.tryReadResidentPage(key(0));
     fresh = {};
-    const QWeakPointer<KisPageReplicaProvider> weak(f.provider);
-    f.provider.clear(); f.store.reset();
-    QVERIFY(!weak.isNull());
+    const std::weak_ptr<KisPageReplicaProvider> weak(f.provider);
+    f.provider.reset(); f.store.reset();
+    QVERIFY(!weak.expired());
     QCOMPARE(static_cast<const quint8 *>(survivor.data())[0], quint8(0x52));
     survivor = {};
     kisDrainPageStoreReclamation();
-    QVERIFY(weak.isNull());
+    QVERIFY(weak.expired());
 }
 
 void KisPageStoreResidentReadTest::providerAccessTransferRetire()
 {
     QFETCH(bool, tiles3);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     QString error;
     auto p = makeProvider(tiles3, completions, &error);
     QVERIFY2(p, qPrintable(error));
@@ -1161,7 +1161,7 @@ void KisPageStoreResidentReadTest::concurrentCommitAndRead()
 void KisPageStoreResidentReadTest::concurrentPinAndRetire()
 {
     QFETCH(bool, tiles3);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     QString error; auto p = makeProvider(tiles3, completions, &error); QVERIFY(p);
     const auto a = p->requestReplica({100}, {key(0), {1}}, descriptor(), cpu.domain,
                                     KisPageAccessMode::Read, KisPagePriority::Normal);
@@ -1188,7 +1188,7 @@ void KisPageStoreResidentReadTest::concurrentPinAndRetire()
 void KisPageStoreResidentReadTest::swapMissDoesNotMaterialize()
 {
     Fixture f; QVERIFY(f.init(true)); QVERIFY(f.fill(1, 0x51));
-    auto p = qSharedPointerDynamicCast<KisTiles3PageReplicaProvider>(f.provider); QVERIFY(p);
+    auto p = std::dynamic_pointer_cast<KisTiles3PageReplicaProvider>(f.provider); QVERIFY(p);
     auto view = f.store->captureReadView();
     const auto request = f.store->acquireReadInView(key(0), view, cpu, KisPagePriority::Normal);
     auto lease = f.store->resolve(request, request.readiness); QVERIFY(lease.isValid());
@@ -1244,14 +1244,14 @@ void KisPageStoreResidentReadTest::abortKeepsNativeBeforeImage()
 void KisPageStoreResidentReadTest::providerRevocationKeepsExistingPin()
 {
     QFETCH(bool, tiles3);
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     QString error; auto p = makeProvider(tiles3, completions, &error); QVERIFY(p);
     const auto a = p->requestReplica({100}, {key(0), {1}}, descriptor(), cpu.domain,
                                     KisPageAccessMode::Read, KisPagePriority::Normal);
     QVERIFY(a.isValid());
     auto binding = p->cpuResidentBinding(a.replica); QVERIFY(binding);
     const auto *data = static_cast<const quint8 *>(binding->acquireRead(a.replica.allocationIdentity(), true)); QVERIFY(data);
-    p.clear();
+    p.reset();
     QCOMPARE(data[0], quint8(0));
     KisCpuResidentReadStatus status;
     QVERIFY(!binding->acquireRead(a.replica.allocationIdentity(), true, &status)); QCOMPARE(status, KisCpuResidentReadStatus::Retired);

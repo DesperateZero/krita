@@ -33,23 +33,23 @@ struct KRITAIMAGE_EXPORT KisReplicaStateSnapshot
     KisReplicaHandle replica;
     KisReplicaValidity validity = KisReplicaValidity::Allocated;
     KisPageOperationId activeOperation;
-    QVector<KisPageLeaseId> readLeases;
+    KisPageSnapshotArray<KisPageLeaseId> readLeases;
     quint32 pinCount = 0;
-    QVector<KisCompletionTicket> pendingLastUses;
+    KisPageSnapshotArray<KisCompletionTicket> pendingLastUses;
 };
 
 struct KRITAIMAGE_EXPORT KisPageVersionStateSnapshot
 {
     KisPageVersion version;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
-    QVector<KisReplicaStateSnapshot> replicas;
+    KisPageSnapshotArray<KisReplicaStateSnapshot> replicas;
     KisReplicaHandle authority;
     // Per-version owner. Different transactions may retain independent sealed
     // versions of this page; only the active writer is page-exclusive.
     KisPageTransactionId preparedBy;
     // Logical captured-view protection, independent of replica pins and
     // execution last-use. A sealed private version may outlive its transaction.
-    QVector<KisImageEpochSnapshotToken> capturedReadViews;
+    KisPageSnapshotArray<KisImageEpochSnapshotToken> capturedReadViews;
 
     /** Exact bytes are defined by the retained surface default revision. */
     bool isVirtualDefault() const
@@ -131,7 +131,7 @@ struct KRITAIMAGE_EXPORT KisPageStateSnapshot
     KisPageGeneration publishedGeneration;
     quint64 publishedDefaultPixelRevision = 0;
     KisPageGeneration nextGeneration;
-    QVector<KisPageVersionStateSnapshot> versions;
+    KisPageSnapshotArray<KisPageVersionStateSnapshot> versions;
     KisPageWriterStateSnapshot writer;
     KisAuthorityHandoffStateSnapshot authorityHandoff;
 
@@ -222,7 +222,7 @@ struct KRITAIMAGE_EXPORT KisPageTransition
     KisPageWriteMode writeMode = KisPageWriteMode::PreserveContents;
     KisCompletionTicket completion;
     KisImageEpochId imageEpoch;
-    QVector<KisPageVersion> versions;
+    KisPageSnapshotArray<KisPageVersion> versions;
     KisImageEpochSnapshotToken readView;
 };
 
@@ -238,7 +238,7 @@ struct KRITAIMAGE_EXPORT KisPageTransitionResult
 {
     bool accepted = false;
     KisPageStateSnapshot next;
-    QVector<KisPageTransitionEffect> effects;
+    KisPageSnapshotArray<KisPageTransitionEffect> effects;
     QString rejectionReason;
 };
 

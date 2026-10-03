@@ -1177,7 +1177,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
 
 KisImageEpochCommitTicket
 KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
-                                                          const QVector<KisPageKey> *changedPages,
+                                                          const KisPageKeyStorage *changedPages,
                                                           const KisPageStore *diagnosticOwner,
                                                           QMutexLocker<QMutex> &ownerLock)
 {
@@ -1629,7 +1629,7 @@ void KisPagePublicationCoordinator::revokePreparedProofLocked(
 }
 
 bool KisPagePublicationCoordinator::prepareDefaultRevisionsLocked(
-    const QVector<KisSurfaceEpochState> &surfaces, QString *error) try
+    const KisPageSnapshotArray<KisSurfaceEpochState> &surfaces, QString *error) try
 {
     if (!m_operational && !m_defaultRevisionHighWater.empty()
         && m_defaultRevisionHighWater.size() == size_t(surfaces.size())

@@ -463,7 +463,7 @@ void KisPageRetirementQueue::schedulePassLocked()
 
 void KisPageRetirementQueue::retireOrDefer(
     const KisReplicaHandle &replica,
-    const QSharedPointer<KisPageReplicaProvider> &provider,
+    const std::shared_ptr<KisPageReplicaProvider> &provider,
     const KisCompletionTicket &lastUse,
     KisPageBackingPreparation &&backing)
 {

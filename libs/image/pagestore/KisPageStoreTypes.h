@@ -8,6 +8,8 @@
 #define KIS_PAGE_STORE_TYPES_H
 
 #include <QByteArray>
+#include "KisPageByteArray_p.h"
+#include "KisPageSnapshotArray_p.h"
 #include <QHashFunctions>
 #include <QRect>
 #include <QSet>
@@ -428,12 +430,12 @@ enum class KisSurfaceEndianness : quint8 {
 struct KRITAIMAGE_EXPORT KisSurfaceFormat
 {
     quint64 formatId = 0;
-    QByteArray colorModelId;
-    QByteArray colorDepthId;
-    QByteArray profileFingerprint;
-    QByteArray channelOrder;
-    QByteArray packing;
-    QByteArray defaultPixel;
+    KisPageByteArray colorModelId;
+    KisPageByteArray colorDepthId;
+    KisPageByteArray profileFingerprint;
+    KisPageByteArray channelOrder;
+    KisPageByteArray packing;
+    KisPageByteArray defaultPixel;
     quint32 channelCount = 0;
     quint32 pixelStride = 0;
     quint32 pixelAlignment = 0;
@@ -1068,39 +1070,33 @@ inline bool operator==(const KisSurfaceEpochChange &lhs,
 struct KRITAIMAGE_EXPORT KisPreparedPageSet
 {
     KisPageTransactionId transaction;
-    QVector<KisPreparedPageProof> proofs;
-    QVector<KisSurfaceEpochChange> surfaceChanges;
-    QVector<KisPageKey> removedPages;
+    KisPageSnapshotArray<KisPreparedPageProof> proofs;
+    KisPageSnapshotArray<KisSurfaceEpochChange> surfaceChanges;
+    KisPageSnapshotArray<KisPageKey> removedPages;
 
     bool isValid() const
     {
         if (!transaction.isValid() ||
             (proofs.isEmpty() && surfaceChanges.isEmpty() &&
              removedPages.isEmpty())) return false;
-        QSet<KisPageKey> proofKeys;
-        proofKeys.reserve(proofs.size());
         for (const KisPreparedPageProof &proof : proofs) {
             if (!proof.isValid() || !(proof.transaction == transaction)) return false;
-            if (proofKeys.contains(proof.authority.version.key)) return false;
-            proofKeys.insert(proof.authority.version.key);
         }
-        QSet<quint64> changedSurfaces;
-        changedSurfaces.reserve(surfaceChanges.size());
+        const auto pageKey = [](const KisPageKey &key) {
+            return std::make_tuple(key.surface.value, key.page.row, key.page.column);
+        };
+        if (!kisPageArrayHasUniqueKeys(proofs, [&](const auto &proof) { return pageKey(proof.authority.version.key); }))
+            return false;
         for (const KisSurfaceEpochChange &change : surfaceChanges) {
-            if (!change.isValid() ||
-                changedSurfaces.contains(change.after.surface.value)) {
-                return false;
-            }
-            changedSurfaces.insert(change.after.surface.value);
+            if (!change.isValid()) return false;
         }
-        QSet<KisPageKey> removedKeys;
-        removedKeys.reserve(removedPages.size());
+        if (!kisPageArrayHasUniqueKeys(surfaceChanges, [](const auto &change) { return change.after.surface.value; }))
+            return false;
         for (const KisPageKey &removed : removedPages) {
-            if (!removed.isValid() || proofKeys.contains(removed) ||
-                removedKeys.contains(removed)) return false;
-            removedKeys.insert(removed);
+            if (!removed.isValid() || std::any_of(proofs.cbegin(), proofs.cend(),
+                [&](const auto &proof) { return proof.authority.version.key == removed; })) return false;
         }
-        return true;
+        return kisPageArrayHasUniqueKeys(removedPages, pageKey);
     }
 };
 
@@ -1119,8 +1115,8 @@ struct KRITAIMAGE_EXPORT KisImageEpochSnapshot
     quint64 defaultPixelRevision = 0;
     quint64 extentRevision = 0;
     quint64 propertyRevision = 0;
-    QVector<KisPageVersion> manifest;
-    QVector<KisSurfaceEpochState> surfaces;
+    KisPageSnapshotArray<KisPageVersion> manifest;
+    KisPageSnapshotArray<KisSurfaceEpochState> surfaces;
 
     bool isValid() const
     {
@@ -1129,24 +1125,17 @@ struct KRITAIMAGE_EXPORT KisImageEpochSnapshot
             propertyRevision == 0) {
             return false;
         }
-        QSet<KisPageKey> manifestKeys;
-        manifestKeys.reserve(manifest.size());
         for (const KisPageVersion &version : manifest) {
-            if (!version.isValid() || manifestKeys.contains(version.key)) {
-                return false;
-            }
-            manifestKeys.insert(version.key);
+            if (!version.isValid()) return false;
         }
-        QSet<quint64> surfaceIds;
-        surfaceIds.reserve(surfaces.size());
+        if (!kisPageArrayHasUniqueKeys(manifest, [](const auto &version) {
+            const auto &key = version.key;
+            return std::make_tuple(key.surface.value, key.page.row, key.page.column);
+        })) return false;
         for (const KisSurfaceEpochState &surface : surfaces) {
-            if (!surface.isValid() ||
-                surfaceIds.contains(surface.surface.value)) {
-                return false;
-            }
-            surfaceIds.insert(surface.surface.value);
+            if (!surface.isValid()) return false;
         }
-        return true;
+        return kisPageArrayHasUniqueKeys(surfaces, [](const auto &surface) { return surface.surface.value; });
     }
 };
 

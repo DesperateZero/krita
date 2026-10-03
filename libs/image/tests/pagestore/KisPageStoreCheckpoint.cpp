@@ -376,8 +376,8 @@ bool KisPageStoreCheckpointCodec::decode(
 bool KisPageStoreCheckpointCodec::restore(
     const KisPageStoreCheckpoint &checkpoint,
     KisPageStore *store,
-    const QSharedPointer<KisPageReplicaProvider> &cpuProvider,
-    const QSharedPointer<KisCompletionRegistry> &completions,
+    const std::shared_ptr<KisPageReplicaProvider> &cpuProvider,
+    const std::shared_ptr<KisCompletionRegistry> &completions,
     qsizetype metadataShardCount,
     QString *error)
 {

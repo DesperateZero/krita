@@ -5,8 +5,6 @@
 #include "KisMutationStorage_p.h"
 #include "KisPageWriteCoordinator_p.h"
 
-#include <QRunnable>
-#include <QThreadPool>
 #include <QThread>
 #include <QCoreApplication>
 #include <QScopeGuard>
@@ -20,6 +18,12 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#ifdef Q_OS_DARWIN
+#include <pthread.h>
+#include <unistd.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 struct KisPageReclamationDelayState : boost::intrusive::set_base_hook<>
 {
@@ -93,31 +97,134 @@ void releaseWake(KisPageReclamationWakeState *wake) noexcept
 // Publish the active worker identity instead. It stays valid through capture
 // destruction, and is cleared before the worker can leave this job or exit.
 std::atomic<Qt::HANDLE> reclaimerThread{nullptr};
-void shutdownReclamation();
 
-class ReclamationExecutor
+// The function/context live inside the prepared executor. Darwin needs no
+// std::thread callable allocation and uses an explicitly owned stack. Native
+// pthread control/TLS mapping is measured before the thread may run callbacks.
+class ReclamationThread
+{
+public:
+    ~ReclamationThread() { join(); }
+    void start(void (*function)(void *), void *context)
+    {
+#ifdef Q_OS_DARWIN
+        Q_ASSERT(!m_joinable);
+        m_started = false;
+        m_accepted = false;
+        m_function = function;
+        m_context = context;
+        m_pageSize = size_t(sysconf(_SC_PAGESIZE));
+        constexpr size_t stackBytes = 512 * 1024;
+        constexpr size_t nativePreparation = 64 * 1024;
+        m_stack = kisAllocatePageProcessStorage(stackBytes, m_pageSize);
+        m_stackBytes = stackBytes;
+        try {
+            kisReservePageProcessStorage(nativePreparation);
+            m_nativeBytes = nativePreparation;
+            pthread_attr_t attributes;
+            if (pthread_attr_init(&attributes)) throw std::bad_alloc();
+            const auto clearAttributes = qScopeGuard([&] { pthread_attr_destroy(&attributes); });
+            if (pthread_attr_setstack(&attributes, m_stack, m_stackBytes) ||
+                pthread_create(&m_thread, &attributes, &ReclamationThread::invoke, this))
+                throw std::bad_alloc();
+            m_joinable = true;
+            mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(m_thread);
+            mach_vm_size_t actualBytes = 0;
+            vm_region_basic_info_data_64_t information{};
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object = MACH_PORT_NULL;
+            const auto query = mach_vm_region(mach_task_self(), &address, &actualBytes,
+                VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&information), &count, &object);
+            if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+            if (query != KERN_SUCCESS || address > reinterpret_cast<mach_vm_address_t>(m_thread)
+                || actualBytes == 0 || actualBytes > nativePreparation) throw std::bad_alloc();
+            kisReleasePageProcessStorage(nativePreparation - size_t(actualBytes));
+            m_nativeBytes = size_t(actualBytes);
+            {
+                std::lock_guard<std::mutex> lock(m_startMutex);
+                m_accepted = true;
+                m_started = true;
+            }
+            m_startChanged.notify_one();
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lock(m_startMutex);
+                m_started = true;
+            }
+            m_startChanged.notify_one();
+            join();
+            throw;
+        }
+#else
+        // Other platform runtimes retain their existing execution contract.
+        // Their native thread/control allocation census is platform-specific.
+        m_thread = std::thread(function, context);
+#endif
+    }
+    void join() noexcept
+    {
+#ifdef Q_OS_DARWIN
+        if (m_joinable) {
+            const int result = pthread_join(m_thread, nullptr);
+            Q_ASSERT(result == 0);
+            m_joinable = false;
+        }
+        if (m_nativeBytes) kisReleasePageProcessStorage(std::exchange(m_nativeBytes, 0));
+        if (m_stack) {
+            kisFreePageProcessStorage(m_stack, m_stackBytes, m_pageSize);
+            m_stack = nullptr;
+        }
+#else
+        if (m_thread.joinable()) m_thread.join();
+#endif
+    }
+private:
+#ifdef Q_OS_DARWIN
+    static void *invoke(void *context)
+    {
+        auto *thread = static_cast<ReclamationThread *>(context);
+        {
+            std::unique_lock<std::mutex> lock(thread->m_startMutex);
+            thread->m_startChanged.wait(lock, [&] { return thread->m_started; });
+            if (!thread->m_accepted) return nullptr;
+        }
+        thread->m_function(thread->m_context);
+        return nullptr;
+    }
+    pthread_t m_thread{};
+    bool m_joinable = false;
+    bool m_started = false;
+    bool m_accepted = false;
+    void (*m_function)(void *) = nullptr;
+    void *m_context = nullptr;
+    void *m_stack = nullptr;
+    size_t m_stackBytes = 0, m_pageSize = 0, m_nativeBytes = 0;
+    std::mutex m_startMutex;
+    std::condition_variable m_startChanged;
+#else
+    std::thread m_thread;
+#endif
+};
+
+class ReclamationExecutor : public KisPageProcessStorageObject
 {
 public:
     ReclamationExecutor()
     {
-        pool.setMaxThreadCount(1);
-        pool.setExpiryTimeout(-1);
-        m_runner.reset(QRunnable::create([this] { runJobs(); }));
-        m_runner->setAutoDelete(false);
-        qAddPostRoutine(shutdownReclamation);
+        qAddPostRoutine(kisStopPageStoreReclamation);
         try {
-            pool.start(m_runner.get());
+            m_worker.start([](void *context) { static_cast<ReclamationExecutor *>(context)->runJobs(); }, this);
             std::unique_lock<std::mutex> lock(m_jobMutex);
             m_jobsDrained.wait(lock, [this] { return m_workerReady; });
         } catch (...) {
-            qRemovePostRoutine(shutdownReclamation);
+            qRemovePostRoutine(kisStopPageStoreReclamation);
             stopJobs();
             throw;
         }
     }
     ~ReclamationExecutor()
     {
-        qRemovePostRoutine(shutdownReclamation);
+        qRemovePostRoutine(kisStopPageStoreReclamation);
         stopDelays();
         stopJobs();
     }
@@ -146,7 +253,7 @@ public:
             m_jobsStopping = true;
             m_jobChanged.notify_one();
         }
-        pool.waitForDone();
+        m_worker.join();
     }
 
     std::shared_ptr<KisPageReclamationDelayState> prepareDelay(
@@ -199,19 +306,19 @@ public:
             std::lock_guard<std::mutex> initialization(m_delayMutex);
             m_stopping = true;
             if (m_clock) {
-                clock = m_clock;
-                std::lock_guard<std::mutex> lock(m_clock->mutex);
-                m_clock->stopping = true;
-                cancelled.swap(m_clock->tasks);
+                clock = std::move(m_clock);
+                std::lock_guard<std::mutex> lock(clock->mutex);
+                clock->stopping = true;
+                cancelled.swap(clock->tasks);
                 for (auto &entry : cancelled) {
                     entry.queued = false;
                     entry.armed = false;
                     entry.readyGeneration = 0;
                 }
-                m_clock->changed.notify_one();
+                clock->changed.notify_one();
             }
         }
-        if (m_monitor.joinable()) m_monitor.join();
+        m_monitor.join();
         // No producer may outlive application teardown. Drop callbacks only
         // after the monitor is stopped and outside either scheduling gate.
         while (!cancelled.empty()) {
@@ -235,7 +342,6 @@ public:
         }
     }
 
-    QThreadPool pool;
 private:
     void runJobs()
     {
@@ -283,10 +389,12 @@ private:
     void ensureClockLocked()
     {
         if (!m_clock) {
-            auto clock = std::make_shared<KisPageReclamationDelayClock>();
+            auto clock = std::allocate_shared<KisPageReclamationDelayClock>(
+                KisMutationStorageAllocator<KisPageReclamationDelayClock>{});
             // Lazy, process-wide deadline monitor. No waiting work occupies
             // the sole reclamation worker or requires a GUI event loop.
-            auto monitor = std::thread([clock] {
+            m_monitor.start([](void *context) {
+                auto *clock = static_cast<KisPageReclamationDelayClock *>(context);
                 std::unique_lock<std::mutex> lock(clock->mutex);
                 bool preferWake = true;
                 while (!clock->stopping) {
@@ -323,9 +431,8 @@ private:
                     task.reset();
                     lock.lock();
                 }
-            });
+            }, clock.get());
             m_clock = std::move(clock);
-            m_monitor = std::move(monitor);
         }
     }
 
@@ -333,7 +440,7 @@ private:
     std::mutex m_jobMutex;
     std::condition_variable m_jobChanged;
     std::condition_variable m_jobsDrained;
-    std::unique_ptr<QRunnable> m_runner;
+    ReclamationThread m_worker;
     KisPageReclamationJob *m_firstJob = nullptr;
     KisPageReclamationJob *m_lastJob = nullptr;
     bool m_jobRunning = false;
@@ -341,20 +448,21 @@ private:
     bool m_jobsStopping = false;
     bool m_stopping = false;
     std::shared_ptr<KisPageReclamationDelayClock> m_clock;
-    std::thread m_monitor;
+    ReclamationThread m_monitor;
 };
 
 ReclamationExecutor &executor()
 {
-    static ReclamationExecutor instance;
-    return instance;
+    static const auto instance = std::make_unique<ReclamationExecutor>();
+    return *instance;
 }
 
-void shutdownReclamation()
+}
+
+void kisStopPageStoreReclamation()
 {
     executor().stopDelays();
     executor().stopJobs();
-}
 }
 
 KisPageReclamationDelay::KisPageReclamationDelay() = default;

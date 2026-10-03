@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <memory_resource>
 #include <new>
 #include <optional>
 #include <type_traits>
@@ -25,6 +26,7 @@
 
 class KisBackingBudgetController;
 class KisMutationStorageOwner;
+enum class KisBackingBudgetClass : quint8;
 KRITAIMAGE_EXPORT KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
 
 // Accounting lifetime only. It neither keeps a PageStore/payload alive nor
@@ -40,17 +42,18 @@ public:
     // charging it twice or retaining the controller itself.
     void retainLiveCharge(quint64 bytes) noexcept;
     void releaseLiveCharge(quint64 bytes) noexcept;
+    void releaseLiveCharge(quint64 bytes, KisBackingBudgetClass budgetClass) noexcept;
     void ref() noexcept { m_references.fetch_add(1, std::memory_order_relaxed); }
     void deref() noexcept;
 private:
     explicit KisMutationStorageOwner(KisBackingBudgetController *controller)
         : m_controller(controller), m_bytes(sizeof(KisMutationStorageOwner)) {}
-    void detach(const QSharedPointer<KisBackingBudgetController> &parent, quint64 child) noexcept;
+    void detach(const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child) noexcept;
     void stopAllocations() noexcept;
     std::atomic<quint32> m_references{0};
     QMutex m_gate;
     KisBackingBudgetController *m_controller;
-    QSharedPointer<KisBackingBudgetController> m_parent;
+    std::shared_ptr<KisBackingBudgetController> m_parent;
     quint64 m_child = 0;
     quint64 m_bytes;
     bool m_accepting = true;
@@ -66,6 +69,22 @@ inline void intrusive_ptr_release(KisMutationStorageOwner *owner) noexcept { own
 // live element counts. Free the allocation before returning its live charge.
 KRITAIMAGE_EXPORT void *kisAllocateMutationStorage(KisBackingBudgetController *, size_t, size_t);
 KRITAIMAGE_EXPORT void kisFreeMutationStorage(KisBackingBudgetController *, void *, size_t, size_t) noexcept;
+KRITAIMAGE_EXPORT void *kisAllocatePageProcessStorage(size_t, size_t);
+KRITAIMAGE_EXPORT void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
+// Native runtime mappings are prepared under the same limit, then return the
+// unused preparation capacity after the OS reports the actual mapping size.
+KRITAIMAGE_EXPORT void kisReservePageProcessStorage(size_t);
+KRITAIMAGE_EXPORT void kisReleasePageProcessStorage(size_t) noexcept;
+KRITAIMAGE_EXPORT std::shared_ptr<std::pmr::memory_resource> kisPageProcessMemoryResource();
+
+// Compatibility facades still returned through ordinary unique_ptr/delete.
+// The allocation remembers its actual request, including its size prefix.
+class KRITAIMAGE_EXPORT KisPageProcessStorageObject
+{
+public:
+    static void *operator new(size_t bytes);
+    static void operator delete(void *data) noexcept;
+};
 
 template<class T>
 class KisMutationStorageAllocator
@@ -109,6 +128,9 @@ private:
     boost::intrusive_ptr<KisMutationStorageOwner> owner;
     template<class> friend class KisMutationStorageAllocator;
 };
+
+struct KisPageKey;
+using KisPageKeyStorage = std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>>;
 
 // The original admission/activity owner supplies synchronization. Every bucket
 // is an actual, constructed record: insert/erase never allocate nodes. Growth
@@ -176,6 +198,7 @@ public:
         void build() noexcept
         {
             Q_ASSERT(stage == 2);
+            std::fill_n(replacement.get(), newBuckets, Entry{});
             for (size_t i = 0; i < oldBuckets; ++i) {
                 const auto &entry = snapshot[i];
                 if (entry.occupied)
@@ -236,7 +259,7 @@ public:
         // changes before this copy do not invalidate that storage. Capture the
         // current revision only after checking both actual buffer bounds and
         // the caller's freshly revalidated insertion requirement.
-        if (growth.owner != this || growth.stage != 1 || growth.oldBuckets != m_buckets
+        if (growth.owner != this || (growth.stage != 1 && growth.stage != 3) || growth.oldBuckets != m_buckets
             || m_revision == std::numeric_limits<quint64>::max()
             || additional > growth.newBuckets / 2 - m_size) return false;
         std::copy_n(data(), m_buckets, growth.snapshot.get());

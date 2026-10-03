@@ -395,7 +395,7 @@ void KisPageReadCoordinator::waitForIdle()
 }
 
 KisPageReadCoordinator::ActiveReadRecord::ActiveReadRecord(
-    const QSharedPointer<KisPageReplicaProvider> &providerValue,
+    const std::shared_ptr<KisPageReplicaProvider> &providerValue,
     const KisReplicaHandle &replicaValue)
     : provider(providerValue)
     , replica(replicaValue)
@@ -416,7 +416,7 @@ KisPageReadCoordinator::KisPageReadCoordinator(
     KisBackingBudgetController &budget,
     KisPageHistoryCollector &history,
     KisPageRetirementQueue &retirementQueue,
-    QSharedPointer<KisCompletionRegistry> &completions,
+    std::shared_ptr<KisCompletionRegistry> &completions,
     QMutex &ownerMutex,
     qsizetype &activeProviderCalls,
     bool &operational,
@@ -443,13 +443,13 @@ KisPageReadCoordinator::KisPageReadCoordinator(
 {
 }
 
-QSharedPointer<KisCpuReadBindingLink> KisPageReadCoordinator::discoverCpuReadBinding(
+std::shared_ptr<KisCpuReadBindingLink> KisPageReadCoordinator::discoverCpuReadBinding(
     KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
-    const KisPageVersion &version, const QSharedPointer<KisCpuReadBindingLink> &stale)
+    const KisPageVersion &version, const std::shared_ptr<KisCpuReadBindingLink> &stale)
 {
     if (stale) {
         if (!(stale->replica.version == version)) return {};
-        metadata.removeCpuReadBinding(stale->replica, stale.data());
+        metadata.removeCpuReadBinding(stale->replica, stale.get());
     }
     // Another reader may already have installed the replacement. Preserve its
     // shared one-time provider lookup rather than creating another candidate.
@@ -713,7 +713,7 @@ void KisPageReadCoordinator::releaseLocked(
     ownerLock.relock();
     activeIt = m_activeReads.find(lease.m_leaseId.value);
     if (activeIt == m_activeReads.end()) return;
-    active->provider.clear();
+    active->provider.reset();
     if (!finishReleasedReadLocked(lease.m_leaseId.value, cleanup)) {
         if (!active->releaseHook.is_linked()) m_releaseRetries.push_back(*active);
         if (m_backgroundReclamation) notifyLastUse(m_lastUseWakeContext, active);
@@ -1073,7 +1073,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
 
 bool KisPageReadCoordinator::releaseSnapshot(
     KisImageEpochSnapshotToken token,
-    const QVector<KisPageKey> *changedPages)
+    const KisPageKeyStorage *changedPages)
 {
     QMutexLocker lock(&m_ownerMutex);
     const bool released = releaseSnapshotLocked(token, changedPages, lock);
@@ -1084,7 +1084,7 @@ bool KisPageReadCoordinator::releaseSnapshot(
 
 bool KisPageReadCoordinator::releaseSnapshotLocked(
     KisImageEpochSnapshotToken token,
-    const QVector<KisPageKey> *changedPages,
+    const KisPageKeyStorage *changedPages,
     QMutexLocker<QMutex> &lock)
 {
     bool becameUnretained = false;
@@ -1095,11 +1095,11 @@ bool KisPageReadCoordinator::releaseSnapshotLocked(
     if (m_backgroundReclamation) {
         if (!becameUnretained) return true;
         m_history.collectUnreachableLocked(
-            changedPages ? changedPages->constData() : nullptr, changedPages ? changedPages->size() : 0, true);
+            changedPages ? changedPages->data() : nullptr, changedPages ? changedPages->size() : 0, true);
         return true;
     }
     m_epochs.collectUnretainedRoots();
-    m_history.collectUnreachableLocked(changedPages ? changedPages->constData() : nullptr,
+    m_history.collectUnreachableLocked(changedPages ? changedPages->data() : nullptr,
         changedPages ? changedPages->size() : 0, !changedPages);
     processRetirementsUnlocked(lock);
     return true;

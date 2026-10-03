@@ -424,7 +424,7 @@ void KisVulkanFoundationContractsTest::pageProviderFailsClosedBeforeBr3()
 
 void KisVulkanFoundationContractsTest::coordinatorAndWsiValidateGenerations()
 {
-    auto completions = QSharedPointer<KisCompletionRegistry>::create();
+    auto completions = std::make_shared<KisCompletionRegistry>();
     auto coordinator = QSharedPointer<KisVulkanSubmissionCoordinator>::create();
     KisVulkanCoordinatorConfig config;
     config.coordinatorGeneration = 1;

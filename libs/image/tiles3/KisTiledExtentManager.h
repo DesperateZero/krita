@@ -12,12 +12,13 @@
 #include <QMap>
 #include <QRect>
 #include <memory>
+#include <memory_resource>
 #include "kritaimage_export.h"
 
 
 class KRITAIMAGE_EXPORT KisTiledExtentManager
 {
-    static const qint32 InitialBufferSize = 256;
+    static constexpr qint32 InitialBufferSize = 256;
 
     class KRITAIMAGE_EXPORT Data
     {
@@ -27,7 +28,7 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
 
         bool add(qint32 index);
         bool remove(qint32 index);
-        void replace(const QVector<qint32> &indexes);
+        void replace(const QVector<QPoint> &indexes, bool columns);
         void takePrepared(Data &prepared) noexcept;
         void clear();
         bool isEmpty();
@@ -43,7 +44,13 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
         struct Growth {
             qint32 capacity = 0;
             qint32 offset = 0;
-            std::unique_ptr<QAtomicInt[]> buffer;
+            struct DeleteBuffer {
+                std::shared_ptr<std::pmr::memory_resource> resource;
+                size_t count = 0;
+                void operator()(QAtomicInt *data) const noexcept;
+            };
+            using Buffer = std::unique_ptr<QAtomicInt[], DeleteBuffer>;
+            Buffer buffer{nullptr, DeleteBuffer{}};
             void allocate();
         };
         bool covers(qint32 first, qint32 last) const;
@@ -63,12 +70,16 @@ class KRITAIMAGE_EXPORT KisTiledExtentManager
         qint32 m_offset;
         qint32 m_capacity;
         qint32 m_count;
-        QAtomicInt *m_buffer;
+        Growth::Buffer m_buffer{nullptr, Growth::DeleteBuffer{}};
         QReadWriteLock m_migrationLock;
     };
 
 public:
     KisTiledExtentManager();
+    static void *operator new(size_t bytes);
+    static void operator delete(void *data) noexcept;
+    // Cold composition only, before either axis owns capacity or live counts.
+    bool configureStorage(std::shared_ptr<std::pmr::memory_resource> resource);
 
     // Prepare both axes before any tile delta or pixels. This may grow retained
     // capacity, but never changes counts or the visible extent. Allocation and

@@ -76,7 +76,7 @@ struct ProviderRegistration : boost::intrusive::set_base_hook<>
 {
     KisBackingBudgetController *budget = nullptr;
     ProviderKey key;
-    QSharedPointer<KisPageReplicaProvider> provider;
+    std::shared_ptr<KisPageReplicaProvider> provider;
     bool backgroundRetirement = false;
     quint64 acceptedRevision = 0; // zero: original registration is still pending
 };
@@ -349,7 +349,7 @@ public:
         return providerRevision;
     }
 
-    QSharedPointer<KisPageReplicaProvider> nextProviderInCut(quint64 cut, ProviderKey *cursor) const
+    std::shared_ptr<KisPageReplicaProvider> nextProviderInCut(quint64 cut, ProviderKey *cursor) const
     {
         QMutexLocker lock(&mutex);
         for (auto next = providers.upper_bound(*cursor, ProviderLess{}); next != providers.end(); ++next) {
@@ -376,7 +376,7 @@ public:
 
     KisCompletionTicket operationCompletion(
         KisPageOperationId operation,
-        QSharedPointer<KisCompletionRegistry> *registry) const
+        std::shared_ptr<KisCompletionRegistry> *registry) const
     {
         QMutexLocker locker(&mutex);
         const auto found = operations.find(operation.value);
@@ -521,7 +521,7 @@ public:
 
     Storage storage;
     mutable QMutex mutex;
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     quint64 nextValidationStamp = 1;
     ProviderIndex providers;
     quint64 providerRevision = 0;
@@ -871,7 +871,7 @@ KisPageOwnerLedger::~KisPageOwnerLedger()
 }
 
 bool KisPageOwnerLedger::configure(
-    const QSharedPointer<KisCompletionRegistry> &completions,
+    const std::shared_ptr<KisCompletionRegistry> &completions,
     QString *error)
 {
     if (!completions || !completions->isOperational()) {
@@ -911,7 +911,7 @@ void KisPageOwnerLedger::attachBackingBudget(KisBackingBudgetController &budget)
 KisReplicaBackingFootprint KisPageOwnerLedger::observeBackingFootprint(
     const KisReplicaHandle &replica) const
 {
-    QSharedPointer<KisPageReplicaProvider> replicaProvider;
+    std::shared_ptr<KisPageReplicaProvider> replicaProvider;
     {
         QMutexLocker locker(&d->mutex);
         const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
@@ -1122,10 +1122,29 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecord(const Ki
         const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
         Q_ASSERT(registered);
         record->replica = replica;
-        record->provider = registered ? registered->provider : QSharedPointer<KisPageReplicaProvider>{};
+        record->provider = registered ? registered->provider : std::shared_ptr<KisPageReplicaProvider>{};
         record->backgroundRetirement = registered && registered->backgroundRetirement;
     }
     return record;
+}
+
+KisPageRetirementRecords KisPageOwnerLedger::takeShutdownRetirementRecords()
+{
+    QMutexLocker lock(&d->mutex);
+    KisPageRetirementRecords records;
+    for (auto &entry : d->backings) {
+        auto &backing = entry.second;
+        auto record = std::move(backing.retirement);
+        if (!record) continue; // The original queue already owns this record.
+        const auto registered = d->registeredProvider(
+            providerKey(backing.replica.provider, backing.replica.providerEpoch));
+        Q_ASSERT(registered);
+        record->replica = backing.replica;
+        record->provider = registered ? registered->provider : std::shared_ptr<KisPageReplicaProvider>{};
+        record->backgroundRetirement = registered && registered->backgroundRetirement;
+        records.push_back(*record.release());
+    }
+    return records;
 }
 
 bool KisPageOwnerLedger::reclassifyBacking(const KisReplicaHandle &replica,
@@ -1271,7 +1290,7 @@ bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
 try
 {
     struct Probe {
-        QSharedPointer<KisPageReplicaProvider> provider;
+        std::shared_ptr<KisPageReplicaProvider> provider;
         KisReplicaBackingDomainChange change;
         bool acknowledged = false;
 
@@ -1368,8 +1387,8 @@ catch (const std::bad_alloc &)
 }
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
-    QVector<KisBackingClassChange> changes,
-    const QVector<KisPageTransitionEffect> &retirementEffects,
+    KisPageSnapshotArray<KisBackingClassChange> changes,
+    const KisPageSnapshotArray<KisPageTransitionEffect> &retirementEffects,
     QString *error)
 try {
     KisBackingBudgetController *budget;
@@ -1711,7 +1730,7 @@ void KisPageOwnerLedger::releaseRetiredBacking(const KisReplicaHandle &replica) 
 }
 
 bool KisPageOwnerLedger::registerProvider(
-    const QSharedPointer<KisPageReplicaProvider> &provider,
+    const std::shared_ptr<KisPageReplicaProvider> &provider,
     QString *error)
 try
 {
@@ -1778,22 +1797,22 @@ catch (const std::bad_alloc &)
     return false;
 }
 
-QSharedPointer<KisPageReplicaProvider> KisPageOwnerLedger::provider(
+std::shared_ptr<KisPageReplicaProvider> KisPageOwnerLedger::provider(
     KisReplicaProviderId providerId,
     KisReplicaProviderEpoch epoch) const
 {
     QMutexLocker locker(&d->mutex);
     const auto registered = d->registeredProvider(providerKey(providerId, epoch));
-    return registered ? registered->provider : QSharedPointer<KisPageReplicaProvider>{};
+    return registered ? registered->provider : std::shared_ptr<KisPageReplicaProvider>{};
 }
 
-QSharedPointer<KisPageReplicaProvider> KisPageOwnerLedger::providerFor(
+std::shared_ptr<KisPageReplicaProvider> KisPageOwnerLedger::providerFor(
     KisPageAccessRequirement access) const
 {
     if (!access.isValid()) return {};
     const auto cut = d->providerCut();
     ProviderKey cursor{};
-    QSharedPointer<KisPageReplicaProvider> selected;
+    std::shared_ptr<KisPageReplicaProvider> selected;
     while (const auto candidate = d->nextProviderInCut(cut, &cursor)) {
         if (!candidate->capabilities().supports(access)) continue;
         if (selected) {
@@ -1860,7 +1879,7 @@ KisVerifiedCompletion KisPageOwnerLedger::verifyTerminalProviderResult(
     const KisReplicaOperation &result,
     QString *error) const
 {
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     {
         QMutexLocker lock(&d->mutex);
         if (!d->acceptsProviderResultLocked(operation, result, error)) return {};
@@ -1927,7 +1946,7 @@ KisVerifiedCompletion KisPageOwnerLedger::verifyProviderOperation(
     KisPageOperationId operation,
     QString *error) const
 {
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     const KisCompletionTicket completion = d->operationCompletion(operation, &completions);
     if (!completion.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("provider operation is unknown"));
@@ -1946,7 +1965,7 @@ bool KisPageOwnerLedger::releaseTerminalProviderOperation(
     KisPageOperationId operation,
     QString *error)
 {
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     const KisCompletionTicket completion = d->operationCompletion(operation, &completions);
     if (!completion.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("provider operation is unknown"));
@@ -1975,7 +1994,7 @@ KisPageReadinessStatus KisPageOwnerLedger::watchProviderOperation(
     KisPageOperationId operation, KisPageReadinessCallback scheduleReady,
     KisPageReadinessSubscription *subscription) const
 {
-    QSharedPointer<KisCompletionRegistry> registry;
+    std::shared_ptr<KisCompletionRegistry> registry;
     const auto ticket = d->operationCompletion(operation, &registry);
     return registry && ticket.isValid()
         ? registry->watchTerminal(ticket, std::move(scheduleReady), subscription)
@@ -1986,7 +2005,7 @@ KisPageReadinessStatus KisPageOwnerLedger::watchCompletion(
     const KisCompletionTicket &ticket, KisPageReadinessCallback scheduleReady,
     KisPageReadinessSubscription *subscription) const
 {
-    QSharedPointer<KisCompletionRegistry> registry;
+    std::shared_ptr<KisCompletionRegistry> registry;
     {
         QMutexLocker lock(&d->mutex);
         registry = d->completions;
@@ -2042,7 +2061,7 @@ try
         return false;
     }
 
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     KisBackingBudgetController *budget = nullptr;
     {
         QMutexLocker locker(&d->mutex);
@@ -2072,7 +2091,7 @@ try
     }
 
     auto record = prepareLedgerNode<SealedProofRecord>(budget);
-    const QSharedPointer<KisPageReplicaProvider> authorityProvider =
+    const std::shared_ptr<KisPageReplicaProvider> authorityProvider =
         provider(snapshot.authority.provider, snapshot.authority.providerEpoch);
     if (!authorityProvider ||
         !authorityProvider->validate(snapshot.authority, descriptor)) {
@@ -2121,7 +2140,7 @@ bool KisPageOwnerLedger::validatePreparedPage(
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof or layout is invalid"));
         return false;
     }
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     {
         QMutexLocker locker(&d->mutex);
         const auto sealedIt =
@@ -2148,7 +2167,7 @@ bool KisPageOwnerLedger::validatePreparedPage(
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof no longer matches metadata"));
         return false;
     }
-    const QSharedPointer<KisPageReplicaProvider> authorityProvider =
+    const std::shared_ptr<KisPageReplicaProvider> authorityProvider =
         provider(proof.authority.provider, proof.authority.providerEpoch);
     if (!authorityProvider ||
         !authorityProvider->validate(snapshot.authority, descriptor)) {

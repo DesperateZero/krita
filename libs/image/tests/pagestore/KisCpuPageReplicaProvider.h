@@ -30,7 +30,7 @@ public:
     std::function<void()> beforeValidate;
 
     bool configure(const KisCpuResidentReplicaProviderConfig &config,
-                   const QSharedPointer<KisCompletionRegistry> &completions,
+                   const std::shared_ptr<KisCompletionRegistry> &completions,
                    QString *error = nullptr);
 
     QString name() const override;

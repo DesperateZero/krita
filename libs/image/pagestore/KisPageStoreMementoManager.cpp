@@ -11,17 +11,22 @@
 #include <QMutexLocker>
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 
 namespace {
 
 std::atomic<quint64> s_nextHistoryCapability{1};
 
-struct ActiveHistoryTransaction
+struct HistoryRecord
 {
+    explicit HistoryRecord(KisMutationStorageAllocator<KisPageKey> storage) : changedPages(storage) {}
     KisPageTransaction transaction;
     KisRetainedImageEpochSnapshot before;
     KisImageEpochSnapshotToken orphanedAfter;
+    KisRetainedImageEpochSnapshot after;
+    KisPageKeyStorage changedPages;
+    bool requiresFullPageRestore = false;
 };
 
 quint64 allocateHistoryCapability(QString *error, const QString &failure)
@@ -31,7 +36,7 @@ quint64 allocateHistoryCapability(QString *error, const QString &failure)
     return capability;
 }
 
-bool releaseActiveHistory(KisPageStore *store, ActiveHistoryTransaction &record)
+bool releaseActiveHistory(KisPageStore *store, HistoryRecord &record)
 {
     if (record.transaction.isValid()) {
         if (!store->abort(record.transaction)) return false;
@@ -50,13 +55,6 @@ bool releaseActiveHistory(KisPageStore *store, ActiveHistoryTransaction &record)
     return true;
 }
 
-struct HistoryRecord
-{
-    KisRetainedImageEpochSnapshot before;
-    KisRetainedImageEpochSnapshot after;
-    QVector<KisPageKey> changedPages;
-    bool requiresFullPageRestore = false;
-};
 
 template<typename ReleaseSnapshot>
 bool releaseHistoryRecord(HistoryRecord &record, ReleaseSnapshot releaseSnapshot)
@@ -82,11 +80,15 @@ bool releaseHistoryRecord(HistoryRecord &record, ReleaseSnapshot releaseSnapshot
 class KisPageStoreMementoManager::Private
 {
 public:
+    using Storage = KisMutationStorageAllocator<Private>;
+    using Records = std::map<quint64, HistoryRecord, std::less<quint64>,
+        KisMutationStorageAllocator<std::pair<const quint64, HistoryRecord>>>;
+    explicit Private(const Storage &allocator) : storage(allocator) {}
     auto find(const KisPageStoreHistoryTransaction &transaction, QString *error)
     {
         auto it = active.find(transaction.capability);
         if (!store || !transaction.isValid() || it == active.end() ||
-            !(it->transaction == transaction.transaction)) {
+            !(it->second.transaction == transaction.transaction)) {
             KisPageStoreDetail::setError(error, QStringLiteral("PageStore history transaction capability is invalid"));
             return active.end();
         }
@@ -103,14 +105,28 @@ public:
     }
 
     mutable QMutex mutex;
+    Storage storage;
     KisPageStore *store = nullptr;
-    QHash<quint64, ActiveHistoryTransaction> active;
-    QHash<quint64, HistoryRecord> mementos;
+    Records active;
+    Records mementos;
 };
 
-KisPageStoreMementoManager::KisPageStoreMementoManager()
-    : d(new Private)
+KisPageStoreMementoManager::KisPageStoreMementoManager(
+    const KisMutationStorageAllocator<KisPageStoreMementoManager> &storage)
 {
+    Private::Storage allocator(storage);
+    auto *raw = allocator.allocate(1);
+    try { std::allocator_traits<Private::Storage>::construct(allocator, raw, allocator); }
+    catch (...) { allocator.deallocate(raw, 1); throw; }
+    d.reset(raw);
+}
+
+void KisPageStoreMementoManager::PrivateReleaser::cleanup(Private *owner)
+{
+    if (!owner) return;
+    auto storage = owner->storage;
+    std::destroy_at(owner);
+    storage.deallocate(owner, 1);
 }
 
 KisPageStoreMementoManager::~KisPageStoreMementoManager()
@@ -127,6 +143,9 @@ bool KisPageStoreMementoManager::configure(KisPageStore *store,
             "PageStore memento manager configuration is invalid"));
         return false;
     }
+    const auto storage = store->storageAllocator();
+    d->active = Private::Records(storage);
+    d->mementos = Private::Records(storage);
     d->store = store;
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -143,6 +162,12 @@ KisPageStoreHistoryTransaction KisPageStoreMementoManager::begin(
     }
     const quint64 capability = allocateHistoryCapability(error, QStringLiteral("PageStore history capability allocation failed"));
     if (!capability) return {};
+    Private::Records prepared(d->active.get_allocator());
+    try { prepared.try_emplace(capability, d->active.get_allocator()); }
+    catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore history record storage is unavailable"));
+        return {};
+    }
     const KisRetainedImageEpochSnapshot before =
         d->store->captureRetainedEpochRoot();
     if (!before.isValid()) {
@@ -158,7 +183,10 @@ KisPageStoreHistoryTransaction KisPageStoreMementoManager::begin(
             "PageStore history transaction allocation failed"));
         return {};
     }
-    d->active.insert(capability, {transaction, before, {}});
+    auto &record = prepared.begin()->second;
+    record.transaction = transaction;
+    record.before = before;
+    d->active.insert(prepared.extract(prepared.begin()));
     KisPageStoreDetail::setError(error, {});
     return {capability, transaction};
 }
@@ -173,54 +201,56 @@ KisPageStoreMemento KisPageStoreMementoManager::commit(
     const quint64 capability = allocateHistoryCapability(error, QStringLiteral("PageStore memento capability allocation failed"));
     if (!capability) return {};
     const KisPreparedPageSet prepared =
-        d->store->preparedPages(it->transaction);
+        d->store->preparedPages(it->second.transaction);
     if (!prepared.isValid()) {
-        if (!d->store->abort(it->transaction)) {
+        if (!d->store->abort(it->second.transaction)) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "PageStore no-op history transaction abort failed"));
             return {};
         }
-        const KisRetainedImageEpochSnapshot retained = it->before;
-        d->active.erase(it);
-        d->mementos.insert(capability,
-                            {retained, retained, {}, false});
+        it->second.transaction = {};
+        it->second.after = it->second.before;
+        auto record = d->active.extract(it);
+        record.key() = capability;
+        d->mementos.insert(std::move(record));
         KisPageStoreDetail::setError(error, {});
         return {capability};
     }
+    auto &record = it->second;
+    try {
+        record.changedPages.clear();
+        record.changedPages.reserve(size_t(prepared.proofs.size()) + size_t(prepared.removedPages.size()));
+        for (const auto &proof : prepared.proofs) record.changedPages.push_back(proof.authority.version.key);
+        record.changedPages.insert(record.changedPages.end(), prepared.removedPages.begin(), prepared.removedPages.end());
+    } catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("PageStore history delta storage is unavailable"));
+        return {};
+    }
+    record.requiresFullPageRestore = std::any_of(
+        prepared.surfaceChanges.constBegin(), prepared.surfaceChanges.constEnd(),
+        [](const KisSurfaceEpochChange &change) {
+            return change.before.format.defaultPixel != change.after.format.defaultPixel;
+        });
     KisRetainedImageEpochSnapshot after;
     const KisImageEpochCommitTicket committed =
-        d->store->commit(it->transaction, prepared, &after);
+        d->store->commit(it->second.transaction, prepared, &after);
     if (!committed.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore history transaction commit failed"));
         return {};
     }
-    it->transaction = {};
+    it->second.transaction = {};
     if (!after.isValid() || !(after.snapshot.epoch == committed.epoch)) {
-        it->orphanedAfter = after.token;
+        it->second.orphanedAfter = after.token;
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore after-root retention failed after commit"));
         return {};
     }
 
-    QVector<KisPageKey> changedPages;
-    changedPages.reserve(prepared.proofs.size() + prepared.removedPages.size());
-    for (const KisPreparedPageProof &proof : prepared.proofs) {
-        changedPages.append(proof.authority.version.key);
-    }
-    changedPages += prepared.removedPages;
-    const bool requiresFullPageRestore = std::any_of(
-        prepared.surfaceChanges.constBegin(),
-        prepared.surfaceChanges.constEnd(),
-        [](const KisSurfaceEpochChange &change) {
-            return change.before.format.defaultPixel !=
-                   change.after.format.defaultPixel;
-        });
-
-    const KisRetainedImageEpochSnapshot before = it->before;
-    d->active.erase(it);
-    d->mementos.insert(capability,
-                        {before, after, changedPages, requiresFullPageRestore});
+    record.after = after;
+    auto accepted = d->active.extract(it);
+    accepted.key() = capability;
+    d->mementos.insert(std::move(accepted));
     KisPageStoreDetail::setError(error, {});
     return {capability};
 }
@@ -232,7 +262,7 @@ bool KisPageStoreMementoManager::abort(
     QMutexLocker locker(&d->mutex);
     auto it = d->find(transaction, error);
     if (it == d->active.end()) return false;
-    if (!releaseActiveHistory(d->store, it.value())) {
+    if (!releaseActiveHistory(d->store, it->second)) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore history transaction cleanup failed"));
         return false;
@@ -264,15 +294,15 @@ KisImageEpochCommitTicket KisPageStoreMementoManager::restore(
     QMutexLocker locker(&d->mutex);
     auto it = d->find(memento, error);
     if (it == d->mementos.end()) return {};
-    if (!it->before.token.isValid() || !it->after.token.isValid()) {
+    if (!it->second.before.token.isValid() || !it->second.after.token.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore memento is being purged"));
         return {};
     }
     const KisRetainedImageEpochSnapshot &target =
-        before ? it->before : it->after;
-    const KisImageEpochCommitTicket restored = it->requiresFullPageRestore
+        before ? it->second.before : it->second.after;
+    const KisImageEpochCommitTicket restored = it->second.requiresFullPageRestore
         ? d->store->restoreRetainedEpoch(target)
-        : d->store->restoreRetainedEpochDelta(target, it->changedPages);
+        : d->store->restoreRetainedEpochDelta(target, it->second.changedPages);
     if (!restored.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore memento restore failed"));
         return {};
@@ -293,7 +323,7 @@ bool KisPageStoreMementoManager::purge(const KisPageStoreMemento &memento,
             ? store->releaseSnapshot(token)
             : store->releaseSnapshotDelta(token, record.changedPages);
     };
-    if (!releaseHistoryRecord(it.value(), releaseSnapshot)) {
+    if (!releaseHistoryRecord(it->second, releaseSnapshot)) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore memento retention release failed"));
         return false;
@@ -311,7 +341,7 @@ bool KisPageStoreMementoManager::close(QString *error)
         return true;
     }
     for (auto it = d->active.begin(); it != d->active.end();) {
-        if (!releaseActiveHistory(d->store, it.value())) {
+        if (!releaseActiveHistory(d->store, it->second)) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "PageStore memento manager transaction drain failed"));
             return false;
@@ -325,7 +355,7 @@ bool KisPageStoreMementoManager::close(QString *error)
             : store->releaseSnapshotDelta(token, record.changedPages);
     };
     for (auto it = d->mementos.begin(); it != d->mementos.end();) {
-        if (!releaseHistoryRecord(it.value(), releaseSnapshot)) {
+        if (!releaseHistoryRecord(it->second, releaseSnapshot)) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "PageStore memento manager retention drain failed"));
             return false;

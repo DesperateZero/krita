@@ -54,6 +54,8 @@ class KRITAIMAGE_EXPORT KisTiledDataManagerIteratorWriteScope
 {
 public:
     ~KisTiledDataManagerIteratorWriteScope();
+    static void *operator new(size_t bytes);
+    static void operator delete(void *data) noexcept;
     bool finish();
     // A clear barrier revokes further acquisition, but keeps borrowed raw
     // storage alive until the iterator releases its original tile locks.
@@ -101,8 +103,8 @@ public:
     // invalid scope fails closed. A marked live-writer scope is an explicit
     // compatibility path, NOT immutable visibility. Wrapped peers share the
     // immutable selection; a supplied selection must match owner and mode.
-    QSharedPointer<const KisPageStoreIteratorReadScope> capturePageStoreReadScope(
-        bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
+    std::shared_ptr<const KisPageStoreIteratorReadScope> capturePageStoreReadScope(
+        bool writable, std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
         beginIteratorWriteScope();
     KisPageStoreWriteOperationResult writePageStoreOperation(

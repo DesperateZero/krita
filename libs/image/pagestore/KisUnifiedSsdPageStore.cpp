@@ -43,7 +43,7 @@ public:
     mutable QMutex mutex;
     bool failNextWrite = false;
     KisLegacySwapArchiveConfig config;
-    QSharedPointer<KisCompletionRegistry> completions;
+    std::shared_ptr<KisCompletionRegistry> completions;
     quint64 completionSource = 0;
     quint64 storedBytes = 0;
     std::unique_ptr<KisSwappedDataStore> swapStore;
@@ -58,7 +58,7 @@ KisUnifiedSsdPageStore::~KisUnifiedSsdPageStore() = default;
 
 bool KisUnifiedSsdPageStore::configureLegacySwapArchive(
     const KisLegacySwapArchiveConfig &config,
-    const QSharedPointer<KisCompletionRegistry> &completions,
+    const std::shared_ptr<KisCompletionRegistry> &completions,
     QString *error)
 {
     if (!config.isValid() || !completions || !completions->isOperational()) {

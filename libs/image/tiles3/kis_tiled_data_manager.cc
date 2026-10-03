@@ -6,6 +6,7 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <memory>
 #include <QRect>
 #include <QRegion>
 #include <QScopeGuard>
@@ -37,6 +38,14 @@ namespace {
 
 using PixelOperationResult = KisPageStoreWriteOperationResult;
 using OperationDelivery = KisTiledDataManagerPageStoreBackend::OperationDelivery;
+
+namespace {
+std::unique_ptr<KisTiledDataManagerPageStoreBackend> preparePageStoreBackend() noexcept
+{
+    try { return std::make_unique<KisTiledDataManagerPageStoreBackend>(); }
+    catch (const std::bad_alloc &) { return {}; }
+}
+}
 
 // A result buffer, never a presence cache or page permission. Common brush
 // jobs use inline storage; larger declarations allocate once before pixels.
@@ -214,11 +223,12 @@ KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
     hashTable->setDefaultTileData(defaultTile.get());
     mementoManager->setDefaultTileData(defaultTile.get());
 
-    auto backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
+    auto backend = preparePageStoreBackend();
     QString pageStoreError;
-    if (!backend->configure(pixelSize, defaultPixel, &pageStoreError)) {
-        backend.reset();
-    }
+    try {
+        if (!backend || !backend->configure(pixelSize, defaultPixel, &pageStoreError)
+            || !m_extentManager.configureStorage(backend->extentStorage())) backend.reset();
+    } catch (const std::bad_alloc &) { backend.reset(); }
     mementoManager->setPageStoreBridge(backend.get());
     m_pixelSize = pixelSize;
     m_defaultPixel = pixel.release();
@@ -239,16 +249,19 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
     auto pixel = std::make_unique<quint8[]>(dm.m_pixelSize);
     memcpy(pixel.get(), dm.m_defaultPixel, dm.m_pixelSize);
 
-    auto backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
+    auto backend = preparePageStoreBackend();
     QString pageStoreError;
-    if (!dm.m_pageStoreBackend ||
+    if (!backend || !dm.m_pageStoreBackend ||
         !dm.m_pageStoreBackend->isOperational() ||
         !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)) {
-        backend = std::make_unique<KisTiledDataManagerPageStoreBackend>();
-        if (!backend->configure(dm.m_pixelSize, pixel.get(), &pageStoreError)) {
+        backend = preparePageStoreBackend();
+        if (!backend || !backend->configure(dm.m_pixelSize, pixel.get(), &pageStoreError)) {
             backend.reset();
         }
     }
+    try {
+        if (backend && !m_extentManager.configureStorage(backend->extentStorage())) backend.reset();
+    } catch (const std::bad_alloc &) { backend.reset(); }
     mementoManager->setPageStoreBridge(backend.get());
     m_pixelSize = dm.m_pixelSize;
     m_defaultPixel = pixel.release();
@@ -412,6 +425,7 @@ bool KisTiledDataManager::tryAbort(KisMementoSP memento, QString *error)
             preparedTable = std::make_unique<KisTileHashTable>(m_mementoManager);
             preparedTable->setDefaultTileData(m_historyDefaultTileData);
             preparedExtent = std::make_unique<KisTiledExtentManager>();
+            if (!preparedExtent->configureStorage(m_pageStoreBackend->extentStorage())) return false;
             for (const auto &page : pages) {
                 bool added = false;
                 auto tile = preparedTable->getTileLazy(page.column, page.row, added);
@@ -1678,12 +1692,12 @@ void KisTiledDataManager::readBytes(quint8 *data,
         KisStrokeJobFailureContext::reportFailure(QStringLiteral("Packed read failed"));
 }
 
-QSharedPointer<const KisPageStoreIteratorReadScope>
+std::shared_ptr<const KisPageStoreIteratorReadScope>
 KisTiledDataManager::capturePageStoreReadScope(
-    bool writable, QSharedPointer<const KisPageStoreIteratorReadScope> existing) const
+    bool writable, std::shared_ptr<const KisPageStoreIteratorReadScope> existing) const
 {
     return m_pageStoreBackend ? m_pageStoreBackend->captureIteratorReadScope(writable, nullptr, std::move(existing))
-                              : QSharedPointer<const KisPageStoreIteratorReadScope>{};
+                              : std::shared_ptr<const KisPageStoreIteratorReadScope>{};
 }
 
 std::unique_ptr<KisTiledDataManagerIteratorWriteScope>

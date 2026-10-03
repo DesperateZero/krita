@@ -9,6 +9,7 @@
 #include "config-memory-leak-tracker.h"
 
 #include <QGlobalStatic>
+#include <algorithm>
 #include <limits>
 #include <utility>
 #include <memory>
@@ -379,16 +380,33 @@ void KisTileDataStore::freeTileData(KisTileData *td)
 
     {
         QMutexLocker locker(&m_residencyObserverLock);
-        m_residencyObservers.remove(td);
+        const auto found = m_residencyObservers.find(td);
+        if (found != m_residencyObservers.end()) {
+            auto *record = &*found;
+            m_residencyObservers.erase(found);
+            intrusive_ptr_release(record);
+        }
     }
 
     delete td;
 }
 
-bool KisTileDataStore::registerResidencyObserver(
-    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer,
-    KisTileDataResidencyState *initialState)
+KisTileDataStore::PreparedResidencyObserver KisTileDataStore::prepareResidencyObserver(
+    const std::shared_ptr<KisTileDataResidencyObserver> &observer)
 {
+    if (!observer) return {};
+    void *raw = observer->allocate(sizeof(ResidencyObservers), alignof(ResidencyObservers));
+    PreparedResidencyObserver candidate(::new (raw) ResidencyObservers(nullptr, observer), false);
+    raw = observer->allocate(sizeof(ResidencyObserverRegistration), alignof(ResidencyObserverRegistration));
+    auto *registration = ::new (raw) ResidencyObserverRegistration(observer);
+    candidate->observers.push_back(*registration);
+    return candidate;
+}
+
+bool KisTileDataStore::registerResidencyObserver(
+    KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer,
+    KisTileDataResidencyState *initialState, PreparedResidencyObserver prepared)
+try {
     if (!td || !observer)
         return false;
     // Match the transition lock order: swap state first, sparse observer
@@ -397,46 +415,73 @@ bool KisTileDataStore::registerResidencyObserver(
     QMutexLocker observerLocker(&m_residencyObserverLock);
     const bool resident = td->data() != nullptr;
     auto found = m_residencyObservers.find(td);
+    auto candidate = std::move(prepared);
+    if (candidate && candidate->storageOwner != observer) return false;
     if (found == m_residencyObservers.end()) {
-        ResidencyObservers record;
-        record.resident = resident;
-        record.revision = 1;
-        record.observersRevision = 1;
-        found = m_residencyObservers.insert(td, std::move(record));
+        if (!candidate) candidate = prepareResidencyObserver(observer);
+        candidate->tile = td;
+        candidate->resident = resident;
+        candidate->revision = 1;
+        candidate->observersRevision = 1;
     } else {
         Q_ASSERT(found->revision != 0);
         Q_ASSERT(found->resident == resident);
     }
-    if (!found->observers.contains(observer)) {
-        found->observers.append(observer);
-        ++found->observersRevision;
-        if (!found->observersRevision)
-            ++found->observersRevision;
+    auto *record = found == m_residencyObservers.end() ? candidate.get() : &*found;
+    const auto existing = std::find_if(record->observers.begin(), record->observers.end(),
+        [&](const auto &value) { return value.observer == observer; });
+    if (existing == record->observers.end()) {
+        ResidencyObserverRegistration *registration = nullptr;
+        if (candidate && !candidate->observers.empty()) {
+            registration = &candidate->observers.front();
+            candidate->observers.pop_front();
+        } else {
+            void *raw = observer->allocate(sizeof(ResidencyObserverRegistration), alignof(ResidencyObserverRegistration));
+            registration = ::new (raw) ResidencyObserverRegistration(observer);
+        }
+        record->observers.push_back(*registration);
+        ++record->observersRevision;
+        if (!record->observersRevision) ++record->observersRevision;
+    }
+    if (found == m_residencyObservers.end()) {
+        m_residencyObservers.insert(*candidate);
+        intrusive_ptr_add_ref(candidate.get()); // The table owns the original node.
     }
     if (initialState)
-        *initialState = {found->resident, found->revision};
+        *initialState = {record->resident, record->revision};
     return true;
 }
+catch (const std::bad_alloc &) { return false; }
 
 void KisTileDataStore::unregisterResidencyObserver(
-    KisTileData *td, const QSharedPointer<KisTileDataResidencyObserver> &observer)
+    KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer)
 {
     QMutexLocker locker(&m_residencyObserverLock);
     auto existing = m_residencyObservers.find(td);
     if (existing == m_residencyObservers.end())
         return;
-    if (existing->observers.removeAll(observer)) {
+    bool removed = false;
+    for (auto it = existing->observers.begin(); it != existing->observers.end();) {
+        const auto entry = it++;
+        if (entry->observer != observer) continue;
+        existing->observers.erase_and_dispose(entry, &ResidencyObserverRegistration::dispose);
+        removed = true;
+    }
+    if (removed) {
         ++existing->observersRevision;
         if (!existing->observersRevision)
             ++existing->observersRevision;
     }
-    if (existing->observers.isEmpty())
+    if (existing->observers.empty()) {
+        auto *record = &*existing;
         m_residencyObservers.erase(existing);
+        intrusive_ptr_release(record);
+    }
 }
 
 KisTileDataStore::PreparedResidencyChange
 KisTileDataStore::prepareResidencyChange(KisTileData *td, bool targetResident)
-{
+try {
     PreparedResidencyChange result;
     if (!td)
         return result;
@@ -446,8 +491,8 @@ KisTileDataStore::prepareResidencyChange(KisTileData *td, bool targetResident)
         if (result.sourceResident == targetResident)
             return result;
         QMutexLocker observerLocker(&m_residencyObserverLock);
-        const auto found = m_residencyObservers.constFind(td);
-        if (found == m_residencyObservers.cend()) {
+        const auto found = m_residencyObservers.find(td);
+        if (found == m_residencyObservers.end()) {
             result.valid = true;
             return result;
         }
@@ -457,7 +502,14 @@ KisTileDataStore::prepareResidencyChange(KisTileData *td, bool targetResident)
         }
         result.sourceRevision = found->revision;
         result.observersRevision = found->observersRevision;
-        result.observers = found->observers;
+        result.registration.reset(&*found);
+        result.observers = decltype(result.observers)(
+            KisTileResidencyStorageAllocator<std::shared_ptr<KisTileDataResidencyObserver>>(found->storageOwner));
+        result.transitions = decltype(result.transitions)(
+            KisTileResidencyStorageAllocator<std::shared_ptr<KisTileDataResidencyTransition>>(found->storageOwner));
+        result.observers.reserve(found->observers.size());
+        for (const auto &registration : found->observers)
+            result.observers.push_back(registration.observer);
     }
 
     const KisTileDataResidencyState source{
@@ -472,11 +524,12 @@ KisTileDataStore::prepareResidencyChange(KisTileData *td, bool targetResident)
             result.valid = false;
             return result;
         }
-        result.transitions.append(std::move(transition));
+        result.transitions.push_back(std::move(transition));
     }
     result.valid = true;
     return result;
 }
+catch (const std::bad_alloc &) { return {}; }
 
 bool KisTileDataStore::validateResidencyChangeLocked(
     KisTileData *td, const PreparedResidencyChange &prepared)
@@ -484,13 +537,13 @@ bool KisTileDataStore::validateResidencyChangeLocked(
     if (!prepared.valid || (td->data() != nullptr) != prepared.sourceResident)
         return false;
     QMutexLocker locker(&m_residencyObserverLock);
-    const auto found = m_residencyObservers.constFind(td);
+    const auto found = m_residencyObservers.find(td);
     if (!prepared.observersRevision)
-        return found == m_residencyObservers.cend();
-    return found != m_residencyObservers.cend()
+        return found == m_residencyObservers.end();
+    return found != m_residencyObservers.end()
         // A deleted and recreated registration can reuse numerical revisions.
-        // The prepared array pins its original storage through validation.
-        && found->observers.constData() == prepared.observers.constData()
+        // Preparation pins the original paid record through validation.
+        && &*found == prepared.registration.get()
         && found->resident == prepared.sourceResident
         && found->revision == prepared.sourceRevision
         && found->observersRevision == prepared.observersRevision;

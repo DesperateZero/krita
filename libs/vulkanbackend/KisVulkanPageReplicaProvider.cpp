@@ -101,7 +101,7 @@ KisReplicaOperation KisVulkanPageReplicaProvider::requestReplica(
                                       QStringLiteral("Vulkan replica provider is not configured"));
     }
     if (!operation.isValid() || !version.isValid() || !descriptor.isValid() ||
-        !d->config.capabilities.domains.contains(domain)) {
+        !d->config.capabilities.supportsStorageDomain(domain)) {
         return KisReplicaOperation::failed(
             operation,
             QStringLiteral("Replica request version or access domain is unsupported"));
@@ -126,7 +126,7 @@ KisReplicaOperation KisVulkanPageReplicaProvider::prepareWrite(
                                       QStringLiteral("Vulkan replica provider is not configured"));
     }
     if (!operation.isValid() || !version.isValid() || !descriptor.isValid() ||
-        !d->config.capabilities.domains.contains(domain)) {
+        !d->config.capabilities.supportsStorageDomain(domain)) {
         return KisReplicaOperation::failed(
             operation,
             QStringLiteral("Write reservation identity or domain is invalid"));
@@ -148,7 +148,7 @@ KisReplicaOperation KisVulkanPageReplicaProvider::transfer(
     if (!request.isSameProviderTransfer() ||
         request.target.provider.value != d->config.providerId ||
         request.target.providerEpoch.value != d->config.providerGeneration ||
-        !d->config.capabilities.domains.contains(request.target.domain)) {
+        !d->config.capabilities.supportsStorageDomain(request.target.domain)) {
         return KisReplicaOperation::failed(
             request.operation,
             QStringLiteral("Replica transfer target or endpoints do not match this provider"));
@@ -192,7 +192,7 @@ bool KisVulkanPageReplicaProvider::validate(
            replica.provider.value == d->config.providerId &&
            replica.providerEpoch.value == d->config.providerGeneration &&
            replica.layout.matches(descriptor) &&
-           d->config.capabilities.domains.contains(replica.domain);
+           d->config.capabilities.supportsStorageDomain(replica.domain);
 }
 
 KisReplicaOperation KisVulkanPageReplicaProvider::retire(
@@ -209,7 +209,7 @@ KisReplicaOperation KisVulkanPageReplicaProvider::retire(
     if (!operation.isValid() || !replica.isValid() ||
         replica.provider.value != d->config.providerId ||
         replica.providerEpoch.value != d->config.providerGeneration ||
-        !d->config.capabilities.domains.contains(replica.domain)) {
+        !d->config.capabilities.supportsStorageDomain(replica.domain)) {
         return KisReplicaOperation::failed(operation,
                                       QStringLiteral("Replica retirement identity is invalid"));
     }

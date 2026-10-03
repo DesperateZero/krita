@@ -45,11 +45,11 @@ public:
     quint64 defaultPixelRevision() const { return m_defaultPixelRevision; }
     quint64 extentRevision() const { return m_extentRevision; }
     quint64 propertyRevision() const { return m_propertyRevision; }
-    QVector<KisPageVersion> manifest() const;
+    KisPageSnapshotArray<KisPageVersion> manifest() const;
     qsizetype pageCount() const;
     qint32 pageTreeHeight() const;
     bool containsPage(const KisPageKey &key, KisPageVersion *version = nullptr) const;
-    QVector<KisSurfaceEpochState> surfaces() const;
+    KisPageSnapshotArray<KisSurfaceEpochState> surfaces() const;
     KisImageEpochSnapshot snapshot() const;
     bool resolve(const KisPageKey &key, KisPageVersion *version) const;
     bool surfaceState(KisSurfaceId surface, KisSurfaceEpochState *state) const;
@@ -92,9 +92,9 @@ private:
 struct KRITAIMAGE_EXPORT KisPageTransactionSnapshot {
     KisPageTransaction transaction;
     KisPageTransactionState state = KisPageTransactionState::Invalid;
-    QVector<KisPageVersion> changes;
-    QVector<KisSurfaceEpochChange> surfaceChanges;
-    QVector<KisPageKey> removedPages;
+    KisPageSnapshotArray<KisPageVersion> changes;
+    KisPageSnapshotArray<KisSurfaceEpochChange> surfaceChanges;
+    KisPageSnapshotArray<KisPageKey> removedPages;
 
     bool isActive() const
     {
@@ -175,7 +175,7 @@ public:
     // counter is unique roots probed in this call (zero for empty keys), not
     // elapsed time, tree nodes, or snapshot-token count. Deferred garbage does
     // not enlarge logical reachability. Physical pins/last-use are separate.
-    QSet<KisPageVersion> reachablePageVersions(const QVector<KisPageKey> &registeredKeys,
+    KisPageSnapshotArray<KisPageVersion> reachablePageVersions(const KisPageSnapshotArray<KisPageKey> &registeredKeys,
                                                quint64 *visitedRoots = nullptr) const;
     // Structural metadata only, and only while admitted. Holding the returned
     // copy does not retain pixel versions or authorize later epoch admission.

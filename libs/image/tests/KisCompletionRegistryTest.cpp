@@ -549,7 +549,7 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     QFETCH(int, terminal);
     const auto status = KisCompletionStatus(terminal);
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
-    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto process = std::make_shared<KisBackingBudgetController>(limits);
     KisCompletionRegistry registry(process);
     const auto source = addSource(registry);
     std::array<KisCompletionTicket, 5> tickets;
@@ -560,15 +560,15 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
         KisPageReadinessCallback callback([&, index] {
             QCOMPARE(registry.status(tickets[index]), status);
             ++calls;
-        }, process.data());
+        }, process.get());
         QCOMPARE(registry.watchTerminal(tickets[index], std::move(callback), index ? &bridge : &first),
                  KisPageReadinessStatus::Waiting);
     }
     auto warm = process->reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
     const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = kisAllocateMutationStorage(process.data(), fillerBytes, 1);
-    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.data(), filler, fillerBytes, 1); });
+    void *filler = kisAllocateMutationStorage(process.get(), fillerBytes, 1);
+    const auto release = qScopeGuard([&] { kisFreeMutationStorage(process.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY(!registry.allocatePending(source).isValid());
     QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), quint64(0));
@@ -584,7 +584,7 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5));
     QVERIFY(live() < limits.metadataArenaBytes);
     for (const auto &ticket : tickets) QVERIFY(!registry.complete(ticket, KisCompletionStatus::Cancelled));
-    kisFreeMutationStorage(process.data(), std::exchange(filler, nullptr), fillerBytes, 1);
+    kisFreeMutationStorage(process.get(), std::exchange(filler, nullptr), fillerBytes, 1);
     const auto next = registry.allocatePending(source);
     QCOMPARE(next.value(), quint64(6)); // Refusal issued no hidden identity.
     QVERIFY(registry.complete(next, KisCompletionStatus::Succeeded));
@@ -594,7 +594,7 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
 void KisCompletionRegistryTest::registryStorageReturnsToProcessOwner()
 {
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
-    auto process = QSharedPointer<KisBackingBudgetController>::create(limits);
+    auto process = std::make_shared<KisBackingBudgetController>(limits);
     const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     // Measure the parent cache after the same real source/subscription workload.
     const auto exercise = [&](bool retain) {
@@ -602,7 +602,7 @@ void KisCompletionRegistryTest::registryStorageReturnsToProcessOwner()
         const auto source = addSource(*registry);
         const auto ticket = registry->allocatePending(source);
         KisPageReadinessSubscription subscription;
-        KisPageReadinessCallback callback([] {}, process.data());
+        KisPageReadinessCallback callback([] {}, process.get());
         if (registry->watchTerminal(ticket, std::move(callback), &subscription) != KisPageReadinessStatus::Waiting)
             return false;
         const auto before = live();

@@ -112,7 +112,7 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     }
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
     KisReplicaHandle replica;
-    QSharedPointer<KisPageReplicaProvider> provider;
+    std::shared_ptr<KisPageReplicaProvider> provider;
     // Fixed at original retirement-owner admission; retries never re-query
     // provider code or maintain another wake-eligibility policy.
     bool backgroundRetirement = false;

@@ -7,6 +7,7 @@
 #ifndef KIS_TILED_DATA_MANAGER_PAGE_STORE_BACKEND_H
 #define KIS_TILED_DATA_MANAGER_PAGE_STORE_BACKEND_H
 
+#include <memory>
 #include <QVarLengthArray>
 #include <QHash>
 #include <QMutex>
@@ -36,7 +37,7 @@ class KisTiledDataManagerIteratorWriteScope;
  * Opaque RAII anchor for one legacy multi-tile write operation. Keeping the
  * token alive coalesces all anonymous tile leases into one PageStore commit.
  */
-class KRITAIMAGE_EXPORT KisTiledDataManagerPageStoreWriteBatch
+class KRITAIMAGE_EXPORT KisTiledDataManagerPageStoreWriteBatch : public KisPageProcessStorageObject
 {
 public:
     ~KisTiledDataManagerPageStoreWriteBatch();
@@ -68,12 +69,12 @@ private:
         const KisPageTransaction &transaction,
         bool owned);
     explicit KisTiledDataManagerPageStoreWriteBatch(
-        QSharedPointer<Private> shared);
+        std::shared_ptr<Private> shared);
     // Backend's managed operation only: retain the sealed session's original
     // admission until this already-existing batch leaves the adapter caller.
     bool finishForAdapterDelivery(QString *error);
 
-    QSharedPointer<Private> d;
+    std::shared_ptr<Private> d;
     bool m_clientFinished = false;
 };
 
@@ -82,7 +83,7 @@ private:
  * PageStore without changing the public iterator/tile ABI in one step.
  */
 class KRITAIMAGE_EXPORT KisTiledDataManagerPageStoreBackend final
-    : public KisTilePageStoreBridge
+    : public KisTilePageStoreBridge, public KisPageProcessStorageObject
 {
 public:
     KisTiledDataManagerPageStoreBackend();
@@ -143,9 +144,9 @@ public:
     // Freeze the selected current/oldData visibility boundary under the
     // publication gate, then release that gate for the whole pixel traversal.
     KisCapturedReadView captureReadView(bool oldData = false, QString *error = nullptr) const;
-    QSharedPointer<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
+    std::shared_ptr<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
         bool writable, QString *error = nullptr,
-        QSharedPointer<const KisPageStoreIteratorReadScope> existing = {}) const;
+        std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
     bool hasCurrentThreadIteratorWrites() const;
     // Synchronous operation-private cursor, never backed by compatibility
     // tile wrappers. Reserve the entire target set before executing callback;
@@ -236,6 +237,7 @@ private:
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;
+    std::shared_ptr<std::pmr::memory_resource> extentStorage() const;
 
     // A new manager read selects current; a retained TileSP keeps its existing
     // nested/fixed read lifetime. A null result never authorizes stale bytes.
@@ -256,15 +258,15 @@ private:
     void unregisterAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
     template<typename Operation>
     KisPageStoreWriteOperationResult runCpuMutationOperation(
-        const QSet<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,
+        const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,
         Operation &&operation,
         QVector<KisLogicalPageId> *changed, QString *error,
         const KisMementoSP &historyOwner = {},
         OperationDelivery *delivery = nullptr,
         const std::function<bool(QString *)> &prepareAdapter = {},
         const AdapterCompletion &completeAdapter = {});
-    QVector<KisLogicalPageId> historyChangedPages(const KisPageTransaction &transaction) const;
-    QSharedPointer<const KisPageReplicaSource> uniformSourceFor(
+    KisPageSnapshotArray<KisLogicalPageId> historyChangedPages(const KisPageTransaction &transaction) const;
+    std::shared_ptr<const KisPageReplicaSource> uniformSourceFor(
         const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error);
     bool cancelAnonymousLeasesForBarrier(QString *error = nullptr);
     bool pruneDefaultPreparedPages(const KisPageTransaction &transaction,

@@ -7,6 +7,7 @@
 #ifndef _KIS_BASE_ITERATOR_H_
 #define _KIS_BASE_ITERATOR_H_
 
+#include <memory>
 #include "kis_datamanager.h"
 #include "kis_tiled_data_manager.h"
 #include "kis_tile.h"
@@ -21,7 +22,7 @@
 class KisBaseIterator {
 protected:
     KisBaseIterator(KisTiledDataManager * _dataManager, bool _writable, KisIteratorCompleteListener *listener,
-                    QSharedPointer<const KisPageStoreIteratorReadScope> scope = {}) {
+                    std::shared_ptr<const KisPageStoreIteratorReadScope> scope = {}) {
         m_dataManager = _dataManager;
         m_pixelSize = m_dataManager->pixelSize();
         m_writable = _writable;
@@ -30,12 +31,12 @@ protected:
             m_writeScope = m_dataManager->beginIteratorWriteScope();
         }
         m_readScope = m_dataManager->capturePageStoreReadScope(_writable, std::move(scope));
-        if (m_readScope && m_readScope->observesLiveLegacyWriter()) m_readScope.clear();
+        if (m_readScope && m_readScope->observesLiveLegacyWriter()) m_readScope.reset();
         if (m_readScope && !_writable) m_readCursor.emplace(m_readScope);
     }
     ~KisBaseIterator() {
         m_readCursor.reset();
-        m_readScope.clear();
+        m_readScope.reset();
         if (m_writeScope) {
             KIS_SAFE_ASSERT_RECOVER_NOOP(m_writeScope->finish());
             m_writeScope.reset();
@@ -48,7 +49,7 @@ protected:
     KisTiledDataManager *m_dataManager;
     qint32 m_pixelSize;        // bytes per pixel
     bool m_writable;
-    QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
+    std::shared_ptr<const KisPageStoreIteratorReadScope> m_readScope;
     std::optional<KisPageStoreReadCursor> m_readCursor;
     inline bool lockTile(KisTileSP &tile) {
         return tile && (m_writable ? tile->lockForWrite() : tile->lockForRead());
@@ -153,7 +154,7 @@ protected:
             unlockOldTile(info.oldtile);
         }
         cache.clear();
-        m_readScope.clear();
+        m_readScope.reset();
         data = oldData = nullptr;
     }
 

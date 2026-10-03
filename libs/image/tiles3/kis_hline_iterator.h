@@ -7,6 +7,7 @@
 #ifndef _KIS_HLINE_ITERATOR_H_
 #define _KIS_HLINE_ITERATOR_H_
 
+#include <memory>
 #include "kis_base_iterator.h"
 #include "kritaimage_export.h"
 #include "kis_iterator_ng.h"
@@ -28,7 +29,7 @@ public:
 
 public:    
     KisHLineIterator2(KisDataManager *dataManager, qint32 x, qint32 y, qint32 w, qint32 offsetX, qint32 offsetY, bool writable, KisIteratorCompleteListener *listener,
-                      QSharedPointer<const KisPageStoreIteratorReadScope> scope = {});
+                      std::shared_ptr<const KisPageStoreIteratorReadScope> scope = {});
     ~KisHLineIterator2() override;
     
     bool nextPixel() override;

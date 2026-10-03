@@ -76,7 +76,7 @@ public:
     KisPageRetirementQueue &operator=(KisPageRetirementQueue &&) = delete;
 
     KRITAIMAGE_EXPORT void retireOrDefer(const KisReplicaHandle &replica,
-                       const QSharedPointer<KisPageReplicaProvider> &provider,
+                       const std::shared_ptr<KisPageReplicaProvider> &provider,
                        const KisCompletionTicket &lastUse,
                        KisPageBackingPreparation &&backing);
     void processAcceptedEffects(bool backgroundReclamation);

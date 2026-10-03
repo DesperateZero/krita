@@ -7,6 +7,7 @@
 #ifndef _KIS_REPEAT_ITERATORS_PIXEL_H_
 #define _KIS_REPEAT_ITERATORS_PIXEL_H_
 
+#include <memory>
 #include <QRect>
 #include "kis_shared.h"
 #include "tiles3/kis_hline_iterator.h"
@@ -57,7 +58,7 @@ private:
     qint32 m_offsetX, m_offsetY;
     QRect m_dataRect;
     T* m_iterator;
-    QSharedPointer<const KisPageStoreIteratorReadScope> m_readScope;
+    std::shared_ptr<const KisPageStoreIteratorReadScope> m_readScope;
     KisIteratorCompleteListener *m_completeListener;
 };
 

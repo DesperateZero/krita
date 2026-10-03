@@ -164,6 +164,9 @@ KRITAIMAGE_EXPORT KisPageReclamationWake kisPreparePageStoreReclamationWake(
 // Cold correctness/shutdown endpoint. Requires quiescent producers; never call
 // from a reclamation job or an interaction/read-guard destructor.
 KRITAIMAGE_EXPORT void kisDrainPageStoreReclamation();
+// Same permanent stop used by application teardown. Producers must be
+// quiescent; late prepared handles may only release after this endpoint.
+KRITAIMAGE_EXPORT void kisStopPageStoreReclamation();
 
 struct KisPageTreeReclamationStatistics
 {

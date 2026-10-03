@@ -4,6 +4,7 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
+#include <memory>
 #include "kis_transaction_test.h"
 #include <simpletest.h>
 #include <KoColorSpace.h>
@@ -77,7 +78,7 @@ void KisTransactionTest::testStrokeMappingContext()
         cs->fromQColor(Qt::black, cursor->rawData()); return true;
     };
     QVERIFY(transaction.applyStrokePixelOperation(dev, {QRect(0, 0, 1, 1)}, write));
-    QSharedPointer<const KisPageStoreIteratorReadScope> frozen;
+    std::shared_ptr<const KisPageStoreIteratorReadScope> frozen;
     if (cut) { QVERIFY(transaction.checkpointStrokeMutation()); frozen = manager->capturePageStoreReadScope(false); QVERIFY(frozen && frozen->isValid()); }
     switch (change) {
     case 0: dev->moveTo(admittedOffset + QPoint(1, 0)); break;

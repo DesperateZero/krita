@@ -103,7 +103,7 @@ public:
                            KisBackingBudgetController &budget,
                            KisPageHistoryCollector &history,
                            KisPageRetirementQueue &retirementQueue,
-                           QSharedPointer<KisCompletionRegistry> &completions,
+                           std::shared_ptr<KisCompletionRegistry> &completions,
                            QMutex &ownerMutex,
                            qsizetype &activeProviderCalls,
                            bool &operational,
@@ -123,10 +123,10 @@ public:
     // Cold native selection only. The caller retains this exact version/root
     // across discovery and pinning; never substitute the current version.
     // A stale candidate is conditionally evicted, preserving a newer cache.
-    static Q_NEVER_INLINE KRITAIMAGE_EXPORT QSharedPointer<KisCpuReadBindingLink> discoverCpuReadBinding(
+    static Q_NEVER_INLINE KRITAIMAGE_EXPORT std::shared_ptr<KisCpuReadBindingLink> discoverCpuReadBinding(
         KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
         const KisPageVersion &version,
-        const QSharedPointer<KisCpuReadBindingLink> &stale = {});
+        const std::shared_ptr<KisCpuReadBindingLink> &stale = {});
 
     KRITAIMAGE_EXPORT KisReadRequest registerRequestLocked(
         const KisPageVersion &version,
@@ -173,7 +173,7 @@ public:
         QMutexLocker<QMutex> *heldOwnerLock = nullptr);
     KRITAIMAGE_EXPORT void retryCapturedReleasesLocked(QMutexLocker<QMutex> &ownerLock, bool drain = false);
     bool releaseSnapshot(KisImageEpochSnapshotToken token,
-                         const QVector<KisPageKey> *changedPages);
+                         const KisPageKeyStorage *changedPages);
 
     KRITAIMAGE_EXPORT KisPageReadCoordinatorSnapshot snapshotLocked() const;
 
@@ -181,11 +181,11 @@ private:
     struct ActiveReadRecord
     {
         ActiveReadRecord(
-            const QSharedPointer<KisPageReplicaProvider> &providerValue,
+            const std::shared_ptr<KisPageReplicaProvider> &providerValue,
             const KisReplicaHandle &replicaValue);
         ~ActiveReadRecord();
 
-        QSharedPointer<KisPageReplicaProvider> provider;
+        std::shared_ptr<KisPageReplicaProvider> provider;
         KisReplicaHandle replica;
         // Prepared before resolveAccess; engage only when the provider returns.
         std::optional<KisReplicaAccess> access;
@@ -220,7 +220,7 @@ private:
                            KisPageLeaseId lease, KisPageReadCleanup &cleanup,
                            const KisCompletionTicket &completion = {});
     bool releaseSnapshotLocked(KisImageEpochSnapshotToken token,
-                               const QVector<KisPageKey> *changedPages,
+                               const KisPageKeyStorage *changedPages,
                                QMutexLocker<QMutex> &ownerLock);
     bool belongsToPreparedTransactionLocked(
         const KisPageVersion &version,
@@ -234,7 +234,7 @@ private:
     KisBackingBudgetController &m_budget;
     KisPageHistoryCollector &m_history;
     KisPageRetirementQueue &m_retirementQueue;
-    QSharedPointer<KisCompletionRegistry> &m_completions;
+    std::shared_ptr<KisCompletionRegistry> &m_completions;
     QMutex &m_ownerMutex;
     qsizetype &m_activeProviderCalls;
     bool &m_operational;

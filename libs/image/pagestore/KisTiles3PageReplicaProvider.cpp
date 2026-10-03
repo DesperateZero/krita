@@ -148,7 +148,7 @@ private:
 // retains its existing COW reference while caching this object. Only a fresh
 // binding pin permits tileData(); finish returns that pin without discarding
 // the cache storage. There is no provider map lookup on a warm read.
-class Tiles3TileReadCache final : public KisTilePageStoreLease
+class Tiles3TileReadCache final : public KisTilePageStoreLease, public KisPageProcessStorageObject
 {
 public:
     ~Tiles3TileReadCache() override { finish(); }
@@ -218,17 +218,20 @@ class Tiles3ReplicaSource final : public KisPageReplicaSource
 public:
     Tiles3ReplicaSource(KisReplicaProviderId provider, KisReplicaProviderEpoch epoch,
                        const KisPageAllocationDescriptor &descriptor,
-                       QSharedPointer<const quint8> owner, KisTileData *tile)
+                       std::shared_ptr<const quint8> owner, KisTileData *tile)
         : KisPageReplicaSource(provider, epoch, descriptor), owner(std::move(owner)), tile(tile)
     { tile->acquire(); }
     ~Tiles3ReplicaSource() override { tile->release(); }
-    const QSharedPointer<const quint8> owner;
+    const std::shared_ptr<const quint8> owner;
     KisTileData *const tile;
 };
 
 class KisTiles3PageReplicaProvider::Private : public KisCpuResidentAllocationIndex<Tiles3Allocation>
 {
 public:
+    using Storage = KisMutationStorageAllocator<Private>;
+    explicit Private(const Storage &allocator)
+        : storage(allocator), sourceOwner(std::allocate_shared<const quint8>(allocator, 0)) {}
     class ResidencyObserver final : public KisTileDataResidencyObserver
     {
         struct Payload : boost::intrusive::list_base_hook<>
@@ -255,11 +258,10 @@ public:
             SlotMap::node_type slot;
         };
         auto storageAllocator() const { return m_admissions.get_allocator(); }
-        explicit ResidencyObserver(const QSharedPointer<KisBackingBudgetController> &process)
-            : m_budget(QSharedPointer<KisBackingBudgetController>::create())
+        explicit ResidencyObserver(const std::shared_ptr<KisBackingBudgetController> &process)
         {
-            if (process && !m_budget->configureSharedNonPayloadBudget(process)) throw std::bad_alloc();
-            const auto storage = KisMutationStorageAllocator<Payload>::retained(m_budget.data());
+            if (process && !m_budget.configureSharedNonPayloadBudget(process)) throw std::bad_alloc();
+            const auto storage = KisMutationStorageAllocator<Payload>::retained(&m_budget);
             m_payloads = PayloadMap(storage);
             m_slots = SlotMap(storage);
             m_admissions = WeakAdmissions(storage);
@@ -329,7 +331,7 @@ public:
             return true;
         }
 
-        QSharedPointer<KisTileDataResidencyTransition> prepareResidencyChange(
+        std::shared_ptr<KisTileDataResidencyTransition> prepareResidencyChange(
             KisTileData *tileData,
             const KisTileDataResidencyState &source,
             bool targetResident,
@@ -374,7 +376,7 @@ public:
                 bytes = tracked->second.bytes;
             }
 
-            auto result = QSharedPointer<Transition>::create(
+            auto result = std::allocate_shared<Transition>(m_admissions.get_allocator(),
                 this, tileData, serial, targetDomain);
             // This original Transition now owns cancellation of its serial.
             // The local guard covers only failure before that acceptance.
@@ -608,7 +610,14 @@ public:
             m_transitionChanged.wakeAll();
         }
 
-        QSharedPointer<KisBackingBudgetController> m_budget;
+        void *do_allocate(size_t bytes, size_t alignment) override {
+            return kisAllocateMutationStorage(&m_budget, bytes, alignment);
+        }
+        void do_deallocate(void *data, size_t bytes, size_t alignment) override {
+            kisFreeMutationStorage(&m_budget, data, bytes, alignment);
+        }
+
+        KisBackingBudgetController m_budget;
         mutable QMutex m_mutex;
         mutable QWaitCondition m_transitionChanged;
         KisReplicaProviderId m_provider;
@@ -631,7 +640,8 @@ public:
         }
     }
 
-    const QSharedPointer<const quint8> sourceOwner = QSharedPointer<const quint8>::create(0);
+    Storage storage;
+    const std::shared_ptr<const quint8> sourceOwner;
     bool canAllocateHandle() const
     {
         return config.isValid() && nextSlot != 0 &&
@@ -658,6 +668,7 @@ public:
         KisReplicaHandle handle;
         AllocationMap::node_type allocation;
         ResidencyObserver::PreparedPayload physical;
+        KisTileDataStore::PreparedResidencyObserver registration;
     };
 
     PreparedAdoption prepareAdoption(const KisPageVersion &version,
@@ -673,7 +684,10 @@ public:
         AllocationMap scratch(allocations.get_allocator());
         scratch.try_emplace(prepared.handle.allocation.slot);
         prepared.allocation = scratch.extract(prepared.handle.allocation.slot);
-        if (!existing) prepared.physical = residencyObserver->preparePayload(nextPhysicalSlot, bytes);
+        if (!existing) {
+            prepared.physical = residencyObserver->preparePayload(nextPhysicalSlot, bytes);
+            prepared.registration = KisTileDataStore::instance()->prepareResidencyObserver(residencyObserver);
+        }
         // Prepare the original binding and actual shared control block before
         // pixel allocation/copy or physical adoption. A refused candidate owns
         // no tile; accepted handles keep this one charged allocation.
@@ -683,7 +697,8 @@ public:
     }
 
     quint64 retainPhysical(KisTileData *tileData, quint64 bytes,
-                           ResidencyObserver::PreparedPayload &prepared)
+                           ResidencyObserver::PreparedPayload &prepared,
+                           KisTileDataStore::PreparedResidencyObserver registration)
     {
         if (const quint64 existing = residencyObserver->retainExisting(tileData, bytes)) {
             return existing;
@@ -699,7 +714,7 @@ public:
         });
         KisTileDataResidencyState initialState;
         if (!KisTileDataStore::instance()->registerResidencyObserver(
-                tileData, residencyObserver, &initialState)
+                tileData, residencyObserver, &initialState, std::move(registration))
             || !residencyObserver->initialize(tileData, initialState)) {
             return {};
         }
@@ -729,7 +744,8 @@ public:
         const auto &binding = prepared.allocation.mapped().binding;
         Q_ASSERT(binding);
         binding->adoptTile(tile);
-        const quint64 physical = retainPhysical(tile, prepared.handle.layout.byteSize, prepared.physical);
+        const quint64 physical = retainPhysical(tile, prepared.handle.layout.byteSize, prepared.physical,
+                                               std::move(prepared.registration));
         if (!physical) return false;
         auto rollback = qScopeGuard([&] { releasePhysical(tile, physical); });
         prepared.allocation.mapped() = {binding, physical, retirementCompletion};
@@ -849,14 +865,27 @@ public:
     }
 
     quint64 nextPhysicalSlot = 1;
-    QSharedPointer<ResidencyObserver> residencyObserver;
+    std::shared_ptr<ResidencyObserver> residencyObserver;
     Tiles3HandoffAdmission handoffAdmission;
     KisTiles3PayloadWork work;
 };
 
-KisTiles3PageReplicaProvider::KisTiles3PageReplicaProvider()
-    : d(new Private)
+KisTiles3PageReplicaProvider::KisTiles3PageReplicaProvider(
+    const KisMutationStorageAllocator<KisTiles3PageReplicaProvider> &storage)
 {
+    Private::Storage allocator(storage);
+    auto *raw = allocator.allocate(1);
+    try { std::allocator_traits<Private::Storage>::construct(allocator, raw, allocator); }
+    catch (...) { allocator.deallocate(raw, 1); throw; }
+    d.reset(raw);
+}
+
+void KisTiles3PageReplicaProvider::PrivateReleaser::cleanup(Private *owner)
+{
+    if (!owner) return;
+    auto storage = owner->storage;
+    std::destroy_at(owner);
+    storage.deallocate(owner, 1);
 }
 
 KisTiles3PageReplicaProvider::~KisTiles3PageReplicaProvider()
@@ -866,14 +895,19 @@ KisTiles3PageReplicaProvider::~KisTiles3PageReplicaProvider()
 
 bool KisTiles3PageReplicaProvider::configure(
     const KisCpuResidentReplicaProviderConfig &config,
-    const QSharedPointer<KisCompletionRegistry> &completions,
+    const std::shared_ptr<KisCompletionRegistry> &completions,
     QString *error,
-    const QSharedPointer<KisBackingBudgetController> &processBudget)
+    const std::shared_ptr<KisBackingBudgetController> &processBudget)
 try
 {
-    auto observer = QSharedPointer<Private::ResidencyObserver>::create(processBudget);
+    const auto parent = processBudget ? processBudget : kisAcquirePageStoreBootstrapBudget(error);
+    if (!parent) return false;
+    KisBackingBudgetController coldStorage;
+    if (!coldStorage.configureSharedNonPayloadBudget(parent, error)) return false;
+    auto observer = std::allocate_shared<Private::ResidencyObserver>(
+        KisMutationStorageAllocator<Private::ResidencyObserver>::retained(&coldStorage), parent);
     const bool configured = d->configure(
-        config, completions, QStringLiteral("tiles3"), error);
+        config, completions, error);
     if (configured) {
         observer->setProviderIdentity(config.provider, config.providerEpoch);
         d->allocations = Private::AllocationMap(observer->storageAllocator());
@@ -983,7 +1017,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
 }
 
 
-QSharedPointer<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCompletedTileSource(
+std::shared_ptr<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCompletedTileSource(
     const KisPageAllocationDescriptor &descriptor, KisTileData *tileData, QString *error)
 {
     if (!supportsNativeTileLayout(descriptor) ||
@@ -993,16 +1027,16 @@ QSharedPointer<const KisPageReplicaSource> KisTiles3PageReplicaProvider::capture
     }
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid()) { KisPageStoreDetail::setError(error, QStringLiteral("source provider is unavailable")); return {}; }
-    auto source = QSharedPointer<Tiles3ReplicaSource>::create(
+    auto source = std::allocate_shared<Tiles3ReplicaSource>(d->residencyObserver->storageAllocator(),
         d->config.provider, d->config.providerEpoch, descriptor, d->sourceOwner, tileData);
     KisPageStoreDetail::setError(error, {});
     return source;
 }
 
 bool KisTiles3PageReplicaProvider::sourceMatchesReadGuard(
-    const QSharedPointer<const KisPageReplicaSource> &source, const KisCpuReadGuard &guard) const
+    const std::shared_ptr<const KisPageReplicaSource> &source, const KisCpuReadGuard &guard) const
 {
-    const auto input = qSharedPointerDynamicCast<const Tiles3ReplicaSource>(source);
+    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
     return input && input->owner == d->sourceOwner &&
         input->tile == tileDataForCpuReadGuard(guard);
 }
@@ -1063,7 +1097,7 @@ TileLease KisTiles3PageReplicaProvider::prepareTileReadCache(
                                         allocation->second.tileData(), std::move(reuse), false);
 }
 
-QSharedPointer<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCpuReadSource(
+std::shared_ptr<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCpuReadSource(
     const KisCpuReadGuard &guard, const KisPageAllocationDescriptor &descriptor, QString *error)
 {
     KisTileData *tileData = tileDataForCpuReadGuard(guard);
@@ -1076,11 +1110,11 @@ QSharedPointer<const KisPageReplicaSource> KisTiles3PageReplicaProvider::capture
 }
 
 bool KisTiles3PageReplicaProvider::copySynchronousSourceToCpu(
-    const QSharedPointer<const KisPageReplicaSource> &source,
+    const std::shared_ptr<const KisPageReplicaSource> &source,
     const KisPageAllocationDescriptor &descriptor, void *destination,
     quint32 rowStride, quint64 byteSize)
 {
-    const auto input = qSharedPointerDynamicCast<const Tiles3ReplicaSource>(source);
+    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid() || !input || input->owner != d->sourceOwner ||
         !(input->descriptor() == descriptor) || !destination ||
@@ -1098,13 +1132,13 @@ bool KisTiles3PageReplicaProvider::copySynchronousSourceToCpu(
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousSource(
-    KisPageOperationId operation, const QSharedPointer<const KisPageReplicaSource> &source,
+    KisPageOperationId operation, const std::shared_ptr<const KisPageReplicaSource> &source,
     const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
     KisReplicaSourceUse use, KisPagePriority priority)
 try
 {
     Q_UNUSED(priority);
-    const auto input = qSharedPointerDynamicCast<const Tiles3ReplicaSource>(source);
+    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
     QMutexLocker locker(&d->mutex);
     if (!d->config.isValid() || !input || input->owner != d->sourceOwner ||
         !(input->descriptor() == descriptor) || !targetVersion.isValid() ||
@@ -1201,7 +1235,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::transfer(
 {
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
-    auto result = d->transfer(request, QStringLiteral("tiles3"));
+    auto result = d->transfer(request);
     if (result.status == KisPageRequestStatus::Ready) {
         ++d->work.explicitCopyPages;
         d->work.explicitCopyBytes += request.target.layout.byteSize;
@@ -1250,9 +1284,8 @@ KisReplicaOperation KisTiles3PageReplicaProvider::retire(
     {
         QMutexLocker locker(&d->mutex);
         auto retirement = d->beginRetirement(operation, replica, lastUse);
-        if (retirement.failure)
-            return KisReplicaOperation::failed(operation,
-                QStringLiteral("tiles3 retirement %1").arg(QString::fromLatin1(retirement.failure)));
+        if (!retirement.failure.isEmpty())
+            return KisReplicaOperation::failed(operation, retirement.failure);
         completion = retirement.completion;
         retired = retirement.allocation->second.tileData();
         if (!retired) {

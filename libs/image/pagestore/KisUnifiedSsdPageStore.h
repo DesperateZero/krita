@@ -40,7 +40,7 @@ public:
 
     bool configureLegacySwapArchive(
         const KisLegacySwapArchiveConfig &config,
-        const QSharedPointer<KisCompletionRegistry> &completions,
+        const std::shared_ptr<KisCompletionRegistry> &completions,
         QString *error = nullptr);
     bool isOperational() const override;
     KisReplicaProviderId archiveId() const override;

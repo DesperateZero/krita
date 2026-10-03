@@ -224,7 +224,7 @@ private:
 class KRITAIMAGE_EXPORT KisBackingBudgetController final
 {
 public:
-    explicit KisBackingBudgetController(const KisPageBackingLimits &limits = {});
+    explicit KisBackingBudgetController(const KisPageBackingLimits &limits = {}, bool processStorage = false);
     ~KisBackingBudgetController();
     KisPageReadinessStatus waitForChange(const KisBackingBudgetDelta &change,
         KisPageReadinessCallback notify, KisBackingBudgetWaiter *waiter, QString *error = nullptr);
@@ -243,8 +243,9 @@ public:
     // parent bounds their combined metadata/default-cache CPU allocation.
     // Configure before the controller is used. The parent must be root-level.
     bool configureSharedNonPayloadBudget(
-        const QSharedPointer<KisBackingBudgetController> &parent,
+        const std::shared_ptr<KisBackingBudgetController> &parent,
         QString *error = nullptr);
+    bool ensureProcessStorageBudget(QString *error = nullptr);
     void releaseLive(KisBackingBudgetClass, KisPageAccessDomain, quint64 bytes) noexcept;
 
 private:
@@ -331,7 +332,7 @@ private:
     boost::intrusive_ptr<KisBackingBudgetWaitContext> m_waitContext;
     boost::intrusive_ptr<KisMutationStorageOwner> m_storageOwner;
     QMutex m_storageOwnerMutex;
-    QSharedPointer<KisBackingBudgetController> m_sharedNonPayloadBudget;
+    std::shared_ptr<KisBackingBudgetController> m_sharedNonPayloadBudget;
     quint64 m_sharedNonPayloadChild = 0;
 
     mutable QMutex m_mutex;
@@ -357,13 +358,28 @@ private:
     quint64 m_reservedDurableBytes = 0;
     SharedChildMap m_sharedChildren;
     quint64 m_nextSharedChild = 1;
+    const bool m_processStorage;
 
     friend class KisBackingBudgetReservation;
     friend class KisBackingBudgetWaiter;
     friend class KisPageOwnerLedger;
     friend class KisMutationStorageOwner;
     friend KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
+    friend void *kisAllocatePageProcessStorage(size_t, size_t);
+    friend void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
+    friend void kisReservePageProcessStorage(size_t);
+    friend void kisReleasePageProcessStorage(size_t) noexcept;
+    friend std::shared_ptr<KisBackingBudgetController> kisAcquirePageStoreProcessBudget(quint64, QString *, bool);
 };
+
+// Same product parent, including storage prepared before attachment and inert
+// weak tails. Fixed runtime allocations do not retain a document controller.
+KRITAIMAGE_EXPORT std::shared_ptr<KisBackingBudgetController>
+kisAcquirePageStoreProcessBudget(quint64 metadataBytes, QString *error = nullptr, bool publishPolicy = true);
+KRITAIMAGE_EXPORT std::shared_ptr<KisBackingBudgetController>
+kisAcquirePageStoreBootstrapBudget(QString *error = nullptr);
+KRITAIMAGE_EXPORT quint64 kisPageProcessStorageBytes() noexcept;
+KRITAIMAGE_EXPORT quint64 kisPageProcessStorageLimit() noexcept;
 
 class KRITAIMAGE_EXPORT KisMutationPageEntry final
 {
@@ -381,8 +397,8 @@ public:
     }
     bool isExposed() const { return state == KisMutationPageEntryState::Exposed; }
     bool isCpuWrite() const { return intent.inputKind != KisPageWriteInputKind::Semantic; }
-    const QSharedPointer<const KisPageReplicaSource> &initializationSource() const { return initialization; }
-    void setInitializationSource(QSharedPointer<const KisPageReplicaSource> source)
+    const std::shared_ptr<const KisPageReplicaSource> &initializationSource() const { return initialization; }
+    void setInitializationSource(std::shared_ptr<const KisPageReplicaSource> source)
     { initialization = std::move(source); }
     bool isRemoval() const
     { return intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval); }
@@ -400,7 +416,7 @@ private:
     KisPageGeneration targetGeneration;
     KisPageOperationId operation;
     KisPageWriterToken writer;
-    QSharedPointer<const KisPageReplicaSource> initialization;
+    std::shared_ptr<const KisPageReplicaSource> initialization;
     quint32 coldPageIndex = std::numeric_limits<quint32>::max();
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
 
@@ -517,7 +533,7 @@ public:
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
     // Unique keys, stable under the caller's session gate. Only this range is
     // visited, not every page previously touched by a long-lived session.
-    bool claimRange(ClaimSet &, KisSurfaceId, const QSet<KisLogicalPageId> &,
+    bool claimRange(ClaimSet &, KisSurfaceId, const KisPageSnapshotArray<KisLogicalPageId> &,
                     QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;
     void rebindClaimSetLocked(ClaimSet &, const KisMutationWriteSet &) noexcept;
@@ -594,7 +610,7 @@ public:
     // caller continues the selected Fresh plan. Admission spans unlocked work.
     KisPageWritePlanKind prepareWritePlanLocked(
         const KisPageTransaction &, const KisPageWriteIntent &,
-        const QSharedPointer<KisPageReplicaProvider> &, KisPageAccessRequirement,
+        const std::shared_ptr<KisPageReplicaProvider> &, KisPageAccessRequirement,
         const KisPageAllocationDescriptor &,
         KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
         QMutexLocker<QMutex> &,
@@ -604,14 +620,14 @@ public:
         KisPageReplicaProvider &, const KisPageTransition &,
         const KisPageAllocationDescriptor &, KisPageAccessRequirement,
         KisPagePriority, const KisCpuPagePayload *,
-        const QSharedPointer<const KisPageReplicaSource> &initialization,
+        const std::shared_ptr<const KisPageReplicaSource> &initialization,
         bool *synchronousCopy = nullptr) const;
-    bool registerTransferBridge(const QSharedPointer<KisPageReplicaTransferBridge> &bridge);
+    bool registerTransferBridge(const std::shared_ptr<KisPageReplicaTransferBridge> &bridge);
     KisCompletionTicket initializeFreshReplica(
         const KisPageWriteIntent &intent, bool initializedDuringAllocation,
         const KisReplicaHandle &source, const KisReplicaHandle &target,
         const KisPageAllocationDescriptor &descriptor,
-        const QSharedPointer<KisPageReplicaProvider> &targetProvider,
+        const std::shared_ptr<KisPageReplicaProvider> &targetProvider,
         KisPagePriority priority, const KisCompletionTicket &allocationReadiness,
         QString *error) const;
     // The caller retains admission until detach succeeds. Metadata, not an
@@ -657,7 +673,8 @@ private:
     KisImageEpochReferenceModel *epoch = nullptr;
     KisBackingBudgetController *budget = nullptr;
     KisPageOwnerLedger *ownerLedger = nullptr;
-    QVector<QSharedPointer<KisPageReplicaTransferBridge>> transferBridges;
+    std::vector<std::shared_ptr<KisPageReplicaTransferBridge>,
+        KisMutationStorageAllocator<std::shared_ptr<KisPageReplicaTransferBridge>>> transferBridges;
     KisMutationAdmissionTable<quint64, TransactionActivity> transactionActivities;
 };
 
