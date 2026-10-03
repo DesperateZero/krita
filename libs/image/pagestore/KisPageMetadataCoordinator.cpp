@@ -3702,17 +3702,18 @@ try {
             }
             QString debtError;
             lock.unlock();
-            if (!m_prepareRetirementDebt(m_retirementDebtContext,
-                                          effects.data(), qsizetype(effects.size()),
-                                          &retirementDebtCookie,
-                                          &debtError)) {
+            const bool debtAccepted = m_prepareRetirementDebt(m_retirementDebtContext,
+                                                               effects.data(), qsizetype(effects.size()),
+                                                               &retirementDebtCookie,
+                                                               &debtError);
+            retirementDebtPrepared = debtAccepted;
+            lock.relock();
+            if (!debtAccepted) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = debtError.isEmpty()
                     ? QStringLiteral("retirement debt budget is exhausted") : debtError;
                 return result;
             }
-            retirementDebtPrepared = true;
-            lock.relock();
             page = shard->pages.find(key);
             if (page == shard->pages.end() || !shard->canMutate(key, page->second)
                 || page->second.revision != expectedRevision) {
@@ -3743,7 +3744,7 @@ try {
             result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
             return result;
         }
-        const auto discardActivity = qScopeGuard([&] {
+        auto discardActivity = qScopeGuard([&] {
             const auto activity = shard->activities.find(key);
             if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
         });
@@ -3764,6 +3765,10 @@ try {
         const bool headerInstalled = shard->installHeader(key, &page->second, nextHeader);
         Q_ASSERT(headerInstalled);
         Q_UNUSED(headerInstalled);
+        // installHeader already installed or removed the authoritative
+        // activity under the shard gate. The preparation rollback must not
+        // revisit that map after this successful path unlocks the gate.
+        discardActivity.dismiss();
         ++page->second.revision;
         shard->localVersionInstalls += quint64(next.versions.size());
         shard->localVersionRemovals += removed;

@@ -1044,6 +1044,7 @@ private Q_SLOTS:
         QTest::newRow("write-prepare-cancel") << 2;
     }
     void genericWorkingStorageRefusalIsAtomic();
+    void concurrentRetirementDebtRefusalPreservesPage();
     void indexedMutationBaseLookup_data()
     {
         QTest::addColumn<int>("history");
@@ -5473,6 +5474,53 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
         capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
         run({capture});
     }
+}
+
+void KisPageStoreReferenceTest::concurrentRetirementDebtRefusalPreservesPage()
+{
+    struct Debt {
+        std::atomic<int> entered{0};
+        std::atomic<int> committed{0}, cancelled{0};
+    } debt;
+    KisBackingBudgetController budget;
+    KisPageMetadataCoordinator coordinator;
+    coordinator.attachBackingBudget(budget);
+    coordinator.attachRetirementDebtOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *, qsizetype, quint64 *, QString *error) {
+            auto &d = *static_cast<Debt *>(p);
+            d.entered.fetch_add(1, std::memory_order_acq_rel);
+            while (d.entered.load(std::memory_order_acquire) != 2) std::this_thread::yield();
+            *error = QStringLiteral("retirement receiver refuses capacity");
+            return false;
+        }, +[](void *p, quint64, const KisPageTransitionEffect *, qsizetype) noexcept {
+            static_cast<Debt *>(p)->committed.fetch_add(1);
+        }, +[](void *p, quint64) noexcept {
+            static_cast<Debt *>(p)->cancelled.fetch_add(1);
+        });
+    QVERIFY(coordinator.configure(1));
+    const auto initial = pageWithHistory(1);
+    QVERIFY(coordinator.registerPage(initial));
+    KisPageTransition discard;
+    discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
+    discard.versions = {initial.versions.last().version};
+    const QVector<KisPageTransition> transitions{discard};
+    const auto before = coordinator.metrics();
+    KisPageMetadataTransitionResult results[2];
+    std::thread first([&] { results[0] = coordinator.applyOwnerSequence(initial.key, transitions); });
+    std::thread second([&] { results[1] = coordinator.applyOwnerSequence(initial.key, transitions); });
+    first.join();
+    second.join();
+    QCOMPARE(debt.entered.load(), 2);
+    for (const auto &result : results) {
+        QVERIFY(!result.accepted);
+        QCOMPARE(result.rejectionReason, QStringLiteral("retirement receiver refuses capacity"));
+    }
+    QCOMPARE(debt.committed.load(), 0);
+    QCOMPARE(debt.cancelled.load(), 0);
+    QCOMPARE(coordinator.metrics().rejectedTransitions, before.rejectedTransitions + 2);
+    KisPageStateSnapshot observed;
+    QVERIFY(coordinator.pageSnapshot(initial.key, &observed));
+    comparePageRecords(observed, initial);
 }
 
 void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()

@@ -1492,32 +1492,41 @@ KisPageMutationExecution::prepareWrites(QString *error)
     KisPageMutationSession session;
     session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
     bool prepared = true;
-    for (size_t i = 0; i < d->count; ++i) {
-        KisPageKey key;
-        {
-            QMutexLocker lock(&d->mutex);
-            if (d->finished || d->thread != QThread::currentThreadId()
-                || d->scope->state != KisPageMutationSession::Private::State::Active) {
-                KisPageStoreDetail::setError(error, QStringLiteral("execution range changed during preparation"));
+    try {
+        for (size_t i = 0; i < d->count; ++i) {
+            KisPageKey key;
+            {
+                QMutexLocker lock(&d->mutex);
+                if (d->finished || d->thread != QThread::currentThreadId()
+                    || d->scope->state != KisPageMutationSession::Private::State::Active) {
+                    KisPageStoreDetail::setError(error, QStringLiteral("execution range changed during preparation"));
+                    prepared = false;
+                    break;
+                }
+                const auto &bound = d->entries()[i];
+                // The original linked entry already owns its admitted backing.
+                // PreserveContents needs no new capacity for a parked pending page;
+                // its actual guard still re-pins/restores through beginWriteImpl.
+                if (bound.page)
+                    continue;
+                key = bound.entry->key();
+                d->markPrepared(i);
+            }
+            auto guard = session.beginWriteImpl(key, KisPageWriteMode::PreserveContents,
+                                                nullptr, error, d, true);
+            if (!guard.isValid()) {
                 prepared = false;
                 break;
             }
-            const auto &bound = d->entries()[i];
-            // The original linked entry already owns its admitted backing.
-            // PreserveContents needs no new capacity for a parked pending page;
-            // its actual guard still re-pins/restores through beginWriteImpl.
-            if (bound.page)
-                continue;
-            key = bound.entry->key();
-            d->markPrepared(i);
+            guard = {};
         }
-        auto guard = session.beginWriteImpl(key, KisPageWriteMode::PreserveContents,
-                                            nullptr, error, d, true);
-        if (!guard.isValid()) {
-            prepared = false;
-            break;
-        }
-        guard = {};
+    } catch (const std::bad_alloc &) {
+        // A cold preparation can throw before beginWriteImpl produces a
+        // guard, including the implicit default snapshot's COW storage. Keep
+        // this refusal on the original preparation/rollback path: unwinding
+        // the execution would otherwise cancel the whole history scope.
+        KisPageStoreDetail::setError(error, QStringLiteral("execution backing storage preparation was refused"));
+        prepared = false;
     }
 
     if (prepared) {

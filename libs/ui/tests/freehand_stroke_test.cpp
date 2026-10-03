@@ -34,11 +34,21 @@
 #include "tiles3/kis_tile_data_store.h"
 #include "tiles3/tests/kis_tile_data_store_test_access.h"
 #include "pagestore/KisPageStoreReclamation_p.h"
+#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
 
 #include "testui.h"
 
 #include <atomic>
 #include <memory>
+
+// Reuse the data manager's existing test friendship to observe the actual
+// native owner; the production strategy needs no new inspection API.
+class KisTiledDataManagerTest
+{
+public:
+    static KisPageStore *store(const KisTiledDataManager &manager)
+    { return manager.m_pageStoreBackend->store(); }
+};
 
 namespace {
 
@@ -52,7 +62,8 @@ enum class PersistentFailurePoint {
 
 enum class PersistentWorkload {
     Basic,
-    TinyBudget
+    TinyBudget,
+    AdmittedCancel
 };
 
 class TinyTileBudget
@@ -132,6 +143,7 @@ struct PersistentStrokeProbe
     std::atomic<int> slowReaderStable {0};
     std::atomic<int> slowReaderReleased {0};
     std::atomic<quint64> peakResidentBytes {0};
+    std::atomic<bool> nativeOwnerObserved {false};
 };
 
 class ProbedFreehandStrokeStrategy : public FreehandStrokeStrategy
@@ -194,6 +206,11 @@ public:
             targetDevice()->pixel(probeData->point.x(), probeData->point.y(), &pixel);
             ++m_probe->visibleChecks;
             if (pixel.alpha() != 0) ++m_probe->visiblePixels;
+            const auto manager = targetDevice()->dataManager();
+            auto *store = KisTiledDataManagerTest::store(*manager);
+            m_probe->nativeOwnerObserved = manager->hasCurrentMemento() &&
+                store->mutationStatistics().sessionsCreated > 0;
+            sampleResidentBytes();
             return;
         }
         if (auto *producerData = dynamic_cast<RecursiveProducerData *>(data)) {
@@ -532,6 +549,20 @@ protected:
         image->addJob(strokeId(), new ProbedFreehandStrokeStrategy::ProbeData(QPoint(150, 400)));
         image->addJob(strokeId(), new ProbedFreehandStrokeStrategy::RecursiveProducerData(
             ProbedFreehandStrokeStrategy::ProducerSteps));
+        if (m_workload == PersistentWorkload::AdmittedCancel) {
+            // Drain the accepted input, its asynchronous producers and visible
+            // checkpoints while the original stroke is still open. The base
+            // tester then requests cancellation of that same owner.
+            QTRY_COMPARE_WITH_TIMEOUT(m_persistentProbe.recursiveProducerSteps.load(),
+                                     ProbedFreehandStrokeStrategy::ProducerSteps, 10000);
+            QCOMPARE(m_persistentProbe.visibleChecks.load(), 2);
+            QCOMPARE(m_persistentProbe.visiblePixels.load(), 2);
+            QVERIFY(m_persistentProbe.nativeOwnerObserved.load());
+            QCOMPARE(m_persistentProbe.recursiveProducerSteps.load(),
+                     ProbedFreehandStrokeStrategy::ProducerSteps);
+            QCOMPARE(m_persistentProbe.finishCallbacks.load(), 0);
+            QCOMPARE(m_persistentProbe.cancelCallbacks.load(), 0);
+        }
     }
 
 private:
@@ -632,18 +663,33 @@ void FreehandStrokeTest::testPersistentAutoBrushStrokePressure()
     QCOMPARE(TinyTileBudget::residentBytes(), quint64(0));
 }
 
+void FreehandStrokeTest::testPersistentAutoBrushStrokePressureCancelled_data()
+{
+    QTest::addColumn<bool>("afterAdmission");
+    QTest::newRow("cancel-queued-input") << false;
+    QTest::newRow("cancel-admitted-visible-input") << true;
+}
+
 void FreehandStrokeTest::testPersistentAutoBrushStrokePressureCancelled()
 {
+    QFETCH(bool, afterAdmission);
     TinyTileBudget budget;
     QCOMPARE(budget.hardBytes(), quint64(8 * 1024 * 1024));
 
     FreehandStrokeTester tester("autobrush_300px.kpp", false, true,
                                 PersistentFailurePoint::None,
-                                PersistentWorkload::Basic);
+                                afterAdmission ? PersistentWorkload::AdmittedCancel
+                                               : PersistentWorkload::Basic);
     tester.testSimpleStrokeCancelled();
 
     QCOMPARE(tester.persistentProbe().finishCallbacks.load(), 0);
     QVERIFY(tester.persistentProbe().cancelCallbacks.load() >= 1);
+    if (afterAdmission) {
+        QVERIFY(tester.persistentProbe().nativeOwnerObserved.load());
+        QCOMPARE(tester.persistentProbe().visiblePixels.load(), 2);
+        QVERIFY(tester.persistentProbe().peakResidentBytes.load() > 0);
+        QVERIFY(tester.persistentProbe().peakResidentBytes.load() <= budget.hardBytes());
+    }
     QCOMPARE(TinyTileBudget::residentBytes(), quint64(0));
 }
 

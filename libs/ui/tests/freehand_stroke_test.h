@@ -21,6 +21,7 @@ private Q_SLOTS:
     void testPersistentAutoBrushStrokeFailure_data();
     void testPersistentAutoBrushStrokeFailure();
     void testPersistentAutoBrushStrokePressure();
+    void testPersistentAutoBrushStrokePressureCancelled_data();
     void testPersistentAutoBrushStrokePressureCancelled();
     void testHatchingStroke();
     void testColorSmudgeStroke();
