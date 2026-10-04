@@ -72311,6 +72311,33 @@
           "implicit": false,
           "line": 62,
           "path": "libs/image/pagestore/KisPageByteArray_p.h"
+        },
+        {
+          "caller": "KisPageMutationSession::Private::stageSemantic",
+          "caller-usr": "c:@S@KisPageMutationSession@S@Private@F@stageSemantic#&1$@S@KisPageKey#&1$@N@std@N@__1@S@shared_ptr>#1$@S@KisPageReplicaSource#b#*$@S@QString#",
+          "column": 46,
+          "dynamic": false,
+          "implicit": false,
+          "line": 1086,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 26,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2216,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 26,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2227,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
         }
       ],
       "qualified-name": "KisPageByteArray::clear",
@@ -72432,6 +72459,15 @@
           "implicit": false,
           "line": 92,
           "path": "libs/image/pagestore/KisPageDefaultStorage.cpp"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 68,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2224,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
         },
         {
           "caller": "KisPageWriteCoordinator::prepareWritePlanLocked",
@@ -72669,6 +72705,15 @@
       "non-call-references": [],
       "production-callers": [
         {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 34,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2217,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
           "caller": "KisSurfaceFormat::isValid",
           "caller-usr": "c:@S@KisSurfaceFormat@F@isValid#1",
           "column": 30,
@@ -72733,17 +72778,7 @@
       "kind": "conversion-function",
       "name": "operator QByteArray",
       "non-call-references": [],
-      "production-callers": [
-        {
-          "caller": "KisPageMutationSession::Private::stageSemantic",
-          "caller-usr": "c:@S@KisPageMutationSession@S@Private@F@stageSemantic#&1$@S@KisPageKey#&1$@N@std@N@__1@S@shared_ptr>#1$@S@KisPageReplicaSource#b#*$@S@QString#",
-          "column": 48,
-          "dynamic": false,
-          "implicit": false,
-          "line": 1081,
-          "path": "libs/image/pagestore/KisPageStore.cpp"
-        }
-      ],
+      "production-callers": [],
       "qualified-name": "KisPageByteArray::operator QByteArray",
       "specializations-and-overrides": [],
       "test-callers": [
@@ -73686,6 +73721,33 @@
           "implicit": false,
           "line": 71,
           "path": "libs/image/pagestore/KisPageByteArray_p.h"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 54,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2224,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 94,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2224,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
+        },
+        {
+          "caller": "KisPageMutationSession::beginWriteImpl",
+          "caller-usr": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
+          "column": 85,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2226,
+          "path": "libs/image/pagestore/KisPageStore.cpp"
         },
         {
           "caller": "KisSurfaceFormat::isValid",
@@ -300288,7 +300350,7 @@
     "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "860616934e3f5ef80b3d730078ad8e28f66bad6c8ee0f5e6b52dabddd8a02051",
     "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "ec47403afd0778a8b8f2a5621c35bd089334fb41a8beddcce255501b8f1bd7ea"
   },
-  "call-edge-count": 27405,
+  "call-edge-count": 27412,
   "callback-registration-count": 27,
   "compile-commands": {
     "path": "_build-br0-cpu/compile_commands.json",
@@ -306850,7 +306912,7 @@
       },
       {
         "predecessors": {
-          "indirect": "c:@S@KisSurfaceFormat@F@isValid#1",
+          "indirect": "c:@S@KisPageMutationSession@F@beginWriteImpl#&1$@S@KisPageKey#$@E@KisPageWriteMode#*1$@S@KisCpuPagePayload#*$@S@QString#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageMutationExecution@S@Private#b#",
           "production": "c:@S@KisSurfaceFormat@F@isValid#1",
           "test": "c:@S@KisSurfaceFormat@F@isValid#1"
         },
@@ -306860,10 +306922,9 @@
       {
         "predecessors": {
           "indirect": null,
-          "production": "c:@S@KisPageMutationSession@S@Private@F@stageSemantic#&1$@S@KisPageKey#&1$@N@std@N@__1@S@shared_ptr>#1$@S@KisPageReplicaSource#b#*$@S@QString#",
           "test": null
         },
-        "status": "production-boundary-reachable",
+        "status": "indirect-review",
         "usr": "c:@S@KisPageByteArray@F@operator QByteArray#1"
       },
       {
@@ -320539,6 +320600,9 @@
         "c:@S@KisPageByteArray@F@fill#C#"
       ],
       [
+        "c:@S@KisPageByteArray@F@operator QByteArray#1"
+      ],
+      [
         "c:@S@KisPageByteArray@F@operator=#*1C#"
       ],
       [
@@ -323960,8 +324024,8 @@
     },
     "scope": "indexed PageStore API boundary; not whole-program/configuration proof",
     "summary": {
-      "indirect-review": 557,
-      "production-boundary-reachable": 1406,
+      "indirect-review": 558,
+      "production-boundary-reachable": 1405,
       "test-only-review": 156,
       "unreached-review": 53
     }
@@ -324746,7 +324810,7 @@
     "libs/image/pagestore/KisPageStateMachine.cpp": "3ec61c33b5b52ba08099b356abb546481cf281324fc64dad2dc9ec6ac0dbd491",
     "libs/image/pagestore/KisPageStateMachine.h": "3e874a7e1e0d157acf08be98e3614deb6b46c281f76b3fa91cd5f060dbadb845",
     "libs/image/pagestore/KisPageStateMachine_p.h": "383fdb39fafaf396093dfbbb05862d21fab4dd26086333e2847226d252563db0",
-    "libs/image/pagestore/KisPageStore.cpp": "28ef0f03ac10c0770112018a1ff7b524e795f7899310670cdab8ae2b7578b991",
+    "libs/image/pagestore/KisPageStore.cpp": "34eb9bba14299513674555af6003278c76547dd7fb4f6a522928b91802ec4d0a",
     "libs/image/pagestore/KisPageStore.h": "7de5958a4c540ffedcfc38b4bd07cfa2bf51421b15fd157dd290d6ff25b763ac",
     "libs/image/pagestore/KisPageStoreDiagnostics.cpp": "b60d6169ed45ee7147e979d5a2dff586853f42ce5fe9fbf8b0c5993c84daaeb1",
     "libs/image/pagestore/KisPageStoreDiagnostics_p.h": "3f542580ad1a5c7a659946f401ee451a635d46d71837ec0c3b9cd348ba373f7f",

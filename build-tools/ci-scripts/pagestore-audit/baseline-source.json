@@ -2441,7 +2441,7 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "28ef0f03ac10c0770112018a1ff7b524e795f7899310670cdab8ae2b7578b991",
+      "sha256": "34eb9bba14299513674555af6003278c76547dd7fb4f6a522928b91802ec4d0a",
       "synchronization_declarations": 19
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -6467,5 +6467,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "6ddccc30979ab859060ed5a19b936d5322aaa1cb"
+  "working_tree_head": "8f84cc8461ca621bc284342dbcdeb6490470b66e"
 }

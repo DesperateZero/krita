@@ -694,7 +694,7 @@ public:
         KisReplicaHandle target;
         const KisPageAllocationDescriptor *descriptor = nullptr;
         KisCpuWriteBindingReservation writable;
-        QByteArray resetPixel;
+        KisPageByteArray resetPixel;
         KisPreparedPageProof proof;
     };
     static_assert(sizeof(Page) <= 512);
