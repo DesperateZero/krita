@@ -14,6 +14,9 @@
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageRetirementRecord_p.h"
+#if defined(Q_OS_WIN) || (defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN))
+#include "KisPagePlatformStorage_p.h"
+#endif
 
 #include <QMutexLocker>
 #include <QScopeGuard>
@@ -121,7 +124,7 @@ void publishProcessStorageLocked(ProcessStorageState &state,
     state.bytes.store(total, std::memory_order_relaxed);
     state.snapshotSequence.fetch_add(1, std::memory_order_release);
 }
-#ifndef Q_OS_DARWIN
+#if !defined(Q_OS_DARWIN) && !defined(Q_OS_WIN) && !defined(Q_OS_UNIX)
 void freePhysicalStorage(void *data, size_t alignment) noexcept
 {
     if (alignment > alignof(std::max_align_t)) ::operator delete(data, std::align_val_t(alignment));
@@ -129,7 +132,7 @@ void freePhysicalStorage(void *data, size_t alignment) noexcept
 }
 #endif
 
-#ifdef Q_OS_DARWIN
+#if defined(Q_OS_DARWIN)
 // Keep fixed native size classes on the common path. Large-cache reuse and
 // memalign can return more than malloc_good_size(). Align small payloads inside
 // an ordinary prepaid size class; use an exact mapping above those classes.
@@ -139,7 +142,7 @@ bool pageStorageHasPrefix(size_t bytes, size_t alignment) noexcept
 {
     return bytes > 64 * 1024 || alignment > alignof(std::max_align_t);
 }
-#else
+#elif !defined(Q_OS_WIN) && !defined(Q_OS_UNIX)
 size_t pageStoragePrefix(size_t alignment) noexcept
 {
     return std::max(sizeof(size_t), alignment);
@@ -1629,6 +1632,8 @@ size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept
     const size_t rounded = malloc_good_size(capacity);
     if (rounded < capacity || rounded > maximum) return size_t(-1);
     capacity = rounded;
+#elif defined(Q_OS_WIN) || defined(Q_OS_UNIX)
+    capacity = KisPagePlatformStorage::allocationBytes(bytes, alignment);
 #else
     const size_t prefix = pageStoragePrefix(alignment);
     if (prefix > maximum || bytes > maximum - prefix) return size_t(-1);
@@ -1656,6 +1661,8 @@ void *kisAllocatePageStorage(size_t bytes, size_t alignment, size_t capacity)
         return data;
     }
     return ::operator new(capacity);
+#elif defined(Q_OS_WIN) || defined(Q_OS_UNIX)
+    return KisPagePlatformStorage::allocate(bytes, alignment, capacity);
 #else
     const size_t prefix = pageStoragePrefix(alignment);
     auto *raw = static_cast<std::byte *>(alignment > alignof(std::max_align_t)
@@ -1675,6 +1682,8 @@ size_t kisPageStorageBytes(const void *data, size_t alignment) noexcept
     }
     return reinterpret_cast<const PageStorageMapping *>(
         static_cast<const std::byte *>(data) - sizeof(PageStorageMapping))->bytes;
+#elif defined(Q_OS_WIN) || defined(Q_OS_UNIX)
+    return KisPagePlatformStorage::bytes(data);
 #else
     const auto *raw = static_cast<const std::byte *>(data) - pageStoragePrefix(alignment);
     return *reinterpret_cast<const size_t *>(raw);
@@ -1705,6 +1714,8 @@ size_t kisFreePageStorage(void *data, size_t alignment) noexcept
         return capacity;
     }
     ::operator delete(data);
+#elif defined(Q_OS_WIN) || defined(Q_OS_UNIX)
+    if (!KisPagePlatformStorage::release(data)) std::terminate();
 #else
     auto *raw = static_cast<std::byte *>(data) - pageStoragePrefix(alignment);
     freePhysicalStorage(raw, alignment);

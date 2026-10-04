@@ -179,6 +179,15 @@ kis_add_test(
     LINK_LIBRARIES kritaimage kritatestsdk
     )
 
+if(NOT APPLE AND NOT ANDROID)
+    add_executable(KisPagePlatformStorageProbe KisPagePlatformStorageProbe.cpp)
+    target_include_directories(KisPagePlatformStorageProbe PRIVATE
+        ${CMAKE_SOURCE_DIR}/libs/image/pagestore)
+    target_link_libraries(KisPagePlatformStorageProbe PRIVATE Threads::Threads)
+    add_test(NAME KisPagePlatformStorageProbe COMMAND $<TARGET_FILE:KisPagePlatformStorageProbe>)
+    ecm_mark_as_test(KisPagePlatformStorageProbe)
+endif()
+
 kis_add_test(
     kis_clone_layer_test.cpp
     LINK_LIBRARIES kritaimage kritatestsdk kritaglobal kritatransformmaskstubs
