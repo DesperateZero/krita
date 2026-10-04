@@ -6622,6 +6622,9 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     const bool installed =
         coordinator->installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup);
     QCOMPARE(installed, !reject);
+    // The transient claim ends at install, while this original reservation
+    // keeps actual activity storage alive until deferred physical cleanup.
+    QCOMPARE(coordinator->footprint().pageActivities, quint64(1));
     QVERIFY(!cleanup.isEmpty());
     QCOMPARE(cleanup.pendingWorkUnits(), qsizetype(1));
     QCOMPARE(cleanup.clearBatch(0), qsizetype(0));

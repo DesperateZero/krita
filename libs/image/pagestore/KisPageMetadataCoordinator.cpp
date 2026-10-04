@@ -294,15 +294,11 @@ quint64 arenaBlocksRequired(const Arena &arena, quint64 slots)
 }
 
 MetadataArenaGrowthPlan metadataArenaGrowthPlan(const MetadataArenas &arenas,
-                                               const MetadataArenaDemand &demand,
-                                               bool fullDemand = false)
+                                               const MetadataArenaDemand &demand)
 {
-    const auto blocks = [fullDemand](const auto &arena, quint64 slots) {
-        return fullDemand ? (slots + arena.slotsPerBlock() - 1) / arena.slotsPerBlock()
-                          : arenaBlocksRequired(arena, slots);
-    };
-    MetadataArenaGrowthPlan plan{blocks(arenas.versions, demand.versions),
-        blocks(arenas.replicas, demand.replicas), blocks(arenas.overflow, demand.overflow)};
+    MetadataArenaGrowthPlan plan{arenaBlocksRequired(arenas.versions, demand.versions),
+        arenaBlocksRequired(arenas.replicas, demand.replicas),
+        arenaBlocksRequired(arenas.overflow, demand.overflow)};
     plan.versionDirectory = arenas.versions.directoryCapacityForBlocks(plan.versionBlocks);
     plan.replicaDirectory = arenas.replicas.directoryCapacityForBlocks(plan.replicaBlocks);
     plan.overflowDirectory = arenas.overflow.directoryCapacityForBlocks(plan.overflowBlocks);
@@ -1754,18 +1750,6 @@ struct MetadataShard : KisPageMetadataShardMetrics {
             activities.erase(current);
     }
 
-    void consumePublicationActivity(const KisPageKey &key, const void *claim)
-    {
-        auto current = activities.find(key);
-        Q_ASSERT(current != activities.end() && current->second.preparedPublications > 0 && !current->second.publicationClaim
-                 && claim);
-        if (current == activities.end() || current->second.preparedPublications == 0 || current->second.publicationClaim || !claim) {
-            return;
-        }
-        --current->second.preparedPublications;
-        current->second.publicationClaim = claim;
-    }
-
     KisPageStateSnapshot header(const KisPageKey &key, const MetadataPage &page) const
     {
         return records.header(key, page, activity(key));
@@ -2061,11 +2045,14 @@ KisPageMetadataCoordinator::PreparedPublication::Data::~Data()
 
 void KisPageMetadataCoordinator::PreparedPublication::Data::cancel() noexcept
 {
-    if (!owner) {
-        return;
-    }
+    // Installed candidates still retain their original activity reservations
+    // through deferred cleanup. Release them even after semantic ownership
+    // has ended; cancelled candidates share this same terminal policy.
     for (Entry &entry : entries) {
         entry.releaseActivity();
+    }
+    if (!owner) {
+        return;
     }
     for (ShardArenaGrowth &growth : arenaGrowth) {
         if (!growth.shardOwner)
@@ -2093,7 +2080,16 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
 {
     if (!data) return {};
     const auto found = data->backingAuthorities.find(version);
-    return found == data->backingAuthorities.end() ? KisReplicaHandle{} : found->second;
+    if (found != data->backingAuthorities.end()) return found->second;
+    // Recoverable candidates already retain the exact base and target values
+    // that will be installed. Their authority is derived from those values,
+    // without another paid hash copy. Unrelated authorities remain indexed.
+    if (data->kind == PreparationKind::RecoverableWrite) {
+        for (const auto &publication : data->publications)
+            for (const auto &record : publication.installRecords)
+                if (record.version == version) return record.authority;
+    }
+    return {};
 }
 
 KisPageMetadataCoordinator::DeferredPublicationCleanup::DeferredPublicationCleanup() = default;
@@ -2346,6 +2342,7 @@ try {
         entry.shardOwner = std::move(shardOwner);
         entry.version = transition.version;
         KisPageWorkingState before(storage);
+        if (recoverable) before.versions.reserve(2);
         {
             QMutexLocker locker(&shard->mutex);
             const auto page = shard->pages.find(transition.version.key);
@@ -2420,7 +2417,16 @@ try {
         // enters through registerPage()'s full validation. The reference test
         // compares every supported publication kind with full apply().
         // Indexed inputs deliberately omit unrelated versions.
-        auto step = stateMachine.applyKnownValid(before, transition);
+        for (const auto &version : std::as_const(before.versions)) {
+            if (version.authority.isValid() && (!recoverable
+                || (!(version.version == transition.baseVersion) && !(version.version == transition.version))))
+                data->backingAuthorities.insert_or_assign(version.version, version.authority);
+        }
+        // Ordinary publication compares the before publication fields. A
+        // recoverable install replaces the exact two revision-bound records,
+        // so consume its original paid work value instead of deep-copying it.
+        auto step = stateMachine.applyKnownValid(
+            recoverable ? std::move(before) : KisPageWorkingState(before), transition);
         if (!step.accepted) {
             KisPageStoreDetail::setError(error, step.rejectionReason);
             return result;
@@ -2434,12 +2440,9 @@ try {
                 return result;
             }
         }
-        for (const auto &version : std::as_const(before.versions)) {
-            if (version.authority.isValid())
-                data->backingAuthorities.insert_or_assign(version.version, version.authority);
-        }
         for (const auto &version : std::as_const(step.next.versions)) {
-            if (version.authority.isValid())
+            if (version.authority.isValid() && (!recoverable
+                || (!(version.version == transition.baseVersion) && !(version.version == transition.version))))
                 data->backingAuthorities.insert_or_assign(version.version, version.authority);
         }
         if (recoverable) {
@@ -2448,8 +2451,16 @@ try {
             // that order, so the old physical slot is unbound before target
             // insertion. Unrelated history is never replaced. This branch is
             // inaccessible through ordinary immediate owner transitions.
-            publication.installRecords.push_back(std::move(*step.next.findVersion(transition.baseVersion)));
-            publication.installRecords.push_back(std::move(*step.next.findVersion(transition.version)));
+            // Base precedes the appended target in this same working array.
+            // Remove unrelated input values cold, then transfer its storage
+            // directly to installation rather than allocate a second array.
+            auto &records = step.next.versions;
+            records.erase(std::remove_if(records.begin(), records.end(), [&](const auto &record) {
+                return !(record.version == transition.baseVersion) && !(record.version == transition.version);
+            }), records.end());
+            Q_ASSERT(records.size() == 2 && records[0].version == transition.baseVersion
+                && records[1].version == transition.version);
+            publication.installRecords = std::move(records);
         } else {
             for (auto &version : step.next.versions) {
                 const auto *previous = before.findVersion(version.version);
@@ -2509,42 +2520,9 @@ try {
         data->publications.push_back(std::move(publication));
         data->entries.push_back(std::move(entry));
     }
-    // One candidate batch per shard avoids reserving a 16/32 KiB block for
-    // every small page. It is still self-sufficient if all observed free slots
-    // are consumed before install, and all payload allocation happens here.
-    for (auto &growth : data->arenaGrowth) {
-        MetadataArenaGrowthPlan plan;
-        bool fitsBudget = false;
-        {
-            QMutexLocker locker(&growth.shardOwner->mutex);
-            plan = metadataArenaGrowthPlan(growth.shardOwner->arenas, growth.totalDemand, true);
-            fitsBudget = metadataArenaGrowthFitsBudget(growth.shardOwner->arenas, plan);
-            if (!fitsBudget)
-                ++growth.shardOwner->metadataArenaGrowthFailures;
-        }
-        if (!fitsBudget) {
-            result.m_failure = PreparedPublication::Failure::Storage;
-            KisPageStoreDetail::setError(error, QStringLiteral("metadata arena budget is exhausted"));
-            return result;
-        }
-        const bool prepared = growth.blocks.prepare(
-            plan, growth.shardOwner->budgetAuthority, error);
-        {
-            QMutexLocker locker(&growth.shardOwner->mutex);
-            ++growth.shardOwner->metadataArenaGrowthBatches;
-            growth.shardOwner->metadataArenaBlockCandidatesPrepared += growth.blocks.preparedBlockCount();
-            if (!prepared)
-                ++growth.shardOwner->metadataArenaGrowthFailures;
-        }
-        if (!prepared) {
-            result.m_failure = PreparedPublication::Failure::Storage;
-            KisPageStoreDetail::setError(error, QStringLiteral("metadata arena storage allocation failed"));
-            return result;
-        }
-    }
-    // Attach and reserve the complete shard-local install capacity during
-    // preparation. Once these tokens exist, ordinary mutations can use only
-    // unreserved arena slots/index capacity; install merely consumes tokens.
+    // Reuse available shard capacity and grow only its shortfall outside the
+    // lock. Reserve the complete capacity before releasing the lock, so other
+    // mutations cannot consume it while this publication awaits installation.
     for (auto &growth : data->arenaGrowth) {
         QMutexLocker locker(&growth.shardOwner->mutex);
         const auto revalidate = [&] {
@@ -2566,26 +2544,14 @@ try {
             return result;
         }
 
-        const quint64 attachedBefore = growth.blocks.attachedBlocks;
-        auto attachResult = growth.blocks.attach(
-            &growth.shardOwner->arenas, &growth.shardOwner->budgetCharge,
-            growth.totalDemand);
-        growth.shardOwner->metadataArenaBlocksAttached += growth.blocks.attachedBlocks - attachedBefore;
-        if (attachResult == MetadataArenaGrowth::AttachResult::NeedsMore) {
-            // A different page can grow this directory during cold allocation.
-            // Continue through the original locked revalidate/growth loop;
-            // install still receives complete reserved capacity, never growth.
-            const auto grown = growMetadataArenasOutsideLock(growth.shardOwner.get(), growth.totalDemand,
-                &growth.blocks, &locker, revalidate, error);
-            if (grown != MetadataGrowthResult::Ready) {
-                result.m_failure = grown == MetadataGrowthResult::Stale
-                    ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
-                return result;
-            }
-            attachResult = MetadataArenaGrowth::AttachResult::Ready;
+        const auto grown = growMetadataArenasOutsideLock(growth.shardOwner.get(), growth.totalDemand,
+            &growth.blocks, &locker, revalidate, error);
+        if (grown != MetadataGrowthResult::Ready) {
+            result.m_failure = grown == MetadataGrowthResult::Stale
+                ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
+            return result;
         }
-        if (attachResult != MetadataArenaGrowth::AttachResult::Ready
-            || !growth.shardOwner->records.reserve(growth.totalDemand,
+        if (!growth.shardOwner->records.reserve(growth.totalDemand,
                                               growth.exactInsertions,
                                               growth.physicalInsertions,
                                               &growth.reservations)) {
@@ -2701,8 +2667,10 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         } else if (page->second.revision != entry.revision)
             break;
         Q_ASSERT(entry.activityReservation);
-        entry.shardOwner->consumePublicationActivity(entry.key(), data.get());
-        entry.activityReservation = false;
+        // Keep the existing reservation until this Data is cleaned outside
+        // installation. Clearing the transient claim cannot then erase/free
+        // an otherwise empty activity node under the publication gate.
+        entry.shardOwner->setPublicationClaim(entry.key(), data.get());
         ++claimed;
     }
     if (claimed != qsizetype(data->entries.size())) {

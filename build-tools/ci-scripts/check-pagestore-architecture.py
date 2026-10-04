@@ -1331,7 +1331,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct MetadataPageActivity",
             "preparedPublications",
             "reservePublicationActivity",
-            "consumePublicationActivity",
+            "releasePublicationActivity",
+            "entry.shardOwner->setPublicationClaim(entry.key(), data.get())",
+            "entry.releaseActivity()",
             "static_assert(sizeof(MetadataPage) <= 96)",
             "static_assert(sizeof(MetadataPageActivity) <= 96)",
             "MetadataMap<KisPageKey, MetadataPageActivity> activities",
@@ -1360,6 +1362,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(f"R2/M2 shard arena authority is missing: {contract}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
+        for forbidden in ("consumePublicationActivity", "entry.activityReservation = false"):
+            if forbidden in metadata_text:
+                errors.append(f"R2/M2 publication consumes activity storage protection during install: {forbidden}")
         for forbidden in (
             "struct VersionRecords",
             "shared_ptr<VersionRecords>",

@@ -1621,7 +1621,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4074,
+      "lines": 4042,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1655,7 +1655,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "2494f4d60755057f71540f20da4f4280eef87d57f3498a8e07256f43233a563f",
+      "sha256": "868ec996fa5f25a1f8699a613384182ae657b2e83e759b669d91f9fd32eabc81",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -1812,6 +1812,7 @@
         "QPair",
         "QScopeGuard",
         "algorithm",
+        "array",
         "atomic",
         "boost/intrusive/set.hpp",
         "limits",
@@ -1819,7 +1820,7 @@
         "unordered_map",
         "unordered_set"
       ],
-      "lines": 2219,
+      "lines": 2222,
       "member_fields": [
         "m_claims",
         "m_cookie",
@@ -1845,7 +1846,7 @@
         "Reservation",
         "SealedProofRecord"
       ],
-      "sha256": "f60e194884297251ff73ee608b4fe6bbd817468932f899658f8b1fe4076fe164",
+      "sha256": "71b2a9a816046f46448360f9887f9e97a2a2265614fde2caa28708857ade3929",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageOwnerLedger.h": {
@@ -3735,7 +3736,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12226,
+      "lines": 12229,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3800,7 +3801,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "5b992429d25d0b3750b11774450c682358f0b4e0f22990231a69ee4e08392489",
+      "sha256": "4f1947db3b9cf36b0ab5db983bbc49cfe2c818c4da97079d778cde6052706766",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6553,5 +6554,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "25ae0dbf8149e8c6620fc5a42d3b15b957bc37b3"
+  "working_tree_head": "500fd0702cfa07ba447d538fb9aad2b086e3160f"
 }
