@@ -1,0 +1,33 @@
+name: CP1 platform storage
+
+on:
+  push:
+    branches:
+      - codex/cp1-platform-exits-ci
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run PageStore platform storage probe
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -Werror -pthread \
+            -Ilibs/image/pagestore \
+            libs/image/tests/KisPagePlatformStorageProbe.cpp \
+            -o KisPagePlatformStorageProbe
+          ./KisPagePlatformStorageProbe
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run PageStore platform storage probe
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /EHsc /W4 /WX /permissive- /Ilibs\image\pagestore libs\image\tests\KisPagePlatformStorageProbe.cpp /Fe:KisPagePlatformStorageProbe.exe
+          KisPagePlatformStorageProbe.exe
