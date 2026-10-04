@@ -107,13 +107,13 @@ public:
     bool hasPageStoreWriteIntent() const;
 
 
-    /* this allows us work directly on tile's data */
+    // Raw access under a write intent must acquire the writable generation.
+    // Refusal returns no cached before-image; the intent still needs unlocking.
     inline quint8 *data() const {
-        markPageStoreWriteDirty();
-        return m_tileData->data();
+        return markPageStoreWriteDirty() ? m_tileData->data() : nullptr;
     }
     inline void setData(const quint8 *data) {
-        markPageStoreWriteDirty();
+        if (!markPageStoreWriteDirty()) return;
         m_tileData->setData(data);
     }
 
@@ -142,8 +142,7 @@ public:
     }
 
     inline KisTileData*  tileData() const {
-        markPageStoreWriteDirty();
-        return m_tileData;
+        return markPageStoreWriteDirty() ? m_tileData : nullptr;
     }
 
 private:
@@ -156,13 +155,14 @@ private:
                bool(m_pageStoreLeases[WriteLease]);
     }
 
-    inline void markPageStoreWriteDirty() const {
+    inline bool markPageStoreWriteDirty() const {
         KisTilePageStoreLease *lease = pageStoreWriteLease();
         if (!lease && Q_UNLIKELY(m_pageStoreWriteLockCount > 0)) {
-            KIS_SAFE_ASSERT_RECOVER_NOOP(ensurePageStoreWriteAccess());
+            if (!ensurePageStoreWriteAccess()) return false;
             lease = pageStoreWriteLease();
         }
         if (lease) lease->markDirty();
+        return true;
     }
 
     void init(qint32 col, qint32 row,

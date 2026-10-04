@@ -758,6 +758,10 @@ void KisTiledDataManager::purge(const QRect& area)
             tileData->deref();
             return;
         }
+        const auto releaseDefault = qScopeGuard([&] {
+            tileData->unblockSwapping();
+            tileData->deref();
+        });
         const quint8 *defaultData = tileData->data();
 
         KisTileHashTableConstIterator iter(m_hashTable);
@@ -765,21 +769,17 @@ void KisTiledDataManager::purge(const QRect& area)
 
         while ((tile = iter.tile())) {
             if (tile->extent().intersects(area)) {
-                if (!tile->lockForRead()) {
-                    tileData->unblockSwapping();
-                    tileData->deref();
-                    return;
-                }
-                if(memcmp(defaultData, tile->data(), tileDataSize) == 0) {
+                if (!tile->lockForRead()) return;
+                const auto unlock = qScopeGuard([&] { tile->unlockForRead(); });
+                const quint8 *data = tile->data();
+                if (!data) return;
+                if(memcmp(defaultData, data, tileDataSize) == 0) {
                     tilesToDelete.push_back(tile);
                 }
-                tile->unlockForRead();
             }
             iter.next();
         }
 
-        tileData->unblockSwapping();
-        tileData->deref();
     }
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         QVector<KisLogicalPageId> pages;
@@ -934,8 +934,14 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                              delete[] clearPixelData;
                              return;
                          }
-                         const bool alreadyCleared = current->tileData() == td;
+                         KisTileData *currentData = current->tileData();
                          current->unlockForRead();
+                         if (!currentData) {
+                             if (td) td->release();
+                             delete[] clearPixelData;
+                             return;
+                         }
+                         const bool alreadyCleared = currentData == td;
                          if (alreadyCleared) continue;
                      }
                  }
@@ -1259,39 +1265,30 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
             if (cloneTileRect == tileRect) {
                  // Clone whole tile
                  if (!srcTile->lockForRead()) return;
+                 const auto unlockSource = qScopeGuard([&] { srcTile->unlockForRead(); });
                  KisTileData *td = srcTile->tileData();
+                 if (!td) return;
                  const bool sparseDefault =
                      !srcTileExists && defaultPixelsCoincide;
                  bool dstTileExists = false;
                  KisTileSP dstTile = getReadOnlyTileLazy(
                      column, row, dstTileExists);
-                 if (!dstTile) {
-                     srcTile->unlockForRead();
-                     return;
-                 }
+                 if (!dstTile) return;
                  bool unchanged = sparseDefault && !dstTileExists;
                  if (!sparseDefault && dstTileExists) {
-                     if (!dstTile->lockForRead()) {
-                         srcTile->unlockForRead();
-                         return;
-                     }
+                     if (!dstTile->lockForRead()) return;
+                     const auto unlockDestination = qScopeGuard([&] { dstTile->unlockForRead(); });
                      KisTileData *dstData = dstTile->tileData();
+                     if (!dstData) return;
                      unchanged = dstData == td ||
                          memcmp(dstData->data(), td->data(),
                                 size_t(rowStride) * KisTileData::HEIGHT) == 0;
-                     dstTile->unlockForRead();
                  }
-                 if (unchanged) {
-                     srcTile->unlockForRead();
-                     continue;
-                 }
+                 if (unchanged) continue;
                  const bool pageStoreReplaced =
                      pageStoreBatch.replaceFullTile(
                          column, row, td, sparseDefault);
-                 if (!pageStoreReplaced) {
-                     srcTile->unlockForRead();
-                     return;
-                 }
+                 if (!pageStoreReplaced) return;
                  const bool wasDeleted =
                      m_hashTable->deleteTile(column, row);
 
@@ -1307,7 +1304,6 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                  } else if (wasDeleted) {
                      m_extentManager.notifyTileRemoved(column, row);
                  }
-                 srcTile->unlockForRead();
 
             } else {
                 const qint32 lineSize = cloneTileRect.width() * pixelSize;
@@ -1318,13 +1314,12 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                                       cloneTileRect.top(),
                                       KisTileDataWrapper::WRITE);
                 if (!tw.isValid() || !srcTile->lockForRead()) return;
+                const auto unlockSource = qScopeGuard([&] { srcTile->unlockForRead(); });
                 // We suppose that the shift in both tiles is the same
-                const quint8* srcTileIt = srcTile->data() + tw.offset();
+                const quint8 *sourceData = srcTile->data();
                 quint8* dstTileIt = tw.data();
-                if (!dstTileIt) {
-                    srcTile->unlockForRead();
-                    return;
-                }
+                if (!sourceData || !dstTileIt) return;
+                const quint8* srcTileIt = sourceData + tw.offset();
 
                 while (rowsRemaining > 0) {
                     memcpy(dstTileIt, srcTileIt, lineSize);
@@ -1333,7 +1328,6 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                     rowsRemaining--;
                 }
 
-                srcTile->unlockForRead();
             }
         }
     }
@@ -1389,40 +1383,31 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
             if (!srcTile) return;
 
             if (!srcTile->lockForRead()) return;
+            const auto unlockSource = qScopeGuard([&] { srcTile->unlockForRead(); });
             KisTileData *td = srcTile->tileData();
+            if (!td) return;
             const bool sparseDefault =
                 !srcTileExists && defaultPixelsCoincide;
             bool dstTileExists = false;
             KisTileSP dstTile = getReadOnlyTileLazy(
                 column, row, dstTileExists);
-            if (!dstTile) {
-                srcTile->unlockForRead();
-                return;
-            }
+            if (!dstTile) return;
             bool unchanged = sparseDefault && !dstTileExists;
             if (!sparseDefault && dstTileExists) {
-                if (!dstTile->lockForRead()) {
-                    srcTile->unlockForRead();
-                    return;
-                }
+                if (!dstTile->lockForRead()) return;
+                const auto unlockDestination = qScopeGuard([&] { dstTile->unlockForRead(); });
                 KisTileData *dstData = dstTile->tileData();
+                if (!dstData) return;
                 unchanged = dstData == td ||
                     memcmp(dstData->data(), td->data(),
                            size_t(KisTileData::WIDTH) *
                                KisTileData::HEIGHT * pixelSize) == 0;
-                dstTile->unlockForRead();
             }
-            if (unchanged) {
-                srcTile->unlockForRead();
-                continue;
-            }
+            if (unchanged) continue;
             const bool pageStoreReplaced =
                 pageStoreBatch.replaceFullTile(
                     column, row, td, sparseDefault);
-            if (!pageStoreReplaced) {
-                srcTile->unlockForRead();
-                return;
-            }
+            if (!pageStoreReplaced) return;
 
             const bool wasDeleted =
                 m_hashTable->deleteTile(column, row);
@@ -1439,7 +1424,6 @@ void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRec
             } else if (wasDeleted) {
                 m_extentManager.notifyTileRemoved(column, row);
             }
-            srcTile->unlockForRead();
         }
     }
     published = pageStoreBatch.finish();
@@ -1511,6 +1495,10 @@ void KisTiledDataManager::setExtent(QRect newRect)
 
                 if (!tile->lockForWrite()) return;
                 quint8* data = tile->data();
+                if (!data) {
+                    tile->unlockForWrite();
+                    return;
+                }
                 quint8* ptr;
 
                 /* FIXME: make it faster */

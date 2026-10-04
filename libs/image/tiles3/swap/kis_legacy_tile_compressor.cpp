@@ -35,7 +35,8 @@ bool KisLegacyTileCompressor::writeTile(KisTileSP tile, KisPaintDeviceWriter &st
 
     if (!tile->lockForRead())
         return false;
-    retval = store.write((char *)tile->data(), tileDataSize);
+    const quint8 *data = tile->data();
+    retval = data && store.write(reinterpret_cast<const char *>(data), tileDataSize);
     tile->unlockForRead();
 
     return retval;
@@ -46,25 +47,26 @@ bool KisLegacyTileCompressor::readTile(QIODevice *stream, KisTiledDataManager *d
     const qint32 tileDataSize = TILE_DATA_SIZE(pixelSize(dm));
 
     const qint32 bufferSize = maxHeaderLength() + 1;
-    quint8 *headerBuffer = new quint8[bufferSize];
+    QScopedArrayPointer<quint8> headerBuffer(new quint8[bufferSize]);
 
     qint32 x, y;
     qint32 width, height;
 
-    stream->readLine((char *)headerBuffer, bufferSize);
-    sscanf((char *) headerBuffer, "%d,%d,%d,%d", &x, &y, &width, &height);
+    stream->readLine(reinterpret_cast<char *>(headerBuffer.data()), bufferSize);
+    sscanf(reinterpret_cast<const char *>(headerBuffer.data()), "%d,%d,%d,%d", &x, &y, &width, &height);
 
     qint32 row = yToRow(dm, y);
     qint32 col = xToCol(dm, x);
 
     KisTileSP tile = dm->getTile(col, row, true);
 
-    if (!tile->lockForWrite())
+    if (!tile || !tile->lockForWrite())
         return false;
-    stream->read((char *)tile->data(), tileDataSize);
+    quint8 *data = tile->tryWriteData();
+    if (data) stream->read(reinterpret_cast<char *>(data), tileDataSize);
     tile->unlockForWrite();
 
-    return true;
+    return data;
 }
 
 void KisLegacyTileCompressor::compressTileData(KisTileData *tileData,

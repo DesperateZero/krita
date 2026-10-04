@@ -460,7 +460,6 @@ bool KisTile::ensurePageStoreWriteAccess() const
 
 quint8 *KisTile::tryWriteData() const
 {
-    if (!ensurePageStoreWriteAccess()) return nullptr;
     return data();
 }
 
@@ -608,6 +607,10 @@ void KisTile::debugDumpTile()
     if (!lockForRead())
         return;
     quint8 *data = this->data();
+    if (!data) {
+        unlockForRead();
+        return;
+    }
 
     for (int i = 0; i < KisTileData::HEIGHT; i++) {
         for (int j = 0; j < KisTileData::WIDTH; j++) {

@@ -130,6 +130,10 @@ private Q_SLOTS:
     void testVoidDrawingFailure();
     void testIteratorRejectedWriteAdmission_data();
     void testIteratorRejectedWriteAdmission();
+    void testTileRawAccessRejectedWrite_data();
+    void testTileRawAccessRejectedWrite();
+    void testTileCompressionRejectedWrite_data();
+    void testTileCompressionRejectedWrite();
     void testPageStoreSemanticRemovalFailure_data();
     void testPageStoreSemanticRemovalFailure();
     void testPageStoreAliasRegionFailure_data();

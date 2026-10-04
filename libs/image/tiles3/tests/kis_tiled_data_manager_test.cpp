@@ -17,6 +17,8 @@
 #include "tiles3/kis_tiled_data_manager.h"
 #include "tiles3/kis_tile_data_store.h"
 #include "tiles3/kis_tile_data_wrapper.h"
+#include "tiles3/swap/kis_legacy_tile_compressor.h"
+#include "tiles3/swap/kis_tile_compressor_2.h"
 #include "tiles3/kis_hline_iterator.h"
 #include "tiles3/kis_vline_iterator.h"
 #include "tiles3/kis_random_accessor.h"
@@ -3385,6 +3387,180 @@ void KisTiledDataManagerTest::testPageStoreRegionWriteFailure()
         dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, width, 64);
         QCOMPARE(actual, QByteArray(actual.size(), char(staged))); dm.purgeHistory(memento);
     }
+}
+
+void KisTiledDataManagerTest::testTileRawAccessRejectedWrite_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<int>("entry");
+    QTest::addColumn<bool>("batch");
+    QTest::addColumn<bool>("pressure");
+    const QStringList entries{"data", "tryWriteData", "tileData", "setData"};
+    for (int bpp : {1, 4, 8, 16})
+        for (int entry = 0; entry < entries.size(); ++entry)
+            for (bool batch : {false, true})
+                for (bool pressure : {false, true})
+                    QTest::newRow(qPrintable(QString("bpp%1-%2-batch%3-pressure%4")
+                        .arg(bpp).arg(entries[entry]).arg(batch).arg(pressure)))
+                        << bpp << entry << batch << pressure;
+}
+
+void KisTiledDataManagerTest::testTileRawAccessRejectedWrite()
+{
+    QFETCH(int, bpp);
+    QFETCH(int, entry);
+    QFETCH(bool, batch);
+    QFETCH(bool, pressure);
+    DefaultBudgetScope budget;
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    const QByteArray replacement(bpp * KisTileData::WIDTH * KisTileData::HEIGHT, char(0x71));
+    const auto bytes = [](const QByteArray &value) {
+        return reinterpret_cast<const quint8 *>(value.constData());
+    };
+    KisTiledDataManager dm(bpp, bytes(blank));
+    dm.writeBytes(bytes(initial), 0, 0, 1, 1);
+    auto *store = dm.m_pageStoreBackend->store();
+    auto before = dm.m_pageStoreBackend->captureReadView();
+    QVERIFY(before.isValid());
+    auto tile = dm.getTile(0, 0, true);
+    QVERIFY(tile);
+    auto exact = before.readResidentPage({{1}, {0, 0}});
+    QVERIFY(exact.isValid());
+    const QByteArray original(static_cast<const char *>(exact.data()), replacement.size());
+    const auto transactions = store->sessionStats().committedTransactions;
+    auto scope = batch ? dm.beginIteratorWriteScope() : nullptr;
+    QVERIFY(!batch || (scope && scope->isActive()));
+
+    const auto foreign = pressure ? KisPageTransaction{} : store->beginCurrentTransaction();
+    auto mutation = pressure ? KisPageMutationSession{} : store->beginMutation(foreign);
+    auto held = pressure ? KisCpuWriteGuard{} : mutation.beginWrite({{1}, {0, 0}});
+    QVERIFY(pressure || held.isValid());
+    const auto releaseForeign = qScopeGuard([&] {
+        held = {};
+        if (mutation.isActive()) mutation.cancel();
+        if (foreign.isValid()) store->abort(foreign);
+    });
+    if (pressure) budget.saturate(bpp, bytes(blank));
+
+    QVERIFY(tile->lockForWrite());
+    bool rejected = false;
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForWrite(); });
+        switch (entry) {
+        case 0: rejected = !tile->data(); break;
+        case 1: rejected = !tile->tryWriteData(); break;
+        case 2: rejected = !tile->tileData(); break;
+        case 3:
+            tile->setData(bytes(replacement));
+            rejected = QByteArray(static_cast<const char *>(exact.data()), original.size()) == original;
+            break;
+        }
+    }
+    scope.reset();
+    budget.release();
+    held = {};
+    if (mutation.isActive()) QVERIFY(mutation.cancel());
+    if (foreign.isValid()) QVERIFY(store->abort(foreign));
+    QVERIFY2(rejected, "Rejected canonical write exposed or modified its before-image");
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), original.size()), original);
+    QCOMPARE(store->sessionStats().committedTransactions, transactions);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QVERIFY(!dm.m_pageStoreBackend->hasCurrentThreadIteratorWrites());
+
+    // The refused raw access leaves no pin/claim behind. A later operation
+    // writes its own generation while the original exact reader stays valid.
+    QVERIFY(tile->lockForWrite());
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForWrite(); });
+        auto *output = tile->tryWriteData();
+        QVERIFY(output);
+        std::memcpy(output, replacement.constData(), size_t(bpp));
+    }
+    QByteArray actual(bpp, Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, replacement.left(bpp));
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), original.size()), original);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+}
+
+void KisTiledDataManagerTest::testTileCompressionRejectedWrite_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("legacy");
+    QTest::addColumn<bool>("pressure");
+    for (int bpp : {1, 4, 8, 16})
+        for (bool legacy : {false, true})
+            for (bool pressure : {false, true})
+                QTest::newRow(qPrintable(QString("bpp%1-legacy%2-pressure%3")
+                    .arg(bpp).arg(legacy).arg(pressure))) << bpp << legacy << pressure;
+}
+
+void KisTiledDataManagerTest::testTileCompressionRejectedWrite()
+{
+    QFETCH(int, bpp);
+    QFETCH(bool, legacy);
+    QFETCH(bool, pressure);
+    DefaultBudgetScope budget;
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    const auto bytes = [](const QByteArray &value) {
+        return reinterpret_cast<const quint8 *>(value.constData());
+    };
+    KisTiledDataManager dm(bpp, bytes(blank));
+    dm.writeBytes(bytes(initial), 0, 0, 1, 1);
+    auto tile = dm.getTile(0, 0, true);
+    QVERIFY(tile);
+    std::unique_ptr<KisAbstractTileCompressor> compressor = legacy
+        ? std::unique_ptr<KisAbstractTileCompressor>(new KisLegacyTileCompressor())
+        : std::unique_ptr<KisAbstractTileCompressor>(new KisTileCompressor2());
+    KoStoreFake input;
+    KisFakePaintDeviceWriter inputWriter(&input);
+    QVERIFY(compressor->writeTile(tile, inputWriter));
+    input.startReading();
+    auto *store = dm.m_pageStoreBackend->store();
+    auto before = dm.m_pageStoreBackend->captureReadView();
+    auto exact = before.readResidentPage({{1}, {0, 0}});
+    QVERIFY(exact.isValid());
+    const QByteArray original(static_cast<const char *>(exact.data()),
+        bpp * KisTileData::WIDTH * KisTileData::HEIGHT);
+    const auto transactions = store->sessionStats().committedTransactions;
+    const auto foreign = pressure ? KisPageTransaction{} : store->beginCurrentTransaction();
+    auto mutation = pressure ? KisPageMutationSession{} : store->beginMutation(foreign);
+    auto held = pressure ? KisCpuWriteGuard{} : mutation.beginWrite({{1}, {0, 0}});
+    QVERIFY(pressure || held.isValid());
+    const auto releaseForeign = qScopeGuard([&] {
+        held = {};
+        if (mutation.isActive()) mutation.cancel();
+        if (foreign.isValid()) store->abort(foreign);
+    });
+    if (pressure) budget.saturate(bpp, bytes(blank));
+
+    // An outer intent makes the nested serializer a raw write consumer too.
+    // Both codecs must return refusal and release only their own nested lock.
+    QVERIFY(tile->lockForWrite());
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForWrite(); });
+        KoStoreFake refused;
+        KisFakePaintDeviceWriter refusedWriter(&refused);
+        QVERIFY(!compressor->writeTile(tile, refusedWriter));
+        QVERIFY(!compressor->readTile(input.device(), &dm));
+        QVERIFY(tile->hasPageStoreWriteIntent());
+    }
+    budget.release();
+    held = {};
+    if (mutation.isActive()) QVERIFY(mutation.cancel());
+    if (foreign.isValid()) QVERIFY(store->abort(foreign));
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), original.size()), original);
+    QCOMPARE(store->sessionStats().committedTransactions, transactions);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QVERIFY(!tile->hasPageStoreWriteIntent());
+
+    input.startReading();
+    QVERIFY(compressor->readTile(input.device(), &dm));
+    QByteArray actual(bpp, Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, initial);
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), original.size()), original);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
 }
 
 void KisTiledDataManagerTest::testIteratorRejectedWriteAdmission_data()
