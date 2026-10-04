@@ -81,6 +81,8 @@ public:
     }
 
 private:
+    void saveDefaultPixel(quint8 *&stored, const quint8 *pixel, quint32 pixelSize);
+
     KisMemento(KisMementoManager* /*mementoManager*/, bool pageStoreStorage)
         : m_pageStoreStorage(pageStoreStorage) {
         m_extentMinX = qint32_MAX;

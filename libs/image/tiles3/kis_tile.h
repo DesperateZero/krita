@@ -177,6 +177,7 @@ private:
 private:
     friend class KisTiledDataManagerPageStoreBackend;
     KisTilePageStoreBridge *resolvePageStoreBridge(KisMementoManager *manager) const;
+    TileLease acquirePageStoreLease(bool writable, bool resolveSelection = true) const;
     void replacePageStoreReadCacheLocked(KisTileData *replacement) const;
     bool releasePageStoreLeasesLocked() const;
 

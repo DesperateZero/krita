@@ -243,12 +243,17 @@ struct PreparedBackingChangeSlot
     explicit PreparedBackingChangeSlot(KisBackingBudgetController *budget)
         : changes(KisMutationStorageAllocator<KisBackingClassChange>(budget))
         , physicals(KisMutationStorageAllocator<PhysicalBackingKey>(budget))
-        , retirementCredits(KisMutationStorageAllocator<PreparedRetirementCredit>(budget)) {}
+        , retirementCredits(KisMutationStorageAllocator<PreparedRetirementCredit>(budget))
+        , handoffClaimNodes(KisMutationStorageAllocator<PreparedBackingIndex::node_type>(budget)) {}
     ChargedVector<KisBackingClassChange> changes;
     ChargedVector<PhysicalBackingKey> physicals;
     KisBackingBudgetReservation reservation;
     KisReplicaHandle handoffTarget;
     ChargedVector<PreparedRetirementCredit> retirementCredits;
+    // The reusable cold slot retains at most two detached handoff index nodes.
+    // They remain charged until cold reuse or Ledger destruction; installation
+    // removes their logical claims without freeing storage in the owner gate.
+    ChargedVector<PreparedBackingIndex::node_type> handoffClaimNodes;
     quint32 generation = 0;
 };
 
@@ -417,6 +422,7 @@ public:
             freePreparedChanges.pop_back();
         }
         PreparedBackingChangeSlot &slot = preparedChanges.at(slotIndex);
+        slot.handoffClaimNodes.clear();
         ++slot.generation;
         if (!slot.generation)
             ++slot.generation;
@@ -434,6 +440,7 @@ public:
             slot.retirementCredits.clear();
             freePreparedChanges.push_back(slotIndex);
         });
+        if (handoffTarget.isValid()) slot.handoffClaimNodes.reserve(2);
         slot.physicals.reserve(slot.changes.size());
         preparedBackingChanges.reserve(preparedBackingChanges.size() + slot.changes.size()
                                        + size_t(handoffTarget.isValid()));
@@ -463,10 +470,20 @@ public:
     }
 
     void releasePreparedClaims(PreparedBackingChangeSlot &slot,
-                               quint64 cookie) noexcept
+                               quint64 cookie, bool deferHandoffStorage = false) noexcept
     {
+        const auto releaseKey = [&](const BackingKey &key) {
+            if (deferHandoffStorage) {
+                auto node = preparedBackingChanges.extract(key);
+                if (!node.empty()) slot.handoffClaimNodes.push_back(std::move(node));
+            } else {
+                preparedBackingChanges.erase(key);
+            }
+        };
+        Q_ASSERT(!deferHandoffStorage || (slot.changes.size() == 1
+            && slot.handoffClaimNodes.empty() && slot.handoffClaimNodes.capacity() >= 2));
         for (const KisBackingClassChange &change : std::as_const(slot.changes))
-            preparedBackingChanges.erase(change.replica.allocationIdentity());
+            releaseKey(change.replica.allocationIdentity());
         for (const PhysicalBackingKey &key : std::as_const(slot.physicals)) {
             auto physical = physicalBackings.find(key);
             if (physical != physicalBackings.end()
@@ -475,7 +492,7 @@ public:
             }
         }
         if (slot.handoffTarget.isValid())
-            preparedBackingChanges.erase(slot.handoffTarget.allocationIdentity());
+            releaseKey(slot.handoffTarget.allocationIdentity());
         slot.handoffTarget = {};
         slot.physicals.clear();
         physicalClaimsChanged.wakeAll();
@@ -1587,7 +1604,7 @@ bool KisPageOwnerLedger::commitBackingHandoff(
         slot->reservation.commitRetaining(installed, retained);
         inserted.position->second.retirementHeadroom = std::move(slot->reservation);
     }
-    d->releasePreparedClaims(*slot, cookie);
+    d->releasePreparedClaims(*slot, cookie, true);
     slot->changes.clear();
     d->freePreparedChanges.push_back(quint32(cookie));
     changeReservation.m_owner = nullptr;
