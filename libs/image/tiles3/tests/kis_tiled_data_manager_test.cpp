@@ -13,6 +13,7 @@
 #include <QScopeGuard>
 #include <QRegularExpression>
 #include <KConfig>
+#include <type_traits>
 
 #include "tiles3/kis_tiled_data_manager.h"
 #include "tiles3/kis_tile_data_store.h"
@@ -43,6 +44,20 @@
 #include "kis_br1_stress_profile.h"
 #include "KisStrokeJobFailureContext.h"
 
+// Exercise both template implementations without changing the production
+// manager configuration or building a second copy of kritaimage.
+#define KisTileHashTable Cp2AlternateTileHashTable
+#define KisTileHashTableIterator Cp2AlternateTileHashTableIterator
+#define KisTileHashTableConstIterator Cp2AlternateTileHashTableConstIterator
+#ifdef USE_LOCK_FREE_HASH_TABLE
+#include "tiles3/kis_tile_hash_table.h"
+#else
+#include "tiles3/kis_tile_hash_table2.h"
+#endif
+#undef KisTileHashTable
+#undef KisTileHashTableIterator
+#undef KisTileHashTableConstIterator
+
 void KisTiledDataManagerTest::initTestCase()
 {
     // KConfig 6.7 lazily updates its global filename after test mode changes.
@@ -53,6 +68,33 @@ void KisTiledDataManagerTest::initTestCase()
 }
 
 namespace {
+
+class CloneFaultTile : public KisTile
+{
+public:
+    using KisTile::KisTile;
+    CloneFaultTile(const CloneFaultTile &source, KisMementoManager *manager)
+        : KisTile(accepted(source), manager), copied(true) {}
+    KisSharedPtr<CloneFaultTile> next() const
+    { return static_cast<CloneFaultTile *>(KisTile::next().data()); }
+    void setNext(KisSharedPtr<CloneFaultTile> tile)
+    { KisTile::setNext(tile.data()); }
+    void notifyDetachedFromDataManager()
+    {
+        if (copied) ++detached;
+        KisTile::notifyDetachedFromDataManager();
+    }
+    static inline int remaining = -1;
+    static inline int detached = 0;
+private:
+    static const CloneFaultTile &accepted(const CloneFaultTile &source)
+    {
+        if (remaining == 0) throw std::bad_alloc();
+        if (remaining > 0) --remaining;
+        return source;
+    }
+    bool copied = false;
+};
 
 class TestableTiledDataManager : public KisTiledDataManager
 {
@@ -762,6 +804,174 @@ void KisTiledDataManagerTest::testConstructorBudgetFailure()
     const QByteArray largePixel(512, char(0x42)); // a 2 MiB tile cannot fit
     QVERIFY_EXCEPTION_THROWN(KisTiledDataManager(512,
         reinterpret_cast<const quint8 *>(largePixel.constData())), std::bad_alloc);
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneActiveWriteRefusal_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("exposed");
+    for (int bpp : {1, 4, 8, 16}) for (bool exposed : {false, true})
+        QTest::newRow(qPrintable(QString("bpp%1-exposed%2").arg(bpp).arg(exposed)))
+            << bpp << exposed;
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneActiveWriteRefusal()
+{
+    QFETCH(int, bpp);
+    QFETCH(bool, exposed);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    auto *backend = source.m_pageStoreBackend;
+    QVERIFY(backend && backend->isOperational());
+    const auto before = backend->captureReadView();
+    auto exact = before.readResidentPage({backend->surface(), {0, 0}});
+    QVERIFY(exact.isValid());
+    auto tile = source.getTile(0, 0, true);
+    QVERIFY(tile && tile->lockForWrite());
+    bool locked = true;
+    const auto unlock = qScopeGuard([&] { if (locked) tile->unlockForWrite(); });
+    if (exposed) {
+        auto *pixels = tile->tryWriteData();
+        QVERIFY(pixels);
+        std::memset(pixels, 0x71, size_t(bpp));
+    }
+    bool refused = false;
+    try { KisTiledDataManager clone(source); }
+    catch (const std::bad_alloc &) { refused = true; }
+    tile->unlockForWrite();
+    locked = false;
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
+    QCOMPARE(backend->store()->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(refused, exposed);
+    KisTiledDataManager retry(source);
+    QByteArray actual(bpp, Qt::Uninitialized);
+    retry.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, exposed ? QByteArray(bpp, char(0x71)) : initial);
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
+}
+
+void KisTiledDataManagerTest::testTileCloneRejectedWrite_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<int>("entry");
+    QTest::addColumn<bool>("batch");
+    QTest::addColumn<bool>("pressure");
+    for (int bpp : {1, 4, 8, 16}) for (int entry = 0; entry < 4; ++entry)
+        for (bool batch : {false, true}) for (bool pressure : {false, true})
+            QTest::newRow(qPrintable(QString("bpp%1-entry%2-batch%3-pressure%4")
+                .arg(bpp).arg(entry).arg(batch).arg(pressure))) << bpp << entry << batch << pressure;
+}
+
+void KisTiledDataManagerTest::testTileCloneRejectedWrite()
+{
+    QFETCH(int, bpp); QFETCH(int, entry); QFETCH(bool, batch); QFETCH(bool, pressure);
+    DefaultBudgetScope budget;
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    auto *backend = source.m_pageStoreBackend;
+    auto *store = backend->store();
+    const auto before = backend->captureReadView();
+    auto exact = before.readResidentPage({backend->surface(), {0, 0}});
+    QVERIFY(exact.isValid());
+    auto tile = source.getTile(0, 0, true);
+    QVERIFY(tile);
+    auto scope = batch ? source.beginIteratorWriteScope() : nullptr;
+    QVERIFY(!batch || (scope && scope->isActive()));
+    const auto foreign = pressure ? KisPageTransaction{} : store->beginCurrentTransaction();
+    auto mutation = pressure ? KisPageMutationSession{} : store->beginMutation(foreign);
+    auto held = pressure ? KisCpuWriteGuard{} : mutation.beginWrite({backend->surface(), {0, 0}});
+    QVERIFY(pressure || held.isValid());
+    const auto releaseForeign = qScopeGuard([&] {
+        held = {};
+        if (mutation.isActive()) mutation.cancel();
+        if (foreign.isValid()) store->abort(foreign);
+    });
+    if (pressure) budget.saturate(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    QVERIFY(tile->lockForWrite());
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForWrite(); });
+        if (entry == 0) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile, 2, 3, nullptr));
+        if (entry == 1) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile, nullptr));
+        if (entry == 2) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile));
+        if (entry == 3) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTiledDataManager clone(source));
+    }
+    scope.reset();
+    budget.release();
+    held = {};
+    if (mutation.isActive()) QVERIFY(mutation.cancel());
+    if (foreign.isValid()) QVERIFY(store->abort(foreign));
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+    QVERIFY(!tile->hasPageStoreWriteIntent());
+    KisTiledDataManager retry(source);
+    QByteArray actual(bpp, Qt::Uninitialized);
+    retry.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, initial);
+}
+
+void KisTiledDataManagerTest::testHashCloneFailureCleanup()
+{
+    const quint8 pixel = 0x31;
+    auto *data = KisTileDataStore::instance()->createDefaultTileData(1, &pixel);
+    QVERIFY(data);
+    data->ref();
+    const auto release = qScopeGuard([&] { data->deref(); });
+    const auto check = [&](auto *implementation) {
+        using Table = std::remove_pointer_t<decltype(implementation)>;
+        Table source(nullptr);
+        source.setDefaultTileData(data);
+        for (int col : {0, 1, 32, 33, 64}) {
+            bool created = false;
+            QVERIFY(source.getTileLazy(col, 0, created));
+            QVERIFY(created);
+        }
+        const int users = data->numUsers();
+        CloneFaultTile::remaining = 2;
+        CloneFaultTile::detached = 0;
+        QVERIFY_THROWS_EXCEPTION(std::bad_alloc, Table(source, nullptr));
+        QCOMPARE(CloneFaultTile::detached, 2);
+        QCOMPARE(data->numUsers(), users);
+        CloneFaultTile::remaining = -1;
+        {
+            Table retry(source, nullptr);
+            QCOMPARE(retry.numTiles(), source.numTiles());
+            QCOMPARE(data->numUsers(), users + 6);
+        }
+        QCOMPARE(CloneFaultTile::detached, 7);
+        QCOMPARE(data->numUsers(), users);
+    };
+    check(static_cast<KisTileHashTableTraits<CloneFaultTile> *>(nullptr));
+    check(static_cast<KisTileHashTableTraits2<CloneFaultTile> *>(nullptr));
+}
+
+void KisTiledDataManagerTest::testCloneCanonicalOrLegacySource_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("native");
+    for (int bpp : {1, 4, 8, 16}) for (bool native : {false, true})
+        QTest::newRow(qPrintable(QString("bpp%1-native%2").arg(bpp).arg(native))) << bpp << native;
+}
+
+void KisTiledDataManagerTest::testCloneCanonicalOrLegacySource()
+{
+    QFETCH(int, bpp); QFETCH(bool, native);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    if (!native) {
+        source.m_mementoManager->setPageStoreBridge(nullptr);
+        delete source.m_pageStoreBackend;
+        source.m_pageStoreBackend = nullptr;
+    }
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), -65, 2, 1, 1);
+    KisTiledDataManager clone(source);
+    QByteArray actual(bpp, Qt::Uninitialized);
+    clone.readBytes(reinterpret_cast<quint8 *>(actual.data()), -65, 2, 1, 1);
+    QCOMPARE(actual, initial);
+    QCOMPARE(clone.extent(), source.extent());
+    QCOMPARE(bool(clone.m_pageStoreBackend), native);
 }
 
 void KisTiledDataManagerTest::testUndoSetDefaultPixel()

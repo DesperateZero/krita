@@ -27,36 +27,18 @@ KisTileHashTableTraits<T>::KisTileHashTableTraits(KisMementoManager *mm)
 template<class T>
 KisTileHashTableTraits<T>::KisTileHashTableTraits(const KisTileHashTableTraits<T> &ht,
         KisMementoManager *mm)
-        : m_lock(QReadWriteLock::NonRecursive)
+        : KisTileHashTableTraits(mm)
 {
     QReadLocker locker(&ht.m_lock);
-
-    m_mementoManager = mm;
-    m_defaultTileData = 0;
     setDefaultTileDataImp(ht.m_defaultTileData);
-
-    m_hashTable = new TileTypeSP [TABLE_SIZE];
-    Q_CHECK_PTR(m_hashTable);
-
-
-    TileTypeSP foreignTile;
-    TileTypeSP nativeTile;
-    TileTypeSP nativeTileHead;
     for (qint32 i = 0; i < TABLE_SIZE; i++) {
-        nativeTileHead = 0;
-
-        foreignTile = ht.m_hashTable[i];
+        TileTypeSP foreignTile = ht.m_hashTable[i];
         while (foreignTile) {
-            nativeTile = TileTypeSP(new TileType(*foreignTile, m_mementoManager));
-            nativeTile->setNext(nativeTileHead);
-            nativeTileHead = nativeTile;
-
+            TileTypeSP nativeTile(new TileType(*foreignTile, m_mementoManager));
+            linkTile(nativeTile, i);
             foreignTile = foreignTile->next();
         }
-
-        m_hashTable[i] = nativeTileHead;
     }
-    m_numTiles = ht.m_numTiles;
 }
 
 template<class T>

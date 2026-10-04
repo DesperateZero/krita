@@ -15,11 +15,13 @@
 #include "kis_debug.h"
 
 #include <algorithm>
+#include <new>
 
 
 void KisTile::init(qint32 col, qint32 row,
                    KisTileData *defaultTileData, KisMementoManager* mm)
 {
+    if (!defaultTileData) throw std::bad_alloc();
     m_col = col;
     m_row = row;
     m_lockCounter = 0;

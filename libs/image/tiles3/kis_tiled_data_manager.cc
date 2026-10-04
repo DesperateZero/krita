@@ -256,30 +256,28 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
     PreparedDefaultTile defaultTile(dm.m_hashTable->refAndFetchDefaultTileData());
     auto mementoManager = std::make_unique<KisMementoManager>();
     mementoManager->setDefaultTileData(defaultTile.get());
-    auto hashTable = std::make_unique<KisTileHashTable>(*dm.m_hashTable, mementoManager.get());
     auto pixel = std::make_unique<quint8[]>(dm.m_pixelSize);
     memcpy(pixel.get(), dm.m_defaultPixel, dm.m_pixelSize);
 
-    auto backend = preparePageStoreBackend();
-    QString pageStoreError;
-    if (!backend || !dm.m_pageStoreBackend ||
-        !dm.m_pageStoreBackend->isOperational() ||
-        !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)) {
-        backend = preparePageStoreBackend();
-        if (!backend || !backend->configure(dm.m_pixelSize, pixel.get(), &pageStoreError)) {
-            backend.reset();
+    const bool canonicalSource = dm.m_pageStoreBackend && dm.m_pageStoreBackend->isOperational();
+    auto backend = canonicalSource ? preparePageStoreBackend() : nullptr;
+    if (canonicalSource) {
+        QString pageStoreError;
+        if (!backend || !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)
+            || !m_extentManager.configureStorage(backend->extentStorage())) {
+            throw std::bad_alloc();
         }
     }
-    try {
-        if (backend && !m_extentManager.configureStorage(backend->extentStorage())) backend.reset();
-    } catch (const std::bad_alloc &) { backend.reset(); }
     mementoManager->setPageStoreBridge(backend.get());
+    auto hashTable = std::make_unique<KisTileHashTable>(*dm.m_hashTable, mementoManager.get());
+    // Keep every constructor resource owned until extent preparation succeeds.
+    m_hashTable = hashTable.get();
+    recalculateExtent();
     m_pixelSize = dm.m_pixelSize;
     m_defaultPixel = pixel.release();
     m_pageStoreBackend = backend.release();
     m_hashTable = hashTable.release();
     m_mementoManager = mementoManager.release();
-    recalculateExtent();
 }
 
 KisTiledDataManager::~KisTiledDataManager()
