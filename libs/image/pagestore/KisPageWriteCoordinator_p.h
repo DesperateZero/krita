@@ -369,7 +369,9 @@ private:
     friend void *kisAllocatePageProcessStorage(size_t, size_t);
     friend void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
     friend void kisReservePageProcessStorage(size_t);
+    friend void kisCommitPageProcessStorage(size_t, size_t) noexcept;
     friend void kisReleasePageProcessStorage(size_t) noexcept;
+    friend void kisReleaseLivePageProcessStorage(size_t) noexcept;
     friend std::shared_ptr<KisBackingBudgetController> kisAcquirePageStoreProcessBudget(quint64, QString *, bool);
 };
 

@@ -120,7 +120,9 @@ public:
         m_stackBytes = stackBytes;
         try {
             kisReservePageProcessStorage(nativePreparation);
-            m_nativeBytes = nativePreparation;
+            auto cancelNativePreparation = qScopeGuard([&] {
+                kisReleasePageProcessStorage(nativePreparation);
+            });
             pthread_attr_t attributes;
             if (pthread_attr_init(&attributes)) throw std::bad_alloc();
             const auto clearAttributes = qScopeGuard([&] { pthread_attr_destroy(&attributes); });
@@ -153,7 +155,8 @@ public:
                 || controlBytes > actualBytes - (threadAddress - address)
                 || controlBytes > nativePreparation)
                 throw std::bad_alloc();
-            kisReleasePageProcessStorage(nativePreparation - controlBytes);
+            kisCommitPageProcessStorage(nativePreparation, controlBytes);
+            cancelNativePreparation.dismiss();
             m_nativeBytes = controlBytes;
             {
                 std::lock_guard<std::mutex> lock(m_startMutex);
@@ -184,7 +187,7 @@ public:
             Q_ASSERT(result == 0);
             m_joinable = false;
         }
-        if (m_nativeBytes) kisReleasePageProcessStorage(std::exchange(m_nativeBytes, 0));
+        if (m_nativeBytes) kisReleaseLivePageProcessStorage(std::exchange(m_nativeBytes, 0));
         if (m_stack) {
             kisFreePageProcessStorage(m_stack, m_stackBytes, m_pageSize);
             m_stack = nullptr;

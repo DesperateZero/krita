@@ -502,6 +502,7 @@ class KisPageStoreCpuMutationTest : public QObject
     Q_OBJECT
 private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
+    void processStorageReportsReservationSeparately();
     void epochNativeConfigurationResumes_data()
     {
         QTest::addColumn<int>("kind");
@@ -1127,6 +1128,64 @@ private Q_SLOTS:
     // Permanent application stop is deliberately the final method.
     void runtimeStopsAtCapacity();
 };
+
+void KisPageStoreCpuMutationTest::processStorageReportsReservationSeparately()
+{
+    kisDrainPageStoreReclamation();
+    auto process = kisAcquirePageStoreBootstrapBudget();
+    QVERIFY(process);
+    const auto metadata = [] (const std::shared_ptr<KisBackingBudgetController> &budget) {
+        return budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+    };
+    const auto before = metadata(process);
+    {
+        constexpr size_t bytes = 4096;
+        kisReservePageProcessStorage(bytes);
+        const auto release = qScopeGuard([&] { kisReleasePageProcessStorage(bytes); });
+        const auto reserved = metadata(process);
+        QCOMPARE(reserved.live.cpuRam, before.live.cpuRam);
+        QCOMPARE(reserved.reserved.cpuRam, before.reserved.cpuRam + bytes);
+        QVERIFY(reserved.peak.cpuRam >= reserved.live.cpuRam + reserved.reserved.cpuRam);
+    }
+    QCOMPARE(metadata(process).live.cpuRam, before.live.cpuRam);
+    QCOMPARE(metadata(process).reserved.cpuRam, before.reserved.cpuRam);
+
+    constexpr size_t payloadBytes = 961;
+    constexpr size_t alignment = 32;
+    const size_t capacity = kisPageStorageAllocationBytes(payloadBytes, alignment);
+    const size_t preparedBytes = capacity + 4096;
+    kisReservePageProcessStorage(preparedBytes);
+    auto cancel = qScopeGuard([&] { kisReleasePageProcessStorage(preparedBytes); });
+    auto reserved = metadata(process);
+    QCOMPARE(reserved.live.cpuRam, before.live.cpuRam);
+    QCOMPARE(reserved.reserved.cpuRam, before.reserved.cpuRam + preparedBytes);
+    void *data = kisAllocatePageStorage(payloadBytes, alignment, capacity);
+    auto free = qScopeGuard([&] {
+        if (!data) return;
+        const auto bytes = kisFreePageStorage(data, alignment);
+        kisReleaseLivePageProcessStorage(bytes);
+    });
+    kisCommitPageProcessStorage(preparedBytes, capacity);
+    cancel.dismiss();
+    auto live = metadata(process);
+    QCOMPARE(live.live.cpuRam, before.live.cpuRam + capacity);
+    QCOMPARE(live.reserved.cpuRam, before.reserved.cpuRam);
+
+    constexpr size_t concurrentReservation = 4096;
+    kisReservePageProcessStorage(concurrentReservation);
+    reserved = metadata(process);
+    QCOMPARE(reserved.live.cpuRam, before.live.cpuRam + capacity);
+    QCOMPARE(reserved.reserved.cpuRam, before.reserved.cpuRam + concurrentReservation);
+    QVERIFY(reserved.peak.cpuRam >= reserved.live.cpuRam + reserved.reserved.cpuRam);
+    kisReleasePageProcessStorage(concurrentReservation);
+
+    const auto physicalBytes = kisFreePageStorage(std::exchange(data, nullptr), alignment);
+    QCOMPARE(physicalBytes, capacity);
+    kisReleaseLivePageProcessStorage(physicalBytes);
+    live = metadata(process);
+    QCOMPARE(live.live.cpuRam, before.live.cpuRam);
+    QCOMPARE(live.reserved.cpuRam, before.reserved.cpuRam);
+}
 
 void KisPageStoreCpuMutationTest::nativeControlExcludesExternalThreads()
 {
@@ -10920,12 +10979,15 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
     QString error;
     auto process = kisAcquirePageStoreBootstrapBudget(&error); QVERIFY2(process, qPrintable(error));
     const auto limit = kisPageProcessStorageLimit();
-    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto used = [&] {
+        const auto metadata = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        return metadata.live.cpuRam + metadata.reserved.cpuRam;
+    };
     KisBackingBudgetReservation warm[16];
     for (auto &reservation : warm) { reservation = process->reserve({}, nullptr); QVERIFY(reservation.isValid()); }
     for (auto &reservation : warm) reservation.release();
     const auto resource = kisPageProcessMemoryResource();
-    const auto baseline = live();
+    const auto baseline = used();
     // Warm large allocations followed by smaller ones used to reuse a larger
     // native block, release more than was charged and poison the next request.
     // Cover that sequence together with the original over-aligned path.
@@ -10945,7 +11007,7 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
         }
         QCOMPARE(kisPageProcessStorageBytes(), processBaseline);
     }
-    QCOMPARE(live(), baseline);
+    QCOMPARE(used(), baseline);
     {
         Fixture f;
         f.completions = std::allocate_shared<KisCompletionRegistry>(KisMutationStorageAllocator<KisCompletionRegistry>{}, process);
@@ -10971,11 +11033,11 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
         struct Value { quint64 value = 42; };
         auto value = std::allocate_shared<Value>(KisMutationStorageAllocator<Value>{});
         std::weak_ptr<Value> weak(value);
-        const auto before = live();
+        const auto before = used();
         const auto fillerBytes = size_t(limit - before);
         void *filler = allocateTestProcessStoragePressure(fillerBytes, 1);
         auto free = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, fillerBytes, 1); });
-        QCOMPARE(live(), limit);
+        QCOMPARE(used(), limit);
         for (int attempt = 0; attempt < 3; ++attempt) {
             QVERIFY_EXCEPTION_THROWN(shared.fill('z'), std::bad_alloc);
             QVERIFY_EXCEPTION_THROWN(std::allocate_shared<KisTiles3PageReplicaProvider>(
@@ -10989,7 +11051,7 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
             QVERIFY(!extent.prepareTileRange(QRect(100000, 100000, 1, 1)));
             QCOMPARE(extent.extent(), oldExtent);
             QVERIFY(!f.store->closeSession(&error));
-            QCOMPARE(live(), limit);
+            QCOMPARE(used(), limit);
             QCOMPARE(bytes.constData()[0], 'a'); QCOMPARE(shared.constData()[0], 'a');
             QCOMPARE(static_cast<const quint8 *>(guard.data())[0], quint8(0x31));
         }
@@ -10999,8 +11061,8 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
         shared.fill('z'); QCOMPARE(bytes.constData()[0], 'a'); QCOMPARE(shared.constData()[0], 'z');
         QVERIFY(KisPageStateMachine().apply(oracle, restore).accepted);
         QVERIFY(extent.prepareTileRange(QRect(100000, 100000, 1, 1)));
-        value.reset(); QVERIFY(weak.expired()); const auto weakBytes = live();
-        weak.reset(); QVERIFY(live() < weakBytes);
+        value.reset(); QVERIFY(weak.expired()); const auto weakBytes = used();
+        weak.reset(); QVERIFY(used() < weakBytes);
         view = {}; guard = {}; defaultGuard = {};
         f.provider->rejectRetire = true;
         const auto retainedBytes = f.provider->memoryUsage().committedBytes;
@@ -11012,7 +11074,7 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
         f.store.reset(); f.provider.reset(); f.completions.reset();
     }
     kisDrainPageStoreReclamation();
-    QCOMPARE(live(), baseline);
+    QCOMPARE(used(), baseline);
     std::weak_ptr<KisBackingBudgetController> weak(process);
     const auto fixedBefore = kisPageProcessStorageBytes();
     process.reset(); QVERIFY(weak.expired());
@@ -11092,9 +11154,12 @@ void KisPageStoreCpuMutationTest::runtimeStopsAtCapacity()
     auto unblockWorker = qScopeGuard([&] {
         if (workerParked) { workerContinue.release(); kisDrainPageStoreReclamation(); }
     });
-    const auto live = [&] { return process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto used = [&] {
+        const auto metadata = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        return metadata.live.cpuRam + metadata.reserved.cpuRam;
+    };
     const auto before = kisPageProcessStorageBytes();
-    const auto fillerBytes = size_t(kisPageProcessStorageLimit() - live());
+    const auto fillerBytes = size_t(kisPageProcessStorageLimit() - used());
     void *filler = allocateTestProcessStoragePressure(fillerBytes, 1);
     auto free = qScopeGuard([&] { freeTestProcessStoragePressure(filler, fillerBytes, 1); });
     const auto outerFillerBytes = size_t(limits.metadataArenaBytes
@@ -11154,7 +11219,7 @@ void KisPageStoreCpuMutationTest::runtimeStopsAtCapacity()
 #ifdef Q_OS_DARWIN
     QVERIFY(kisPageProcessStorageBytes() + 2 * 512 * 1024 <= before + fillerBytes);
 #endif
-    const auto stopped = live(); late.reset(); QVERIFY(live() < stopped);
+    const auto stopped = used(); late.reset(); QVERIFY(used() < stopped);
     kisStopPageStoreReclamation(); // The same permanent endpoint is idempotent.
     qInfo() << "BR1_FIXED_RUNTIME_STOP_BYTES" << before << kisPageProcessStorageBytes() - fillerBytes;
 }

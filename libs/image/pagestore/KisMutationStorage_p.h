@@ -82,8 +82,12 @@ KRITAIMAGE_EXPORT void *kisAllocatePageProcessStorage(size_t, size_t);
 KRITAIMAGE_EXPORT void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
 // Native runtime mappings are prepared under the same limit, then return the
 // unused preparation capacity after the OS reports the actual mapping size.
+// A reservation must be committed to live storage or released. Committed
+// storage is released only after its physical allocation has been freed.
 KRITAIMAGE_EXPORT void kisReservePageProcessStorage(size_t);
+KRITAIMAGE_EXPORT void kisCommitPageProcessStorage(size_t, size_t) noexcept;
 KRITAIMAGE_EXPORT void kisReleasePageProcessStorage(size_t) noexcept;
+KRITAIMAGE_EXPORT void kisReleaseLivePageProcessStorage(size_t) noexcept;
 KRITAIMAGE_EXPORT std::shared_ptr<std::pmr::memory_resource> kisPageProcessMemoryResource();
 
 // Compatibility facades still returned through ordinary unique_ptr/delete.

@@ -70,6 +70,9 @@ struct ProcessStorageState
     std::weak_ptr<KisBackingBudgetController> parent;
     quint64 limit = 64 * 1024 * 1024;
     bool productPolicy = false;
+    std::atomic<quint64> snapshotSequence{0};
+    std::atomic<quint64> liveBytes{fixedStorageBytes()};
+    std::atomic<quint64> reservedBytes{0};
     std::atomic<quint64> bytes{fixedStorageBytes()};
     ~ProcessStorageState()
     {
@@ -83,6 +86,40 @@ ProcessStorageState &processStorage()
 {
     static ProcessStorageState state;
     return state;
+}
+struct ProcessStorageSnapshot
+{
+    quint64 live = 0;
+    quint64 reserved = 0;
+    quint64 total = 0;
+};
+ProcessStorageSnapshot processStorageSnapshot() noexcept
+{
+    auto &state = processStorage();
+    for (;;) {
+        const auto before = state.snapshotSequence.load(std::memory_order_acquire);
+        if (before & 1) continue;
+        const ProcessStorageSnapshot result{
+            state.liveBytes.load(std::memory_order_relaxed),
+            state.reservedBytes.load(std::memory_order_relaxed),
+            state.bytes.load(std::memory_order_relaxed)};
+        const auto after = state.snapshotSequence.load(std::memory_order_acquire);
+        if (before == after && !(after & 1)
+            && result.live <= std::numeric_limits<quint64>::max() - result.reserved
+            && result.live + result.reserved == result.total)
+            return result;
+    }
+}
+void publishProcessStorageLocked(ProcessStorageState &state,
+                                 quint64 live, quint64 reserved, quint64 total) noexcept
+{
+    Q_ASSERT(live <= std::numeric_limits<quint64>::max() - reserved);
+    Q_ASSERT(live + reserved == total);
+    state.snapshotSequence.fetch_add(1, std::memory_order_acq_rel);
+    state.liveBytes.store(live, std::memory_order_relaxed);
+    state.reservedBytes.store(reserved, std::memory_order_relaxed);
+    state.bytes.store(total, std::memory_order_relaxed);
+    state.snapshotSequence.fetch_add(1, std::memory_order_release);
 }
 #ifndef Q_OS_DARWIN
 void freePhysicalStorage(void *data, size_t alignment) noexcept
@@ -468,15 +505,18 @@ bool KisBackingBudgetController::fitsLocked(
     quint64 irreducibleMetadataBytes) const
 {
     quint64 liveSsd = 0;
+    const auto process = m_processStorage ? processStorageSnapshot() : ProcessStorageSnapshot{};
     for (size_t i = 0; i < budgetClassCount; ++i) {
         const auto budgetClass = static_cast<KisBackingBudgetClass>(i);
         auto live = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].live);
-        const auto reserved = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved);
+        auto reserved = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved);
         const auto requested = components(delta.buckets[i]);
         if (emptyUsage && budgetClass == KisBackingBudgetClass::MetadataArena)
             live[0] = irreducibleMetadataBytes;
-        if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena)
-            live[0] = saturatedAdd(live[0], kisPageProcessStorageBytes());
+        if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena) {
+            live[0] = saturatedAdd(live[0], process.live);
+            reserved[0] = saturatedAdd(reserved[0], process.reserved);
+        }
         for (size_t domain = 0; domain < requested.size(); ++domain) {
             if (requested[domain] < 0) return false;
             const quint64 addition = quint64(requested[domain]);
@@ -486,7 +526,9 @@ bool KisBackingBudgetController::fitsLocked(
         }
         const auto limit = aggregateLimit(m_limits, budgetClass);
         const auto current = sumComponents(live);
-        const auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
+        auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
+        if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena)
+            pending = saturatedAdd(pending, process.reserved);
         if (aggregateBytes[i] > limit || current > limit - aggregateBytes[i] ||
             pending > limit - aggregateBytes[i] - current) return false;
         liveSsd = saturatedAdd(liveSsd, live[3]);
@@ -1105,6 +1147,7 @@ void KisBackingBudgetController::activateReservationLocked(
 {
     auto *slot = activeReservation(cookie);
     Q_ASSERT(slot && !hasPositiveBytes(slot->delta));
+    const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
     slot->delta = delta;
     slot->aggregateBytes = aggregateBytes;
     slot->durableBytes = durableBytes;
@@ -1134,7 +1177,7 @@ void KisBackingBudgetController::activateReservationLocked(
             reserved[domain] += quint64(requested[domain]);
             auto total = saturatedAdd(live[domain], reserved[domain]);
             if (m_processStorage && bucketIndex == size_t(KisBackingBudgetClass::MetadataArena) && domain == 0)
-                total = saturatedAdd(total, kisPageProcessStorageBytes());
+                total = saturatedAdd(total, processBytes);
             peak[domain] = std::max(peak[domain], total);
         }
         m_usage.buckets[bucketIndex].reserved = fromComponents(reserved);
@@ -1155,8 +1198,10 @@ KisPageBackingUsage KisBackingBudgetController::usage() const
     QMutexLocker lock(&m_mutex);
     auto result = m_usage;
     if (m_processStorage) {
+        const auto process = processStorageSnapshot();
         auto &metadata = result.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, kisPageProcessStorageBytes());
+        metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, process.live);
+        metadata.reserved.cpuRam = saturatedAdd(metadata.reserved.cpuRam, process.reserved);
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
             saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam));
     }
@@ -1699,12 +1744,16 @@ void kisReservePageProcessStorage(size_t bytes)
                 ++parent->m_usage.backpressureCount;
                 throw std::bad_alloc();
             }
-            state.bytes.store(current + bytes, std::memory_order_release);
+            const auto live = state.liveBytes.load(std::memory_order_relaxed);
+            const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
+            publishProcessStorageLocked(state, live, reserved + bytes, current + bytes);
             auto &metadata = parent->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
             metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
                 saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), current + bytes));
         } else {
-            state.bytes.store(current + bytes, std::memory_order_release);
+            const auto live = state.liveBytes.load(std::memory_order_relaxed);
+            const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
+            publishProcessStorageLocked(state, live, reserved + bytes, current + bytes);
         }
     }
 }
@@ -1714,10 +1763,32 @@ void *kisAllocatePageProcessStorage(size_t bytes, size_t alignment)
     const size_t capacity = kisPageStorageAllocationBytes(bytes, alignment);
     kisReservePageProcessStorage(capacity);
     try {
-        return kisAllocatePageStorage(bytes, alignment, capacity);
+        void *result = kisAllocatePageStorage(bytes, alignment, capacity);
+        kisCommitPageProcessStorage(capacity, capacity);
+        return result;
     } catch (...) {
         kisReleasePageProcessStorage(capacity);
         throw;
+    }
+}
+
+void kisCommitPageProcessStorage(size_t preparedBytes, size_t liveBytes) noexcept
+{
+    auto &state = processStorage();
+    std::shared_ptr<KisBackingBudgetController> parent;
+    {
+        QMutexLocker gate(&state.gate);
+        parent = state.parent.lock();
+        const auto live = state.liveBytes.load(std::memory_order_relaxed);
+        const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
+        const auto total = state.bytes.load(std::memory_order_relaxed);
+        Q_ASSERT(liveBytes <= preparedBytes && reserved >= preparedBytes && total >= preparedBytes);
+        publishProcessStorageLocked(state, live + liveBytes, reserved - preparedBytes,
+                                    total - preparedBytes + liveBytes);
+    }
+    if (parent && liveBytes < preparedBytes) {
+        QMutexLocker budget(&parent->m_mutex);
+        parent->notifyWaitersLocked();
     }
 }
 
@@ -1728,9 +1799,30 @@ void kisReleasePageProcessStorage(size_t bytes) noexcept
     {
         QMutexLocker gate(&state.gate);
         parent = state.parent.lock();
-        const auto current = state.bytes.load(std::memory_order_relaxed);
-        Q_ASSERT(current >= ProcessStorageState::fixedStorageBytes() + bytes);
-        state.bytes.store(current - bytes, std::memory_order_release);
+        const auto live = state.liveBytes.load(std::memory_order_relaxed);
+        const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
+        const auto total = state.bytes.load(std::memory_order_relaxed);
+        Q_ASSERT(reserved >= bytes && total >= bytes);
+        publishProcessStorageLocked(state, live, reserved - bytes, total - bytes);
+    }
+    if (parent) {
+        QMutexLocker budget(&parent->m_mutex);
+        parent->notifyWaitersLocked();
+    }
+}
+
+void kisReleaseLivePageProcessStorage(size_t bytes) noexcept
+{
+    auto &state = processStorage();
+    std::shared_ptr<KisBackingBudgetController> parent;
+    {
+        QMutexLocker gate(&state.gate);
+        parent = state.parent.lock();
+        const auto live = state.liveBytes.load(std::memory_order_relaxed);
+        const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
+        const auto total = state.bytes.load(std::memory_order_relaxed);
+        Q_ASSERT(live >= ProcessStorageState::fixedStorageBytes() + bytes && total >= bytes);
+        publishProcessStorageLocked(state, live - bytes, reserved, total - bytes);
     }
     if (parent) {
         QMutexLocker budget(&parent->m_mutex);
@@ -1742,7 +1834,7 @@ void kisFreePageProcessStorage(void *data, size_t, size_t alignment) noexcept
 {
     if (!data) return;
     const size_t capacity = kisFreePageStorage(data, alignment);
-    kisReleasePageProcessStorage(capacity);
+    kisReleaseLivePageProcessStorage(capacity);
 }
 
 std::shared_ptr<KisBackingBudgetController> kisAcquirePageStoreProcessBudget(
