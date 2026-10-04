@@ -671,7 +671,7 @@
     },
     {
       "creation-paths": [
-        "reserve/reserveChange prepare real slot storage and counters",
+        "reserve/reserveChange prepare real transferable slot storage and counters; ordinary/retained/pmr mutation storage instead owns synchronous capacity preparation on its original allocator stack, charging the same local/parent domain and aggregate reserved counters without a slot or cookie",
         "waitForChange prepares an empty slot plus exact per-class/domain/aggregate/durable demand and FIFO identity; no waiting payload pin",
         "wait context intrusive references and the fixed 32-entry allocator-backed request array are prepared outside the budget gate; only installation assigns the original controller owner",
         "prepareReservationSlot charges actual slot-array bytes through one embedded cold reservation and the existing parent token; allocation occurs outside accounting gates, then original demand is revalidated",
@@ -685,7 +685,7 @@
       ],
       "fact": "backing capacity reservations and bounded cancellable admission requests",
       "id": "BR1-OWN-BACKING-ADMISSION",
-      "lock-or-claim": "budget mutex owns usage, reservation slots and at most 32 queued/granted requests; cancellation/worker/destruction take lifetime context gate before budget mutex; producer mutations only notify a cold-prepared monitor node",
+      "lock-or-claim": "budget mutex owns usage including synchronous physical-storage preparation, transferable reservation slots and at most 32 queued/granted requests; cancellation/worker/destruction take lifetime context gate before budget mutex; producer mutations only notify a cold-prepared monitor node",
       "read-only-observers": [
         "KisBackingBudgetController::usage",
         "KisBackingBudgetWaiter::isValid",
@@ -701,7 +701,8 @@
         "controller destruction clears owner under the lifetime gate, cancels wake captures, and frees requests plus their charged array before detaching the small inert context; shared-budget child unregistration waits for the last actual retained allocation and accounting owner; dormant handles retain no PageStore",
         "failed or losing prepared contexts reset their owning wake before dropping the final external reference, preventing a candidate callback cycle",
         "growth preserves cookies and charges old plus new arrays concurrently; old storage is freed outside gates before charge release; controller destruction frees the retained slot array before shared-child unregistration; a live root keeps its own array charged",
-        "controller stop fences new retained allocations; detach preserves the original shared parent and child registration while inert handles, monitor callbacks or weak control blocks retain real storage; physical deallocation precedes charge release, and the last accounting owner deallocation precedes child unregister; ordinary raw allocations still require the original controller lifetime"
+        "controller stop fences new retained allocations; detach preserves the original shared parent and child registration while inert handles, monitor callbacks or weak control blocks retain real storage; physical deallocation precedes charge release, and the last accounting owner deallocation precedes child unregister; ordinary raw allocations still require the original controller lifetime",
+        "synchronous storage first admits parent then local capacity under the unchanged fits/earlier-waiter policy, allocates outside both gates, and settles local then parent reserved counters to either live storage or zero on refusal; both outcomes use the same original wake, and raw/retained actual-free endpoints remain authoritative"
       ]
     },
     {

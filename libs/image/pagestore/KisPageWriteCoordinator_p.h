@@ -351,9 +351,9 @@ private:
     quint32 m_slotCapacity = 0;
     QMutex m_slotGrowthMutex;
     quint32 m_firstFreeSlot = std::numeric_limits<quint32>::max();
-    // Aggregate/durable reservations are authoritative derivatives of the
-    // active slots. Keep them current at every slot transition so admission
-    // cost depends on this request, not on a historical concurrency peak.
+    // Aggregate/durable reservations include active slots and stack-owned
+    // physical storage preparation. Update them at both reservation boundaries;
+    // admission cost must not depend on a historical concurrency peak.
     std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
         m_reservedAggregateBytes{};
     quint64 m_reservedDurableBytes = 0;
@@ -366,6 +366,7 @@ private:
     friend class KisPageOwnerLedger;
     friend class KisMutationStorageOwner;
     friend KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
+    friend void *kisAllocateMutationStorage(KisBackingBudgetController *, size_t, size_t);
     friend void *kisAllocatePageProcessStorage(size_t, size_t);
     friend void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
     friend void kisReservePageProcessStorage(size_t);

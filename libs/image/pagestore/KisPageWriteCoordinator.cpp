@@ -2044,12 +2044,76 @@ void *kisAllocateMutationStorage(KisBackingBudgetController *budget, size_t byte
         throw std::bad_alloc();
     KisBackingBudgetDelta delta;
     delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
-    auto reservation = budget->reserve(delta, nullptr);
-    if (!reservation.isValid())
-        throw std::bad_alloc();
+    std::array<quint64, budgetClassCount> aggregate{};
+    aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = capacity;
+    auto *parent = budget->m_sharedNonPayloadBudget.get();
+    const quint64 child = budget->m_sharedNonPayloadChild;
+    // The allocator alone owns this preparation until it either returns real
+    // storage or throws. Its stack already retains the exact bytes and both
+    // owners; no transferable slot/cookie or waiter grant is needed here.
+    const auto prepare = [&](KisBackingBudgetController *owner, quint64 registration) {
+        QMutexLocker lock(&owner->m_mutex);
+        KisBackingBudgetController::SharedChildUsage *shared = nullptr;
+        if (owner == parent) {
+            const auto found = owner->m_sharedChildren.find(registration);
+            if (!registration || found == owner->m_sharedChildren.end()) {
+                ++owner->m_usage.backpressureCount;
+                return false;
+            }
+            shared = &found->second;
+        }
+        if (owner->priorWaiterConflictsLocked(delta, aggregate, 0)
+            || !owner->fitsLocked(delta, aggregate, 0)) {
+            ++owner->m_usage.backpressureCount;
+            return false;
+        }
+        auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        metadata.reserved.cpuRam += capacity;
+        owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)] += capacity;
+        if (shared) shared->reservedBytes += capacity;
+        auto total = saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam);
+        if (owner->m_processStorage) total = saturatedAdd(total, processStorageSnapshot().total);
+        metadata.peak.cpuRam = std::max(metadata.peak.cpuRam, total);
+        return true;
+    };
+    const auto settle = [&](KisBackingBudgetController *owner, quint64 registration, bool installed) noexcept {
+        QMutexLocker lock(&owner->m_mutex);
+        auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        auto &reserved = owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)];
+        Q_ASSERT(metadata.reserved.cpuRam >= capacity && reserved >= capacity);
+        metadata.reserved.cpuRam -= capacity;
+        reserved -= capacity;
+        if (installed) metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, capacity);
+        if (owner == parent) {
+            const auto found = owner->m_sharedChildren.find(registration);
+            Q_ASSERT(found != owner->m_sharedChildren.end() && found->second.reservedBytes >= capacity);
+            auto &shared = found->second;
+            shared.reservedBytes -= capacity;
+            if (installed) shared.liveBytes = saturatedAdd(shared.liveBytes, capacity);
+        }
+        owner->notifyWaitersLocked();
+    };
+    bool localPrepared = false;
+    bool parentPrepared = false;
+    const auto cleanup = qScopeGuard([&] {
+        if (localPrepared) settle(budget, 0, false);
+        if (parentPrepared) settle(parent, child, false);
+    });
+    if (parent) {
+        if (!prepare(parent, child)) {
+            QMutexLocker lock(&budget->m_mutex);
+            ++budget->m_usage.backpressureCount;
+            throw std::bad_alloc();
+        }
+        parentPrepared = true;
+    }
+    if (!prepare(budget, 0)) throw std::bad_alloc();
+    localPrepared = true;
     void *result = kisAllocatePageStorage(bytes, alignment, capacity);
-    if (reservation.isValid())
-        budget->commitReservation(std::move(reservation), delta);
+    settle(budget, 0, true);
+    localPrepared = false;
+    if (parentPrepared) settle(parent, child, true);
+    parentPrepared = false;
     return result;
 }
 

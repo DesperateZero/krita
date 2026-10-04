@@ -7771,15 +7771,10 @@ void KisPageStoreReferenceTest::mutationWriteSetBudgetFailureIsAtomic()
         for (int i = 0; i < count - 1; ++i)
             QCOMPARE(writes.findIndex(pageKey(i)), quint32(i));
     }
-    // Inline-only refusal needs no accounting storage. Once dynamic storage
-    // has been admitted its controller cache remains charged after writes die.
-    KisBackingBudgetController probe;
-    auto accountingSlot = probe.reserve({}, nullptr);
-    QVERIFY(accountingSlot.isValid()); accountingSlot.release();
-    const quint64 retainedControlBytes = admittedBytes ? probe.usage().buckets[
-        size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam : 0;
+    // This ordinary storage never owns a transferable reservation slot. Its
+    // complete live charge ends with the final physical write-set allocation.
     const auto usage = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-    QCOMPARE(usage.live.cpuRam, retainedControlBytes);
+    QCOMPARE(usage.live.cpuRam, quint64(0));
     QCOMPARE(usage.reserved.cpuRam, quint64(0));
 }
 

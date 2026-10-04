@@ -4733,6 +4733,11 @@ void KisPageStoreCpuMutationTest::budgetWaiterStateStorageIsChargedAndReleased()
     {
         KisBackingBudgetController child;
         QVERIFY2(child.configureSharedNonPayloadBudget(constrainedParent, &error), qPrintable(error));
+        // Match the measured geometry above: the transferable waiter slot is
+        // prepared independently of ordinary synchronous storage allocation.
+        auto initialSlot = child.reserve({}, &error);
+        QVERIFY2(initialSlot.isValid(), qPrintable(error));
+        initialSlot.release();
         QCOMPARE(child.waitForChange(demand, [] {}, &rejected, &error),
                  KisPageReadinessStatus::Unavailable);
         QVERIFY(error.contains(QStringLiteral("allocation failed")));
