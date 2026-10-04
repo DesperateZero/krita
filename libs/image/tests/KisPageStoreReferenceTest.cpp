@@ -750,6 +750,8 @@ public:
 
     bool cancelStoreExact(KisPageOperationId operation) override
     {
+        if (std::exchange(throwNextCancelStorageFailure, false))
+            throw std::bad_alloc();
         return finish(operation, KisCompletionStatus::Cancelled);
     }
 
@@ -772,6 +774,8 @@ public:
     }
     bool contains(const KisPageVersion &version) const override
     {
+        if (std::exchange(throwNextContainsStorageFailure, false))
+            throw std::bad_alloc();
         QMutexLocker locker(&m_mutex);
         return m_records.contains(version);
     }
@@ -802,6 +806,8 @@ public:
     }
 
     bool throwNextStoreStorageFailure = false;
+    bool throwNextCancelStorageFailure = false;
+    mutable bool throwNextContainsStorageFailure = false;
 
     KisPageOperationId pendingOperation(const KisCompletionTicket &completion) const
     {
@@ -11298,6 +11304,9 @@ void KisPageStoreReferenceTest::asyncArchiveCompletionCancellationAndShutdownAre
     const KisPageOperationId firstOperation = archive->pendingOperation(first);
     QVERIFY(firstOperation.isValid());
     QVERIFY(archive->finish(firstOperation, KisCompletionStatus::Succeeded));
+    archive->throwNextContainsStorageFailure = true;
+    QVERIFY(store.pollArchiveCompletions().isEmpty());
+    QCOMPARE(store.sessionStats().pendingArchiveOperations, qsizetype(1));
     const QVector<KisPageArchiveCompletionEvent> firstEvents = store.pollArchiveCompletions();
     QCOMPARE(firstEvents.size(), 1);
     QVERIFY(firstEvents.first().isValid());
@@ -11309,6 +11318,18 @@ void KisPageStoreReferenceTest::asyncArchiveCompletionCancellationAndShutdownAre
     QVERIFY(generation3.isValid());
     const KisCompletionTicket second = store.archiveRead(key, {}, KisPagePriority::Background, &error);
     QVERIFY(second.isValid());
+    archive->throwNextCancelStorageFailure = true;
+    bool cancelThrew = false;
+    bool cancelled = false;
+    try {
+        cancelled = store.cancelArchive(second);
+    } catch (const std::bad_alloc &) {
+        cancelThrew = true;
+    }
+    QVERIFY(!cancelThrew);
+    QVERIFY(!cancelled);
+    QCOMPARE(store.sessionStats().activeProviderCalls, qsizetype(0));
+    QCOMPARE(store.sessionStats().pendingArchiveOperations, qsizetype(1));
     QVERIFY(store.cancelArchive(second));
     const QVector<KisPageArchiveCompletionEvent> secondEvents = store.pollArchiveCompletions();
     QCOMPARE(secondEvents.size(), 1);

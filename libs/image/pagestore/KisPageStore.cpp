@@ -4467,6 +4467,17 @@ QVector<KisPageArchiveCompletionEvent> KisPageStore::pollArchiveCompletions(qsiz
             candidates.push_back({KisPageOperationId{it->first}, it->second, terminal});
         }
     }
+    const auto releaseBusy = qScopeGuard([&] {
+        QMutexLocker locker(&d->mutex);
+        for (const Candidate &candidate : std::as_const(candidates)) {
+            auto it = d->pendingArchives.find(candidate.operation.value);
+            if (it != d->pendingArchives.end() && it->second.busy
+                && it->second.completion == candidate.record.completion
+                && it->second.version == candidate.record.version) {
+                it->second.busy = false;
+            }
+        }
+    });
 
     for (const Candidate &candidate : std::as_const(candidates)) {
         KisPageArchiveCompletionEvent event;
@@ -4525,14 +4536,19 @@ bool KisPageStore::cancelArchive(const KisCompletionTicket &completion)
         ++d->activeProviderCalls;
     }
 
-    const bool cancelled = record.archive->cancelStoreExact(operation);
-    QMutexLocker locker(&d->mutex);
-    --d->activeProviderCalls;
-    auto it = d->pendingArchives.find(operation.value);
-    if (it != d->pendingArchives.end() && it->second.completion == record.completion) {
-        it->second.busy = false;
+    const auto releaseBusy = qScopeGuard([&] {
+        QMutexLocker locker(&d->mutex);
+        --d->activeProviderCalls;
+        auto it = d->pendingArchives.find(operation.value);
+        if (it != d->pendingArchives.end() && it->second.completion == record.completion) {
+            it->second.busy = false;
+        }
+    });
+    try {
+        return record.archive->cancelStoreExact(operation);
+    } catch (const std::bad_alloc &) {
+        return false;
     }
-    return cancelled;
 }
 
 KisCompletionTicket KisPageStore::publish(KisWriteLease lease, const KisCompletionTicket &producerCompletion)
