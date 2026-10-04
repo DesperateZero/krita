@@ -473,11 +473,6 @@ public:
     bool resolveSurfaceState(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     /** Resolves identity only; it neither materializes bytes nor grants access. */
     bool resolvePageVersion(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
-    // Ephemeral classification of a declared batch at one metadata boundary.
-    // No retained view, pixels, read protection or access permission. Output is
-    // replaced only on complete success; unsealed mutation bytes are excluded.
-    bool resolvePagePresence(KisSurfaceId, const QVector<KisLogicalPageId> &,
-                             const KisPageReadView &, QVector<quint8> *present) const;
     bool pageDescriptor(const KisPageVersion &version, KisPageAllocationDescriptor *descriptor) const;
 
     // Captures current/retained/transaction-base roots once. TransactionOverlay

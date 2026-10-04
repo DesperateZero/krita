@@ -41,6 +41,7 @@
 #include "tiles3/kis_tile_data_store.h"
 #include "tiles3/kis_tile_data_store_iterators.h"
 #include "tiles3/KisTiledExtentManager.h"
+#include "tiles3/kis_memento.h"
 #include "tiles3/tests/kis_tile_data_store_test_access.h"
 
 namespace {
@@ -503,6 +504,7 @@ class KisPageStoreCpuMutationTest : public QObject
 private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
     void processStorageReportsReservationSeparately();
+    void pageStoreMementoStorageIsProcessOwned();
     void epochNativeConfigurationResumes_data()
     {
         QTest::addColumn<int>("kind");
@@ -1185,6 +1187,37 @@ void KisPageStoreCpuMutationTest::processStorageReportsReservationSeparately()
     live = metadata(process);
     QCOMPARE(live.live.cpuRam, before.live.cpuRam);
     QCOMPARE(live.reserved.cpuRam, before.reserved.cpuRam);
+}
+
+void KisPageStoreCpuMutationTest::pageStoreMementoStorageIsProcessOwned()
+{
+    const auto before = kisPageProcessStorageBytes();
+    {
+        KisMementoSP legacy = new KisMemento(nullptr);
+        std::array<quint8, 40> pixel{};
+        legacy->saveOldDefaultPixel(pixel.data(), pixel.size());
+        legacy->saveNewDefaultPixel(pixel.data(), pixel.size());
+        QCOMPARE(kisPageProcessStorageBytes(), before);
+    }
+    QCOMPARE(kisPageProcessStorageBytes(), before);
+    {
+        KisMementoSP memento = KisMemento::createPageStoreMemento();
+        QVERIFY(memento);
+        const auto object = kisPageProcessStorageBytes();
+        QVERIFY(object > before);
+        std::array<quint8, 40> oldPixel{};
+        std::array<quint8, 40> newPixel{};
+        newPixel.fill(0x71);
+        memento->saveOldDefaultPixel(oldPixel.data(), oldPixel.size());
+        const auto oldStored = kisPageProcessStorageBytes();
+        QVERIFY(oldStored > object);
+        memento->saveNewDefaultPixel(newPixel.data(), newPixel.size());
+        const auto bothStored = kisPageProcessStorageBytes();
+        QVERIFY(bothStored > oldStored);
+        QCOMPARE(memento->oldDefaultPixel()[0], quint8(0));
+        QCOMPARE(memento->newDefaultPixel()[0], quint8(0x71));
+    }
+    QCOMPARE(kisPageProcessStorageBytes(), before);
 }
 
 void KisPageStoreCpuMutationTest::nativeControlExcludesExternalThreads()
@@ -8126,11 +8159,10 @@ void KisPageStoreCpuMutationTest::metadataPresenceUsesCanonicalSelector()
     const auto captures = f.store->readScopeStatistics().capturedReadViewsCreated;
     const auto requests = f.store->sessionStats().readRequestsCreated;
     const auto query = [&](const KisPageReadView &view, const QVector<quint8> &expected) {
-        const QVector<quint8> oldValues(present.cbegin(), present.cend());
-        const auto sharedPrevious = present;
-        QVERIFY(f.store->resolvePagePresence({1}, pages, view, &present));
+        present.resize(pages.size());
+        QVERIFY(f.store->resolvePagePresenceInto(
+            {1}, pages, view, present.data(), present.size()));
         QCOMPARE(present, expected);
-        QCOMPARE(sharedPrevious, oldValues);
         QCOMPARE(f.store->readScopeStatistics().capturedReadViewsCreated, captures);
         QCOMPARE(f.store->sessionStats().readRequestsCreated, requests);
     };
@@ -8160,17 +8192,14 @@ void KisPageStoreCpuMutationTest::metadataPresenceUsesCanonicalSelector()
     query({}, {0, 1, 1}); // an absent page stays absent after changing default
     QCOMPARE(bindings, bindingsAfterCommit);
 
-    const QVector<quint8> sentinel{9, 8};
-    present = sentinel;
-    QVERIFY(!f.store->resolvePagePresence({1}, pages, overlay, &present));
-    QCOMPARE(present, sentinel); // ended selector cannot partially replace output
-    QVERIFY(!f.store->resolvePagePresence({1}, {}, overlay, &present));
-    QCOMPARE(present, sentinel); // empty batches still validate the selector
-    QVERIFY(!f.store->resolvePagePresence({999}, pages, {}, &present));
-    QCOMPARE(present, sentinel);
-    QVERIFY(!f.store->resolvePagePresence({1}, pages, {}, nullptr));
-    QVERIFY(f.store->resolvePagePresence({1}, {}, {}, &present));
-    QVERIFY(present.isEmpty());
+    present.resize(pages.size());
+    QVERIFY(!f.store->resolvePagePresenceInto(
+        {1}, pages, overlay, present.data(), present.size()));
+    QVERIFY(!f.store->resolvePagePresenceInto({1}, {}, overlay, nullptr, 0));
+    QVERIFY(!f.store->resolvePagePresenceInto(
+        {999}, pages, {}, present.data(), present.size()));
+    QVERIFY(!f.store->resolvePagePresenceInto({1}, pages, {}, nullptr, pages.size()));
+    QVERIFY(f.store->resolvePagePresenceInto({1}, {}, {}, nullptr, 0));
     query({}, {0, 1, 1});
     QVERIFY(f.store->closeSession()); // saved classifications retain no view/pin
     QCOMPARE(present, QVector<quint8>({0, 1, 1}));

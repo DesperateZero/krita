@@ -12,9 +12,11 @@
 #include <QRect>
 
 #include "kis_global.h"
+#include "kritaimage_export.h"
 
 #include <kis_shared.h>
 #include <kis_shared_ptr.h>
+#include <cstddef>
 
 
 class KisMementoManager;
@@ -23,23 +25,17 @@ class KisMemento;
 typedef KisSharedPtr<KisMemento> KisMementoSP;
 
 
-class KisMemento : public KisShared
+class KRITAIMAGE_EXPORT KisMemento : public KisShared
 {
 public:
-    inline KisMemento(KisMementoManager* /*mementoManager*/) {
-        m_extentMinX = qint32_MAX;
-        m_extentMinY = qint32_MAX;
-        m_extentMaxX = qint32_MIN;
-        m_extentMaxY = qint32_MIN;
+    static KisMemento *createPageStoreMemento();
+    static void *operator new(std::size_t bytes);
+    static void operator delete(void *data) noexcept;
+    static void operator delete(void *data, std::size_t bytes) noexcept;
 
-        m_oldDefaultPixel = 0;
-        m_newDefaultPixel = 0;
-    }
-
-    inline ~KisMemento() {
-        delete[] m_oldDefaultPixel;
-        delete[] m_newDefaultPixel;
-    }
+    inline KisMemento(KisMementoManager* mementoManager)
+        : KisMemento(mementoManager, false) {}
+    ~KisMemento();
 
     inline void extent(qint32 &x, qint32 &y, qint32 &w, qint32 &h) {
         const bool extentIsValid =
@@ -73,19 +69,8 @@ public:
         m_extentMaxY = extent.isEmpty() ? qint32_MIN : extent.bottom();
     }
 
-    void saveOldDefaultPixel(const quint8* pixel, quint32 pixelSize) {
-        m_oldDefaultPixel = new quint8[pixelSize];
-        memcpy(m_oldDefaultPixel, pixel, pixelSize);
-    }
-
-    void saveNewDefaultPixel(const quint8* pixel, quint32 pixelSize) {
-        // Commit may be rejected and retried. Prepare the replacement before
-        // releasing the last attempted value (also safe if pixel aliases it).
-        quint8 *replacement = new quint8[pixelSize];
-        memcpy(replacement, pixel, pixelSize);
-        delete[] m_newDefaultPixel;
-        m_newDefaultPixel = replacement;
-    }
+    void saveOldDefaultPixel(const quint8* pixel, quint32 pixelSize);
+    void saveNewDefaultPixel(const quint8* pixel, quint32 pixelSize);
 
     const quint8* oldDefaultPixel() const {
         return m_oldDefaultPixel;
@@ -96,6 +81,17 @@ public:
     }
 
 private:
+    KisMemento(KisMementoManager* /*mementoManager*/, bool pageStoreStorage)
+        : m_pageStoreStorage(pageStoreStorage) {
+        m_extentMinX = qint32_MAX;
+        m_extentMinY = qint32_MAX;
+        m_extentMaxX = qint32_MIN;
+        m_extentMaxY = qint32_MIN;
+
+        m_oldDefaultPixel = 0;
+        m_newDefaultPixel = 0;
+    }
+
     friend class KisMementoManager;
 
     inline void updateExtent(qint32 col, qint32 row, QMutex *currentMementoExtentLock) {
@@ -129,6 +125,7 @@ private:
     qint32 m_extentMaxX;
     qint32 m_extentMinY;
     qint32 m_extentMaxY;
+    bool m_pageStoreStorage = false;
 };
 
 #endif // KIS_MEMENTO_H_

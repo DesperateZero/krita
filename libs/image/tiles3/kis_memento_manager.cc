@@ -7,6 +7,102 @@
 #include <QtGlobal>
 #include "kis_memento_manager.h"
 #include "kis_memento.h"
+#include "pagestore/KisMutationStorage_p.h"
+
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <new>
+
+namespace {
+
+struct alignas(std::max_align_t) MementoStorageHeader
+{
+    bool processStorage = false;
+};
+
+static_assert(alignof(KisMemento) <= alignof(std::max_align_t));
+
+void *allocateMementoStorage(std::size_t bytes, bool processStorage)
+{
+    if (bytes > std::numeric_limits<std::size_t>::max() - sizeof(MementoStorageHeader))
+        throw std::bad_alloc();
+    const std::size_t total = sizeof(MementoStorageHeader) + bytes;
+    void *raw = processStorage
+        ? kisAllocatePageProcessStorage(total, alignof(std::max_align_t))
+        : ::operator new(total);
+    ::new (raw) MementoStorageHeader{processStorage};
+    return static_cast<std::byte *>(raw) + sizeof(MementoStorageHeader);
+}
+
+MementoStorageHeader *mementoStorageHeader(void *data) noexcept
+{
+    return reinterpret_cast<MementoStorageHeader *>(
+        static_cast<std::byte *>(data) - sizeof(MementoStorageHeader));
+}
+
+}
+
+void *KisMemento::operator new(std::size_t bytes)
+{
+    return allocateMementoStorage(bytes, false);
+}
+
+void KisMemento::operator delete(void *data) noexcept
+{
+    if (!data) return;
+    auto *header = mementoStorageHeader(data);
+    if (header->processStorage)
+        kisFreePageProcessStorage(header, 0, alignof(std::max_align_t));
+    else
+        ::operator delete(header);
+}
+
+void KisMemento::operator delete(void *data, std::size_t) noexcept
+{
+    KisMemento::operator delete(data);
+}
+
+KisMemento *KisMemento::createPageStoreMemento()
+{
+    void *storage = allocateMementoStorage(sizeof(KisMemento), true);
+    return ::new (storage) KisMemento(nullptr, true);
+}
+
+KisMemento::~KisMemento()
+{
+    if (m_pageStoreStorage) {
+        kisFreePageProcessStorage(m_oldDefaultPixel, 0, alignof(quint8));
+        kisFreePageProcessStorage(m_newDefaultPixel, 0, alignof(quint8));
+    } else {
+        delete[] m_oldDefaultPixel;
+        delete[] m_newDefaultPixel;
+    }
+}
+
+void KisMemento::saveOldDefaultPixel(const quint8 *pixel, quint32 pixelSize)
+{
+    quint8 *replacement = m_pageStoreStorage
+        ? static_cast<quint8 *>(kisAllocatePageProcessStorage(pixelSize, alignof(quint8)))
+        : new quint8[pixelSize];
+    memcpy(replacement, pixel, pixelSize);
+    if (m_pageStoreStorage) kisFreePageProcessStorage(m_oldDefaultPixel, 0, alignof(quint8));
+    else delete[] m_oldDefaultPixel;
+    m_oldDefaultPixel = replacement;
+}
+
+void KisMemento::saveNewDefaultPixel(const quint8 *pixel, quint32 pixelSize)
+{
+    // Commit may be rejected and retried. Prepare the replacement before
+    // releasing the last attempted value (also safe if pixel aliases it).
+    quint8 *replacement = m_pageStoreStorage
+        ? static_cast<quint8 *>(kisAllocatePageProcessStorage(pixelSize, alignof(quint8)))
+        : new quint8[pixelSize];
+    memcpy(replacement, pixel, pixelSize);
+    if (m_pageStoreStorage) kisFreePageProcessStorage(m_newDefaultPixel, 0, alignof(quint8));
+    else delete[] m_newDefaultPixel;
+    m_newDefaultPixel = replacement;
+}
 
 
 //#define DEBUG_MM

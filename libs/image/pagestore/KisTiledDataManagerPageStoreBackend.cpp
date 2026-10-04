@@ -1657,7 +1657,7 @@ KisMementoSP KisTiledDataManagerPageStoreBackend::beginHistory(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore history is unavailable"));
         return {};
     }
-    KisMementoSP candidate = new KisMemento(nullptr);
+    KisMementoSP candidate = KisMemento::createPageStoreMemento();
     candidate->saveOldDefaultPixel(defaultPixel, pixelSize);
     const auto prepared = d->mementos.emplace(candidate.data(), KisPageStoreMemento{}).first;
     const KisPageStoreHistoryTransaction transaction =

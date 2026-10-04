@@ -3694,28 +3694,6 @@ bool KisPageStore::resolveTileReadIdentity(const KisPageKey &key, const KisPageR
         (!version->isDefaultPixel() || d->publicationCoordinator.resolveSurfaceLocked(key.surface, view, state));
 }
 
-bool KisPageStore::resolvePagePresence(KisSurfaceId surface,
-                                       const QVector<KisLogicalPageId> &pages,
-                                       const KisPageReadView &view,
-                                       QVector<quint8> *present) const
-{
-    if (!present || !surface.isValid()) return false;
-    // Actual output storage precedes the owner gate, including Qt detachment.
-    // A rejected selector leaves the caller's previous classification intact.
-    QVector<quint8> candidate;
-    try {
-        candidate.reserve(pages.size());
-        if (candidate.capacity() < pages.size()) return false;
-        candidate.resize(pages.size());
-    } catch (const std::bad_alloc &) {
-        return false;
-    }
-    if (!resolvePagePresenceInto(surface, pages, view, candidate.data(), candidate.size())) return false;
-    // The output's previous storage also dies outside the owner gate.
-    present->swap(candidate);
-    return true;
-}
-
 bool KisPageStore::resolvePagePresenceInto(KisSurfaceId surface,
                                           const QVector<KisLogicalPageId> &pages,
                                           const KisPageReadView &view,
