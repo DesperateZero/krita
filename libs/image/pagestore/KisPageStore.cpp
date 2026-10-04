@@ -517,11 +517,17 @@ public:
         }
         defaultStorage.beginPreparationLocked(version.key);
         ++activeProviderCalls;
-        locker->unlock();
-        const KisReplicaOperation allocation =
-            provider->requestReplica(operation, version, descriptor, access.domain, KisPageAccessMode::Read, priority);
-        locker->relock();
-        --activeProviderCalls;
+        KisReplicaOperation allocation;
+        try {
+            locker->unlock();
+            const auto done = qScopeGuard([&] { locker->relock(); --activeProviderCalls; });
+            allocation = provider->requestReplica(
+                operation, version, descriptor, access.domain, KisPageAccessMode::Read, priority);
+        } catch (const std::bad_alloc &) {
+            defaultStorage.finishPreparationLocked(version.key);
+            KisPageStoreDetail::setError(error, QStringLiteral("implicit default provider storage was refused"));
+            return false;
+        }
         defaultStorage.finishPreparationLocked(version.key);
         const bool ours = ownsPreparedReplica(allocation.replica, version, *provider);
         const bool backingOwned = ours && owner.registerBacking(

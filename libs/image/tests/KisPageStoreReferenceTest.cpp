@@ -851,6 +851,7 @@ public:
     std::function<void()> retireProbe;
     std::function<void()> nativeCopyProbe;
     bool failNextRetire = false;
+    bool throwNextRequestStorageFailure = false;
     mutable bool throwNextValidateStorageFailure = false;
     bool enableNativeCopy = false;
     bool corruptNextNativeOperation = false;
@@ -882,6 +883,8 @@ public:
                                        KisPageAccessMode mode,
                                        KisPagePriority priority) override
     {
+        if (std::exchange(throwNextRequestStorageFailure, false))
+            throw std::bad_alloc();
         return m_delegate->requestReplica(operation, version, descriptor, domain, mode, priority);
     }
     KisReplicaOperation prepareWrite(KisPageOperationId operation,
@@ -10743,13 +10746,14 @@ void KisPageStoreReferenceTest::cpuSurfaceOpsPreserveRectCopyAndSparseClear()
 void KisPageStoreReferenceTest::sparseDefaultPageFirstWriteAndUndoStayVersioned()
 {
     auto completions = std::make_shared<KisCompletionRegistry>();
-    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
+    auto delegate = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
     providerConfig.provider = KisReplicaProviderId{66};
     providerConfig.providerEpoch = KisReplicaProviderEpoch{1};
     providerConfig.budgetBytes = 1024 * 1024;
     QString error;
-    QVERIFY2(provider->configure(providerConfig, completions, &error), qPrintable(error));
+    QVERIFY2(delegate->configure(providerConfig, completions, &error), qPrintable(error));
+    auto provider = std::make_shared<ReentrantProbeCpuProvider>(delegate);
 
     KisImageEpochSnapshot initial;
     initial.epoch = KisImageEpochId{1};
@@ -10773,6 +10777,18 @@ void KisPageStoreReferenceTest::sparseDefaultPageFirstWriteAndUndoStayVersioned(
     QVERIFY(resolvedVersion.isDefaultPixel());
     QCOMPARE(resolvedVersion.defaultPixelRevision, quint64(7));
     const KisPageAccessRequirement cpuAccess{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
+    provider->throwNextRequestStorageFailure = true;
+    bool defaultRequestThrew = false;
+    KisReadRequest refusedDefault;
+    try {
+        refusedDefault = store.acquireRead(sparseKey, current, cpuAccess, KisPagePriority::Normal);
+    } catch (const std::bad_alloc &) {
+        defaultRequestThrew = true;
+    }
+    QVERIFY(!defaultRequestThrew);
+    QVERIFY(!refusedDefault.isValid());
+    QCOMPARE(store.sessionStats().activeProviderCalls, qsizetype(0));
+    QCOMPARE(store.sessionStats().activeDefaultPreparations, qsizetype(0));
     KisReadRequest defaultRequest = store.acquireRead(sparseKey, current, cpuAccess, KisPagePriority::Normal);
     QVERIFY2(defaultRequest.isValid(), qPrintable(defaultRequest.error));
     QVERIFY(defaultRequest.version.isDefaultPixel());
