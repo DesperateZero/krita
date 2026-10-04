@@ -505,6 +505,7 @@ private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
     void processStorageReportsReservationSeparately();
     void pageStoreMementoStorageIsProcessOwned();
+    void tiles3ReadCaptureStorageRefusalIsRecoverable();
     void epochNativeConfigurationResumes_data()
     {
         QTest::addColumn<int>("kind");
@@ -11111,6 +11112,75 @@ void KisPageStoreCpuMutationTest::processStorageRejectsAndRetains()
     QCOMPARE(kisPageProcessStorageBytes(), fixedBefore);
     weak.reset();
     QVERIFY(kisPageProcessStorageBytes() < fixedBefore);
+}
+
+void KisPageStoreCpuMutationTest::tiles3ReadCaptureStorageRefusalIsRecoverable()
+{
+    kisDrainPageStoreReclamation();
+    QString error;
+    auto process = kisAcquirePageStoreBootstrapBudget(&error);
+    QVERIFY2(process, qPrintable(error));
+    Fixture f;
+    f.providerProcessBudget = process;
+    QVERIFY2(f.init(), qPrintable(f.error));
+    QVERIFY2(f.fill(0x31), qPrintable(f.error));
+    auto view = f.store->captureReadView();
+    QVERIFY(view.isValid());
+    auto guard = view.readResidentPage(key());
+    QVERIFY(guard.isValid());
+    auto *tile = f.provider->p->tileDataForCpuReadGuard(guard);
+    QVERIFY(tile);
+    KisSurfaceEpochState surface;
+    QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+
+    const auto used = [&] {
+        const auto metadata = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        return metadata.live.cpuRam + metadata.reserved.cpuRam;
+    };
+    const quint64 before = used();
+    const quint64 limit = kisPageProcessStorageLimit();
+    QVERIFY(before < limit);
+    const size_t fillerBytes = size_t(limit - before);
+    void *filler = allocateTestProcessStoragePressure(fillerBytes, 1);
+    auto free = qScopeGuard([&] {
+        if (filler) freeTestProcessStoragePressure(filler, fillerBytes, 1);
+    });
+    QCOMPARE(used(), limit);
+
+    std::shared_ptr<const KisPageReplicaSource> refusedSource;
+    TileLease refusedCache;
+    bool sourceThrew = false;
+    bool cacheThrew = false;
+    try {
+        refusedSource = f.provider->p->captureCompletedTileSource(
+            surface.allocationDescriptor(), tile, &error);
+    } catch (const std::bad_alloc &) {
+        sourceThrew = true;
+    }
+    try {
+        refusedCache = f.provider->p->acquireTileReadCache(guard);
+    } catch (const std::bad_alloc &) {
+        cacheThrew = true;
+    }
+    QVERIFY2(!sourceThrew, "completed source capture leaked bad_alloc");
+    QVERIFY2(!cacheThrew, "read-cache preparation leaked bad_alloc");
+    QVERIFY(!refusedSource);
+    QVERIFY(!refusedCache);
+    QVERIFY(error.contains(QStringLiteral("storage")));
+    QCOMPARE(used(), limit);
+    QCOMPARE(static_cast<const quint8 *>(guard.data())[0], quint8(0x31));
+
+    freeTestProcessStoragePressure(std::exchange(filler, nullptr), fillerBytes, 1);
+    auto source = f.provider->p->captureCompletedTileSource(
+        surface.allocationDescriptor(), tile, &error);
+    auto cache = f.provider->p->acquireTileReadCache(guard);
+    QVERIFY2(source, qPrintable(error));
+    QVERIFY(cache);
+    QCOMPARE(cache->tileData(), tile);
+    QVERIFY(cache->finish());
+    cache.reset();
+    source.reset();
+    QCOMPARE(used(), before);
 }
 
 void KisPageStoreCpuMutationTest::runtimeStopsAtCapacity()

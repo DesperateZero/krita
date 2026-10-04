@@ -185,7 +185,13 @@ public:
         // A nested reader's capability must never be stolen for a writer.
         if (cache && cache->readPinned()) return {};
         if (!cache) {
-            reuse = std::make_unique<Tiles3TileReadCache>();
+            // This is only a derived read hint. Capacity refusal is the same
+            // recoverable cache miss that the public bridge already returns.
+            try {
+                reuse = std::make_unique<Tiles3TileReadCache>();
+            } catch (const std::bad_alloc &) {
+                return {};
+            }
             cache = static_cast<Tiles3TileReadCache *>(reuse.get());
         }
         cache->m_binding = binding;
@@ -1017,7 +1023,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
 
 
 std::shared_ptr<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCompletedTileSource(
-    const KisPageAllocationDescriptor &descriptor, KisTileData *tileData, QString *error)
+    const KisPageAllocationDescriptor &descriptor, KisTileData *tileData, QString *error) try
 {
     if (!supportsNativeTileLayout(descriptor) ||
         descriptor.format.pixelAlignment > alignof(void *) || !tileData ||
@@ -1030,6 +1036,11 @@ std::shared_ptr<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captur
         d->config.provider, d->config.providerEpoch, descriptor, d->sourceOwner, tileData);
     KisPageStoreDetail::setError(error, {});
     return source;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("completed tile source storage was refused"));
+    return {};
 }
 
 bool KisTiles3PageReplicaProvider::sourceMatchesReadGuard(
