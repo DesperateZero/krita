@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -708,7 +709,10 @@ bool KisTiledDataManagerPageStoreBackend::configure(
     surface.surface = d->surface;
     surface.format.formatId = pixelSize;
     surface.format.colorModelId = QByteArrayLiteral("KRITA_RAW_PIXEL");
-    surface.format.colorDepthId = QByteArray::number(pixelSize * 8);
+    char depth[std::numeric_limits<quint32>::digits10 + 1];
+    const auto converted = std::to_chars(depth, depth + sizeof(depth), pixelSize * 8);
+    Q_ASSERT(converted.ec == std::errc{});
+    surface.format.colorDepthId = KisPageByteArray(depth, converted.ptr - depth);
     surface.format.profileFingerprint = QByteArrayLiteral("tiles3-datamanager");
     surface.format.channelOrder = QByteArrayLiteral("RAW");
     surface.format.packing = QByteArrayLiteral("interleaved");

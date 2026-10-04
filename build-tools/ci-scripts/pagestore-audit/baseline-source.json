@@ -2408,7 +2408,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4773,
+      "lines": 4774,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2441,7 +2441,7 @@
         "State",
         "WriteClosureRecord"
       ],
-      "sha256": "34eb9bba14299513674555af6003278c76547dd7fb4f6a522928b91802ec4d0a",
+      "sha256": "b8bd6c5026fc16ff40c5ab07a34b92ca82219283844f46115bb3a38bea7762b9",
       "synchronization_declarations": 19
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -3156,6 +3156,7 @@
         "QThread",
         "algorithm",
         "atomic",
+        "charconv",
         "cstring",
         "kis_image_config.h",
         "limits",
@@ -3166,7 +3167,7 @@
         "tiles3/kis_tiled_data_manager.h",
         "utility"
       ],
-      "lines": 2751,
+      "lines": 2755,
       "member_fields": [
         "m_barrierPin",
         "m_batch",
@@ -3207,7 +3208,7 @@
         "ProductBackingPolicy",
         "TrimPage"
       ],
-      "sha256": "947d206e54fb0163a86e69ba039bfaabbcd3111029b429f5717cf490833555b2",
+      "sha256": "547d7eee87d098be2477910dcf65e099715bb59cecb7d878738747e2b4b6e144",
       "synchronization_declarations": 6
     },
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": {
@@ -6468,5 +6469,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "3c22a0226a858ef16d150b2dfe5523d9bfbc684e"
+  "working_tree_head": "2e471d5efb7e99ee323541fe499478af9d43e73c"
 }

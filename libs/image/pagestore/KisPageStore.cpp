@@ -2145,7 +2145,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                 || !allocation.replica.layout.matches(descriptor) || !binding
                 || !data || !owner->owner.verifyTerminalProviderResult(operation, allocation, &failure).succeeded()) {
                 rejectAllocation();
-                fail(QStringLiteral("CPU mutation native allocation/access failed: ") + failure);
+                // Reporting a refusal must not allocate another error buffer.
+                fail(failure.isEmpty() ? QStringLiteral("CPU mutation native allocation/access failed") : failure);
                 return result;
             }
             acquire.target = allocation.replica;
@@ -2529,7 +2530,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
         lock.relock();
         retire();
         if (!storageRefused) d->cancelLocked(&lock);
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation seal failed: ") + failure);
+        KisPageStoreDetail::setError(error, failure.isEmpty() ? QStringLiteral("CPU mutation seal failed") : failure);
         return false;
     }
     // Installation now owns the replacements. The original pages cease
