@@ -714,6 +714,8 @@ public:
     KisPageArchiveOperation storeExact(const KisExactPageArchiveWrite &write, KisPagePriority priority) override
     {
         Q_UNUSED(priority);
+        if (std::exchange(throwNextStoreStorageFailure, false))
+            throw std::bad_alloc();
         KisPageArchiveOperation result;
         result.operation = write.operation;
         result.version = write.version;
@@ -798,6 +800,8 @@ public:
         m_pending.erase(it);
         return true;
     }
+
+    bool throwNextStoreStorageFailure = false;
 
     KisPageOperationId pendingOperation(const KisCompletionTicket &completion) const
     {
@@ -11272,6 +11276,21 @@ void KisPageStoreReferenceTest::asyncArchiveCompletionCancellationAndShutdownAre
 
     const KisPageVersion generation2 = writeAndCommit(0x61);
     QVERIFY(generation2.isValid());
+    archive->throwNextStoreStorageFailure = true;
+    bool archiveThrew = false;
+    KisCompletionTicket refusedArchive;
+    try {
+        refusedArchive = store.archiveRead(key, {}, KisPagePriority::Background, &error);
+    } catch (const std::bad_alloc &) {
+        archiveThrew = true;
+    }
+    QVERIFY(!archiveThrew);
+    QVERIFY(!refusedArchive.isValid());
+    QVERIFY(error.contains(QStringLiteral("storage")));
+    QCOMPARE(store.sessionStats().activeProviderCalls, qsizetype(0));
+    QCOMPARE(store.sessionStats().activeReadLeases, qsizetype(0));
+    QCOMPARE(store.sessionStats().pendingArchiveOperations, qsizetype(0));
+    QCOMPARE(currentByte(), 0x61);
     const KisCompletionTicket first = store.archiveRead(key, {}, KisPagePriority::Background, &error);
     QVERIFY2(first.isValid(), qPrintable(error));
     QCOMPARE(store.sessionStats().pendingArchiveOperations, qsizetype(1));

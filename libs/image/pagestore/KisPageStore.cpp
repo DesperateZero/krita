@@ -3596,13 +3596,23 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
         if (!backing.reservation.isValid()) return false;
         ++d->activeProviderCalls;
     }
+    const auto finishProviderCall = qScopeGuard([&] {
+        QMutexLocker locker(&d->mutex);
+        --d->activeProviderCalls;
+    });
 
-    const KisReplicaOperation allocation = provider->requestReplica(allocationOperation,
-                                                                    version,
-                                                                    descriptor,
-                                                                    KisPageAccessDomain::CpuRam,
-                                                                    KisPageAccessMode::Write,
-                                                                    KisPagePriority::Normal);
+    KisReplicaOperation allocation;
+    try {
+        allocation = provider->requestReplica(allocationOperation,
+                                              version,
+                                              descriptor,
+                                              KisPageAccessDomain::CpuRam,
+                                              KisPageAccessMode::Write,
+                                              KisPagePriority::Normal);
+    } catch (const std::bad_alloc &) {
+        KisPageStoreDetail::setError(error, QStringLiteral("initial canonical page provider storage was refused"));
+        return false;
+    }
     QString failure;
     const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, version, *provider);
     const bool backingOwned = ownsNewTarget && d->owner.registerBacking(
@@ -3613,8 +3623,15 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
     bool bytesCopied = false;
     if (backingOwned && allocated.isValid() && allocated.succeeded()
         && allocation.replica.layout.matches(descriptor)) {
-        KisReplicaAccess access =
-            provider->resolveAccess(lease, accessOperation, allocation.replica, cpuAccess, KisPageAccessMode::Write);
+        KisReplicaAccess access = [&]() -> KisReplicaAccess {
+            try {
+                return provider->resolveAccess(
+                    lease, accessOperation, allocation.replica, cpuAccess, KisPageAccessMode::Write);
+            } catch (const std::bad_alloc &) {
+                failure = QStringLiteral("initial canonical page access storage was refused");
+                return {};
+            }
+        }();
         if (access.isValid()) {
             const quint64 rowBytes = descriptor.minimumRowBytes();
             bytesCopied = access.replica.layout.rowStride >= rowBytes
@@ -3638,10 +3655,6 @@ bool KisPageStore::adoptInitialPageBytes(const KisPageVersion &version,
     }
     if (!adopted && ownsNewTarget) {
         d->retirementQueue.retireOrDefer(allocation.replica, provider, {}, std::move(backing));
-    }
-    {
-        QMutexLocker locker(&d->mutex);
-        --d->activeProviderCalls;
     }
     if (!adopted) {
         KisPageStoreDetail::setError(error, failure.isEmpty() ? QStringLiteral("initial canonical page import failed") : failure);
@@ -4366,7 +4379,18 @@ KisPageStore::archiveRead(const KisPageKey &key, const KisPageReadView &view, Ki
         KisPageStoreDetail::setError(error, QStringLiteral("archive tracking storage preparation was refused"));
         return {};
     }
-    const KisPageArchiveOperation archived = archive->storeExact(write, priority);
+    KisPageArchiveOperation archived;
+    try {
+        archived = archive->storeExact(write, priority);
+    } catch (const std::bad_alloc &) {
+        {
+            QMutexLocker locker(&d->mutex);
+            --d->activeProviderCalls;
+        }
+        release(std::move(lease));
+        KisPageStoreDetail::setError(error, QStringLiteral("exact-generation archive storage was refused"));
+        return {};
+    }
 
     bool accepted = false;
     QString failure = archived.error;

@@ -521,6 +521,7 @@ private Q_SLOTS:
         QTest::newRow("prepared-install-and-history") << 2;
     }
     void overlayStorageAtCapacity();
+    void initialByteImportProviderStorageFailureIsRecoverable();
     void initialReplicaImportFailure_data();
     void initialReplicaImportFailure();
     void productionRecoverableHandoff_data();
@@ -10643,6 +10644,76 @@ void KisPageStoreCpuMutationTest::initialReplicaImportFailure_data()
     QTest::addColumn<int>("bpp"); QTest::addColumn<int>("fault");
     for (int bpp : {1, 4, 8, 16}) for (int fault = 0; fault < 5; ++fault)
         QTest::newRow(qPrintable(QString("%1-fault%2").arg(bpp).arg(fault))) << bpp << fault;
+}
+
+void KisPageStoreCpuMutationTest::initialByteImportProviderStorageFailureIsRecoverable()
+{
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
+    Fixture f;
+    f.providerProcessBudget = parent;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY2(f.init(), qPrintable(f.error));
+
+    KisImageEpochSnapshot initial = f.store->captureCommittedEpoch();
+    const KisPageVersion importedVersion{key(), {1}};
+    initial.manifest = {importedVersion};
+    KisSurfaceEpochState surface;
+    QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    const auto descriptor = surface.allocationDescriptor();
+    const QByteArray importedBytes(qsizetype(descriptor.minimumByteSize()), char(0x27));
+
+    KisPageStore imported;
+    QVERIFY(imported.configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY2(imported.configure(initial, f.completions, 4, &f.error), qPrintable(f.error));
+    QVERIFY(imported.registerReplicaProvider(f.provider));
+
+    void *filler = nullptr;
+    size_t fillerBytes = 0;
+    const auto exhaustStorage = [&] {
+        const quint64 live = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        fillerBytes = size_t(limits.metadataArenaBytes - live);
+        filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+        KisMutationStorageAllocator<char>(parent.get()).allocate(1);
+    };
+    f.provider->beforeRequestReplica = exhaustStorage;
+    const auto releaseFiller = qScopeGuard([&] {
+        if (filler) freeTestStoragePressure(parent.get(), filler, fillerBytes, 1);
+    });
+    bool threw = false;
+    bool adopted = false;
+    try {
+        adopted = imported.adoptInitialPageBytes(importedVersion, descriptor, importedBytes, &f.error);
+    } catch (const std::bad_alloc &) {
+        threw = true;
+    }
+    QVERIFY(!threw);
+    QVERIFY(!adopted);
+    QVERIFY(f.error.contains(QStringLiteral("storage")));
+    QCOMPARE(imported.sessionStats().activeProviderCalls, qsizetype(0));
+
+    f.provider->beforeRequestReplica = {};
+    freeTestStoragePressure(parent.get(), std::exchange(filler, nullptr), fillerBytes, 1);
+    f.provider->beforeWriteResolve = [&](const KisReplicaHandle &) { exhaustStorage(); };
+    adopted = imported.adoptInitialPageBytes(importedVersion, descriptor, importedBytes, &f.error);
+    QVERIFY(!adopted);
+    QVERIFY(f.error.contains(QStringLiteral("storage")));
+    QCOMPARE(imported.sessionStats().activeProviderCalls, qsizetype(0));
+    f.provider->beforeWriteResolve = {};
+    freeTestStoragePressure(parent.get(), std::exchange(filler, nullptr), fillerBytes, 1);
+    QVERIFY(imported.waitForRetirementIdle());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+
+    QVERIFY2(imported.adoptInitialPageBytes(importedVersion, descriptor, importedBytes, &f.error), qPrintable(f.error));
+    QVERIFY2(imported.finalizeInitialization(&f.error), qPrintable(f.error));
+    const auto request = imported.acquireRead(key(), {}, cpu, KisPagePriority::Normal);
+    auto lease = imported.resolve(request, request.readiness);
+    QVERIFY(lease.isValid());
+    QCOMPARE(static_cast<const quint8 *>(lease.cpuData())[0], quint8(0x27));
+    imported.release(std::move(lease));
+    QVERIFY2(imported.closeSession(&f.error), qPrintable(f.error));
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
 }
 
 void KisPageStoreCpuMutationTest::initialReplicaImportFailure()
