@@ -3283,7 +3283,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 2906,
+          "line": 2919,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -27970,7 +27970,7 @@
           "column": 79,
           "dynamic": false,
           "implicit": false,
-          "line": 3263,
+          "line": 3276,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -30412,7 +30412,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 3421,
+          "line": 3434,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -30421,7 +30421,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 3871,
+          "line": 3891,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -54766,7 +54766,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2643,
+          "line": 2656,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -54775,7 +54775,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2645,
+          "line": 2658,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -54784,7 +54784,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2646,
+          "line": 2659,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -65869,7 +65869,7 @@
           "column": 69,
           "dynamic": false,
           "implicit": false,
-          "line": 3473,
+          "line": 3486,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -68471,7 +68471,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 2905,
+          "line": 2918,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -69357,7 +69357,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 2505,
+          "line": 2518,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -69366,7 +69366,7 @@
           "column": 63,
           "dynamic": false,
           "implicit": false,
-          "line": 3216,
+          "line": 3229,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -69375,7 +69375,16 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 3594,
+          "line": 3607,
+          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageMetadataCoordinator::applyProjectedSequence",
+          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@applyProjectedSequence#&1$@S@KisPageKey#*1$@S@KisPageTransition#K#",
+          "column": 59,
+          "dynamic": false,
+          "implicit": false,
+          "line": 3661,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -77828,7 +77837,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2946,
+          "line": 2959,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -78029,7 +78038,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 3421,
+          "line": 3434,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -78168,7 +78177,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3979,
+          "line": 3999,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -78177,7 +78186,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3980,
+          "line": 4000,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -78186,7 +78195,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 3981,
+          "line": 4001,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -78622,7 +78631,7 @@
           "column": 70,
           "dynamic": false,
           "implicit": false,
-          "line": 2635,
+          "line": 2648,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -78845,7 +78854,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 2778,
+          "line": 2791,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -79449,7 +79458,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 2492,
+          "line": 2505,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79458,7 +79467,7 @@
           "column": 93,
           "dynamic": false,
           "implicit": false,
-          "line": 2493,
+          "line": 2506,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79467,7 +79476,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 2532,
+          "line": 2545,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79476,7 +79485,7 @@
           "column": 100,
           "dynamic": false,
           "implicit": false,
-          "line": 2533,
+          "line": 2546,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79485,7 +79494,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 2570,
+          "line": 2583,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79494,7 +79503,7 @@
           "column": 103,
           "dynamic": false,
           "implicit": false,
-          "line": 2571,
+          "line": 2584,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79503,7 +79512,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 2573,
+          "line": 2586,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79512,7 +79521,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 2578,
+          "line": 2591,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79521,7 +79530,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2659,
+          "line": 2672,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79530,7 +79539,7 @@
           "column": 89,
           "dynamic": false,
           "implicit": false,
-          "line": 2660,
+          "line": 2673,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79539,7 +79548,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 2663,
+          "line": 2676,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79548,7 +79557,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 2673,
+          "line": 2686,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79557,7 +79566,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 2680,
+          "line": 2693,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79566,7 +79575,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2691,
+          "line": 2704,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79575,7 +79584,7 @@
           "column": 100,
           "dynamic": false,
           "implicit": false,
-          "line": 2692,
+          "line": 2705,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79584,7 +79593,7 @@
           "column": 88,
           "dynamic": false,
           "implicit": false,
-          "line": 2725,
+          "line": 2738,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79593,7 +79602,7 @@
           "column": 88,
           "dynamic": false,
           "implicit": false,
-          "line": 2749,
+          "line": 2762,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -79602,7 +79611,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 2761,
+          "line": 2774,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -79701,7 +79710,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 2505,
+          "line": 2518,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -80001,7 +80010,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2597,
+          "line": 2610,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80182,7 +80191,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2471,
+          "line": 2473,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80191,7 +80200,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 2497,
+          "line": 2510,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80200,7 +80209,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2544,
+          "line": 2557,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80209,7 +80218,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2552,
+          "line": 2565,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80218,7 +80227,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2561,
+          "line": 2574,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80227,7 +80236,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2582,
+          "line": 2595,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80236,7 +80245,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 2593,
+          "line": 2606,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -80245,7 +80254,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 2599,
+          "line": 2612,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -81494,7 +81503,7 @@
               "usr": "c:@S@KisPageMetadataCoordinator@F@configure#K#*$@S@QString#"
             }
           ],
-          "line": 2913,
+          "line": 2926,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp",
           "scope": "production"
         }
@@ -81518,7 +81527,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 2782,
+          "line": 2795,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -81548,7 +81557,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2816,
+          "line": 2829,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81557,7 +81566,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2840,
+          "line": 2853,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81566,7 +81575,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2852,
+          "line": 2865,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81575,7 +81584,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2862,
+          "line": 2875,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81584,7 +81593,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 2961,
+          "line": 2974,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81593,7 +81602,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 3016,
+          "line": 3029,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81602,7 +81611,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3031,
+          "line": 3044,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81611,7 +81620,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3077,
+          "line": 3090,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81620,7 +81629,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3112,
+          "line": 3125,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81629,7 +81638,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3138,
+          "line": 3151,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81638,7 +81647,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3161,
+          "line": 3174,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81647,7 +81656,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3213,
+          "line": 3226,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81656,7 +81665,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3425,
+          "line": 3438,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81665,7 +81674,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3477,
+          "line": 3490,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81674,7 +81683,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3586,
+          "line": 3599,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -81683,7 +81692,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3872,
+          "line": 3892,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -81879,7 +81888,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3841,
+          "line": 3861,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -81960,7 +81969,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3848,
+          "line": 3868,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -81974,7 +81983,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 3845,
+          "line": 3865,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -82024,7 +82033,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3467,
+          "line": 3480,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82038,7 +82047,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3398,
+          "line": 3411,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -82047,7 +82056,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3409,
+          "line": 3422,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82069,7 +82078,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3390,
+          "line": 3403,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82799,7 +82808,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3402,
+          "line": 3415,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82899,7 +82908,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3576,
+          "line": 3589,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82913,7 +82922,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 3399,
+          "line": 3412,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -82922,7 +82931,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 3410,
+          "line": 3423,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82944,7 +82953,7 @@
       "definitions": [
         {
           "column": 61,
-          "line": 3413,
+          "line": 3426,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82958,7 +82967,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3395,
+          "line": 3408,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -82967,7 +82976,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3406,
+          "line": 3419,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -82976,7 +82985,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 3865,
+          "line": 3885,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -82998,7 +83007,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2785,
+          "line": 2798,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -83287,7 +83296,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2793,
+          "line": 2806,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -83414,7 +83423,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3110,
+          "line": 3123,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -83459,7 +83468,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2886,
+          "line": 2899,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84108,7 +84117,7 @@
       "definitions": [
         {
           "column": 68,
-          "line": 2850,
+          "line": 2863,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84181,7 +84190,7 @@
       "definitions": [
         {
           "column": 46,
-          "line": 2860,
+          "line": 2873,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84245,7 +84254,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3208,
+          "line": 3221,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84291,7 +84300,7 @@
       "definitions": [
         {
           "column": 54,
-          "line": 3971,
+          "line": 3991,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84697,7 +84706,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 3158,
+          "line": 3171,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84761,7 +84770,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 2810,
+          "line": 2823,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -84970,7 +84979,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2602,
+          "line": 2615,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -85259,7 +85268,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2616,
+          "line": 2629,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -85291,7 +85300,7 @@
           "column": 12,
           "dynamic": false,
           "implicit": false,
-          "line": 2608,
+          "line": 2621,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -85413,7 +85422,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2932,
+          "line": 2945,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -85477,7 +85486,7 @@
       "definitions": [
         {
           "column": 52,
-          "line": 3916,
+          "line": 3936,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -86036,7 +86045,7 @@
       "definitions": [
         {
           "column": 39,
-          "line": 3903,
+          "line": 3923,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -86100,7 +86109,7 @@
       "definitions": [
         {
           "column": 62,
-          "line": 3786,
+          "line": 3806,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -86145,7 +86154,7 @@
       "definitions": [
         {
           "column": 37,
-          "line": 3008,
+          "line": 3021,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -86254,7 +86263,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3014,
+          "line": 3027,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -87590,7 +87599,7 @@
       "definitions": [
         {
           "column": 74,
-          "line": 3309,
+          "line": 3322,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -87690,7 +87699,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3868,
+          "line": 3888,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -87726,7 +87735,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3027,
+          "line": 3040,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -87844,7 +87853,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3134,
+          "line": 3147,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -87917,7 +87926,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2951,
+          "line": 2964,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -88503,7 +88512,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 2837,
+          "line": 2850,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -88567,7 +88576,7 @@
       "definitions": [
         {
           "column": 39,
-          "line": 2937,
+          "line": 2950,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -88667,7 +88676,7 @@
       "definitions": [
         {
           "column": 39,
-          "line": 2943,
+          "line": 2956,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -88739,7 +88748,7 @@
       "definitions": [
         {
           "column": 68,
-          "line": 3808,
+          "line": 3828,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -88775,7 +88784,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3074,
+          "line": 3087,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89019,7 +89028,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3795,
+          "line": 3815,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89042,7 +89051,7 @@
           "column": 5,
           "dynamic": false,
           "implicit": false,
-          "line": 3789,
+          "line": 3809,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89064,7 +89073,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 2780,
+          "line": 2793,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89146,7 +89155,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3982,
+          "line": 4002,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -89155,7 +89164,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3983,
+          "line": 4003,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89225,7 +89234,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 3364,
+          "line": 3377,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89374,7 +89383,7 @@
       "definitions": [
         {
           "column": 34,
-          "line": 3382,
+          "line": 3395,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89388,7 +89397,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3362,
+          "line": 3375,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -89397,7 +89406,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 3374,
+          "line": 3387,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -89586,7 +89595,7 @@
       "definitions": [
         {
           "column": 57,
-          "line": 3371,
+          "line": 3384,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -89642,7 +89651,7 @@
       "definitions": [
         {
           "column": 29,
-          "line": 3362,
+          "line": 3375,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -99980,7 +99989,7 @@
           "column": 93,
           "dynamic": false,
           "implicit": false,
-          "line": 3055,
+          "line": 3068,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -99989,7 +99998,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3244,
+          "line": 3257,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -125041,7 +125050,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 3788,
+          "line": 3808,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -125050,7 +125059,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 3814,
+          "line": 3834,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -125059,7 +125068,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 3818,
+          "line": 3838,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -129465,7 +129474,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 2428,
+          "line": 2429,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -129483,7 +129492,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3649,
+          "line": 3669,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -129519,7 +129528,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 2955,
+          "line": 2968,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160388,7 +160397,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 3387,
+          "line": 3400,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -160457,7 +160466,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2831,
+          "line": 2844,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160466,7 +160475,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 2967,
+          "line": 2980,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160475,7 +160484,7 @@
           "column": 87,
           "dynamic": false,
           "implicit": false,
-          "line": 3216,
+          "line": 3229,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160484,7 +160493,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3314,
+          "line": 3327,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160493,7 +160502,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 3487,
+          "line": 3500,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -160502,7 +160511,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3592,
+          "line": 3605,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -160994,7 +161003,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 2470,
+          "line": 2472,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161003,7 +161012,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 2495,
+          "line": 2508,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161012,7 +161021,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2542,
+          "line": 2555,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161021,22 +161030,13 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2560,
+          "line": 2573,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
           "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
           "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
           "column": 33,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2579,
-          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
-          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 25,
           "dynamic": false,
           "implicit": false,
           "line": 2592,
@@ -161048,7 +161048,16 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2596,
+          "line": 2605,
+          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
+          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
+          "column": 25,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2609,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161057,7 +161066,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2647,
+          "line": 2660,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161066,7 +161075,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2682,
+          "line": 2695,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161075,7 +161084,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2774,
+          "line": 2787,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161084,7 +161093,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2889,
+          "line": 2902,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161093,7 +161102,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2895,
+          "line": 2908,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161102,7 +161111,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2925,
+          "line": 2938,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161111,7 +161120,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2928,
+          "line": 2941,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161120,7 +161129,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2956,
+          "line": 2969,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161129,7 +161138,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2963,
+          "line": 2976,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161138,7 +161147,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2970,
+          "line": 2983,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161147,7 +161156,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2977,
+          "line": 2990,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161156,7 +161165,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2986,
+          "line": 2999,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161165,7 +161174,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2995,
+          "line": 3008,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161174,7 +161183,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 3000,
+          "line": 3013,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -161183,7 +161192,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 3004,
+          "line": 3017,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -175576,7 +175585,7 @@
           "column": 72,
           "dynamic": false,
           "implicit": false,
-          "line": 3046,
+          "line": 3059,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -175585,7 +175594,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 3237,
+          "line": 3250,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176201,7 +176210,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3032,
+          "line": 3045,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176210,7 +176219,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3039,
+          "line": 3052,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176219,7 +176228,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3044,
+          "line": 3057,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176228,7 +176237,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3046,
+          "line": 3059,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176237,7 +176246,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 3066,
+          "line": 3079,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176246,7 +176255,7 @@
           "column": 82,
           "dynamic": false,
           "implicit": false,
-          "line": 3066,
+          "line": 3079,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176255,7 +176264,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3139,
+          "line": 3152,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176264,7 +176273,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3149,
+          "line": 3162,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176273,7 +176282,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 3152,
+          "line": 3165,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176282,7 +176291,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3153,
+          "line": 3166,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176291,7 +176300,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 3162,
+          "line": 3175,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176300,7 +176309,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 3171,
+          "line": 3184,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176309,7 +176318,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 3230,
+          "line": 3243,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176318,7 +176327,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 3604,
+          "line": 3617,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -176327,7 +176336,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 3854,
+          "line": 3874,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -177861,7 +177870,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3601,
+          "line": 3614,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -177895,21 +177904,12 @@
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
-          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
-          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 47,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2466,
-          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
-        },
-        {
           "caller": "KisPageMetadataCoordinator::applyProjectedSequence",
           "caller-usr": "c:@S@KisPageMetadataCoordinator@F@applyProjectedSequence#&1$@S@KisPageKey#*1$@S@KisPageTransition#K#",
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 3604,
+          "line": 3617,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -177918,7 +177918,7 @@
           "column": 23,
           "dynamic": false,
           "implicit": false,
-          "line": 3747,
+          "line": 3767,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -177948,7 +177948,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 2489,
+          "line": 2502,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -177957,7 +177957,7 @@
           "column": 38,
           "dynamic": false,
           "implicit": false,
-          "line": 3728,
+          "line": 3748,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -178016,7 +178016,7 @@
           "column": 15,
           "dynamic": false,
           "implicit": false,
-          "line": 3602,
+          "line": 3615,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -178055,7 +178055,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 3606,
+          "line": 3619,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -188830,15 +188830,6 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2421,
-          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
-          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 35,
-          "dynamic": false,
-          "implicit": false,
           "line": 2444,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
@@ -188848,7 +188839,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2813,
+          "line": 2826,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -188857,7 +188848,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2879,
+          "line": 2892,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -188866,7 +188857,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 3630,
+          "line": 3643,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -188875,7 +188866,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3854,
+          "line": 3874,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -188884,7 +188875,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 3871,
+          "line": 3891,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -189725,7 +189716,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3058,
+          "line": 3071,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -189734,7 +189725,7 @@
           "column": 79,
           "dynamic": false,
           "implicit": false,
-          "line": 3058,
+          "line": 3071,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -189743,7 +189734,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 3632,
+          "line": 3645,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -211938,7 +211929,7 @@
           "column": 98,
           "dynamic": false,
           "implicit": false,
-          "line": 3854,
+          "line": 3874,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -212436,7 +212427,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3862,
+          "line": 3882,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -214642,7 +214633,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 2966,
+          "line": 2979,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -214681,7 +214672,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2967,
+          "line": 2980,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -214690,7 +214681,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3487,
+          "line": 3500,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -214699,7 +214690,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3593,
+          "line": 3606,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215101,7 +215092,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3217,
+          "line": 3230,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215110,7 +215101,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3437,
+          "line": 3450,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215119,7 +215110,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3488,
+          "line": 3501,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215208,7 +215199,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2770,
+          "line": 2783,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215217,7 +215208,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 3298,
+          "line": 3311,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215276,7 +215267,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 2770,
+          "line": 2783,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215285,7 +215276,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3298,
+          "line": 3311,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215294,7 +215285,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 3768,
+          "line": 3788,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215471,7 +215462,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 3452,
+          "line": 3465,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215480,7 +215471,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3561,
+          "line": 3574,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215587,7 +215578,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 3452,
+          "line": 3465,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215596,7 +215587,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 3561,
+          "line": 3574,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215925,7 +215916,7 @@
           "column": 69,
           "dynamic": false,
           "implicit": false,
-          "line": 2991,
+          "line": 3004,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215934,7 +215925,7 @@
           "column": 73,
           "dynamic": false,
           "implicit": false,
-          "line": 3736,
+          "line": 3756,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -215964,7 +215955,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 2547,
+          "line": 2560,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215973,7 +215964,7 @@
           "column": 26,
           "dynamic": false,
           "implicit": false,
-          "line": 2973,
+          "line": 2986,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215982,7 +215973,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3533,
+          "line": 3546,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -215991,7 +215982,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 3710,
+          "line": 3730,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216116,7 +216107,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 2994,
+          "line": 3007,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216155,7 +216146,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 2493,
+          "line": 2506,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216164,7 +216155,7 @@
           "column": 84,
           "dynamic": false,
           "implicit": false,
-          "line": 2533,
+          "line": 2546,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216173,7 +216164,7 @@
           "column": 87,
           "dynamic": false,
           "implicit": false,
-          "line": 2571,
+          "line": 2584,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216182,7 +216173,7 @@
           "column": 73,
           "dynamic": false,
           "implicit": false,
-          "line": 2660,
+          "line": 2673,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216191,7 +216182,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 3225,
+          "line": 3238,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216200,7 +216191,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 3277,
+          "line": 3290,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216209,7 +216200,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 3440,
+          "line": 3453,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216218,7 +216209,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 3492,
+          "line": 3505,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216227,7 +216218,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3535,
+          "line": 3548,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216236,7 +216227,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 3597,
+          "line": 3610,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216245,7 +216236,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 3703,
+          "line": 3723,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216254,7 +216245,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 3712,
+          "line": 3732,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216284,7 +216275,7 @@
           "column": 17,
           "dynamic": false,
           "implicit": false,
-          "line": 2985,
+          "line": 2998,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216293,7 +216284,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 3729,
+          "line": 3749,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216332,7 +216323,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 2573,
+          "line": 2586,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216341,7 +216332,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 2663,
+          "line": 2676,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216350,7 +216341,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3040,
+          "line": 3053,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216389,7 +216380,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 3602,
+          "line": 3615,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216428,7 +216419,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 3752,
+          "line": 3772,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216458,7 +216449,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 2725,
+          "line": 2738,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216467,7 +216458,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 2749,
+          "line": 2762,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216497,7 +216488,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 2692,
+          "line": 2705,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216557,7 +216548,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 2578,
+          "line": 2591,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216587,7 +216578,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 2673,
+          "line": 2686,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216596,7 +216587,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2680,
+          "line": 2693,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -216605,7 +216596,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 2761,
+          "line": 2774,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -216635,7 +216626,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 3023,
+          "line": 3036,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218210,7 +218201,7 @@
           "column": 16,
           "dynamic": false,
           "implicit": false,
-          "line": 3384,
+          "line": 3397,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218259,7 +218250,7 @@
           "column": 7,
           "dynamic": false,
           "implicit": false,
-          "line": 3367,
+          "line": 3380,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218379,7 +218370,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 3457,
+          "line": 3470,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -218388,7 +218379,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 3565,
+          "line": 3578,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218493,7 +218484,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 3452,
+          "line": 3465,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -218502,7 +218493,7 @@
           "column": 85,
           "dynamic": false,
           "implicit": false,
-          "line": 3561,
+          "line": 3574,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218599,7 +218590,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3451,
+          "line": 3464,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -218608,7 +218599,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3560,
+          "line": 3573,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -218805,7 +218796,7 @@
           "column": 18,
           "dynamic": false,
           "implicit": false,
-          "line": 3377,
+          "line": 3390,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -218814,7 +218805,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 3384,
+          "line": 3397,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219115,7 +219106,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3045,
+          "line": 3058,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -219124,7 +219115,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3085,
+          "line": 3098,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -219133,7 +219124,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3148,
+          "line": 3161,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -219142,7 +219133,7 @@
           "column": 30,
           "dynamic": false,
           "implicit": false,
-          "line": 3151,
+          "line": 3164,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219181,7 +219172,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 3607,
+          "line": 3620,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219307,7 +219298,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 2499,
+          "line": 2512,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -219316,7 +219307,7 @@
           "column": 59,
           "dynamic": false,
           "implicit": false,
-          "line": 3709,
+          "line": 3729,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219346,7 +219337,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3740,
+          "line": 3760,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219445,7 +219436,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 3625,
+          "line": 3638,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219475,7 +219466,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 2743,
+          "line": 2756,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219532,7 +219523,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 2721,
+          "line": 2734,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219625,7 +219616,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2769,
+          "line": 2782,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -219925,7 +219916,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 2824,
+          "line": 2837,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220081,7 +220072,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 3039,
+          "line": 3052,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220090,7 +220081,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 3049,
+          "line": 3062,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220099,7 +220090,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3088,
+          "line": 3101,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220108,7 +220099,7 @@
           "column": 24,
           "dynamic": false,
           "implicit": false,
-          "line": 3119,
+          "line": 3132,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220117,7 +220108,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3174,
+          "line": 3187,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220126,7 +220117,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3232,
+          "line": 3245,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220135,7 +220126,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3259,
+          "line": 3272,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220144,7 +220135,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3499,
+          "line": 3512,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220153,7 +220144,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 3877,
+          "line": 3897,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220183,7 +220174,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 3446,
+          "line": 3459,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220339,7 +220330,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2574,
+          "line": 2587,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220348,7 +220339,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 2665,
+          "line": 2678,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220495,7 +220486,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 3519,
+          "line": 3532,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220504,7 +220495,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3522,
+          "line": 3535,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220513,7 +220504,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3557,
+          "line": 3570,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220522,7 +220513,7 @@
           "column": 43,
           "dynamic": false,
           "implicit": false,
-          "line": 3892,
+          "line": 3912,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220531,7 +220522,7 @@
           "column": 74,
           "dynamic": false,
           "implicit": false,
-          "line": 4008,
+          "line": 4028,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220540,7 +220531,7 @@
           "column": 78,
           "dynamic": false,
           "implicit": false,
-          "line": 4023,
+          "line": 4043,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220627,7 +220618,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3632,
+          "line": 3645,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220693,7 +220684,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 3185,
+          "line": 3198,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220702,7 +220693,7 @@
           "column": 86,
           "dynamic": false,
           "implicit": false,
-          "line": 3185,
+          "line": 3198,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220798,7 +220789,7 @@
           "column": 36,
           "dynamic": false,
           "implicit": false,
-          "line": 3621,
+          "line": 3634,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220837,7 +220828,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3284,
+          "line": 3297,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220846,7 +220837,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 3748,
+          "line": 3768,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -220921,7 +220912,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 2825,
+          "line": 2838,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220930,7 +220921,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 2872,
+          "line": 2885,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220939,7 +220930,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 2876,
+          "line": 2889,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220948,7 +220939,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 3053,
+          "line": 3066,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220957,7 +220948,7 @@
           "column": 58,
           "dynamic": false,
           "implicit": false,
-          "line": 3099,
+          "line": 3112,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220966,7 +220957,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 3240,
+          "line": 3253,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220975,7 +220966,7 @@
           "column": 54,
           "dynamic": false,
           "implicit": false,
-          "line": 3262,
+          "line": 3275,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220984,7 +220975,7 @@
           "column": 70,
           "dynamic": false,
           "implicit": false,
-          "line": 3828,
+          "line": 3848,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -220993,7 +220984,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3882,
+          "line": 3902,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221002,7 +220993,7 @@
           "column": 70,
           "dynamic": false,
           "implicit": false,
-          "line": 4016,
+          "line": 4036,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -221125,7 +221116,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2554,
+          "line": 2567,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -221155,7 +221146,7 @@
           "column": 60,
           "dynamic": false,
           "implicit": false,
-          "line": 2711,
+          "line": 2724,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221164,7 +221155,7 @@
           "column": 64,
           "dynamic": false,
           "implicit": false,
-          "line": 2734,
+          "line": 2747,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -221581,7 +221572,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 3042,
+          "line": 3055,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221590,7 +221581,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 3051,
+          "line": 3064,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221599,7 +221590,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3083,
+          "line": 3096,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221608,7 +221599,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 3089,
+          "line": 3102,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221617,7 +221608,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 3123,
+          "line": 3136,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221626,7 +221617,7 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 3145,
+          "line": 3158,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221635,7 +221626,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3175,
+          "line": 3188,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221644,7 +221635,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 3183,
+          "line": 3196,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221653,7 +221644,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 3192,
+          "line": 3205,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221662,7 +221653,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3233,
+          "line": 3246,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221671,7 +221662,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3260,
+          "line": 3273,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221680,7 +221671,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 3319,
+          "line": 3332,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221689,7 +221680,7 @@
           "column": 40,
           "dynamic": false,
           "implicit": false,
-          "line": 3504,
+          "line": 3517,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221698,7 +221689,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 3824,
+          "line": 3844,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221707,7 +221698,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 3878,
+          "line": 3898,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -221716,7 +221707,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 4002,
+          "line": 4022,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -223174,7 +223165,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 2910,
+          "line": 2923,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -223531,7 +223522,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 3985,
+          "line": 4005,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -223540,7 +223531,7 @@
           "column": 92,
           "dynamic": false,
           "implicit": false,
-          "line": 3985,
+          "line": 4005,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -223588,7 +223579,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3831,
+          "line": 3851,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -224393,7 +224384,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3790,
+          "line": 3810,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -228122,7 +228113,7 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 3410,
+          "line": 3423,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -228496,7 +228487,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 2825,
+          "line": 2838,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -228505,7 +228496,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2873,
+          "line": 2886,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -228514,7 +228505,7 @@
           "column": 14,
           "dynamic": false,
           "implicit": false,
-          "line": 2878,
+          "line": 2891,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -228925,7 +228916,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 2912,
+          "line": 2925,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -230008,7 +229999,7 @@
           "column": 44,
           "dynamic": false,
           "implicit": false,
-          "line": 3553,
+          "line": 3566,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -230517,7 +230508,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 3558,
+          "line": 3571,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -232818,7 +232809,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3405,
+          "line": 3418,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -232827,7 +232818,7 @@
           "column": 53,
           "dynamic": false,
           "implicit": false,
-          "line": 3406,
+          "line": 3419,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -232836,7 +232827,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3407,
+          "line": 3420,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -232845,7 +232836,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 3408,
+          "line": 3421,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -232854,7 +232845,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 3409,
+          "line": 3422,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235517,7 +235508,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 2875,
+          "line": 2888,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235526,7 +235517,7 @@
           "column": 68,
           "dynamic": false,
           "implicit": false,
-          "line": 3052,
+          "line": 3065,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235535,7 +235526,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 3098,
+          "line": 3111,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235544,7 +235535,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 3122,
+          "line": 3135,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235553,7 +235544,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3182,
+          "line": 3195,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235562,7 +235553,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 3191,
+          "line": 3204,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235571,7 +235562,7 @@
           "column": 19,
           "dynamic": false,
           "implicit": false,
-          "line": 3200,
+          "line": 3213,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235580,7 +235571,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 3235,
+          "line": 3248,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235589,7 +235580,7 @@
           "column": 47,
           "dynamic": false,
           "implicit": false,
-          "line": 3236,
+          "line": 3249,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235598,7 +235589,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 3239,
+          "line": 3252,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235607,7 +235598,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 3243,
+          "line": 3256,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235616,7 +235607,7 @@
           "column": 51,
           "dynamic": false,
           "implicit": false,
-          "line": 3261,
+          "line": 3274,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235625,7 +235616,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 3518,
+          "line": 3531,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235634,7 +235625,7 @@
           "column": 29,
           "dynamic": false,
           "implicit": false,
-          "line": 3524,
+          "line": 3537,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235643,7 +235634,7 @@
           "column": 28,
           "dynamic": false,
           "implicit": false,
-          "line": 3554,
+          "line": 3567,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235652,7 +235643,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 3823,
+          "line": 3843,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235661,7 +235652,7 @@
           "column": 88,
           "dynamic": false,
           "implicit": false,
-          "line": 3827,
+          "line": 3847,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235670,7 +235661,7 @@
           "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 3881,
+          "line": 3901,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235679,7 +235670,7 @@
           "column": 45,
           "dynamic": false,
           "implicit": false,
-          "line": 3891,
+          "line": 3911,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235688,7 +235679,7 @@
           "column": 80,
           "dynamic": false,
           "implicit": false,
-          "line": 4001,
+          "line": 4021,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235697,7 +235688,7 @@
           "column": 104,
           "dynamic": false,
           "implicit": false,
-          "line": 4007,
+          "line": 4027,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235706,7 +235697,7 @@
           "column": 88,
           "dynamic": false,
           "implicit": false,
-          "line": 4015,
+          "line": 4035,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -235715,7 +235706,7 @@
           "column": 99,
           "dynamic": false,
           "implicit": false,
-          "line": 4022,
+          "line": 4042,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -236138,7 +236129,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 2902,
+          "line": 2915,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -237970,7 +237961,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 3068,
+          "line": 3081,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -237979,7 +237970,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 3291,
+          "line": 3304,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -237988,7 +237979,7 @@
           "column": 9,
           "dynamic": false,
           "implicit": false,
-          "line": 3445,
+          "line": 3458,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -237997,7 +237988,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3497,
+          "line": 3510,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -238006,7 +237997,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3640,
+          "line": 3653,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -240334,7 +240325,7 @@
           "column": 22,
           "dynamic": false,
           "implicit": false,
-          "line": 2948,
+          "line": 2961,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -240941,7 +240932,7 @@
       "definitions": [
         {
           "column": 6,
-          "line": 3330,
+          "line": 3343,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -240955,7 +240946,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 3581,
+          "line": 3594,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -243117,7 +243108,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -243126,7 +243117,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -243135,7 +243126,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -245056,7 +245047,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -245065,7 +245056,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -245074,7 +245065,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -246914,7 +246905,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -246923,7 +246914,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -246932,7 +246923,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -248792,7 +248783,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -248801,7 +248792,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -248810,7 +248801,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -250668,7 +250659,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -250677,7 +250668,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -250686,7 +250677,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -252535,7 +252526,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -252544,7 +252535,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -252553,7 +252544,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -254393,7 +254384,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -254402,7 +254393,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -254411,7 +254402,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -256305,7 +256296,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -256314,7 +256305,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -256323,7 +256314,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -258187,10 +258178,10 @@
         {
           "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
           "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 54,
+          "column": 50,
           "dynamic": false,
           "implicit": false,
-          "line": 2477,
+          "line": 2481,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -258199,7 +258190,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -258208,7 +258199,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -258217,7 +258208,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -258226,7 +258217,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 3512,
+          "line": 3525,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -260228,7 +260219,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -260237,7 +260228,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -260246,7 +260237,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -262095,7 +262086,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -262104,7 +262095,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -262113,7 +262104,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -264034,7 +264025,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -264043,7 +264034,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -264052,7 +264043,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -265973,7 +265964,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -265982,7 +265973,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -265991,7 +265982,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -267849,7 +267840,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -267858,7 +267849,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -267867,7 +267858,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -269941,7 +269932,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -269950,7 +269941,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -269959,7 +269950,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -269968,7 +269959,7 @@
           "column": 87,
           "dynamic": false,
           "implicit": false,
-          "line": 3894,
+          "line": 3914,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -271993,7 +271984,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -272002,7 +271993,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -272011,7 +272002,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274164,7 +274155,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274173,7 +274164,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274182,7 +274173,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274191,7 +274182,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 3032,
+          "line": 3045,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274200,7 +274191,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 3139,
+          "line": 3152,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274209,7 +274200,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 3162,
+          "line": 3175,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274218,7 +274209,7 @@
           "column": 61,
           "dynamic": false,
           "implicit": false,
-          "line": 3230,
+          "line": 3243,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274227,7 +274218,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 3420,
+          "line": 3433,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274236,7 +274227,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 3473,
+          "line": 3486,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -274245,7 +274236,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 3633,
+          "line": 3646,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -276337,7 +276328,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -276346,7 +276337,7 @@
           "column": 32,
           "dynamic": false,
           "implicit": false,
-          "line": 2644,
+          "line": 2657,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -276355,7 +276346,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -276364,7 +276355,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278321,24 +278312,6 @@
           "column": 39,
           "dynamic": false,
           "implicit": false,
-          "line": 2422,
-          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
-          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 87,
-          "dynamic": false,
-          "implicit": false,
-          "line": 2422,
-          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
-        },
-        {
-          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
-          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
-          "column": 39,
-          "dynamic": false,
-          "implicit": false,
           "line": 2445,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
@@ -278390,10 +278363,19 @@
         {
           "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
           "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
+          "column": 47,
+          "dynamic": false,
+          "implicit": false,
+          "line": 2479,
+          "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
+        },
+        {
+          "caller": "KisPageMetadataCoordinator::preparePublicationImpl",
+          "caller-usr": "c:@S@KisPageMetadataCoordinator@F@preparePublicationImpl#&1$@S@KisPageTransaction#$@S@KisImageEpochId#*1$@S@KisPageTransition#K#b#*$@S@QString#$@S@KisPageMetadataCoordinator@E@PreparationKind#*1$@S@KisPageVersion#*1$@S@KisPageMetadataCoordinator@S@PublicationChange#1",
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278402,7 +278384,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278411,7 +278393,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278420,7 +278402,7 @@
           "column": 48,
           "dynamic": false,
           "implicit": false,
-          "line": 3066,
+          "line": 3079,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278429,7 +278411,7 @@
           "column": 31,
           "dynamic": false,
           "implicit": false,
-          "line": 3150,
+          "line": 3163,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278438,7 +278420,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 3153,
+          "line": 3166,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278447,7 +278429,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3250,
+          "line": 3263,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -278456,7 +278438,7 @@
           "column": 71,
           "dynamic": false,
           "implicit": false,
-          "line": 3854,
+          "line": 3874,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -280926,7 +280908,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -280935,7 +280917,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -280944,7 +280926,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -282883,7 +282865,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -282892,7 +282874,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -282901,7 +282883,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -284759,7 +284741,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -284768,7 +284750,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -284777,7 +284759,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -286653,7 +286635,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -286662,7 +286644,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -286671,7 +286653,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -286680,7 +286662,7 @@
           "column": 76,
           "dynamic": false,
           "implicit": false,
-          "line": 2845,
+          "line": 2858,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -286689,7 +286671,7 @@
           "column": 57,
           "dynamic": false,
           "implicit": false,
-          "line": 3884,
+          "line": 3904,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -288916,7 +288898,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -288925,7 +288907,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -288934,7 +288916,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -288943,7 +288925,7 @@
           "column": 34,
           "dynamic": false,
           "implicit": false,
-          "line": 3057,
+          "line": 3070,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -290783,7 +290765,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -290792,7 +290774,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -290801,7 +290783,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -290810,7 +290792,7 @@
           "column": 52,
           "dynamic": false,
           "implicit": false,
-          "line": 3058,
+          "line": 3071,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -292677,7 +292659,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -292686,7 +292668,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -292695,7 +292677,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -294544,7 +294526,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -294553,7 +294535,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -294562,7 +294544,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -296420,7 +296402,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -296429,7 +296411,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -296438,7 +296420,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -298305,7 +298287,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -298314,7 +298296,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -298323,7 +298305,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -300222,7 +300204,7 @@
           "column": 41,
           "dynamic": false,
           "implicit": false,
-          "line": 2502,
+          "line": 2515,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -300231,7 +300213,7 @@
           "column": 46,
           "dynamic": false,
           "implicit": false,
-          "line": 2697,
+          "line": 2710,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -300240,7 +300222,7 @@
           "column": 49,
           "dynamic": false,
           "implicit": false,
-          "line": 2701,
+          "line": 2714,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303127,7 +303109,7 @@
           "column": 27,
           "dynamic": false,
           "implicit": false,
-          "line": 2822,
+          "line": 2835,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303136,7 +303118,7 @@
           "column": 25,
           "dynamic": false,
           "implicit": false,
-          "line": 2866,
+          "line": 2879,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -303588,7 +303570,7 @@
           "column": 70,
           "dynamic": false,
           "implicit": false,
-          "line": 2873,
+          "line": 2886,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303597,7 +303579,7 @@
           "column": 20,
           "dynamic": false,
           "implicit": false,
-          "line": 2881,
+          "line": 2894,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303606,7 +303588,7 @@
           "column": 33,
           "dynamic": false,
           "implicit": false,
-          "line": 3054,
+          "line": 3067,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303615,7 +303597,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 3100,
+          "line": 3113,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303624,7 +303606,7 @@
           "column": 37,
           "dynamic": false,
           "implicit": false,
-          "line": 3263,
+          "line": 3276,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303633,7 +303615,7 @@
           "column": 35,
           "dynamic": false,
           "implicit": false,
-          "line": 3831,
+          "line": 3851,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -303642,7 +303624,7 @@
           "column": 13,
           "dynamic": false,
           "implicit": false,
-          "line": 3884,
+          "line": 3904,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -304002,7 +303984,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 3550,
+          "line": 3563,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -304376,7 +304358,7 @@
           "column": 42,
           "dynamic": false,
           "implicit": false,
-          "line": 2909,
+          "line": 2922,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -305284,7 +305266,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 3405,
+          "line": 3418,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -305293,7 +305275,7 @@
           "column": 21,
           "dynamic": false,
           "implicit": false,
-          "line": 3407,
+          "line": 3420,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -305302,7 +305284,7 @@
           "column": 77,
           "dynamic": false,
           "implicit": false,
-          "line": 3410,
+          "line": 3423,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307045,7 +307027,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 3979,
+          "line": 3999,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307054,7 +307036,7 @@
           "column": 55,
           "dynamic": false,
           "implicit": false,
-          "line": 3980,
+          "line": 4000,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307063,7 +307045,7 @@
           "column": 56,
           "dynamic": false,
           "implicit": false,
-          "line": 3981,
+          "line": 4001,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -307211,7 +307193,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 3982,
+          "line": 4002,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307220,7 +307202,7 @@
           "column": 66,
           "dynamic": false,
           "implicit": false,
-          "line": 3983,
+          "line": 4003,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307229,7 +307211,7 @@
           "column": 62,
           "dynamic": false,
           "implicit": false,
-          "line": 3994,
+          "line": 4014,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         },
         {
@@ -307238,7 +307220,7 @@
           "column": 65,
           "dynamic": false,
           "implicit": false,
-          "line": 3995,
+          "line": 4015,
           "path": "libs/image/pagestore/KisPageMetadataCoordinator.cpp"
         }
       ],
@@ -308172,9 +308154,9 @@
     "build-tools/ci-scripts/generate-pagestore-callgraph.py": "6ea227322679be3a242559aa24845e9a36be88d28a0219f2d109e56ce07eaa35",
     "build-tools/ci-scripts/pagestore-audit/intrusion-manifest.json": "c02c33e287cd6624a4c9a8150896736009a144158e737e5e3af7de0221072ce9",
     "build-tools/ci-scripts/pagestore-audit/runtime-census.json": "860616934e3f5ef80b3d730078ad8e28f66bad6c8ee0f5e6b52dabddd8a02051",
-    "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "6f6d851fbd22952687b4ab617ddbc276ee2b4270d85ad9d58acca6512ccf12a5"
+    "build-tools/ci-scripts/pagestore-audit/state-ownership.json": "bcb8e5c6f96aa419fa480f00aaec9a43952258407cd81541de17c487b2a63d5e"
   },
-  "call-edge-count": 28248,
+  "call-edge-count": 28246,
   "callback-registration-count": 27,
   "compile-commands": {
     "path": "_build-br0-cpu/compile_commands.json",
@@ -332754,7 +332736,7 @@
     "libs/image/pagestore/KisPageHistoryCollector.cpp": "26d7d3210b0a9f75253e08f6950a19b7dfc992d11ed56f8f2154ffec98508d2a",
     "libs/image/pagestore/KisPageHistoryCollector_p.h": "0fe0d7b0b199bea14792e6ab0a8887352cf7172b842823e8e472e1b5cc0c20c4",
     "libs/image/pagestore/KisPageMetadataArena_p.h": "7c31fb0d7e04640cf01bbbe422ddcbc06ff40a191eb4526579fd72dbffc2f418",
-    "libs/image/pagestore/KisPageMetadataCoordinator.cpp": "868ec996fa5f25a1f8699a613384182ae657b2e83e759b669d91f9fd32eabc81",
+    "libs/image/pagestore/KisPageMetadataCoordinator.cpp": "0b4b7508e5a984932803b049f3316d40c5ddbb14898415b318cd31cd69f7012b",
     "libs/image/pagestore/KisPageMetadataCoordinator.h": "7b5dcceec543bc1fbe07609e55b59ce73425dc7482b7304a1f5aeea54e73369a",
     "libs/image/pagestore/KisPageMetadataCoordinator_p.h": "c01ed443253d3a98ba2f9b14f548910f82bcf1d04b54357e632b716461255b06",
     "libs/image/pagestore/KisPageMetadataIndex_p.h": "78e7c5890d773d8bff93eaa17ce9afc4a3ca1c96fa10e3a6535b02069f101ea3",

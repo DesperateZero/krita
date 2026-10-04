@@ -2417,16 +2417,16 @@ try {
         // enters through registerPage()'s full validation. The reference test
         // compares every supported publication kind with full apply().
         // Indexed inputs deliberately omit unrelated versions.
-        for (const auto &version : std::as_const(before.versions)) {
-            if (version.authority.isValid() && (!recoverable
-                || (!(version.version == transition.baseVersion) && !(version.version == transition.version))))
-                data->backingAuthorities.insert_or_assign(version.version, version.authority);
+        // Ordinary publication only compares these fields after the shared
+        // transition. Keep them in the original delta storage, then compact
+        // that same array to installation deltas. These publication kinds
+        // preserve input order and may only append an immutable addition.
+        if (!recoverable) {
+            publication.deltas.reserve(before.versions.size());
+            for (const auto &version : before.versions)
+                publication.deltas.push_back({version.version, version.publication, version.preparedBy});
         }
-        // Ordinary publication compares the before publication fields. A
-        // recoverable install replaces the exact two revision-bound records,
-        // so consume its original paid work value instead of deep-copying it.
-        auto step = stateMachine.applyKnownValid(
-            recoverable ? std::move(before) : KisPageWorkingState(before), transition);
+        auto step = stateMachine.applyKnownValid(std::move(before), transition);
         if (!step.accepted) {
             KisPageStoreDetail::setError(error, step.rejectionReason);
             return result;
@@ -2462,9 +2462,11 @@ try {
                 && records[1].version == transition.version);
             publication.installRecords = std::move(records);
         } else {
-            for (auto &version : step.next.versions) {
-                const auto *previous = before.findVersion(version.version);
-                if (!previous) {
+            const size_t inputCount = publication.deltas.size();
+            size_t deltaCount = 0;
+            for (size_t index = 0; index < step.next.versions.size(); ++index) {
+                const auto &version = step.next.versions[index];
+                if (index >= inputCount) {
                     if (version.publication == KisPagePublicationState::Prepared
                         || version.publication == KisPagePublicationState::Unpublished) {
                         KisPageStoreDetail::setError(error, QStringLiteral("publication candidate introduced mutable metadata"));
@@ -2472,13 +2474,24 @@ try {
                     }
                     if (version.publication == KisPagePublicationState::Historical)
                         ++entryHistoryNodesPrepared;
-                    publication.installRecords.push_back(std::move(version));
-                } else if (previous->publication != version.publication
-                           || !(previous->preparedBy == version.preparedBy)) {
-                    publication.deltas.push_back({version.version, version.publication, version.preparedBy});
-                    if (version.publication == KisPagePublicationState::Historical)
-                        ++entryHistoryNodesPrepared;
+                } else {
+                    const auto &previous = publication.deltas[index];
+                    Q_ASSERT(previous.version == version.version);
+                    if (previous.publication != version.publication
+                        || !(previous.preparedBy == version.preparedBy)) {
+                        publication.deltas[deltaCount++] = {version.version, version.publication, version.preparedBy};
+                        if (version.publication == KisPagePublicationState::Historical)
+                            ++entryHistoryNodesPrepared;
+                    }
                 }
+            }
+            publication.deltas.resize(deltaCount);
+            if (step.next.versions.size() > inputCount) {
+                // Transfer the appended values and their paid storage; old
+                // replica/protection values can be destroyed during prepare.
+                auto &records = step.next.versions;
+                records.erase(records.begin(), records.begin() + inputCount);
+                publication.installRecords = std::move(records);
             }
         }
         // Ordinary publication only changes publication fields. Recoverable
@@ -3642,7 +3655,14 @@ try {
             ++shard->backgroundLocalTransitionSequences;
             shard->backgroundLocalVersionInputs += quint64(input.versions.size());
         }
-        auto next = input;
+        // Installation needs the original identities only to remove records
+        // absent from the accepted result. No second replica/protection image
+        // is needed through unlocked growth or retirement preparation.
+        KisPageWorkingArray<KisPageVersion> inputVersions(workingStorage);
+        inputVersions.reserve(input.versions.size());
+        for (const auto &version : input.versions)
+            inputVersions.push_back(version.version);
+        auto next = std::move(input);
         const KisPageStateMachine machine;
         for (qsizetype i = 0; i < count; ++i) {
             const auto &transition = transitions[i];
@@ -3660,14 +3680,14 @@ try {
         const quint64 expectedRevision = page->second.revision;
         const auto discardStaleAttempt = [&] {
             Q_ASSERT(shard->localTransitionSequences > 0);
-            Q_ASSERT(shard->localVersionInputs >= quint64(input.versions.size()));
+            Q_ASSERT(shard->localVersionInputs >= quint64(inputVersions.size()));
             --shard->localTransitionSequences;
-            shard->localVersionInputs -= quint64(input.versions.size());
+            shard->localVersionInputs -= quint64(inputVersions.size());
             if (background) {
                 Q_ASSERT(shard->backgroundLocalTransitionSequences > 0);
-                Q_ASSERT(shard->backgroundLocalVersionInputs >= quint64(input.versions.size()));
+                Q_ASSERT(shard->backgroundLocalVersionInputs >= quint64(inputVersions.size()));
                 --shard->backgroundLocalTransitionSequences;
-                shard->backgroundLocalVersionInputs -= quint64(input.versions.size());
+                shard->backgroundLocalVersionInputs -= quint64(inputVersions.size());
             }
         };
         quint64 retirementDebtCookie = 0;
@@ -3743,9 +3763,9 @@ try {
             return result;
         }
         quint64 removed = 0;
-        for (const auto &version : std::as_const(input.versions)) {
-            if (!next.findVersion(version.version)) {
-                shard->records.remove(&page->second, version.version);
+        for (const auto &version : inputVersions) {
+            if (!next.findVersion(version)) {
+                shard->records.remove(&page->second, version);
                 ++removed;
             }
         }

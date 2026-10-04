@@ -1621,7 +1621,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4042,
+      "lines": 4062,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1655,7 +1655,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "868ec996fa5f25a1f8699a613384182ae657b2e83e759b669d91f9fd32eabc81",
+      "sha256": "0b4b7508e5a984932803b049f3316d40c5ddbb14898415b318cd31cd69f7012b",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -6554,5 +6554,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "500fd0702cfa07ba447d538fb9aad2b086e3160f"
+  "working_tree_head": "840d14ae71f5c5ed4999b7ce545bbeee685fb7cf"
 }
