@@ -63,6 +63,7 @@ public:
     bool disableBackgroundRetirement = false;
     bool mismatchTransferOperation = false;
     std::atomic<int> retireCalls{0};
+    std::atomic<int> retireAllocationFailures{0};
     KisCompletionTicket deferredRetirement;
     std::function<void()> beforeRetire;
     std::function<void()> beforeCapabilities;
@@ -167,6 +168,10 @@ public:
     KisReplicaOperation retire(KisPageOperationId o, const KisReplicaHandle &r, const KisCompletionTicket &t) override
     {
         ++retireCalls; if (beforeRetire) beforeRetire();
+        int failures = retireAllocationFailures.load();
+        while (failures > 0 &&
+               !retireAllocationFailures.compare_exchange_weak(failures, failures - 1)) {}
+        if (failures > 0) throw std::bad_alloc();
         auto result = rejectRetire ? KisReplicaOperation{} : p->retire(o, r, t);
         // Delay acknowledgement, not physical safety: the wrapped provider
         // still checks pins/last-use before accepting retirement.
@@ -836,6 +841,7 @@ private Q_SLOTS:
     void reclamationDeadlinesCancelAndDoNotOccupyWorker();
     void autonomousRetirementRetries_data() { pixelRows(); }
     void autonomousRetirementRetries();
+    void backgroundRetirementAllocationFailureRetries();
     void noSignalPinRetirementRetries();
     void retirementRetryCloseAndLifetime_data()
     {
@@ -6346,6 +6352,34 @@ void KisPageStoreCpuMutationTest::autonomousRetirementRetries()
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(129 * 64 * 64 * bpp));
     QCOMPARE(quint8(f.pixel()[0]), quint8(0x77));
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::backgroundRetirementAllocationFailureRetries()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    auto lateView = f.store->captureReadView();
+    QVERIFY(lateView.isValid());
+    QVERIFY(f.fill(0x77));
+    auto lateRead = lateView.readResidentPage(key());
+    QVERIFY(lateRead.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(lateRead.data()), f.bpp),
+             QByteArray(f.bpp, char(0x31)));
+    lateRead = {};
+    const auto callsBeforeRelease = f.provider->retireCalls.load();
+    f.provider->retireAllocationFailures = 3;
+    lateView = {};
+    QTRY_COMPARE(f.provider->retireAllocationFailures.load(), 0);
+    QTRY_COMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(0));
+    QVERIFY(f.provider->retireCalls.load() >= callsBeforeRelease + 4);
+    QCOMPARE(f.store->sessionStats().providerOperations, qsizetype(0));
+    QCOMPARE(f.store->backingUsage()
+                 .buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam,
+             quint64(0));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(2 * 64 * 64 * f.bpp));
+    QCOMPARE(quint8(f.pixel()[0]), quint8(0x77));
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    QVERIFY(!f.store->sessionStats().hasOutstandingCapabilities());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::noSignalPinRetirementRetries()

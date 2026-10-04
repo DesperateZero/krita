@@ -344,8 +344,16 @@ bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
         const auto operation = m_owner.prepareRetirementOperation(record);
         if (!operation.isValid()) return false;
         auto cancelPrepared = qScopeGuard([&] { m_owner.cancelRetirementOperation(operation); });
-        const auto result = record.provider->retire(
-            operation, record.replica, record.lastUse);
+        KisReplicaOperation result;
+        try {
+            result = record.provider->retire(
+                operation, record.replica, record.lastUse);
+        } catch (const std::bad_alloc &) {
+            // The provider did not return an accepted result. Keep this exact
+            // record and let the original wait/retry policy resume it; the
+            // prepared operation is cancelled by the guard above.
+            return false;
+        }
         if (!result.isValid()) return false;
         cancelPrepared.dismiss();
         record.retirementOperation = operation;
