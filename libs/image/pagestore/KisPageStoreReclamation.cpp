@@ -105,8 +105,7 @@ class ReclamationThread
 {
 public:
     ~ReclamationThread() { join(); }
-    void start(void (*function)(void *), void *context,
-               [[maybe_unused]] const ReclamationThread *alreadyPaid = nullptr)
+    void start(void (*function)(void *), void *context)
     {
 #ifdef Q_OS_DARWIN
         Q_ASSERT(!m_joinable);
@@ -137,26 +136,25 @@ public:
             const auto query = mach_vm_region(mach_task_self(), &address, &actualBytes,
                 VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&information), &count, &object);
             if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-            if (query != KERN_SUCCESS || address > reinterpret_cast<mach_vm_address_t>(m_thread)
-                || actualBytes == 0 || actualBytes > std::numeric_limits<mach_vm_address_t>::max() - address)
+            const auto threadAddress = reinterpret_cast<mach_vm_address_t>(m_thread);
+            if (!m_pageSize || sizeof(*m_thread) > std::numeric_limits<size_t>::max() - (m_pageSize - 1))
                 throw std::bad_alloc();
-            // The monitor starts while the original worker remains alive.
-            // Darwin can merge their adjacent control mappings into one VM
-            // region. Exclude capacity already paid by that worker; its join
-            // follows the monitor's join, so the overlap stays funded.
-            mach_vm_size_t sharedBytes = 0;
-            if (alreadyPaid) {
-                const auto first = std::max(address, alreadyPaid->m_nativeSpanAddress);
-                const auto last = std::min(address + actualBytes,
-                    alreadyPaid->m_nativeSpanAddress + alreadyPaid->m_nativeSpanBytes);
-                if (first < last) sharedBytes = last - first;
-            }
-            const auto uniqueBytes = actualBytes - sharedBytes;
-            if (uniqueBytes == 0 || uniqueBytes > nativePreparation) throw std::bad_alloc();
-            kisReleasePageProcessStorage(nativePreparation - size_t(uniqueBytes));
-            m_nativeBytes = size_t(uniqueBytes);
-            m_nativeSpanAddress = address;
-            m_nativeSpanBytes = actualBytes;
+            const size_t controlBytes =
+                (sizeof(*m_thread) + m_pageSize - 1) / m_pageSize * m_pageSize;
+            // Adjacent pthread controls can be coalesced with external/runtime
+            // mappings into one VM region. The PageStore thread owns only its
+            // page-rounded SDK control object; validate that exact span is
+            // mapped instead of charging the containing region.
+            if (query != KERN_SUCCESS || address > threadAddress
+                || actualBytes == 0
+                || actualBytes > std::numeric_limits<mach_vm_address_t>::max() - address
+                || threadAddress % m_pageSize != 0
+                || threadAddress - address > actualBytes
+                || controlBytes > actualBytes - (threadAddress - address)
+                || controlBytes > nativePreparation)
+                throw std::bad_alloc();
+            kisReleasePageProcessStorage(nativePreparation - controlBytes);
+            m_nativeBytes = controlBytes;
             {
                 std::lock_guard<std::mutex> lock(m_startMutex);
                 m_accepted = true;
@@ -187,8 +185,6 @@ public:
             m_joinable = false;
         }
         if (m_nativeBytes) kisReleasePageProcessStorage(std::exchange(m_nativeBytes, 0));
-        m_nativeSpanAddress = 0;
-        m_nativeSpanBytes = 0;
         if (m_stack) {
             kisFreePageProcessStorage(m_stack, m_stackBytes, m_pageSize);
             m_stack = nullptr;
@@ -218,8 +214,6 @@ private:
     void *m_context = nullptr;
     void *m_stack = nullptr;
     size_t m_stackBytes = 0, m_pageSize = 0, m_nativeBytes = 0;
-    mach_vm_address_t m_nativeSpanAddress = 0;
-    mach_vm_size_t m_nativeSpanBytes = 0;
     std::mutex m_startMutex;
     std::condition_variable m_startChanged;
 #else
@@ -454,7 +448,7 @@ private:
                     task.reset();
                     lock.lock();
                 }
-            }, clock.get(), &m_worker);
+            }, clock.get());
             m_clock = std::move(clock);
         }
     }

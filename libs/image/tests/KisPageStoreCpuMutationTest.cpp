@@ -14,6 +14,12 @@
 #include <new>
 #include <optional>
 #include <vector>
+#ifdef Q_OS_DARWIN
+#include <pthread.h>
+#include <unistd.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #include "KisCpuResidentBinding_p.h"
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageMetadataCoordinator.h"
@@ -446,12 +452,56 @@ void pixelRows()
     QTest::addColumn<int>("bpp");
     for (int bpp : {1, 4, 8, 16}) QTest::newRow(qPrintable(QString::number(bpp))) << bpp;
 }
+#ifdef Q_OS_DARWIN
+class ExternalNativeThread
+{
+public:
+    static constexpr size_t stackBytes = 512 * 1024;
+    ~ExternalNativeThread() { join(); }
+    bool start(size_t pageSize)
+    {
+        if (posix_memalign(&m_stack, pageSize, stackBytes)) return false;
+        pthread_attr_t attributes;
+        if (pthread_attr_init(&attributes)) return false;
+        const auto clearAttributes = qScopeGuard([&] { pthread_attr_destroy(&attributes); });
+        if (pthread_attr_setstack(&attributes, m_stack, stackBytes)
+            || pthread_create(&m_thread, &attributes, &ExternalNativeThread::invoke, this))
+            return false;
+        m_joinable = true;
+        return true;
+    }
+    void join() noexcept
+    {
+        if (m_joinable) {
+            m_stop.store(true, std::memory_order_release);
+            pthread_join(m_thread, nullptr);
+            m_joinable = false;
+        }
+        free(std::exchange(m_stack, nullptr));
+    }
+    pthread_t thread() const { return m_thread; }
+
+private:
+    static void *invoke(void *context)
+    {
+        auto *thread = static_cast<ExternalNativeThread *>(context);
+        while (!thread->m_stop.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        return nullptr;
+    }
+    std::atomic<bool> m_stop{false};
+    pthread_t m_thread{};
+    void *m_stack = nullptr;
+    bool m_joinable = false;
+};
+#endif
 }
 
 class KisPageStoreCpuMutationTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void nativeControlExcludesExternalThreads();
     void epochNativeConfigurationResumes_data()
     {
         QTest::addColumn<int>("kind");
@@ -1077,6 +1127,61 @@ private Q_SLOTS:
     // Permanent application stop is deliberately the final method.
     void runtimeStopsAtCapacity();
 };
+
+void KisPageStoreCpuMutationTest::nativeControlExcludesExternalThreads()
+{
+#ifndef Q_OS_DARWIN
+    QSKIP("Darwin native pthread control accounting only");
+#else
+    const size_t pageSize = size_t(sysconf(_SC_PAGESIZE));
+    const size_t controlBytes = (sizeof(*pthread_self()) + pageSize - 1) / pageSize * pageSize;
+    constexpr size_t nativePreparation = 64 * 1024;
+    std::vector<std::unique_ptr<ExternalNativeThread>> external;
+    bool mergeBoundaryPrepared = false;
+    for (int attempt = 0; attempt < 32
+         && (external.size() < 4 || (pageSize > 4096 && !mergeBoundaryPrepared)); ++attempt) {
+        auto thread = std::make_unique<ExternalNativeThread>();
+        QVERIFY(thread->start(pageSize));
+        mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(thread->thread());
+        mach_vm_size_t bytes = 0;
+        vm_region_basic_info_data_64_t information{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        const auto query = mach_vm_region(mach_task_self(), &address, &bytes,
+            VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&information), &count, &object);
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        QVERIFY(query == KERN_SUCCESS);
+        const auto threadAddress = reinterpret_cast<mach_vm_address_t>(thread->thread());
+        mergeBoundaryPrepared = bytes == nativePreparation
+            && threadAddress == address + bytes - controlBytes;
+        external.push_back(std::move(thread));
+    }
+    if (pageSize <= 4096) mergeBoundaryPrepared = true;
+    QVERIFY2(mergeBoundaryPrepared,
+             "could not prepare an external pthread region at the old 64 KiB accounting boundary");
+
+    const quint64 before = kisPageProcessStorageBytes();
+    QSemaphore workerRan;
+    bool scheduled = false;
+    try {
+        kisSchedulePageStoreReclamation([&] { workerRan.release(); });
+        scheduled = true;
+    } catch (const std::bad_alloc &) {
+    }
+    QVERIFY2(scheduled, "an external pthread region was charged as PageStore-owned storage");
+    QVERIFY(workerRan.tryAcquire(1, 5000));
+    kisDrainPageStoreReclamation();
+
+    KisPageReclamationDelay monitor(KisPageReadinessCallback([] {}));
+    QVERIFY(monitor.isValid());
+    const quint64 after = kisPageProcessStorageBytes();
+    const quint64 stackCapacity = kisPageStorageAllocationBytes(
+        ExternalNativeThread::stackBytes, pageSize);
+    QVERIFY(after > before + 2 * stackCapacity);
+    QVERIFY(after <= before + 2 * stackCapacity + nativePreparation);
+    monitor.reset();
+#endif
+}
 
 void KisPageStoreCpuMutationTest::epochNativeConfigurationResumes()
 {
