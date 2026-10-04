@@ -2970,7 +2970,7 @@
         "unistd.h",
         "utility"
       ],
-      "lines": 3170,
+      "lines": 3162,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStoreDetail",
@@ -2988,7 +2988,7 @@
         "ProcessStorageState",
         "Resource"
       ],
-      "sha256": "e454b0fbd9ab0a2f206856e34678dd9e41decd77ff63f63b09389f4de0a614f0",
+      "sha256": "8c9d789b30670b41c3fa413d1f6fd3939b022c599cb68ecb19751d667154cf33",
       "synchronization_declarations": 14
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -6554,5 +6554,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "b8581139d22bc68d1ff15d93f44167c18bac4db3"
+  "working_tree_head": "9c707902d68130a17de4cbd6d64a761215387be0"
 }

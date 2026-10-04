@@ -243,46 +243,34 @@ bool hasPositiveBytes(const KisBackingBudgetDelta &delta)
     return false;
 }
 
-quint64 domainLimit(const KisPageBackingLimits &limits, KisBackingBudgetClass budgetClass, size_t domain)
+std::array<quint64, 4> domainLimits(
+    const KisPageBackingLimits &limits, KisBackingBudgetClass budgetClass)
 {
     switch (budgetClass) {
     case KisBackingBudgetClass::Current:
-        return components(limits.residentCurrentBytes)[domain];
+        return components(limits.residentCurrentBytes);
     case KisBackingBudgetClass::RetainedHistory:
-        return components(limits.residentHistoryBytes)[domain];
+        return components(limits.residentHistoryBytes);
     case KisBackingBudgetClass::ActivePending:
     case KisBackingBudgetClass::InFlight:
     case KisBackingBudgetClass::RetirementDebt:
     case KisBackingBudgetClass::OptionalCache:
-    case KisBackingBudgetClass::MetadataArena:
-        return std::numeric_limits<quint64>::max();
+    case KisBackingBudgetClass::MetadataArena: {
+        constexpr auto maximum = std::numeric_limits<quint64>::max();
+        return {maximum, maximum, maximum, maximum};
+    }
     case KisBackingBudgetClass::Count:
         break;
     }
-    return 0;
+    return {};
 }
 
-quint64 aggregateLimit(const KisPageBackingLimits &limits, KisBackingBudgetClass budgetClass)
+std::array<quint64, budgetClassCount> aggregateLimits(const KisPageBackingLimits &limits)
 {
-    switch (budgetClass) {
-    case KisBackingBudgetClass::Current:
-        return limits.logicalCurrentBytes;
-    case KisBackingBudgetClass::RetainedHistory:
-        return limits.retainedHistoryBytes;
-    case KisBackingBudgetClass::ActivePending:
-        return limits.activePendingBytes;
-    case KisBackingBudgetClass::InFlight:
-        return limits.inFlightReplicaBytes;
-    case KisBackingBudgetClass::RetirementDebt:
-        return limits.retirementDebtBytes;
-    case KisBackingBudgetClass::OptionalCache:
-        return limits.optionalCacheBytes;
-    case KisBackingBudgetClass::MetadataArena:
-        return limits.metadataArenaBytes;
-    case KisBackingBudgetClass::Count:
-        break;
-    }
-    return 0;
+    return {limits.logicalCurrentBytes, limits.retainedHistoryBytes,
+            limits.activePendingBytes, limits.inFlightReplicaBytes,
+            limits.retirementDebtBytes, limits.optionalCacheBytes,
+            limits.metadataArenaBytes};
 }
 
 quint64 sumComponents(const std::array<quint64, 4> &values)
@@ -509,8 +497,10 @@ bool KisBackingBudgetController::fitsLocked(
 {
     quint64 liveSsd = 0;
     const auto process = m_processStorage ? processStorageSnapshot() : ProcessStorageSnapshot{};
+    const auto classLimits = aggregateLimits(m_limits);
     for (size_t i = 0; i < budgetClassCount; ++i) {
         const auto budgetClass = static_cast<KisBackingBudgetClass>(i);
+        const auto limits = domainLimits(m_limits, budgetClass);
         auto live = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].live);
         auto reserved = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved);
         const auto requested = components(delta.buckets[i]);
@@ -523,11 +513,11 @@ bool KisBackingBudgetController::fitsLocked(
         for (size_t domain = 0; domain < requested.size(); ++domain) {
             if (requested[domain] < 0) return false;
             const quint64 addition = quint64(requested[domain]);
-            const quint64 limit = domainLimit(m_limits, budgetClass, domain);
+            const quint64 limit = limits[domain];
             if (addition > limit || live[domain] > limit - addition ||
                 reserved[domain] > limit - addition - live[domain]) return false;
         }
-        const auto limit = aggregateLimit(m_limits, budgetClass);
+        const auto limit = classLimits[i];
         const auto current = sumComponents(live);
         auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
         if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena)
@@ -547,6 +537,7 @@ bool KisBackingBudgetController::priorWaiterConflictsLocked(
     quint64 durableBytes, quint64 beforeSequence) const
 {
     if (!m_usage.waitingRequests) return false;
+    const auto classLimits = aggregateLimits(m_limits);
     for (const auto &prior : m_waitContext->requests) {
         if (!prior || prior->granted || prior->sequence >= beforeSequence) continue;
         if (durableBytes && prior->durableBytes &&
@@ -554,12 +545,13 @@ bool KisBackingBudgetController::priorWaiterConflictsLocked(
         for (size_t i = 0; i < budgetClassCount; ++i) {
             const auto budgetClass = static_cast<KisBackingBudgetClass>(i);
             if (aggregateBytes[i] && prior->aggregateBytes[i] &&
-                aggregateLimit(m_limits, budgetClass) != std::numeric_limits<quint64>::max()) return true;
+                classLimits[i] != std::numeric_limits<quint64>::max()) return true;
+            const auto limits = domainLimits(m_limits, budgetClass);
             const auto requested = components(delta.buckets[i]);
             const auto waiting = components(prior->requested.buckets[i]);
             for (size_t domain = 0; domain < requested.size(); ++domain)
                 if (requested[domain] && waiting[domain] &&
-                    domainLimit(m_limits, budgetClass, domain) != std::numeric_limits<quint64>::max()) return true;
+                    limits[domain] != std::numeric_limits<quint64>::max()) return true;
         }
     }
     return false;
