@@ -2104,10 +2104,16 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         // requiring CancelWrite. Keep failed Fresh preparation cancellable.
         auto discardUnprepared = qScopeGuard([&] { d->erasePageAtEntry(entryIndex); });
         KisCpuWriteBindingReservation writable;
-        const auto plan = owner->writeCoordinator.prepareWritePlanLocked(
-            d->transaction, intent, d->provider,
-            {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
-            owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic);
+        KisPageWritePlanKind plan;
+        try {
+            plan = owner->writeCoordinator.prepareWritePlanLocked(
+                d->transaction, intent, d->provider,
+                {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
+                owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic);
+        } catch (const std::bad_alloc &) {
+            fail(QStringLiteral("CPU mutation write plan storage is unavailable"));
+            return result;
+        }
         if (plan != KisPageWritePlanKind::RecoverableHandoff) {
             decltype(owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor)) descriptors;
             const auto discardDescriptors = qScopeGuard([&] {
