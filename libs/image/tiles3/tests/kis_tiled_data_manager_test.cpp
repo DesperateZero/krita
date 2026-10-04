@@ -962,7 +962,6 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityBehavior()
     QCOMPARE(tile->data()[0], quint8(0x57));
     tile->unlockForRead();
 
-    QVERIFY(!backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, true));
 
 }
 
@@ -2504,7 +2503,7 @@ void KisTiledDataManagerTest::testPageStoreCancelledPrivateClient()
     }), KisPageStoreWriteOperationResult::Succeeded);
     if (compatibilityBatch) {
         auto batch = backend->beginMutationBatch(); QVERIFY(batch);
-        auto lease = backend->acquireTile(1,0,KisTilePageStoreBridge::Access::Write,false); QVERIFY(lease); QVERIFY(lease->tileData());
+        auto lease = backend->acquireTile(1,0,KisTilePageStoreBridge::Access::Write); QVERIFY(lease); QVERIFY(lease->tileData());
         lease->tileData()->data()[0] = 0x62; lease->markDirty(); QVERIFY(lease->finish()); lease.reset();
         QVERIFY(!batch->cancel()); batch.reset();
     } else {
@@ -3668,7 +3667,7 @@ void KisTiledDataManagerTest::testPageStoreBatchCachePreparationFailure()
     QVERIFY(store->waitForRetirementIdle());
     auto scope = dm.beginIteratorWriteScope();
     QVERIFY(scope && scope->isActive());
-    auto warm = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
+    auto warm = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write);
     QVERIFY(warm && warm->writable());
     warm->tileData()->data()[0] = 0x71;
     warm->markDirty();
@@ -3689,7 +3688,7 @@ void KisTiledDataManagerTest::testPageStoreBatchCachePreparationFailure()
     });
     QCOMPARE(used(), kisPageProcessStorageLimit());
     TileLease cache;
-    auto refused = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false, &cache);
+    auto refused = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, &cache);
     QVERIFY(!refused);
     QVERIFY(!cache);
     QCOMPARE(store->mutationStatistics().generationsReserved, generations);
@@ -3708,6 +3707,133 @@ void KisTiledDataManagerTest::testPageStoreBatchCachePreparationFailure()
     dm.readBytes(&current, 0, 0, 1, 1);
     QCOMPARE(current, recovered);
     QCOMPARE(static_cast<const quint8 *>(exact.data())[0], initial);
+}
+
+void KisTiledDataManagerTest::testPageStoreTileSelectionFailure_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("allocated");
+    QTest::addColumn<bool>("abort");
+    QTest::addColumn<bool>("writable");
+    for (int bpp : {1, 4, 8, 16})
+        for (bool allocated : {false, true})
+            for (bool abort : {false, true})
+                for (bool writable : {false, true})
+                    QTest::newRow(qPrintable(QString("bpp%1-allocated%2-abort%3-writable%4")
+                        .arg(bpp).arg(allocated).arg(abort).arg(writable)))
+                        << bpp << allocated << abort << writable;
+}
+
+void KisTiledDataManagerTest::testPageStoreTileSelectionFailure()
+{
+    QFETCH(int, bpp);
+    QFETCH(bool, allocated);
+    QFETCH(bool, abort);
+    QFETCH(bool, writable);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31)), changed(bpp, char(0x72));
+    const auto bytes = [](const QByteArray &value) {
+        return reinterpret_cast<const quint8 *>(value.constData());
+    };
+    KisTiledDataManager dm(bpp, bytes(allocated ? blank : initial));
+    if (allocated) dm.writeBytes(bytes(initial), 0, 0, 1, 1);
+    const auto memento = dm.getMemento();
+    QVERIFY(memento);
+    dm.writeBytes(bytes(changed), 0, 0, 1, 1);
+    auto *store = dm.m_pageStoreBackend->store();
+    QVERIFY(store->waitForRetirementIdle());
+    auto process = kisAcquirePageStoreBootstrapBudget();
+    QVERIFY(process);
+    const auto used = [&] {
+        const auto metadata = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        return metadata.live.cpuRam + metadata.reserved.cpuRam;
+    };
+    const size_t capacity = size_t(kisPageProcessStorageLimit() - used());
+    void *filler = allocateTestProcessStoragePressure(capacity, 1);
+    const auto free = qScopeGuard([&] {
+        if (filler) freeTestProcessStoragePressure(filler, capacity, 1);
+    });
+    QCOMPARE(used(), kisPageProcessStorageLimit());
+    bool present = true;
+    bool reported = false;
+    KisTileSP escaped;
+    {
+        KisStrokeJobFailureContext failure(true);
+        escaped = writable ? dm.getTile(0, 0, true) : dm.getOldTile(0, 0, present);
+        reported = failure.failed();
+    }
+    freeTestProcessStoragePressure(std::exchange(filler, nullptr), capacity, 1);
+
+    // Capacity recovery can serve a new selection, but cannot repair an
+    // invalid capability already handed to the previous caller.
+    bool oldPresent = !allocated;
+    auto old = dm.getOldTile(0, 0, oldPresent);
+    QVERIFY(old);
+    QCOMPARE(oldPresent, allocated);
+    QVERIFY(old->lockForRead());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(old->data()), bpp), initial);
+    old->unlockForRead();
+    auto current = dm.getTile(0, 0, true);
+    QVERIFY(current);
+    QVERIFY(current->lockForRead());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(current->data()), bpp), changed);
+    current->unlockForRead();
+    if (abort) QVERIFY(dm.tryAbort(memento));
+    else QVERIFY(dm.tryCommit());
+    dm.purgeHistory(memento);
+    QVERIFY(store->waitForRetirementIdle());
+    QVERIFY(old->lockForRead());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(old->data()), bpp), initial);
+    old->unlockForRead();
+    QByteArray actual(bpp, Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, abort ? initial : changed);
+    QCOMPARE(store->sessionStats().activeReadLeases, qsizetype(0));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    if (!writable && escaped) {
+        QVERIFY(escaped->lockForRead());
+        const QByteArray rebound(reinterpret_cast<const char *>(escaped->data()), bpp);
+        escaped->unlockForRead();
+        if (!abort) QCOMPARE(rebound, initial);
+    }
+    QVERIFY(!escaped);
+    QVERIFY(reported);
+    if (!writable) QVERIFY(!present);
+}
+
+void KisTiledDataManagerTest::testPageStoreOldTileOwnerLifetime_data()
+{
+    QTest::addColumn<int>("bpp");
+    for (int bpp : {1, 4, 8, 16})
+        QTest::newRow(qPrintable(QString("bpp%1").arg(bpp))) << bpp;
+}
+
+void KisTiledDataManagerTest::testPageStoreOldTileOwnerLifetime()
+{
+    QFETCH(int, bpp);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31)), changed(bpp, char(0x72));
+    auto dm = std::make_unique<KisTiledDataManager>(bpp,
+        reinterpret_cast<const quint8 *>(blank.constData()));
+    dm->writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    const auto memento = dm->getMemento();
+    QVERIFY(memento);
+    dm->writeBytes(reinterpret_cast<const quint8 *>(changed.constData()), 0, 0, 1, 1);
+    auto old = dm->getOldTile(0, 0);
+    QVERIFY(old);
+    QVERIFY(dm->tryCommit());
+    dm->purgeHistory(memento);
+    dm.reset();
+    kisDrainPageStoreReclamation();
+    // A G0 wrapper keeps its immutable storage, not a borrowed manager.
+    // Writer refusal must happen before creating an intent or returning data.
+    QVERIFY(old->lockForRead());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(old->data()), bpp), initial);
+    old->unlockForRead();
+    const bool writable = old->lockForWrite();
+    if (writable) old->unlockForWrite();
+    QVERIFY(!writable);
+    QVERIFY(old->lockForRead());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(old->data()), bpp), initial);
+    old->unlockForRead();
 }
 
 void KisTiledDataManagerTest::testIteratorRejectedWriteAdmission_data()
@@ -5471,7 +5597,7 @@ void KisTiledDataManagerTest::testClearRetainsBareLease()
     if (iteratorBatch) QVERIFY(scope);
     // No compatibility Tile owns this backing. Cancellation must retain both
     // a residency pin and a reference until the actual lease is returned.
-    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
+    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write);
     QVERIFY(lease && lease->writable());
     auto *tile = lease->tileData();
     auto *borrowed = tile->data();

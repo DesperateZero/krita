@@ -367,7 +367,6 @@ private:
     void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
     void rebuildPageStoreIndex();
-    void attachPageStoreTile(KisTileSP &tile, bool oldData, bool nativeReady);
     void refreshPageStoreIndex(const QRect &rect);
     void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
     void refreshPageStorePages(const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity);

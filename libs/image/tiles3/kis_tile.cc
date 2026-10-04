@@ -151,7 +151,7 @@ bool KisTile::refreshPageStoreData()
     TileLease lease =
         bridge->acquireTile(
             m_col, m_row, KisTilePageStoreBridge::Access::ReadSelection,
-            bool(m_pageStoreOldDataView.loadRelaxed()), &m_pageStoreLeases[ReadLease]);
+            &m_pageStoreLeases[ReadLease]);
     if (!lease || !lease->tileData()) return false;
     KisTileData *replacement = lease->tileData();
     replacePageStoreReadCacheLocked(replacement);
@@ -381,7 +381,7 @@ bool KisTile::lockForRead() const
                     if (result != KisTilePageStoreLease::ReadPinResult::Retired) {
                         auto borrow = bridge->acquireTile(m_col, m_row,
                             KisTilePageStoreBridge::Access::ReadCache,
-                            bool(m_pageStoreOldDataView.loadRelaxed()), &cache);
+                            &cache);
                         if (!borrow || borrow->tileData() != m_tileData) return false;
                         cache = std::move(borrow);
                         ++m_lockCounter;
@@ -397,7 +397,7 @@ bool KisTile::lockForRead() const
             }
             TileLease lease =
                 bridge->acquireTile(m_col, m_row, KisTilePageStoreBridge::Access::ReadSelection,
-                                    bool(m_pageStoreOldDataView.loadRelaxed()), &m_pageStoreLeases[ReadLease]);
+                                    &m_pageStoreLeases[ReadLease]);
             if (!lease || !lease->tileData())
                 return false;
             replacePageStoreReadCacheLocked(lease->tileData());
@@ -434,11 +434,11 @@ bool KisTile::ensurePageStoreWriteAccess() const
 
     KisMementoManager *manager = m_mementoManager.loadAcquire();
     KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
-    if (!bridge || m_pageStoreOldDataView.loadRelaxed()) return false;
+    if (!bridge) return false;
 
     const bool hadPageStoreLease = hasPageStoreLeases();
     TileLease lease =
-        bridge->acquireTile(m_col, m_row, KisTilePageStoreBridge::Access::Write, false, &m_pageStoreLeases[ReadLease]);
+        bridge->acquireTile(m_col, m_row, KisTilePageStoreBridge::Access::Write, &m_pageStoreLeases[ReadLease]);
     if (!lease || !lease->tileData() || !lease->writable()) return false;
 
     KisTileData *replacement = lease->tileData();
@@ -495,6 +495,8 @@ bool KisTile::lockForWrite()
     KisMementoManager *manager = m_mementoManager.loadAcquire();
     {
         QMutexLocker locker(&m_swapBarrierLock);
+        // A standalone G0 wrapper has storage lifetime, no writer authority.
+        if (m_pageStoreOldDataView.loadRelaxed()) return false;
         KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
         if (bridge) {
             if (m_lockCounter == 0) {

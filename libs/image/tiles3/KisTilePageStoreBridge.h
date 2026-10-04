@@ -43,7 +43,7 @@ public:
     enum class Access { ReadSelection, ReadCache, Write };
     virtual ~KisTilePageStoreBridge() = default;
     virtual TileLease acquireTile(
-        qint32 column, qint32 row, Access access, bool oldData,
+        qint32 column, qint32 row, Access access,
         TileLease *readCache = nullptr) = 0;
 };
 

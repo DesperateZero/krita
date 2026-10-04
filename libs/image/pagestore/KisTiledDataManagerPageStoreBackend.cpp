@@ -1549,7 +1549,6 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     qint32 column,
     qint32 row,
     Access access,
-    bool oldData,
     TileLease *readCache) try
 {
     // A read view that names a transaction must remain valid until PageStore
@@ -1563,13 +1562,12 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     KisPageReadView readView;
     {
         QMutexLocker locker(&d->mutex);
-        if (!d->operational ||
-            (!selection && oldData)) {
+        if (!d->operational) {
             return {};
         }
         pageStore = d->store.get();
         provider = d->provider;
-        readView = d->selectReadViewLocked(oldData);
+        readView = d->selectReadViewLocked(false);
     }
 
     const KisPageKey key{d->surface, {column, row}};
@@ -2032,7 +2030,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                 if (changed) changed->append(key.page);
                 continue;
             }
-            auto lease = acquireTile(key.page.column, key.page.row, Access::Write, false);
+            auto lease = acquireTile(key.page.column, key.page.row, Access::Write);
             if (!lease || !lease->writable() || !lease->tileData()) return false;
             auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const int x = affected.left() - pageRect.left(), y = affected.top() - pageRect.top();
@@ -2496,7 +2494,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 if (changed) changed->append(to.page);
                 continue;
             }
-            auto lease = acquireTile(to.page.column, to.page.row, Access::Write, false);
+            auto lease = acquireTile(to.page.column, to.page.row, Access::Write);
             if (!lease || !lease->writable() || !lease->tileData()) return false;
             auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const qsizetype offset = (qsizetype(affected.top() - pageRect.top()) * KisTileData::WIDTH +
@@ -2647,7 +2645,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
             if (!batch->replaceFullTile(change.page.column, change.page.row, nullptr, true, error)) return false;
             continue;
         }
-        auto lease = acquireTile(change.page.column, change.page.row, Access::Write, false);
+        auto lease = acquireTile(change.page.column, change.page.row, Access::Write);
         if (!lease || !lease->writable() || !lease->tileData()) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page acquisition failed"));
             return false;

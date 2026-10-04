@@ -138,7 +138,7 @@ public:
         QString *error = nullptr);
 
     TileLease acquireTile(
-        qint32 column, qint32 row, Access access, bool oldData,
+        qint32 column, qint32 row, Access access,
         TileLease *readCache = nullptr) override;
 
     // Freeze the selected current/oldData visibility boundary under the

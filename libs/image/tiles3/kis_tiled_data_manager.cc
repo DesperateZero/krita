@@ -318,7 +318,14 @@ KisTileSP KisTiledDataManager::getTile(qint32 col, qint32 row, bool writable)
         m_extentManager.notifyTileAdded(col, row);
     }
     // A writable miss remains an intent until mutable pixels are exposed.
-    attachPageStoreTile(tile, false, newTile);
+    if (tile && m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        tile->setPageStoreBridge(m_pageStoreBackend, false);
+        if (newTile) tile->setPageStoreNativeReadReady();
+        else if (!tile->refreshPageStoreData()) {
+            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Cannot select writable tile read"));
+            return {};
+        }
+    }
     return tile;
 }
 
@@ -346,21 +353,28 @@ KisTileSP KisTiledDataManager::getOldTile(
             col, row, existingTile);
         return tile ? tile : getReadOnlyTileLazy(col, row, existingTile);
     }
-    KisTileSP current =
-        m_hashTable->getReadOnlyTileLazy(col, row, existingTile);
-    existingTile = m_pageStoreBackend->pageAllocated(col, row, true);
-    KisTileSP oldTile = new KisTile(*current, col, row, nullptr);
-    attachPageStoreTile(oldTile, true, false);
-    return oldTile;
-}
-
-void KisTiledDataManager::attachPageStoreTile(
-    KisTileSP &tile, bool oldData, bool nativeReady)
-{
-    if (!tile || !m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return;
-    tile->setPageStoreBridge(m_pageStoreBackend, oldData);
-    if (nativeReady) tile->setPageStoreNativeReadReady();
-    else KIS_SAFE_ASSERT_RECOVER_NOOP(tile->refreshPageStoreData());
+    try {
+        const KisPageKey key{m_pageStoreBackend->surface(), {col, row}};
+        const auto view = m_pageStoreBackend->captureReadView(true);
+        // Select and protect the original cut before constructing a
+        // compatibility wrapper. Failed preparation must not escape as
+        // an oldData flag that can select current after history ends.
+        KisPageStoreReadPage read(m_pageStoreBackend->store(), view, key,
+                                 nullptr, KisPagePriority::Normal, false);
+        KisTileData *data = m_pageStoreBackend->tileDataForReadPage(read);
+        if (data) {
+            KisTileSP oldTile = new KisTile(col, row, data, nullptr);
+            // This wrapper is not in the manager's hash/detach lifecycle.
+            // Its COW reference keeps the original storage, never the backend.
+            oldTile->setPageStoreBridge(nullptr, true);
+            existingTile = !read.version().isDefaultPixel();
+            return oldTile;
+        }
+    } catch (const std::bad_alloc &) {
+    }
+    existingTile = false;
+    KisStrokeJobFailureContext::reportFailure(QStringLiteral("Cannot select old tile read"));
+    return {};
 }
 
 KisMementoSP KisTiledDataManager::getMemento()

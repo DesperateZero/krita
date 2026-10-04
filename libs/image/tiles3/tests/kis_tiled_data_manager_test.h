@@ -137,6 +137,10 @@ private Q_SLOTS:
     void testPageStoreParkedBatchReadCapability_data();
     void testPageStoreParkedBatchReadCapability();
     void testPageStoreBatchCachePreparationFailure();
+    void testPageStoreTileSelectionFailure_data();
+    void testPageStoreTileSelectionFailure();
+    void testPageStoreOldTileOwnerLifetime_data();
+    void testPageStoreOldTileOwnerLifetime();
     void testPageStoreSemanticRemovalFailure_data();
     void testPageStoreSemanticRemovalFailure();
     void testPageStoreAliasRegionFailure_data();
