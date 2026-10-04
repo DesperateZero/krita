@@ -5,9 +5,11 @@
  */
 
 #include <QMutexLocker>
+#include <QScopeGuard>
 #include <QHash>
 #include <cstring>
 #include <limits>
+#include <new>
 #include <utility>
 //#include "kis_debug.h"
 #include "kis_swapped_data_store.h"
@@ -56,7 +58,7 @@ quint64 KisSwappedDataStore::numTiles() const
 }
 
 bool KisSwappedDataStore::trySwapOutTileData(KisTileData *td)
-{
+try {
     Q_ASSERT(td->data());
     QMutexLocker locker(&m_lock);
 
@@ -76,9 +78,9 @@ bool KisSwappedDataStore::trySwapOutTileData(KisTileData *td)
     KisChunk chunk;
     if (!m_allocator->tryGetChunk(quint64(bytesWritten), &chunk))
         return false;
+    auto discardChunk = qScopeGuard([&] { m_allocator->freeChunk(chunk); });
     quint8 *ptr = m_swapSpace->getWriteChunkPtr(chunk);
     if (!ptr) {
-        m_allocator->freeChunk(chunk);
         qWarning() << "swap out of tile failed";
         return false;
     }
@@ -86,14 +88,17 @@ bool KisSwappedDataStore::trySwapOutTileData(KisTileData *td)
 
     td->releaseMemory();
     td->setSwapChunk(chunk);
+    discardChunk.dismiss();
 
     m_totalSwapMemoryUsed += chunk.size();
 
     return true;
+} catch (const std::bad_alloc &) {
+    return false;
 }
 
 bool KisSwappedDataStore::swapInTileData(KisTileData *td)
-{
+try {
     Q_ASSERT(!td->data());
     QMutexLocker locker(&m_lock);
 
@@ -112,18 +117,19 @@ bool KisSwappedDataStore::swapInTileData(KisTileData *td)
     if (failure == KisSwapInFailurePoint::Allocation)
         return false;
     td->allocateMemory();
-    if (!td->data())
-        return false;
+    auto discardPixels = qScopeGuard([&] { td->releaseMemory(); });
     if (failure == KisSwapInFailurePoint::Decompression
         || !m_compressor->decompressTileData(ptr, chunk.size(), td)) {
-        td->releaseMemory();
         return false;
     }
 
     m_totalSwapMemoryUsed -= chunk.size();
     td->setSwapChunk(KisChunk());
     m_allocator->freeChunk(chunk);
+    discardPixels.dismiss();
     return true;
+} catch (const std::bad_alloc &) {
+    return false;
 }
 
 void KisSwappedDataStore::testingFailNextSwapIn(

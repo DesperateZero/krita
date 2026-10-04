@@ -4830,20 +4830,21 @@
       "synchronization_declarations": 4
     },
     "libs/image/tiles3/kis_tile_data.cc": {
-      "container_declarations": 2,
+      "container_declarations": 0,
       "include_edges": [
+        "QScopeGuard",
         "boost/pool/singleton_pool.hpp",
         "kis_debug.h",
         "kis_tile_data.h",
         "kis_tile_data_store.h",
         "kis_tile_data_store_iterators.h",
-        "unistd.h"
+        "new"
       ],
-      "lines": 277,
+      "lines": 215,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "0228f0f05b7e1db98073f089f91ba222670266d8813b7556fdb608c175edb27e",
+      "sha256": "a375238b9980305f4fc634d8f79fa17c063d7684cc3af67693012ec192ab631b",
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/kis_tile_data.h": {
@@ -4903,17 +4904,20 @@
       "synchronization_declarations": 3
     },
     "libs/image/tiles3/kis_tile_data_pooler.cc": {
-      "container_declarations": 9,
+      "container_declarations": 10,
       "include_edges": [
+        "QScopeGuard",
         "kis_debug.h",
         "kis_image_config.h",
         "kis_tile_data.h",
         "kis_tile_data_pooler.h",
         "kis_tile_data_store.h",
         "kis_tile_data_store_iterators.h",
+        "memory",
+        "new",
         "stdio.h"
       ],
-      "lines": 414,
+      "lines": 423,
       "member_fields": [
         "m_lastHistoricalMemoryMetric",
         "m_lastPoolMemoryMetric",
@@ -4921,7 +4925,7 @@
       ],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "ac693676658e8853b5c7fd51553f5163764e30531d58f2a9de4beef3018cdde7",
+      "sha256": "2790a0fdcdee7bbf12f5b541dbc4f59d1151a4c72e282451acde5376ba2110c9",
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/kis_tile_data_pooler.h": {
@@ -4969,12 +4973,12 @@
         "stdio.h",
         "utility"
       ],
-      "lines": 818,
+      "lines": 848,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "84e607649ed9eb36b02005822703ef6990daf3bd12c7a9e697468443661672ee",
-      "synchronization_declarations": 0
+      "sha256": "803cee82962713389ece17937092c7aa2a65d9742867d0991ceaba32af84c1b5",
+      "synchronization_declarations": 1
     },
     "libs/image/tiles3/kis_tile_data_store.h": {
       "container_declarations": 16,
@@ -5411,15 +5415,17 @@
       "include_edges": [
         "QHash",
         "QMutexLocker",
+        "QScopeGuard",
         "cstring",
         "kis_image_config.h",
         "kis_memory_window.h",
         "kis_swapped_data_store.h",
         "kis_tile_compressor_2.h",
         "limits",
+        "new",
         "utility"
       ],
-      "lines": 206,
+      "lines": 212,
       "member_fields": [
         "m_allocator",
         "m_compressor",
@@ -5431,7 +5437,7 @@
       "public_types": [
         "KisSwappedDataStore"
       ],
-      "sha256": "324309d00a21fe4aed134a2cfca7492f1fa16dffb87950e42524188d3a160cb8",
+      "sha256": "ba6f1ddf3f9fe08e0500101e0b78a93f56030b69e33f2faed75a52ac2f0f106f",
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/swap/kis_swapped_data_store.h": {
@@ -5481,19 +5487,21 @@
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/swap/kis_tile_data_swapper.cpp": {
-      "container_declarations": 1,
+      "container_declarations": 0,
       "include_edges": [
         "QMutex",
+        "QScopeGuard",
         "QSemaphore",
+        "array",
         "kis_debug.h",
+        "new",
         "tiles3/kis_tile_data.h",
         "tiles3/kis_tile_data_store.h",
         "tiles3/kis_tile_data_store_iterators.h",
         "tiles3/swap/kis_tile_data_swapper.h",
-        "tiles3/swap/kis_tile_data_swapper_p.h",
-        "utility"
+        "tiles3/swap/kis_tile_data_swapper_p.h"
       ],
-      "lines": 243,
+      "lines": 256,
       "member_fields": [
         "m_d"
       ],
@@ -5503,7 +5511,7 @@
         "Q_DECL_HIDDEN",
         "SoftSwapStrategy"
       ],
-      "sha256": "28936702bca9912c2a5ec30409497bf815311da361e2a49c079f6312c3a73cd2",
+      "sha256": "f0fe6c59b1623821956edae9dde199bc6573415231485bf67434ca1952ce3329",
       "synchronization_declarations": 2
     },
     "libs/image/tiles3/swap/kis_tile_data_swapper.h": {
@@ -6469,5 +6477,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "2e471d5efb7e99ee323541fe499478af9d43e73c"
+  "working_tree_head": "87a8b43ae98bcf13fb437ee7fe2b941701035fe3"
 }

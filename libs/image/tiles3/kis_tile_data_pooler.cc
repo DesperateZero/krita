@@ -12,6 +12,9 @@
 #include "kis_debug.h"
 #include "kis_tile_data_pooler.h"
 #include "kis_image_config.h"
+#include <QScopeGuard>
+#include <memory>
+#include <new>
 
 
 const qint32 KisTileDataPooler::MAX_NUM_CLONES = 16;
@@ -129,10 +132,12 @@ void KisTileDataPooler::cloneTileData(KisTileData *td, qint32 numClones) const
     if (numClones > 0) {
         if (!td->blockSwapping())
             return;
+        const auto releasePin = qScopeGuard([&] { td->unblockSwapping(); });
         for (qint32 i = 0; i < numClones; i++) {
-            td->m_clonesStack.push(new KisTileData(*td, false));
+            auto clone = std::unique_ptr<KisTileData>(new KisTileData(*td, false));
+            td->m_clonesStack.push(clone.get());
+            clone.release();
         }
-        td->unblockSwapping();
     } else {
         qint32 numUnneededClones = qAbs(numClones);
         for (qint32 i = 0; i < numUnneededClones; i++) {
@@ -186,39 +191,42 @@ void KisTileDataPooler::run()
         DEBUG_SIMPLE_ACTION("cycle started");
 
 
-        KisTileDataStoreReverseIterator *iter = m_store->beginReverseIteration();
-        QList<KisTileData*> beggars;
-        QList<KisTileData*> donors;
-        qint32 memoryOccupied;
+        try {
+            KisTileDataStoreReverseIterator *iter = m_store->beginReverseIteration();
+            const auto finish = qScopeGuard([&] { m_store->endIteration(iter); });
+            QList<KisTileData*> beggars;
+            QList<KisTileData*> donors;
+            qint32 memoryOccupied;
+            qint32 statRealMemory;
+            qint32 statHistoricalMemory;
 
-        qint32 statRealMemory;
-        qint32 statHistoricalMemory;
+            getLists(iter, beggars, donors,
+                     memoryOccupied,
+                     statRealMemory,
+                     statHistoricalMemory);
 
+            m_lastCycleHadWork =
+                processLists(beggars, donors, memoryOccupied);
 
-        getLists(iter, beggars, donors,
-                 memoryOccupied,
-                 statRealMemory,
-                 statHistoricalMemory);
-
-        m_lastCycleHadWork =
-            processLists(beggars, donors, memoryOccupied);
-
-        m_lastPoolMemoryMetric = memoryOccupied;
-        m_lastRealMemoryMetric = statRealMemory;
-        m_lastHistoricalMemoryMetric = statHistoricalMemory;
-
-        m_store->endIteration(iter);
-
+            m_lastPoolMemoryMetric = memoryOccupied;
+            m_lastRealMemoryMetric = statRealMemory;
+            m_lastHistoricalMemoryMetric = statHistoricalMemory;
+        } catch (const std::bad_alloc &) {
+            // Optional preclones remain owned by their original tile. Retry
+            // through the existing timed cycle after releasing its gates.
+            m_lastCycleHadWork = true;
+        }
         DEBUG_TILE_STATISTICS();
         DEBUG_SIMPLE_ACTION("cycle finished");
     }
 }
 
 void KisTileDataPooler::forceUpdateMemoryStats()
-{
+try {
     KIS_SAFE_ASSERT_RECOVER_RETURN(!isRunning());
 
     KisTileDataStoreReverseIterator *iter = m_store->beginReverseIteration();
+    const auto finish = qScopeGuard([&] { m_store->endIteration(iter); });
     QList<KisTileData*> beggars;
     QList<KisTileData*> donors;
     qint32 memoryOccupied;
@@ -236,7 +244,8 @@ void KisTileDataPooler::forceUpdateMemoryStats()
     m_lastRealMemoryMetric = statRealMemory;
     m_lastHistoricalMemoryMetric = statHistoricalMemory;
 
-    m_store->endIteration(iter);
+} catch (const std::bad_alloc &) {
+    // Retain the preceding complete statistics if optional sampling fails.
 }
 
 qint64 KisTileDataPooler::lastPoolMemoryMetric() const

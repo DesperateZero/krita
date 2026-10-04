@@ -10,6 +10,8 @@
 #include "kis_tile_data_store.h"
 
 #include <kis_debug.h>
+#include <QScopeGuard>
+#include <new>
 
 #include <boost/pool/singleton_pool.hpp>
 #include "kis_tile_data_store_iterators.h"
@@ -37,11 +39,11 @@ void SimpleCache::clear()
     quint8 *ptr = 0;
 
     while (m_4Pool.pop(ptr)) {
-        BoostPool4BPP::free(ptr);
+        BoostPool4BPP::ordered_free(ptr);
     }
 
     while (m_8Pool.pop(ptr)) {
-        BoostPool8BPP::free(ptr);
+        BoostPool8BPP::ordered_free(ptr);
     }
 
     while (m_16Pool.pop(ptr)) {
@@ -104,7 +106,7 @@ KisTileData::KisTileData(const KisTileData& rhs, bool checkFreeMemory)
     }
     m_data = allocateData(m_pixelSize);
 
-    memcpy(m_data, rhs.data(), m_pixelSize * WIDTH * HEIGHT);
+    memcpy(m_data, rhs.data(), size_t(m_pixelSize) * WIDTH * HEIGHT);
 }
 
 
@@ -150,128 +152,64 @@ quint8* KisTileData::allocateData(const qint32 pixelSize)
     if (!m_cache.pop(pixelSize, ptr)) {
         switch (pixelSize) {
         case 4:
-            ptr = (quint8*)BoostPool4BPP::malloc();
+            ptr = (quint8*)BoostPool4BPP::ordered_malloc();
             break;
         case 8:
-            ptr = (quint8*)BoostPool8BPP::malloc();
+            ptr = (quint8*)BoostPool8BPP::ordered_malloc();
             break;
         default:
-            ptr = (quint8*) malloc(pixelSize * WIDTH * HEIGHT);
+            ptr = (quint8*) malloc(size_t(pixelSize) * WIDTH * HEIGHT);
             break;
         }
     }
 
+    if (!ptr) throw std::bad_alloc();
     return ptr;
 }
 
 void KisTileData::freeData(quint8* ptr, const qint32 pixelSize)
 {
-    if (!m_cache.push(pixelSize, ptr)) {
-        switch (pixelSize) {
-        case 4:
-            BoostPool4BPP::free(ptr);
-            break;
-        case 8:
-            BoostPool8BPP::free(ptr);
-            break;
-        default:
-            free(ptr);
-            break;
-        }
+    try {
+        if (m_cache.push(pixelSize, ptr)) return;
+    } catch (const std::bad_alloc &) {
+        // Cache admission is optional, including during destruction.
+    }
+    switch (pixelSize) {
+    case 4:
+        BoostPool4BPP::ordered_free(ptr);
+        break;
+    case 8:
+        BoostPool8BPP::ordered_free(ptr);
+        break;
+    default:
+        free(ptr);
+        break;
     }
 }
 
-//#define DEBUG_POOL_RELEASE
-
-#ifdef DEBUG_POOL_RELEASE
-#include <unistd.h>
-#endif /* DEBUG_POOL_RELEASE */
-
 void KisTileData::releaseInternalPools()
 {
-    const int maxMigratedTiles = 100;
-
-    if (KisTileDataStore::instance()->numTilesInMemory() < maxMigratedTiles) {
-
-        QVector<KisTileData*> dataObjects;
-        QVector<QByteArray> memoryChunks;
-        bool failedToLock = false;
-
-        KisTileDataStoreIterator *iter = KisTileDataStore::instance()->beginIteration();
-
-        while (iter->hasNext()) {
-            KisTileData *item = iter->next();
-
-            // first release all the clones
-            KisTileData *clone = 0;
-            while (item->m_clonesStack.pop(clone)) {
-                delete clone;
+    const int maxCloneCleanupTiles = 100;
+    if (KisTileDataStore::instance()->numTilesInMemory() < maxCloneCleanupTiles) {
+        try {
+            auto *store = KisTileDataStore::instance();
+            auto *iter = store->beginIteration();
+            const auto finish = qScopeGuard([&] { store->endIteration(iter); });
+            while (iter->hasNext()) {
+                KisTileData *item = iter->next();
+                KisTileData *clone = nullptr;
+                while (item->m_clonesStack.pop(clone)) delete clone;
             }
-
-            // check if the tile data has actually been pooled
-            if (item->m_pixelSize != 4 &&
-                item->m_pixelSize != 8 &&
-                item->m_pixelSize != 16) {
-
-                continue;
-            }
-
-            // check if the tile has been swapped out
-            if (item->m_data) {
-                const bool locked = item->m_swapLock.tryLockForWrite();
-                if (!locked) {
-                    failedToLock = true;
-                    break;
-                }
-
-                const int chunkSize = item->m_pixelSize * WIDTH * HEIGHT;
-                dataObjects << item;
-                memoryChunks << QByteArray((const char*)item->m_data, chunkSize);
-            }
-
+        } catch (const std::bad_alloc &) {
+            // Failure to inspect optional clones does not prevent reclaiming
+            // cache entries and wholly unused pool blocks below.
         }
-
-        if (!failedToLock) {
-            // purge the pools memory
-            m_cache.clear();
-            BoostPool4BPP::purge_memory();
-            BoostPool8BPP::purge_memory();
-
-            auto it = dataObjects.begin();
-            auto chunkIt = memoryChunks.constBegin();
-
-            for (; it != dataObjects.end(); ++it, ++chunkIt) {
-                KisTileData *item = *it;
-                const int chunkSize = item->m_pixelSize * WIDTH * HEIGHT;
-
-                item->m_data = allocateData(item->m_pixelSize);
-                memcpy(item->m_data, chunkIt->data(), chunkSize);
-
-                item->m_swapLock.unlock();
-            }
-        } else {
-            Q_FOREACH (KisTileData *item, dataObjects) {
-                item->m_swapLock.unlock();
-            }
-
-            warnKrita << "WARNING: Failed to lock the tiles while trying to release the pooled memory";
-        }
-
-        KisTileDataStore::instance()->endIteration(iter);
-
-#ifdef DEBUG_POOL_RELEASE
-        dbgKrita << "After purging unused memory:";
-
-        char command[256];
-        sprintf(command, "cat /proc/%d/status | grep -i vm", (int)getpid());
-        printf("--- %s ---\n", command);
-        (void)system(command);
-#endif /* DEBUG_POOL_RELEASE */
-
-    } else {
-        dbgKrita << "DEBUG: releasing of the pooled memory has been cancelled:"
-                 << "there are still"
-                 << KisTileDataStore::instance()->numTilesInMemory()
-                 << "tiles in memory";
     }
+    // Native construction can hold an allocated tile before registration.
+    // Reclaim only unused blocks; never invalidate such a tile or replace a
+    // live backing with a post-purge allocation that can itself be refused.
+    try { m_cache.clear(); }
+    catch (const std::bad_alloc &) { return; }
+    BoostPool4BPP::release_memory();
+    BoostPool8BPP::release_memory();
 }

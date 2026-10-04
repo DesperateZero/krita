@@ -6,8 +6,10 @@
 
 #include <QMutex>
 #include <QSemaphore>
+#include <QScopeGuard>
 
-#include <utility>
+#include <array>
+#include <new>
 
 #include "tiles3/swap/kis_tile_data_swapper.h"
 #include "tiles3/swap/kis_tile_data_swapper_p.h"
@@ -202,37 +204,48 @@ qint64 KisTileDataSwapper::pass(qint64 needToFreeMetric)
         qint64 scanned = 0;
         while (freedMetric < needToFreeMetric
                && scanned < initialResidentTiles) {
-            QList<KisTileData *> candidates;
-            candidates.reserve(maximumCandidateBatch);
-            typename strategy::iterator *iter =
-                strategy::beginIteration(m_d->store);
-            while (iter->hasNext() && scanned < initialResidentTiles
-                   && candidates.size() < maximumCandidateBatch) {
-                KisTileData *item = iter->next();
-                ++scanned;
-                if (!strategy::isInteresting(item))
-                    continue;
-                if (!strategy::swapOutFirst(item) && !includeNewlyAged) {
-                    item->markOld();
-                    continue;
+            std::array<KisTileData *, maximumCandidateBatch> candidates{};
+            qsizetype count = 0;
+            const auto releasePins = qScopeGuard([&] {
+                for (qsizetype i = 0; i < count; ++i) candidates[i]->deref();
+            });
+            {
+                typename strategy::iterator *iter =
+                    strategy::beginIteration(m_d->store);
+                const auto finish = qScopeGuard([&] {
+                    strategy::endIteration(m_d->store, iter);
+                });
+                while (iter->hasNext() && scanned < initialResidentTiles
+                       && count < maximumCandidateBatch) {
+                    KisTileData *item = iter->next();
+                    ++scanned;
+                    if (!strategy::isInteresting(item))
+                        continue;
+                    if (!strategy::swapOutFirst(item) && !includeNewlyAged) {
+                        item->markOld();
+                        continue;
+                    }
+                    if (item->tryRef()) candidates[count++] = item;
                 }
-                if (item->tryRef())
-                    candidates.append(item);
             }
-            strategy::endIteration(m_d->store, iter);
 
-            for (KisTileData *candidate : std::as_const(candidates)) {
+            for (qsizetype i = 0; i < count; ++i) {
+                KisTileData *candidate = candidates[i];
                 if (freedMetric < needToFreeMetric
                     && m_d->store->trySwapTileData(candidate)) {
                     freedMetric += candidate->pixelSize();
                 }
-                candidate->deref();
             }
         }
     };
-    scan(false);
-    if (freedMetric < needToFreeMetric)
-        scan(true);
+    try {
+        scan(false);
+        if (freedMetric < needToFreeMetric)
+            scan(true);
+    } catch (const std::bad_alloc &) {
+        // Keep completed swaps; a later original reclaim request can retry
+        // the remaining resident tiles after all candidate pins unwind.
+    }
 
     return freedMetric;
 }

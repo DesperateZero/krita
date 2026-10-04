@@ -31,6 +31,16 @@ quint64 configuredResidentHardLimitBytes()
     const int limitMiB = KisImageConfig(true).tilesHardLimit();
     return limitMiB > 0 ? quint64(limitMiB) << 20 : 0;
 }
+
+template<class Create>
+auto beginLockedIteration(QReadWriteLock &gate, Create create)
+{
+    gate.lockForWrite();
+    auto failed = qScopeGuard([&] { gate.unlock(); });
+    auto *iterator = create();
+    failed.dismiss(); // The returned iterator retains the original gate.
+    return iterator;
+}
 }
 
 //#define DEBUG_PRECLONE
@@ -245,9 +255,13 @@ KisTileData *KisTileDataStore::allocTileData(qint32 pixelSize, const quint8 *def
     const auto releaseReservation = qScopeGuard([&] {
         releaseResidentMemoryReservation(pixelSize);
     });
-    auto td = std::make_unique<KisTileData>(pixelSize, defPixel, this);
-    registerTileData(td.get());
-    return td.release();
+    try {
+        auto td = std::make_unique<KisTileData>(pixelSize, defPixel, this);
+        registerTileData(td.get());
+        return td.release();
+    } catch (const std::bad_alloc &) {
+        return nullptr;
+    }
 }
 
 KisTileData *KisTileDataStore::createTileDataFromRows(
@@ -266,9 +280,14 @@ KisTileData *KisTileDataStore::createTileDataFromRows(
     const auto releaseReservation = qScopeGuard([&] {
         releaseResidentMemoryReservation(pixelSize);
     });
-    auto td = std::unique_ptr<KisTileData>(new KisTileData(pixelSize, source, sourceStride, this));
-    registerTileData(td.get());
-    return td.release();
+    try {
+        auto td = std::unique_ptr<KisTileData>(
+            new KisTileData(pixelSize, source, sourceStride, this));
+        registerTileData(td.get());
+        return td.release();
+    } catch (const std::bad_alloc &) {
+        return nullptr;
+    }
 }
 
 KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs)
@@ -286,23 +305,27 @@ KisTileData *KisTileDataStore::duplicateTileData(KisTileData *rhs, bool *preclon
         releaseResidentMemoryReservation(qint32(rhs->pixelSize()));
     });
 
-    if (rhs->m_clonesStack.pop(td)) {
-        if (precloneHit) *precloneHit = true;
-        DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
-        DEBUG_COUNT_PRECLONE_HIT(rhs);
-    } else {
-        if (precloneHit) *precloneHit = false;
-        if (!rhs->blockSwapping())
-            return nullptr;
-        const auto releaseSwap = qScopeGuard([&] { rhs->unblockSwapping(); });
-        td = new KisTileData(*rhs);
-        DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
-        DEBUG_COUNT_PRECLONE_MISS(rhs);
-    }
+    try {
+        if (rhs->m_clonesStack.pop(td)) {
+            if (precloneHit) *precloneHit = true;
+            DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
+            DEBUG_COUNT_PRECLONE_HIT(rhs);
+        } else {
+            if (precloneHit) *precloneHit = false;
+            if (!rhs->blockSwapping())
+                return nullptr;
+            const auto releaseSwap = qScopeGuard([&] { rhs->unblockSwapping(); });
+            td = new KisTileData(*rhs);
+            DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
+            DEBUG_COUNT_PRECLONE_MISS(rhs);
+        }
 
-    std::unique_ptr<KisTileData> candidate(td);
-    registerTileData(candidate.get());
-    return candidate.release();
+        std::unique_ptr<KisTileData> candidate(td);
+        registerTileData(candidate.get());
+        return candidate.release();
+    } catch (const std::bad_alloc &) {
+        return nullptr;
+    }
 }
 
 KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *precloneHit)
@@ -313,20 +336,24 @@ KisTileData *KisTileDataStore::duplicatePinnedTileData(KisTileData *rhs, bool *p
     const auto releaseReservation = qScopeGuard([&] {
         releaseResidentMemoryReservation(qint32(rhs->pixelSize()));
     });
-    KisTileData *td = nullptr;
-    if (rhs->m_clonesStack.pop(td)) {
-        if (precloneHit) *precloneHit = true;
-        DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
-        DEBUG_COUNT_PRECLONE_HIT(rhs);
-    } else {
-        if (precloneHit) *precloneHit = false;
-        td = new KisTileData(*rhs);
-        DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
-        DEBUG_COUNT_PRECLONE_MISS(rhs);
+    try {
+        KisTileData *td = nullptr;
+        if (rhs->m_clonesStack.pop(td)) {
+            if (precloneHit) *precloneHit = true;
+            DEBUG_PRECLONE_ACTION("+ Pre-clone HIT", rhs, td);
+            DEBUG_COUNT_PRECLONE_HIT(rhs);
+        } else {
+            if (precloneHit) *precloneHit = false;
+            td = new KisTileData(*rhs);
+            DEBUG_PRECLONE_ACTION("- Pre-clone #MISS#", rhs, td);
+            DEBUG_COUNT_PRECLONE_MISS(rhs);
+        }
+        std::unique_ptr<KisTileData> candidate(td);
+        registerTileData(candidate.get());
+        return candidate.release();
+    } catch (const std::bad_alloc &) {
+        return nullptr;
     }
-    std::unique_ptr<KisTileData> candidate(td);
-    registerTileData(candidate.get());
-    return candidate.release();
 }
 
 bool KisTileDataStore::tryClaimBackingHandoff(KisTileData *td)
@@ -708,8 +735,9 @@ bool KisTileDataStore::trySwapTileData(KisTileData *td)
 
 KisTileDataStoreIterator* KisTileDataStore::beginIteration()
 {
-    m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreIterator(m_tileDataMap);
+    return beginLockedIteration(m_iteratorLock, [&] {
+        return new KisTileDataStoreIterator(m_tileDataMap);
+    });
 }
 void KisTileDataStore::endIteration(KisTileDataStoreIterator* iterator)
 {
@@ -719,8 +747,9 @@ void KisTileDataStore::endIteration(KisTileDataStoreIterator* iterator)
 
 KisTileDataStoreReverseIterator* KisTileDataStore::beginReverseIteration()
 {
-    m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreReverseIterator(m_tileDataMap);
+    return beginLockedIteration(m_iteratorLock, [&] {
+        return new KisTileDataStoreReverseIterator(m_tileDataMap);
+    });
 }
 void KisTileDataStore::endIteration(KisTileDataStoreReverseIterator* iterator)
 {
@@ -731,8 +760,9 @@ void KisTileDataStore::endIteration(KisTileDataStoreReverseIterator* iterator)
 
 KisTileDataStoreClockIterator* KisTileDataStore::beginClockIteration()
 {
-    m_iteratorLock.lockForWrite();
-    return new KisTileDataStoreClockIterator(m_tileDataMap, m_clockIndex.loadAcquire());
+    return beginLockedIteration(m_iteratorLock, [&] {
+        return new KisTileDataStoreClockIterator(m_tileDataMap, m_clockIndex.loadAcquire());
+    });
 }
 
 void KisTileDataStore::endIteration(KisTileDataStoreClockIterator* iterator)
