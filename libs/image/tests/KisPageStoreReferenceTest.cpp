@@ -851,6 +851,7 @@ public:
     std::function<void()> retireProbe;
     std::function<void()> nativeCopyProbe;
     bool failNextRetire = false;
+    mutable bool throwNextValidateStorageFailure = false;
     bool enableNativeCopy = false;
     bool corruptNextNativeOperation = false;
     bool pendNextNativeResult = false;
@@ -918,6 +919,8 @@ public:
     }
     bool validate(const KisReplicaHandle &replica, const KisPageAllocationDescriptor &descriptor) const override
     {
+        if (std::exchange(throwNextValidateStorageFailure, false))
+            throw std::bad_alloc();
         return m_delegate->validate(replica, descriptor);
     }
     KisReplicaOperation
@@ -9370,6 +9373,17 @@ void KisPageStoreReferenceTest::pageStoreNativeCopyIsLockExternalRetainedAndFail
     QString error;
     QVERIFY(store.configure(initial, completions, 4, &error));
     QVERIFY(store.registerReplicaProvider(provider));
+    provider->throwNextValidateStorageFailure = true;
+    bool validationThrew = false;
+    bool refusedAdoption = false;
+    try {
+        refusedAdoption = store.adoptInitialPage(initialVersion, descriptor, allocation.replica, &error);
+    } catch (const std::bad_alloc &) {
+        validationThrew = true;
+    }
+    QVERIFY(!validationThrew);
+    QVERIFY(!refusedAdoption);
+    QCOMPARE(store.sessionStats().activeProviderCalls, qsizetype(0));
     QVERIFY(store.adoptInitialPage(initialVersion, descriptor, allocation.replica, &error));
     QVERIFY(store.finalizeInitialization(&error));
     const auto retained = store.captureRetainedEpoch();

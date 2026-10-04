@@ -3449,12 +3449,13 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
         providers.push_back(std::move(provider));
     }
     ++d->activeProviderCalls;
-    locker.unlock();
     bool valid = true;
-    for (qsizetype i = 0; i < replicas.size(); ++i)
-        valid = providers[i]->validate(replicas[i], descriptor) && valid;
-    locker.relock();
-    --d->activeProviderCalls;
+    {
+        locker.unlock();
+        const auto done = qScopeGuard([&] { locker.relock(); --d->activeProviderCalls; });
+        for (qsizetype i = 0; i < replicas.size(); ++i)
+            valid = providers[i]->validate(replicas[i], descriptor) && valid;
+    }
     KisPageMetadataCoordinator::VersionInfo existingPage;
     if (!valid || d->operational || d->closed || d->metadata.versionSnapshot(version, &existingPage)) {
         KisPageStoreDetail::setError(error, QStringLiteral("initial page replicas failed provider validation"));
