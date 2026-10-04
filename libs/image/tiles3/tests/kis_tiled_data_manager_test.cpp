@@ -12,6 +12,7 @@
 #include <QSemaphore>
 #include <QScopeGuard>
 #include <QRegularExpression>
+#include <KConfig>
 
 #include "tiles3/kis_tiled_data_manager.h"
 #include "tiles3/kis_tile_data_store.h"
@@ -38,6 +39,15 @@
 #include "config-limit-long-tests.h"
 #include "kis_br1_stress_profile.h"
 #include "KisStrokeJobFailureContext.h"
+
+void KisTiledDataManagerTest::initTestCase()
+{
+    // KConfig 6.7 lazily updates its global filename after test mode changes.
+    // Complete both initial construction and that transition on the main
+    // thread before any stress worker opens its thread-local configuration.
+    KConfig initialConfig;
+    KConfig testModeConfig;
+}
 
 namespace {
 

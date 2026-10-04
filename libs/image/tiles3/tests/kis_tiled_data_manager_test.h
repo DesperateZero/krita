@@ -31,6 +31,7 @@ private:
     void benchmarkCOWImpl();
 
 private Q_SLOTS:
+    void initTestCase();
     void testExtentGrowthReusesNegativeCapacity();
     void testPageStoreHistoryDirtyExtent();
     void testUndoingNewTiles();

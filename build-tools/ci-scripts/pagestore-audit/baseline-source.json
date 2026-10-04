@@ -5720,6 +5720,7 @@
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.cpp": {
       "container_declarations": 56,
       "include_edges": [
+        "KConfig",
         "KisPageStoreCpuSurfaceOps.h",
         "KisRegion.h",
         "KisStrokeJobFailureContext.h",
@@ -5753,7 +5754,7 @@
         "tiles3/kis_vline_iterator.h",
         "tiles_test_utils.h"
       ],
-      "lines": 6238,
+      "lines": 6248,
       "member_fields": [
         "m_accessRect",
         "m_index",
@@ -5787,7 +5788,7 @@
         "Observation",
         "TestableTiledDataManager"
       ],
-      "sha256": "368caf3b72edf769c1a55cfeac7889acdcbc05ee534b1ea9287c9039945ba372",
+      "sha256": "9e9e16f94effe625ce6b51702cc6491a82702d3d34453b7a8c167a205cb5b8aa",
       "synchronization_declarations": 9
     },
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": {
@@ -5795,14 +5796,14 @@
       "include_edges": [
         "simpletest.h"
       ],
-      "lines": 212,
+      "lines": 213,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [
         "KisTiledDataManager",
         "KisTiledDataManagerTest"
       ],
-      "sha256": "8f251101eb18047a6d28b7ff849b5ef586ad4e714c1833548b8d6613cafdf023",
+      "sha256": "3d1e2f32aabc56732d0c728a9d1507eb807323580d3009d86c86478e1d2a0582",
       "synchronization_declarations": 0
     },
     "libs/image/tiles3/tests/kis_tiles3_cpu_baseline_test.cpp": {
@@ -6467,5 +6468,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "8f84cc8461ca621bc284342dbcdeb6490470b66e"
+  "working_tree_head": "3c22a0226a858ef16d150b2dfe5523d9bfbc684e"
 }
