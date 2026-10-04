@@ -1931,6 +1931,19 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
     return claimed;
 }
 
+KisPageVersion KisPageMutationSession::legacyMutationPageVersion(const KisPageKey &key) const
+{
+    if (!d) return {};
+    QMutexLocker scopeLock(&d->mutex);
+    if (d->state != Private::State::Active || d->executions || d->thread != QThread::currentThreadId()) return {};
+    const auto index = d->writes.findIndex(key);
+    const auto *entry = d->writes.at(index);
+    if (!entry || entry->isExposed() || !d->pageAtEntry(index)) return {};
+    QMutexLocker ownerLock(&d->owner->mutex);
+    return d->owner->writeAdmission.ownsClaimSetLocked(d->admission)
+        ? entry->preparedTargetVersion() : KisPageVersion{};
+}
+
 bool KisPageMutationSession::removePage(const KisPageKey &key, QString *error)
 {
     if (!d) {

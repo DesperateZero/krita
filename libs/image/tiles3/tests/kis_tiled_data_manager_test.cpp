@@ -28,6 +28,7 @@
 #include "pagestore/KisTiledDataManagerPageStoreBackend.h"
 #include "pagestore/KisTiles3PageReplicaProvider.h"
 #include "KisPageStoreCpuSurfaceOps.h"
+#include "KisPageStoreStoragePressure.h"
 #include "pagestore/KisPageStoreDiagnostics_p.h"
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
 #include "pagestore/KisPageStoreReclamation_p.h"
@@ -961,7 +962,7 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityBehavior()
     QCOMPARE(tile->data()[0], quint8(0x57));
     tile->unlockForRead();
 
-    QVERIFY(!backend->acquireTile(0, 0, true, true));
+    QVERIFY(!backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, true));
 
 }
 
@@ -2503,7 +2504,7 @@ void KisTiledDataManagerTest::testPageStoreCancelledPrivateClient()
     }), KisPageStoreWriteOperationResult::Succeeded);
     if (compatibilityBatch) {
         auto batch = backend->beginMutationBatch(); QVERIFY(batch);
-        auto lease = backend->acquireTile(1,0,true,false); QVERIFY(lease); QVERIFY(lease->tileData());
+        auto lease = backend->acquireTile(1,0,KisTilePageStoreBridge::Access::Write,false); QVERIFY(lease); QVERIFY(lease->tileData());
         lease->tileData()->data()[0] = 0x62; lease->markDirty(); QVERIFY(lease->finish()); lease.reset();
         QVERIFY(!batch->cancel()); batch.reset();
     } else {
@@ -3561,6 +3562,152 @@ void KisTiledDataManagerTest::testTileCompressionRejectedWrite()
     QCOMPARE(actual, initial);
     QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), original.size()), original);
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+}
+
+void KisTiledDataManagerTest::testPageStoreParkedBatchReadCapability_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("history");
+    for (int bpp : {1, 4, 8, 16})
+        for (bool history : {false, true})
+            QTest::newRow(qPrintable(QString("bpp%1-history%2").arg(bpp).arg(history)))
+                << bpp << history;
+}
+
+void KisTiledDataManagerTest::testPageStoreParkedBatchReadCapability()
+{
+    QFETCH(int, bpp);
+    QFETCH(bool, history);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    const QByteArray staged(bpp, char(0x71)), final(bpp, char(0x72));
+    const auto bytes = [](const QByteArray &value) {
+        return reinterpret_cast<const quint8 *>(value.constData());
+    };
+    KisTiledDataManager dm(bpp, bytes(blank));
+    dm.writeBytes(bytes(initial), 0, 0, 1, 1);
+    auto *store = dm.m_pageStoreBackend->store();
+    auto before = dm.m_pageStoreBackend->captureReadView();
+    auto exact = before.readResidentPage({{1}, {0, 0}});
+    QVERIFY(exact.isValid());
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    const auto counters = store->mutationStatistics();
+    auto scope = dm.beginIteratorWriteScope();
+    QVERIFY(scope && scope->isActive());
+    auto tile = dm.getTile(0, 0, true);
+    QVERIFY(tile && tile->lockForWrite());
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForWrite(); });
+        auto *data = tile->tryWriteData();
+        QVERIFY(data);
+        std::memcpy(data, staged.constData(), size_t(bpp));
+    }
+
+    // The page is still Reserved by the original segment. A foreign wrapper
+    // reader cannot turn its cached address into permission over those bytes.
+    bool foreignLocked = false;
+    std::thread foreign([&] {
+        foreignLocked = tile->lockForRead();
+        if (foreignLocked) tile->unlockForRead();
+    });
+    foreign.join();
+    QVERIFY(!foreignLocked);
+
+    const auto captures = store->readScopeStatistics().capturedReadViewsCreated;
+    const auto requests = store->sessionStats().readRequestsCreated;
+    QVERIFY(tile->lockForRead());
+    {
+        const auto unlock = qScopeGuard([&] { tile->unlockForRead(); });
+        auto *live = tile->data();
+        QVERIFY(live);
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(live), bpp), staged);
+        QVERIFY(tile->lockForWrite());
+        {
+            const auto unlockWrite = qScopeGuard([&] { tile->unlockForWrite(); });
+            QCOMPARE(tile->tryWriteData(), live);
+            std::memcpy(live, final.constData(), size_t(bpp));
+        }
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(live), bpp), final);
+    }
+    QCOMPARE(store->readScopeStatistics().capturedReadViewsCreated, captures);
+    QCOMPARE(store->sessionStats().readRequestsCreated, requests);
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
+    QVERIFY(scope->finish());
+    scope.reset();
+    const auto after = store->mutationStatistics();
+    QCOMPARE(after.generationsReserved - counters.generationsReserved, quint64(1));
+    QCOMPARE(after.pagesSealed - counters.pagesSealed, quint64(1));
+    QCOMPARE(after.writablePinsAcquired - counters.writablePinsAcquired,
+             after.writablePinsReleased - counters.writablePinsReleased);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QByteArray actual(bpp, Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, final);
+    if (history) {
+        dm.commit();
+        dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+        QCOMPARE(actual, initial);
+        dm.rollforward(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+        QCOMPARE(actual, final);
+        dm.purgeHistory(memento);
+    }
+    QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
+}
+
+void KisTiledDataManagerTest::testPageStoreBatchCachePreparationFailure()
+{
+    const quint8 blank = 0x13, initial = 0x31;
+    KisTiledDataManager dm(1, &blank);
+    dm.writeBytes(&initial, 0, 0, 1, 1);
+    auto *backend = dm.m_pageStoreBackend;
+    auto *store = backend->store();
+    auto before = backend->captureReadView();
+    auto exact = before.readResidentPage({{1}, {0, 0}});
+    QVERIFY(exact.isValid());
+    QVERIFY(store->waitForRetirementIdle());
+    auto scope = dm.beginIteratorWriteScope();
+    QVERIFY(scope && scope->isActive());
+    auto warm = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
+    QVERIFY(warm && warm->writable());
+    warm->tileData()->data()[0] = 0x71;
+    warm->markDirty();
+    QVERIFY(warm->finish());
+    warm.reset();
+    const auto generations = store->mutationStatistics().generationsReserved;
+
+    auto process = kisAcquirePageStoreBootstrapBudget();
+    QVERIFY(process);
+    const auto used = [&] {
+        const auto metadata = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        return metadata.live.cpuRam + metadata.reserved.cpuRam;
+    };
+    const size_t bytes = size_t(kisPageProcessStorageLimit() - used());
+    void *filler = allocateTestProcessStoragePressure(bytes, 1);
+    const auto free = qScopeGuard([&] {
+        if (filler) freeTestProcessStoragePressure(filler, bytes, 1);
+    });
+    QCOMPARE(used(), kisPageProcessStorageLimit());
+    TileLease cache;
+    auto refused = backend->acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false, &cache);
+    QVERIFY(!refused);
+    QVERIFY(!cache);
+    QCOMPARE(store->mutationStatistics().generationsReserved, generations);
+    QCOMPARE(static_cast<const quint8 *>(exact.data())[0], initial);
+    freeTestProcessStoragePressure(std::exchange(filler, nullptr), bytes, 1);
+    // Once the target was prepared, failure to transfer its capability must
+    // cancel the original segment. Freeing capacity cannot silently publish it.
+    QVERIFY(!scope->finish());
+    scope.reset();
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    quint8 current = 0;
+    dm.readBytes(&current, 0, 0, 1, 1);
+    QCOMPARE(current, initial);
+    const quint8 recovered = 0x72;
+    dm.writeBytes(&recovered, 0, 0, 1, 1);
+    dm.readBytes(&current, 0, 0, 1, 1);
+    QCOMPARE(current, recovered);
+    QCOMPARE(static_cast<const quint8 *>(exact.data())[0], initial);
 }
 
 void KisTiledDataManagerTest::testIteratorRejectedWriteAdmission_data()
@@ -5324,7 +5471,7 @@ void KisTiledDataManagerTest::testClearRetainsBareLease()
     if (iteratorBatch) QVERIFY(scope);
     // No compatibility Tile owns this backing. Cancellation must retain both
     // a residency pin and a reference until the actual lease is returned.
-    auto lease = backend.acquireTile(0, 0, true, false);
+    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
     QVERIFY(lease && lease->writable());
     auto *tile = lease->tileData();
     auto *borrowed = tile->data();

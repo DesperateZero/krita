@@ -124,7 +124,7 @@ bool KisTile::releasePageStoreLeasesLocked() const
     auto &read = m_pageStoreLeases[ReadLease];
     if (read) {
         KIS_SAFE_ASSERT_RECOVER_NOOP(read->finish());
-        if (!read->reusableReadCache()) read.reset();
+        if (!read->reusableReadCache()) read = read->takeReadCache();
     }
     auto &write = m_pageStoreLeases[WriteLease];
     if (write) {
@@ -150,7 +150,7 @@ bool KisTile::refreshPageStoreData()
     if (m_pageStoreNativeReadReady.loadRelaxed()) return true;
     TileLease lease =
         bridge->acquireTile(
-            m_col, m_row, false,
+            m_col, m_row, KisTilePageStoreBridge::Access::ReadSelection,
             bool(m_pageStoreOldDataView.loadRelaxed()), &m_pageStoreLeases[ReadLease]);
     if (!lease || !lease->tileData()) return false;
     KisTileData *replacement = lease->tileData();
@@ -378,8 +378,15 @@ bool KisTile::lockForRead() const
                     // An identity mismatch is different: never read a retagged
                     // backing through this cache. Idle-reference migration
                     // must replace this ownership before removing that ref.
-                    if (result != KisTilePageStoreLease::ReadPinResult::Retired)
-                        return false;
+                    if (result != KisTilePageStoreLease::ReadPinResult::Retired) {
+                        auto borrow = bridge->acquireTile(m_col, m_row,
+                            KisTilePageStoreBridge::Access::ReadCache,
+                            bool(m_pageStoreOldDataView.loadRelaxed()), &cache);
+                        if (!borrow || borrow->tileData() != m_tileData) return false;
+                        cache = std::move(borrow);
+                        ++m_lockCounter;
+                        return succeeded();
+                    }
                     cache.reset();
                 }
                 if (!m_tileData->blockSwapping())
@@ -389,7 +396,7 @@ bool KisTile::lockForRead() const
                 return succeeded();
             }
             TileLease lease =
-                bridge->acquireTile(m_col, m_row, false,
+                bridge->acquireTile(m_col, m_row, KisTilePageStoreBridge::Access::ReadSelection,
                                     bool(m_pageStoreOldDataView.loadRelaxed()), &m_pageStoreLeases[ReadLease]);
             if (!lease || !lease->tileData())
                 return false;
@@ -417,13 +424,21 @@ bool KisTile::ensurePageStoreWriteAccess() const
         return true;
     }
 
+    auto &read = m_pageStoreLeases[ReadLease];
+    if (read && read->writable()) {
+        // A same-owner batch read already borrowed this pending guard. Nested
+        // write uses that capability; a second beginWrite would reject it.
+        m_pageStoreLeases[WriteLease] = std::move(read);
+        return true;
+    }
+
     KisMementoManager *manager = m_mementoManager.loadAcquire();
     KisTilePageStoreBridge *bridge = resolvePageStoreBridge(manager);
     if (!bridge || m_pageStoreOldDataView.loadRelaxed()) return false;
 
     const bool hadPageStoreLease = hasPageStoreLeases();
     TileLease lease =
-        bridge->acquireTile(m_col, m_row, true, false, &m_pageStoreLeases[ReadLease]);
+        bridge->acquireTile(m_col, m_row, KisTilePageStoreBridge::Access::Write, false, &m_pageStoreLeases[ReadLease]);
     if (!lease || !lease->tileData() || !lease->writable()) return false;
 
     KisTileData *replacement = lease->tileData();

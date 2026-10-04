@@ -187,7 +187,8 @@ public:
         KisTiledDataManagerPageStoreBackend *backend,
         KisTileData *tile,
         KisCpuWriteGuard &&guard,
-        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch);
+        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch,
+        TileLease readCache);
     KisTiledDataManagerPageStoreLease(
         KisTiledDataManagerPageStoreBackend *backend,
         KisTileData *tile, const KisPageTransaction &transaction,
@@ -207,7 +208,7 @@ public:
     }
 
     KisTileData *tileData() const override { return m_tileData; }
-    bool writable() const override { return m_native.isValid(); }
+    bool writable() const override { return m_native.isValid() && belongsToCurrentThread(); }
     void markDirty() override { m_dirty = true; }
     TileLease takeReadCache() override
     {
@@ -437,8 +438,10 @@ public:
 KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
     KisTiledDataManagerPageStoreBackend *backend, KisTileData *tile,
     KisCpuWriteGuard &&guard,
-    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch)
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch,
+    TileLease readCache)
     : m_backend(backend), m_tileData(tile), m_batch(std::move(batch)),
+      m_readCache(std::move(readCache)),
       m_native(std::move(guard))
 {
     QMutexLocker lock(&m_batch->leaseMutex);
@@ -1545,22 +1548,23 @@ std::unique_ptr<KisTilePageStoreLease>
 KisTiledDataManagerPageStoreBackend::acquireTile(
     qint32 column,
     qint32 row,
-    bool writable,
+    Access access,
     bool oldData,
     TileLease *readCache) try
 {
     // A read view that names a transaction must remain valid until PageStore
     // has converted it into an active read capability. Readers share this
     // publication gate; only the final publisher/aborter takes it exclusively.
-    QReadLocker publicationLocker(
-        writable ? nullptr : &d->publicationLock);
+    const bool selection = access == Access::ReadSelection;
+    if (!selection && access != Access::ReadCache && access != Access::Write) return {};
+    QReadLocker publicationLocker(selection ? &d->publicationLock : nullptr);
     KisPageStore *pageStore = nullptr;
     std::shared_ptr<KisTiles3PageReplicaProvider> provider;
     KisPageReadView readView;
     {
         QMutexLocker locker(&d->mutex);
         if (!d->operational ||
-            (writable && oldData)) {
+            (!selection && oldData)) {
             return {};
         }
         pageStore = d->store.get();
@@ -1569,7 +1573,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     }
 
     const KisPageKey key{d->surface, {column, row}};
-    if (!writable) {
+    if (selection) {
         auto view = pageStore->captureReadView(readView);
         publicationLocker.unlock();
         KisPageStoreReadPage read(pageStore, view, key, nullptr,
@@ -1589,57 +1593,64 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
         if (batch && (batch->failed || batch->clients == 0)) return {};
         mutation = batch ? &batch->mutation : nullptr;
     }
-    if (mutation) {
-        QString failure;
-        if (!mutation->reserveLegacyMutationPage(key, &failure)) {
-            qWarning() << "PageStore CPU mutation acquisition failed:" << failure;
-            return {};
-        }
-        auto guard = mutation->beginWrite(key, &failure);
-        if (!guard.isValid()) {
-            qWarning() << "PageStore CPU mutation acquisition failed:" << failure;
-            return {};
-        }
-        KisTileData *tile = provider->tileDataForCpuWriteGuard(guard);
-        if (!tile) return {};
-        return std::make_unique<KisTiledDataManagerPageStoreLease>(
-            this, tile, std::move(guard), batch);
+    if (access == Access::ReadCache) {
+        // An idle wrapper is an expected-identity hint, not a fresh selector.
+        // Only the original live iterator segment may lend its parked target.
+        // Check before beginWrite: a read must never prepare a new generation.
+        if (!batch || !batch->iteratorScope || !readCache || !*readCache ||
+            (*readCache)->readPinned() || !provider->readCacheMatchesVersion(
+                readCache->get(), mutation->legacyMutationPageVersion(key))) return {};
     }
 
     bool ownsTransaction = false;
+    bool prepared = false;
+    bool accepted = false;
     QString transactionError;
-    const KisPageTransaction transaction =
-        writableTransaction(&ownsTransaction, &transactionError);
-    if (!transaction.isValid()) return {};
+    KisPageTransaction transaction;
     auto returnClient = qScopeGuard([&] {
+        if (batch && prepared && !accepted) {
+            QMutexLocker leaseLock(&batch->leaseMutex);
+            QMutexLocker lock(&d->mutex);
+            batch->failed = true;
+        }
         if (ownsTransaction) abortOwnedTransaction(transaction);
     });
-    auto native = pageStore->beginMutation(transaction, &transactionError);
-    if (!native.reserveLegacyMutationPage(key, &transactionError)) {
-        native.cancel();
+    KisPageMutationSession native;
+    if (!mutation) {
+        transaction = writableTransaction(&ownsTransaction, &transactionError);
+        if (!transaction.isValid()) return {};
+        native = pageStore->beginMutation(transaction, &transactionError);
+        mutation = &native;
+    }
+    if (access == Access::Write && !mutation->reserveLegacyMutationPage(key, &transactionError)) {
+        if (batch) qWarning() << "PageStore CPU mutation acquisition failed:" << transactionError;
         return {};
     }
-    auto guard = native.beginWrite(key, &transactionError);
+    auto guard = mutation->beginWrite(key, &transactionError);
+    prepared = guard.isValid();
+    if (!guard.isValid()) {
+        if (batch && access == Access::Write)
+            qWarning() << "PageStore CPU mutation acquisition failed:" << transactionError;
+        return {};
+    }
+    if (access == Access::ReadCache &&
+        !provider->readCacheMatchesVersion(readCache->get(), guard.version())) return {};
     KisTileData *tile = guard.isValid() ? provider->tileDataForCpuWriteGuard(guard) : nullptr;
-    if (!tile) {
-        guard = {};
-        native.cancel();
-        return {};
-    }
+    if (!tile) return {};
     TileLease futureRead;
     if (readCache) {
         TileLease reuse;
         if (*readCache && !(*readCache)->readPinned()) reuse = std::move(*readCache);
         futureRead = provider->prepareTileReadCache(guard, std::move(reuse));
-        if (!futureRead) {
-            guard = {};
-            native.cancel();
-            return {};
-        }
+        if (!futureRead) return {};
     }
-    auto lease = std::make_unique<KisTiledDataManagerPageStoreLease>(
-        this, tile, transaction, ownsTransaction,
-        std::move(native), std::move(guard), std::move(futureRead));
+    auto lease = batch
+        ? std::make_unique<KisTiledDataManagerPageStoreLease>(
+            this, tile, std::move(guard), batch, std::move(futureRead))
+        : std::make_unique<KisTiledDataManagerPageStoreLease>(
+            this, tile, transaction, ownsTransaction,
+            std::move(native), std::move(guard), std::move(futureRead));
+    accepted = true;
     ownsTransaction = false;
     return lease;
 }
@@ -2021,7 +2032,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                 if (changed) changed->append(key.page);
                 continue;
             }
-            auto lease = acquireTile(key.page.column, key.page.row, true, false);
+            auto lease = acquireTile(key.page.column, key.page.row, Access::Write, false);
             if (!lease || !lease->writable() || !lease->tileData()) return false;
             auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const int x = affected.left() - pageRect.left(), y = affected.top() - pageRect.top();
@@ -2485,7 +2496,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 if (changed) changed->append(to.page);
                 continue;
             }
-            auto lease = acquireTile(to.page.column, to.page.row, true, false);
+            auto lease = acquireTile(to.page.column, to.page.row, Access::Write, false);
             if (!lease || !lease->writable() || !lease->tileData()) return false;
             auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const qsizetype offset = (qsizetype(affected.top() - pageRect.top()) * KisTileData::WIDTH +
@@ -2636,7 +2647,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
             if (!batch->replaceFullTile(change.page.column, change.page.row, nullptr, true, error)) return false;
             continue;
         }
-        auto lease = acquireTile(change.page.column, change.page.row, true, false);
+        auto lease = acquireTile(change.page.column, change.page.row, Access::Write, false);
         if (!lease || !lease->writable() || !lease->tileData()) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page acquisition failed"));
             return false;

@@ -11912,8 +11912,8 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesOverlappingAnonymousLeases
     QString error;
     QVERIFY2(backend.configure(1, &initialDefault, &error), qPrintable(error));
 
-    std::unique_ptr<KisTilePageStoreLease> first = backend.acquireTile(0, 0, true, false);
-    std::unique_ptr<KisTilePageStoreLease> second = backend.acquireTile(1, 0, true, false);
+    std::unique_ptr<KisTilePageStoreLease> first = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
+    std::unique_ptr<KisTilePageStoreLease> second = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::Write, false);
     QVERIFY(first && first->tileData() && first->writable());
     QVERIFY(second && second->tileData() && second->writable());
     first->markDirty();
@@ -11926,8 +11926,8 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesOverlappingAnonymousLeases
     QVERIFY(second->finish());
     QCOMPARE(backend.store()->captureCommittedEpoch().manifest.size(), 2);
 
-    std::unique_ptr<KisTilePageStoreLease> firstRead = backend.acquireTile(0, 0, false, false);
-    std::unique_ptr<KisTilePageStoreLease> secondRead = backend.acquireTile(1, 0, false, false);
+    std::unique_ptr<KisTilePageStoreLease> firstRead = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false);
+    std::unique_ptr<KisTilePageStoreLease> secondRead = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::ReadSelection, false);
     QVERIFY(firstRead && secondRead);
     QCOMPARE(firstRead->tileData()->data()[0], quint8(0x31));
     QCOMPARE(secondRead->tileData()->data()[0], quint8(0x42));
@@ -11936,8 +11936,8 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesOverlappingAnonymousLeases
     QVERIFY(backend.store()->waitForRetirementIdle());
     QVERIFY(!backend.store()->sessionStats().hasOutstandingCapabilities());
 
-    std::unique_ptr<KisTilePageStoreLease> dirty = backend.acquireTile(2, 0, true, false);
-    std::unique_ptr<KisTilePageStoreLease> clean = backend.acquireTile(3, 0, true, false);
+    std::unique_ptr<KisTilePageStoreLease> dirty = backend.acquireTile(2, 0, KisTilePageStoreBridge::Access::Write, false);
+    std::unique_ptr<KisTilePageStoreLease> clean = backend.acquireTile(3, 0, KisTilePageStoreBridge::Access::Write, false);
     QVERIFY(dirty && clean);
     dirty->markDirty();
     dirty->tileData()->data()[0] = 0x53;
@@ -12005,7 +12005,7 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesConcurrentProductWrites()
                 std::unique_ptr<KisTilePageStoreLease> lease =
                     backend.acquireTile(iteration % writesPerWorker,
                                         (iteration / writesPerWorker) % workerCount,
-                                        false,
+                                        KisTilePageStoreBridge::Access::ReadSelection,
                                         false);
                 if (!lease || !lease->tileData() || !lease->finish()) {
                     recordFailure(QStringLiteral("reader %1 iteration %2: %3")

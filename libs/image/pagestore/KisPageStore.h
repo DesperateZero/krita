@@ -229,6 +229,8 @@ private:
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,
                            QString *error);
     bool reserveLegacyMutationPage(const KisPageKey &key, QString *error);
+    // Original parked target only; never selects current or prepares a page.
+    KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
     KisCpuWriteGuard
     beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error,
                    const std::shared_ptr<KisPageMutationExecution::Private> &execution = {},

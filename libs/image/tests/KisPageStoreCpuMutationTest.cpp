@@ -4362,7 +4362,7 @@ void KisPageStoreCpuMutationTest::compatibilityFinalUnlockCanTransferThreads()
     KisTiledDataManagerPageStoreBackend backend;
     const quint8 defaultPixel = 0x2a;
     QVERIFY(backend.configure(1, &defaultPixel));
-    auto lease = backend.acquireTile(0, 0, true, false);
+    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false);
     QVERIFY(lease);
     lease->tileData()->data()[0] = 0x55;
     lease->markDirty();
@@ -4376,7 +4376,7 @@ void KisPageStoreCpuMutationTest::compatibilityFinalUnlockCanTransferThreads()
     QVERIFY(finished);
     QCOMPARE(backend.store()->sessionStats().activeTransactions, qsizetype(0));
     QCOMPARE(backend.store()->sessionStats().writeRequestsCreated, quint64(0));
-    auto read = backend.acquireTile(0, 0, false, false);
+    auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false);
     QVERIFY(read); QCOMPARE(read->tileData()->data()[0], quint8(0x55));
     QVERIFY(read->finish()); read.reset();
     QVERIFY(backend.store()->closeSession());
@@ -8682,7 +8682,7 @@ void KisPageStoreCpuMutationTest::abandonedCompatibilityBatch()
     const quint8 defaultPixel = 0x2a;
     QVERIFY(backend.configure(1, &defaultPixel));
     auto batch = backend.beginMutationBatch(); QVERIFY(batch);
-    auto lease = backend.acquireTile(0, 0, true, false); QVERIFY(lease);
+    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(lease);
     lease->tileData()->data()[0] = 0x55;
     lease->markDirty();
     batch.reset(); // the lease keeps deferred cancellation alive
@@ -8690,13 +8690,13 @@ void KisPageStoreCpuMutationTest::abandonedCompatibilityBatch()
     QVERIFY(lease->finish()); lease.reset();
     QCOMPARE(backend.store()->mutationStatistics().pagesCancelled, quint64(1));
     QCOMPARE(backend.store()->sessionStats().activeTransactions, qsizetype(0));
-    auto read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+    auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], defaultPixel); QVERIFY(read->finish()); read.reset();
     batch = backend.beginMutationBatch(); QVERIFY(batch);
-    lease = backend.acquireTile(0, 0, true, false); QVERIFY(lease);
+    lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(lease);
     lease->tileData()->data()[0] = 0x6a; lease->markDirty(); QVERIFY(lease->finish()); lease.reset();
     QVERIFY(batch->finish()); batch.reset();
-    read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+    read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(0x6a)); QVERIFY(read->finish()); read.reset();
     QVERIFY(backend.store()->closeSession());
 }
@@ -8707,7 +8707,7 @@ void KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter()
     QVERIFY(backend.configure(1, &blank));
     QVERIFY(backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x31))));
     auto outer = backend.beginMutationBatch(); QVERIFY(outer);
-    auto lease = backend.acquireTile(0, 0, true, false); QVERIFY(lease);
+    auto lease = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(lease);
     lease->tileData()->data()[0] = 0x71; lease->markDirty(); QVERIFY(lease->finish()); lease.reset();
     QString error;
     QVERIFY(!backend.beginMutationBatch(&error)); QVERIFY(!error.isEmpty());
@@ -8716,7 +8716,7 @@ void KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter()
     // transaction or consume its client count and writer reservations.
     QCOMPARE(backend.store()->sessionStats().activeTransactions, qsizetype(1));
     QVERIFY2(outer->finish(&error), qPrintable(error)); outer.reset();
-    auto read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+    auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(0x71));
     QVERIFY(read->finish()); read.reset(); QVERIFY(backend.store()->closeSession());
 }
@@ -8730,9 +8730,9 @@ void KisPageStoreCpuMutationTest::concurrentBatchAbandonment()
     for (int round = 0; round < 128; ++round) {
         const quint8 next = quint8(0x41 + round % 128);
         auto batch = backend.beginMutationBatch(); QVERIFY2(batch, qPrintable(QString::number(round)));
-        auto first = backend.acquireTile(0, 0, true, false); QVERIFY(first);
+        auto first = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(first);
         first->tileData()->data()[0] = next; first->markDirty(); QVERIFY(first->finish()); first.reset();
-        auto last = backend.acquireTile(1, 0, true, false); QVERIFY(last);
+        auto last = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(last);
         last->tileData()->data()[0] = next; last->markDirty();
         QSemaphore start;
         bool released = false;
@@ -8785,9 +8785,9 @@ void KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished()
     }
     const auto stats = backend.store()->mutationStatistics();
     auto batch = backend.beginMutationBatch(); QVERIFY(batch);
-    auto first = backend.acquireTile(0, 0, true, false); QVERIFY(first);
+    auto first = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(first);
     first->tileData()->data()[0] = 0x71; first->markDirty();
-    auto second = backend.acquireTile(1, 0, true, false); QVERIFY(second);
+    auto second = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::Write, false); QVERIFY(second);
     second->tileData()->data()[0] = 0x72; second->markDirty();
     QVERIFY(!batch->cancel()); // still borrowed pointers
     QCOMPARE(first->tileData()->data()[0], quint8(0x71));
@@ -8797,14 +8797,14 @@ void KisPageStoreCpuMutationTest::failedProductionBatchCancelsUnpublished()
     QCOMPARE(after.activeCpuWritePages, qsizetype(0));
     QCOMPARE(after.activeControlWritePages, qsizetype(0));
     QCOMPARE(backend.store()->mutationStatistics().pagesCancelled - stats.pagesCancelled, quint64(2));
-    auto read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+    auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(history ? 0x41 : 0x31));
     QVERIFY(read->finish()); read.reset();
-    read = backend.acquireTile(1, 0, false, false); QVERIFY(read);
+    read = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], blank); QVERIFY(read->finish()); read.reset();
     if (history) {
         QVERIFY(backend.commitHistory(&blank, 1)); QVERIFY(backend.rollback(memento));
-        read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+        read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
         QCOMPARE(read->tileData()->data()[0], quint8(0x31)); QVERIFY(read->finish()); read.reset();
         QVERIFY(backend.rollforward(memento)); QVERIFY(backend.purgeHistory(memento, &blank, 1));
     }
@@ -8822,7 +8822,7 @@ void KisPageStoreCpuMutationTest::invalidAliasCancelsSemanticBatch()
         memento = backend.beginHistory(&blank, 1); QVERIFY(memento);
         QVERIFY(backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x41))));
     }
-    auto source = backend.acquireTile(0, 0, false, false); QVERIFY(source);
+    auto source = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(source);
     const auto stats = backend.store()->mutationStatistics();
     auto batch = backend.beginMutationBatch(); QVERIFY(batch);
     QVERIFY(batch->replaceFullTile(0, 0, nullptr, true));
@@ -8834,12 +8834,12 @@ void KisPageStoreCpuMutationTest::invalidAliasCancelsSemanticBatch()
     batch.reset();
     QCOMPARE(backend.store()->mutationStatistics().removalsCancelled - stats.removalsCancelled, quint64(1));
     QCOMPARE(backend.store()->sessionStats().activeCpuWritePages, qsizetype(0));
-    auto read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+    auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(history ? 0x41 : 0x31));
     QVERIFY(read->finish()); read.reset();
     if (history) {
         QVERIFY(backend.commitHistory(&blank, 1)); QVERIFY(backend.rollback(memento));
-        read = backend.acquireTile(0, 0, false, false); QVERIFY(read);
+        read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection, false); QVERIFY(read);
         QCOMPARE(read->tileData()->data()[0], quint8(0x31)); QVERIFY(read->finish()); read.reset();
         QVERIFY(backend.rollforward(memento)); QVERIFY(backend.purgeHistory(memento, &blank, 1));
     }
