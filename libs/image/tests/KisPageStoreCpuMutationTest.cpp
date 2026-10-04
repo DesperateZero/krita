@@ -776,6 +776,7 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("bpp%1-failure%2").arg(bpp).arg(failure))) << bpp << failure;
     }
     void aliasBatchFailure();
+    void aliasProviderPreparationStorageFailureIsRecoverable();
     void immutableAliasSource_data() { pixelRows(); }
     void immutableAliasSource();
     void mixedSemanticAtomicity_data();
@@ -8983,6 +8984,50 @@ void KisPageStoreCpuMutationTest::aliasBatchFailure()
     }
     QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
     old = {}; current = {}; source.reset(); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::aliasProviderPreparationStorageFailureIsRecoverable()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    KisSurfaceEpochState surface;
+    QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    const QByteArray pixel(f.bpp, char(0x61));
+    auto *tile = KisTileDataStore::instance()->createDefaultTileData(
+        f.bpp, reinterpret_cast<const quint8 *>(pixel.constData()));
+    QVERIFY(tile); tile->acquire();
+    const auto release = qScopeGuard([&] { tile->release(); });
+    auto source = f.provider->p->captureCompletedTileSource(
+        surface.allocationDescriptor(), tile, &f.error);
+    QVERIFY2(source, qPrintable(f.error));
+
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx);
+    QVERIFY(mutation.aliasPage(key(), source, &f.error));
+    bool injected = false;
+    bool threw = false;
+    bool sealed = true;
+    f.provider->beforeAdopt = [&] { injected = true; throw std::bad_alloc(); };
+    try {
+        sealed = mutation.seal(&f.error);
+    } catch (const std::bad_alloc &) {
+        threw = true;
+    }
+    f.provider->beforeAdopt = {};
+
+    QVERIFY(injected);
+    QVERIFY(!threw);
+    QVERIFY(!sealed);
+    QVERIFY(mutation.isActive());
+    QCOMPARE(f.store->sessionStats().activeProviderCalls, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(1));
+    QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(1));
+    QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x31)));
+
+    QVERIFY2(mutation.seal(&f.error), qPrintable(f.error));
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x61)));
+    source.reset();
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::aliasMutation_data()

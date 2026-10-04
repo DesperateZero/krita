@@ -1178,12 +1178,19 @@ public:
             lock.unlock();
             const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
             KisPageStoreDiagnosticTimer phase(diagnosticOwner, KisPageStoreDiagnosticPhase::MutationAliasPrepare, 1);
-            allocation = producer->prepareSynchronousSource(adoption.operation,
-                                                            source,
-                                                            adoption.version,
-                                                            descriptor,
-                                                            KisReplicaSourceUse::ImmutableAlias,
-                                                            KisPagePriority::Interactive);
+            try {
+                allocation = producer->prepareSynchronousSource(adoption.operation,
+                                                                source,
+                                                                adoption.version,
+                                                                descriptor,
+                                                                KisReplicaSourceUse::ImmutableAlias,
+                                                                KisPagePriority::Interactive);
+            } catch (const std::bad_alloc &) {
+                if (storageRefused) *storageRefused = true;
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("alias provider preparation storage was refused"));
+                return false;
+            }
         }
         const bool reusesPendingSlot = page &&
             allocation.replica.physicalSlotIdentity() == page->target.physicalSlotIdentity();
