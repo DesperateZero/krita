@@ -2118,8 +2118,12 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             }
             ++owner->activeProviderCalls;
             lock.unlock();
+            const auto providerPreparation = qScopeGuard([&] {
+                if (!lock.isLocked()) lock.relock();
+                --owner->activeProviderCalls;
+            });
             KisReplicaOperation allocation;
-            {
+            try {
                 KisPageStoreDiagnosticTimer prepare(d->diagnosticOwner,
                                                     KisPageStoreDiagnosticPhase::WriteProviderPrepare,
                                                     1);
@@ -2127,6 +2131,9 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                     acquire, descriptor,
                     {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
                     KisPagePriority::Interactive, payload, initialization);
+            } catch (const std::bad_alloc &) {
+                fail(QStringLiteral("CPU mutation provider preparation storage is unavailable"));
+                return result;
             }
             const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, target, *d->provider, source);
             const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
@@ -2136,7 +2143,6 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
             data = d->pinWritable(writable, counters);
             lock.relock();
-            --owner->activeProviderCalls;
             auto rejectAllocation = [&] {
                 ++owner->activeProviderCalls;
                 lock.unlock();

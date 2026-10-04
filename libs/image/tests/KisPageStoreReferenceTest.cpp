@@ -852,8 +852,10 @@ public:
     std::function<void()> nativeCopyProbe;
     bool failNextRetire = false;
     bool throwNextRequestStorageFailure = false;
+    bool throwNextPrepareStorageFailure = false;
     mutable bool throwNextValidateStorageFailure = false;
     bool enableNativeCopy = false;
+    bool enableNativeMutation = false;
     bool corruptNextNativeOperation = false;
     bool pendNextNativeResult = false;
 
@@ -874,6 +876,10 @@ public:
         auto result = m_delegate->capabilities();
         if (enableNativeCopy)
             result.synchronousWriteCopy = true;
+        if (enableNativeMutation) {
+            result.synchronousWriteCopy = true;
+            result.nativeCpuMutation = true;
+        }
         return result;
     }
     KisReplicaOperation requestReplica(KisPageOperationId operation,
@@ -894,6 +900,8 @@ public:
                                      KisPageWriteMode mode,
                                      KisPagePriority priority) override
     {
+        if (std::exchange(throwNextPrepareStorageFailure, false))
+            throw std::bad_alloc();
         if (prepareProbe)
             prepareProbe();
         return m_delegate->prepareWrite(operation, version, descriptor, domain, mode, priority);
@@ -940,6 +948,11 @@ public:
     KisReplicaMemoryUsage memoryUsage() const override
     {
         return m_delegate->memoryUsage();
+    }
+    std::shared_ptr<KisCpuResidentBinding> cpuResidentBinding(
+        const KisReplicaHandle &replica, KisCpuResidentReadStatus *status = nullptr) const override
+    {
+        return m_delegate->cpuResidentBinding(replica, status);
     }
     KisReplicaOperation prepareSynchronousWriteCopy(KisPageOperationId operation,
                                                     const KisReplicaHandle &source,
@@ -10282,6 +10295,7 @@ void KisPageStoreReferenceTest::pageStoreCallsProviderOutsideGlobalLock()
     QString error;
     QVERIFY2(delegate->configure(providerConfig, completions, &error), qPrintable(error));
     auto provider = std::make_shared<ReentrantProbeCpuProvider>(delegate);
+    provider->enableNativeMutation = true;
 
     KisPageAllocationDescriptor descriptor = allocationDescriptor();
     descriptor.initialization = KisPageInitialization::DefaultPixel;
@@ -10301,12 +10315,38 @@ void KisPageStoreReferenceTest::pageStoreCallsProviderOutsideGlobalLock()
     initial.extentRevision = 1;
     initial.propertyRevision = 1;
     initial.manifest = {initialVersion};
+    initial.surfaces = {surfaceEpochState(initialVersion.key.surface)};
 
     KisPageStore store;
     QVERIFY2(store.configure(initial, completions, 4, &error), qPrintable(error));
     QVERIFY(store.registerReplicaProvider(provider));
     QVERIFY2(store.adoptInitialPage(initialVersion, descriptor, initialAllocation.replica, &error), qPrintable(error));
     QVERIFY2(store.finalizeInitialization(&error), qPrintable(error));
+
+    const KisPageKey refusedMutationKey = pageKey(44, 1);
+    const KisPageTransaction refusedMutationTransaction = store.beginTransaction(initial.epoch);
+    QVERIFY(refusedMutationTransaction.isValid());
+    {
+        KisPageMutationSession refusedMutation = store.beginMutation(refusedMutationTransaction, &error);
+        QVERIFY2(refusedMutation.isActive(), qPrintable(error));
+        provider->throwNextPrepareStorageFailure = true;
+        bool mutationPrepareThrew = false;
+        KisCpuWriteGuard refusedGuard;
+        try {
+            refusedGuard = refusedMutation.beginWrite(refusedMutationKey,
+                                                       KisPageWriteMode::DiscardContents,
+                                                       &error);
+        } catch (const std::bad_alloc &) {
+            mutationPrepareThrew = true;
+        }
+        QVERIFY(!mutationPrepareThrew);
+        QVERIFY(!refusedGuard.isValid());
+        QVERIFY2(error.contains(QStringLiteral("provider preparation storage")), qPrintable(error));
+        QCOMPARE(store.sessionStats().activeProviderCalls, qsizetype(0));
+        QVERIFY(refusedMutation.cancel());
+    }
+    QVERIFY(store.abort(refusedMutationTransaction));
+    provider->enableNativeMutation = false;
 
     int prepareCalls = 0;
     int transferCalls = 0;
