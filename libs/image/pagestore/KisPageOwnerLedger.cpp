@@ -2136,6 +2136,7 @@ bool KisPageOwnerLedger::validatePreparedPage(
     const KisPreparedPageProof &proof,
     const KisPageAllocationDescriptor &descriptor,
     QString *error) const
+try
 {
     if (!proof.isValid() || !descriptor.isValid() ||
         !proof.authority.layout.matches(descriptor)) {
@@ -2178,6 +2179,11 @@ bool KisPageOwnerLedger::validatePreparedPage(
     }
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof validation storage was refused"));
+    return false;
 }
 
 bool KisPageOwnerLedger::revokePreparedPage(const KisPreparedPageProof &proof)

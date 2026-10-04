@@ -1028,6 +1028,7 @@ private Q_SLOTS:
     void mutablePreparationDoesNotAliasSource_data();
     void mutablePreparationDoesNotAliasSource();
     void failedCommitPreparationReleasesClaim();
+    void commitProviderValidationStorageFailureIsRecoverable();
     void restoreProtectsSourceAndRevalidatesLease();
     void restoreRejectsNewTransaction();
     void restoreRejectsChangedHead();
@@ -4087,6 +4088,39 @@ void KisPageStoreCpuMutationTest::failedCommitPreparationReleasesClaim()
     f.provider->validationsUntilFailure = -1;
     auto retryMutation = f.begin(tx); QVERIFY(retryMutation.isActive()); QVERIFY(retryMutation.cancel());
     QVERIFY(f.store->abort(tx)); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::commitProviderValidationStorageFailureIsRecoverable()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx); auto write = mutation.beginWrite(key());
+    QVERIFY(write.isValid()); static_cast<quint8 *>(write.data())[0] = 0x72;
+    write = {}; QVERIFY(mutation.seal());
+    const auto prepared = f.store->preparedPages(tx);
+
+    bool injected = false;
+    bool threw = false;
+    KisImageEpochCommitTicket refused;
+    f.provider->beforeValidate = [&] { injected = true; throw std::bad_alloc(); };
+    try {
+        refused = f.store->commit(tx, prepared);
+    } catch (const std::bad_alloc &) {
+        threw = true;
+    }
+    f.provider->beforeValidate = {};
+
+    QVERIFY(injected);
+    QVERIFY(!threw);
+    QVERIFY(!refused.isValid());
+    QCOMPARE(f.store->publicationStatistics().activeCommitPreparations, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(1));
+    QCOMPARE(f.store->sessionStats().sealedPreparedProofs, qsizetype(1));
+    QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x31)));
+
+    QVERIFY(f.store->commit(tx, prepared).isValid());
+    QCOMPARE(quint8(f.pixel()[0]), quint8(0x72));
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::restoreProtectsSourceAndRevalidatesLease()
