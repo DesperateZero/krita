@@ -1268,6 +1268,7 @@ private Q_SLOTS:
     void mutationActivityAdmissionPreservesExisting();
     void freshWriteSelectorAndBackingBudgetAreBounded();
     void backingBatchMatchesFlatPhysicalAccounting();
+    void backingClaimsPreserveSelectedAliases();
     void preparedMutationPreservesLateProtection_data()
     {
         QTest::addColumn<int>("protection");
@@ -8151,6 +8152,85 @@ void KisPageStoreReferenceTest::mutationActivityAdmissionPreservesExisting()
     QVERIFY(coordinator.beginSessionActivity({5}, lock, &error));
     coordinator.endSessionActivity({5});
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, quint64(0));
+}
+
+void KisPageStoreReferenceTest::backingClaimsPreserveSelectedAliases()
+{
+    using Class = KisBackingBudgetClass;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger owner;
+    owner.attachBackingBudget(budget);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {1}; config.providerEpoch = {1}; config.budgetBytes = 64 * 1024 * 1024;
+    QString error;
+    QVERIFY(owner.configure(completions, &error));
+    QVERIFY(provider->configure(config, completions, &error));
+    QVERIFY(owner.registerProvider(provider, &error));
+    std::array<KisReplicaHandle, 24> handles;
+    const auto registerCurrent = [&](const KisReplicaHandle &handle) {
+        KisBackingBudgetDelta initial;
+        initial.buckets[size_t(Class::Current)].cpuRam = handle.layout.byteSize;
+        auto reservation = budget.reserve(initial, &error);
+        return reservation.isValid() && owner.registerBacking(handle, reservation, Class::Current, &error);
+    };
+    for (size_t i = 0; i < handles.size(); ++i) {
+        handles[i] = replica(pageVersion(qint32(i), 1), 1, 1, i / 2 + 1, i % 2 + 1);
+        QVERIFY2(registerCurrent(handles[i]), qPrintable(error));
+    }
+    std::vector<KisBackingClassChangeReservation> claims;
+    for (size_t group = 0; group < handles.size() / 2; ++group) {
+        claims.push_back(owner.prepareBackingChanges(
+            {{handles[group * 2], Class::Current, Class::RetainedHistory}}, {}, &error));
+        QVERIFY2(claims.back().isValid(), qPrintable(error));
+    }
+    // All physical groups are claimed concurrently, across slot growth. The
+    // selected identity rejects even a no-op; its unselected alias may no-op
+    // but cannot change class or add another alias to that physical backing.
+    for (size_t group = 0; group < claims.size(); ++group) {
+        const auto &selected = handles[group * 2];
+        const auto &alias = handles[group * 2 + 1];
+        QVERIFY(!owner.reclassifyBacking(selected, Class::Current, &error));
+        QVERIFY(owner.reclassifyBacking(alias, Class::Current, &error));
+        QVERIFY(!owner.reclassifyBacking(alias, Class::RetainedHistory, &error));
+        QVERIFY(!owner.prepareBackingChanges(
+            {{alias, Class::Current, Class::RetainedHistory}}, {}, &error).isValid());
+        auto newAlias = replica(pageVersion(qint32(100 + group), 1), 1, 1, group + 1, 3);
+        QVERIFY(!registerCurrent(newAlias));
+        QCOMPARE(owner.backingClass(selected), Class::Current);
+        QCOMPARE(owner.backingClass(alias), Class::Current);
+    }
+    for (size_t group = 0; group < claims.size(); group += 2) claims[group].release();
+    for (size_t group = 0; group < claims.size(); ++group) {
+        QCOMPARE(owner.reclassifyBacking(handles[group * 2], Class::Current, &error), group % 2 == 0);
+        QVERIFY(owner.reclassifyBacking(handles[group * 2 + 1], Class::Current, &error));
+    }
+    // Reusing a cancelled slot must not uncover any other live claim.
+    for (size_t group = 0; group < claims.size(); group += 2) {
+        claims[group] = owner.prepareBackingChanges(
+            {{handles[group * 2], Class::Current, Class::RetainedHistory}}, {}, &error);
+        QVERIFY2(claims[group].isValid(), qPrintable(error));
+    }
+    for (auto &claim : claims) owner.commitBackingChanges(std::move(claim));
+    QVector<KisBackingClassChange> retirement;
+    for (size_t i = 0; i < handles.size(); ++i) {
+        const auto expected = i % 2 ? Class::Current : Class::RetainedHistory;
+        QCOMPARE(owner.backingClass(handles[i]), expected);
+        QVERIFY(owner.reclassifyBacking(handles[i], expected, &error));
+        retirement.push_back({handles[i], expected, Class::RetirementDebt});
+    }
+    QCOMPARE(budget.usage().buckets[size_t(Class::Current)].live.cpuRam, quint64(12 * 4096));
+    auto terminal = owner.prepareBackingChanges(retirement, {}, &error);
+    QVERIFY2(terminal.isValid(), qPrintable(error));
+    owner.commitBackingChanges(std::move(terminal));
+    for (const auto &handle : handles) owner.releaseRetiredBacking(handle);
+    for (const auto &bucket : budget.usage().buckets) {
+        QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+    }
+    for (Class c : {Class::Current, Class::RetainedHistory, Class::RetirementDebt})
+        QCOMPARE(budget.usage().buckets[size_t(c)].live.cpuRam, quint64(0));
 }
 
 void KisPageStoreReferenceTest::backingBatchMatchesFlatPhysicalAccounting()
