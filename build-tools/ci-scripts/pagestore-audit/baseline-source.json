@@ -1596,7 +1596,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.cpp": {
-      "container_declarations": 36,
+      "container_declarations": 35,
       "include_edges": [
         "KisCpuResidentBinding_p.h",
         "KisDeferredMetadataCleanup_p.h",
@@ -1616,12 +1616,11 @@
         "map",
         "memory",
         "tuple",
-        "unordered_map",
         "unordered_set",
         "utility",
         "vector"
       ],
-      "lines": 4065,
+      "lines": 4071,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1652,10 +1651,9 @@
         "ReleasedBlocks",
         "ReservationSet",
         "ShardArenaGrowth",
-        "ShardRecordStore",
-        "VersionHash"
+        "ShardRecordStore"
       ],
-      "sha256": "da78b04268ac22bf7e6a2492e5609030f374d01233b902cf6cb28c1ebcf04095",
+      "sha256": "d5ef647787c3347e1b4528de8e64970327ce3ae0ab0244a4a04292d747bff1fe",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -3684,7 +3682,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 100,
+      "container_declarations": 102,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -3740,7 +3738,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12445,
+      "lines": 12510,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3805,7 +3803,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "f40a5e294bacfdd5a6d21ed0ba601a61d0f4da44b2a877e0a041fd9637193df7",
+      "sha256": "e4e5ac42cdabba4dc9a114df67e321ba0a91e24ec86539ebac08b84d4829a3a4",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6558,5 +6556,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "58b4dfc09c3048d2f344ccb35a3d92d80adc390f"
+  "working_tree_head": "feff9031b1e356c7967e1b5066ec6896549dc491"
 }

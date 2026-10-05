@@ -25,7 +25,6 @@
 #include <map>
 #include <tuple>
 #include <utility>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -1961,13 +1960,9 @@ public:
     // The same paid values serve the transition and installation, without a
     // second Qt-to-install copy or independent representation of protection.
     using Version = KisPageWorkingVersion;
-    struct VersionHash {
-        size_t operator()(const KisPageVersion &version) const noexcept { return qHash(version); }
-    };
-
     explicit Data(Storage allocator)
         : storage(allocator), entries(allocator), publications(allocator), arenaGrowth(allocator)
-        , backingAuthorities(0, VersionHash{}, std::equal_to<KisPageVersion>{}, allocator) {}
+        , backingAuthorities(allocator) {}
     ~Data();
     void invoke() override;
     void dispose() noexcept override { DataDeleter{}(this); }
@@ -2027,8 +2022,10 @@ public:
     // Detachment retains the same claims and terminal policy in entries.
     Array<Publication> publications;
     Array<ShardArenaGrowth> arenaGrowth;
-    std::unordered_map<KisPageVersion, KisReplicaHandle, VersionHash, std::equal_to<KisPageVersion>,
-        KisMutationStorageAllocator<std::pair<const KisPageVersion, KisReplicaHandle>>> backingAuthorities;
+    // Page keys and projected versions are already unique. This candidate is
+    // immutable before any authority lookup; one sorted paid array avoids
+    // buckets and one charged allocation for every copied version identity.
+    Array<std::pair<KisPageVersion, KisReplicaHandle>> backingAuthorities;
 };
 
 void KisPageMetadataCoordinator::PreparedPublication::DataDeleter::operator()(Data *value) const noexcept
@@ -2080,11 +2077,14 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
     const KisPageVersion &version) const
 {
     if (!data) return {};
-    const auto found = data->backingAuthorities.find(version);
-    if (found != data->backingAuthorities.end()) return found->second;
+    const auto found = std::lower_bound(data->backingAuthorities.cbegin(),
+        data->backingAuthorities.cend(), version, [](const auto &entry, const KisPageVersion &key) {
+            return MetadataKeyLess{}(entry.first, key);
+        });
+    if (found != data->backingAuthorities.cend() && found->first == version) return found->second;
     // Recoverable candidates already retain the exact base and target values
     // that will be installed. Their authority is derived from those values,
-    // without another paid hash copy. Unrelated authorities remain indexed.
+    // without another paid copy. Unrelated authorities remain indexed.
     if (data->kind == PreparationKind::RecoverableWrite) {
         for (const auto &publication : data->publications)
             for (const auto &record : publication.installRecords)
@@ -2442,11 +2442,15 @@ try {
                 return result;
             }
         }
-        for (const auto &version : std::as_const(step.next.versions)) {
-            if (version.authority.isValid() && (!recoverable
-                || (!(version.version == transition.baseVersion) && !(version.version == transition.version))))
-                data->backingAuthorities.insert_or_assign(version.version, version.authority);
-        }
+        const auto copiedAuthority = [&](const auto &version) {
+            return version.authority.isValid() && (!recoverable
+                || (!(version.version == transition.baseVersion) && !(version.version == transition.version)));
+        };
+        if (data->backingAuthorities.empty())
+            data->backingAuthorities.reserve(size_t(std::count_if(step.next.versions.cbegin(),
+                step.next.versions.cend(), copiedAuthority)));
+        for (const auto &version : std::as_const(step.next.versions))
+            if (copiedAuthority(version)) data->backingAuthorities.emplace_back(version.version, version.authority);
         if (recoverable) {
             // Strict revision revalidation covers every replica/reader fact
             // used here. Install only this exact base and the new target, in
@@ -2598,6 +2602,8 @@ try {
         }
         entry.activityReservation = true;
     }
+    std::sort(data->backingAuthorities.begin(), data->backingAuthorities.end(),
+        [](const auto &a, const auto &b) { return MetadataKeyLess{}(a.first, b.first); });
     result.data = std::move(data);
     for (const auto &entry : result.data->entries) {
         QMutexLocker locker(&entry.shardOwner->mutex);

@@ -1152,6 +1152,7 @@ private Q_SLOTS:
     void capturedReadViewBenchmark();
     void capturedReadViewIsCoherentDuringConcurrentCommits();
     void preparedMetadataPublicationIsBoundAndOneShot();
+    void publicationAuthoritySnapshotMatchesVersionIdentity();
     void preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges();
     void metadataInstallationPrecedesRootAndRejectsAtomically();
     void preparedEpochCandidateIsInvisibleAndSingleUse_data()
@@ -2030,6 +2031,70 @@ void KisPageStoreReferenceTest::currentTransactionPinsBaseWithoutManifestExport(
     QVERIFY(store.abort(latest));
     QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::ManifestExport)].intervals, quint64(0));
     QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::TransactionBegin)].intervals, quint64(4));
+}
+
+void KisPageStoreReferenceTest::publicationAuthoritySnapshotMatchesVersionIdentity()
+{
+    KisPageMetadataCoordinator coordinator;
+    QVERIFY(coordinator.configure(8));
+    const KisPageTransaction transaction{{71}, {1}};
+    QVector<KisPageTransition> transitions;
+    std::vector<std::pair<KisPageVersion, KisReplicaHandle>> expected;
+    for (int i = 0; i < 32; ++i) {
+        auto current = pageVersion(i - 16, 1, i % 3 - 1);
+        current.key.surface = {quint64(i % 4 + 1)};
+        auto target = current;
+        target.generation = {2};
+        const auto before = replica(current, 1, 1, quint64(i * 2 + 1));
+        const auto after = replica(target, 1, 1, quint64(i * 2 + 2));
+        auto page = initialPageState(current, before);
+        page.versions.append({target, KisPagePublicationState::Prepared,
+                              {{after, KisReplicaValidity::Valid, {}, {}, 0, {}}}, after, transaction.id});
+        page.nextGeneration = {3};
+        QVERIFY(coordinator.registerPage(page));
+        expected.emplace_back(current, before);
+        expected.emplace_back(target, after);
+        KisPageTransition transition;
+        transition.kind = KisPageTransitionKind::CommitTransaction;
+        transition.transaction = transaction.id;
+        transition.version = target;
+        transition.imageEpoch = {2};
+        transitions.append(transition);
+    }
+    std::mt19937 random(7123);
+    std::shuffle(transitions.begin(), transitions.end(), random);
+    auto prepared = coordinator.preparePublication(transaction, {2}, transitions);
+    QVERIFY(prepared.isValid());
+    QCOMPARE(coordinator.footprint().pageActivities, quint64(32));
+    for (const auto &entry : expected) {
+        QCOMPARE(prepared.backingAuthority(entry.first), entry.second);
+        auto absent = entry.first;
+        absent.defaultPixelRevision = 1;
+        QVERIFY(!prepared.backingAuthority(absent).isValid());
+        absent = entry.first;
+        absent.generation = {3};
+        QVERIFY(!prepared.backingAuthority(absent).isValid());
+        absent = entry.first;
+        absent.key.surface = {5};
+        QVERIFY(!prepared.backingAuthority(absent).isValid());
+    }
+    QVERIFY(!prepared.backingAuthority({}).isValid());
+    auto moved = std::move(prepared);
+    QVERIFY(!prepared.backingAuthority(expected.front().first).isValid());
+    for (const auto &entry : expected) QCOMPARE(moved.backingAuthority(entry.first), entry.second);
+    moved = {};
+    QCOMPARE(coordinator.footprint().pageActivities, quint64(0));
+    prepared = coordinator.preparePublication(transaction, {2}, transitions);
+    QVERIFY(prepared.isValid());
+    for (const auto &entry : expected) QCOMPARE(prepared.backingAuthority(entry.first), entry.second);
+    QVERIFY(coordinator.installPublication(std::move(prepared), transaction, {2}));
+    for (const auto &transition : transitions) {
+        KisPageStateSnapshot page;
+        QVERIFY(coordinator.pageSnapshot(transition.version.key, &page));
+        QCOMPARE(page.publishedGeneration, transition.version.generation);
+        QVERIFY(KisPageStateMachine().validateInvariants(page));
+    }
+    QCOMPARE(coordinator.footprint().pageActivities, quint64(0));
 }
 
 void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
