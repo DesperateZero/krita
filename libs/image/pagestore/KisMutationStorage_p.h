@@ -108,6 +108,11 @@ public:
     using propagate_on_container_swap = std::true_type;
 
     explicit KisMutationStorageAllocator(KisBackingBudgetController *value = nullptr) noexcept : budget(value) {}
+    // A moved-from container can reuse its allocator before receiving the
+    // incoming one. Keep the same accounting lifetime for that allocation
+    // and its later deallocation, including after controller detachment.
+    KisMutationStorageAllocator(const KisMutationStorageAllocator &) = default;
+    KisMutationStorageAllocator &operator=(const KisMutationStorageAllocator &) = default;
     template<class U>
     KisMutationStorageAllocator(const KisMutationStorageAllocator<U> &other) noexcept
         : budget(other.budget), owner(other.owner) {}

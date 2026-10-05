@@ -242,45 +242,30 @@ PageRoot balancePageRoot(const PageRoot &root)
     return root;
 }
 
-PageRoot insertPageRoot(const PageRoot &root, const KisPageVersion &version,
-                        const std::shared_ptr<KisImageEpochTreeStorage> &storage)
+// A batch may change subtree height by more than one. Join down the taller
+// spine before balancing; a single rotation at the old root is insufficient.
+PageRoot joinPageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
+                      const KisPageVersion &version, const PageRoot &left, const PageRoot &right)
 {
-    if (!root)
-        return makePageRoot(storage, version);
-    if (version.key == root->version.key) {
-        return makePageRoot(storage, version, root->left, root->right);
+    if (pageRootHeight(left) > pageRootHeight(right) + 1) {
+        return balancePageRoot(makePageRoot(storage, left->version, left->left,
+            joinPageRoot(storage, version, left->right, right)));
     }
-    if (pageKeyLess(version.key, root->version.key)) {
-        return balancePageRoot(makePageRoot(storage, root->version, insertPageRoot(root->left, version, storage), root->right));
+    if (pageRootHeight(right) > pageRootHeight(left) + 1) {
+        return balancePageRoot(makePageRoot(storage, right->version,
+            joinPageRoot(storage, version, left, right->left), right->right));
     }
-    return balancePageRoot(makePageRoot(storage, root->version, root->left, insertPageRoot(root->right, version, storage)));
+    return makePageRoot(storage, version, left, right);
 }
 
-const KisImageEpochPageRoot *minimumPageRoot(const PageRoot &root)
+PageRoot joinPageRoots(const PageRoot &left, const PageRoot &right)
 {
-    const KisImageEpochPageRoot *node = root.get();
-    while (node && node->left)
-        node = node->left.get();
-    return node;
-}
-
-PageRoot removePageRoot(const PageRoot &root, const KisPageKey &key)
-{
-    if (!root)
-        return {};
-    if (pageKeyLess(key, root->version.key)) {
-        return balancePageRoot(makePageRoot(root->storage, root->version, removePageRoot(root->left, key), root->right));
-    }
-    if (pageKeyLess(root->version.key, key)) {
-        return balancePageRoot(makePageRoot(root->storage, root->version, root->left, removePageRoot(root->right, key)));
-    }
-    if (!root->left)
-        return root->right;
-    if (!root->right)
-        return root->left;
-    const KisImageEpochPageRoot *successor = minimumPageRoot(root->right);
-    return balancePageRoot(
-        makePageRoot(root->storage, successor->version, root->left, removePageRoot(root->right, successor->version.key)));
+    if (!left) return right;
+    if (!right) return left;
+    // Remove the pivot in the same traversal that joins the ordered trees.
+    // The left child's height can shrink by several levels after a batch.
+    return joinPageRoot(right->storage, right->version,
+        joinPageRoots(left, right->left), right->right);
 }
 
 bool resolvePageRoot(const PageRoot &root, const KisPageKey &key, KisPageVersion *version)
@@ -319,6 +304,33 @@ PageRoot buildPageRoot(const Versions &manifest, qsizetype begin, qsizetype end,
     return makePageRoot(storage, manifest.at(middle),
                         buildPageRoot(manifest, begin, middle, storage),
                         buildPageRoot(manifest, middle + 1, end, storage));
+}
+
+template<class Changes, class Removals>
+PageRoot applyPageRootDelta(const PageRoot &root,
+                           Changes first, Changes last, Removals removedFirst, Removals removedLast,
+                           const std::shared_ptr<KisImageEpochTreeStorage> &storage)
+{
+    if (first == last && removedFirst == removedLast)
+        return root;
+    if (!root) {
+        if (first == last) return {};
+        const auto middle = first + (last - first) / 2;
+        return makePageRoot(storage, *middle,
+            applyPageRootDelta({}, first, middle, removedFirst, removedFirst, storage),
+            applyPageRootDelta({}, middle + 1, last, removedFirst, removedFirst, storage));
+    }
+    const auto change = std::lower_bound(first, last, root->version.key,
+        [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
+    const auto removed = std::lower_bound(removedFirst, removedLast, root->version.key, pageKeyLess);
+    const bool replaces = change != last && change->key == root->version.key;
+    const bool removes = removed != removedLast && *removed == root->version.key;
+    const PageRoot left = applyPageRootDelta(root->left, first, change, removedFirst, removed, storage);
+    const PageRoot right = applyPageRootDelta(root->right, replaces ? change + 1 : change, last,
+        removes ? removed + 1 : removed, removedLast, storage);
+    if (removes)
+        return joinPageRoots(left, right);
+    return joinPageRoot(storage, replaces ? *change : root->version, left, right);
 }
 
 bool resolveSurface(const KisImageEpochSurfaces &surfaces, KisSurfaceId surface, KisSurfaceEpochState *state)
@@ -1191,10 +1203,8 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     const qsizetype currentPageCount = current.pageCount();
     const bool densePageDelta = pageDeltaSize > 0 && pageDeltaSize >= (currentPageCount + 3) / 4;
     if (densePageDelta) {
-        // Repeated path-copy is ideal for sparse K, but needlessly allocates
-        // K*log(N) nodes when most leaves change. A dense delta is rebuilt
-        // once in O(N+K); because N <= 4K here, fixed-K commits can never
-        // fall into this path as the document grows.
+        // A dense delta is rebuilt once in O(N+K); because N <= 4K here,
+        // fixed-K commits can never fall into this path as the document grows.
         EpochArray<KisPageVersion> manifest(prepared->changes.get_allocator());
         manifest.reserve(size_t(currentPageCount) + prepared->changes.size());
         auto change = prepared->changes.cbegin();
@@ -1210,12 +1220,12 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
         manifest.insert(manifest.end(), change, prepared->changes.end());
         root.m_pageRoot = buildPageRoot(manifest, 0, manifest.size(), d->treeStorage);
     } else {
-        for (const KisPageVersion &change : prepared->changes) {
-            root.m_pageRoot = insertPageRoot(root.m_pageRoot, change, d->treeStorage);
-        }
-        for (const KisPageKey &key : prepared->removedPages) {
-            root.m_pageRoot = removePageRoot(root.m_pageRoot, key);
-        }
+        // The accepted arrays are sorted and disjoint. Copy each affected
+        // shared path once, including mixed insertion/removal/replacement;
+        // untouched subtrees retain their original immutable storage.
+        root.m_pageRoot = applyPageRootDelta(root.m_pageRoot,
+            prepared->changes.cbegin(), prepared->changes.cend(),
+            prepared->removedPages.cbegin(), prepared->removedPages.cend(), d->treeStorage);
     }
     std::shared_ptr<KisImageEpochSurfaces> surfaces;
     if (!prepared->surfaceChanges.empty()) {

@@ -7,10 +7,17 @@
 #include "KisPageStateMachine.h"
 #include "KisMutationStorage_p.h"
 
+#include <boost/container/small_vector.hpp>
+#include <type_traits>
+
 // Temporary values, never metadata authority. Publication keeps these same
 // values through installation; the allocator follows every nested capacity.
+// Retained inline values are part of their enclosing paid allocation. Spills
+// use that same allocator; protection arrays keep their unbounded capacity.
 using KisPageWorkingStorage = KisMutationStorageAllocator<char>;
-template<class T> using KisPageWorkingArray = std::vector<T, KisMutationStorageAllocator<T>>;
+template<class T, size_t InlineCapacity = 0> using KisPageWorkingArray = std::conditional_t<
+    InlineCapacity == 0, std::vector<T, KisMutationStorageAllocator<T>>,
+    boost::container::small_vector<T, InlineCapacity, KisMutationStorageAllocator<T>>>;
 
 struct KisPageWorkingReplica
 {
@@ -27,10 +34,10 @@ struct KisPageWorkingReplica
 struct KisPageWorkingVersion
 {
     explicit KisPageWorkingVersion(KisPageWorkingStorage storage)
-        : replicas(storage), capturedReadViews(storage) {}
+        : replicas(decltype(replicas)::allocator_type(storage)), capturedReadViews(storage) {}
     KisPageVersion version;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
-    KisPageWorkingArray<KisPageWorkingReplica> replicas;
+    KisPageWorkingArray<KisPageWorkingReplica, 1> replicas;
     KisReplicaHandle authority;
     KisPageTransactionId preparedBy;
     KisPageWorkingArray<KisImageEpochSnapshotToken> capturedReadViews;
@@ -55,13 +62,14 @@ struct KisPageWorkingVersion
 
 struct KisPageWorkingState
 {
-    explicit KisPageWorkingState(KisPageWorkingStorage storage) : versions(storage) {}
+    explicit KisPageWorkingState(KisPageWorkingStorage storage)
+        : versions(decltype(versions)::allocator_type(storage)) {}
     KisPageKey key;
     KisImageEpochId publishedEpoch;
     KisPageGeneration publishedGeneration;
     quint64 publishedDefaultPixelRevision = 0;
     KisPageGeneration nextGeneration;
-    KisPageWorkingArray<KisPageWorkingVersion> versions;
+    KisPageWorkingArray<KisPageWorkingVersion, 2> versions;
     KisPageWriterStateSnapshot writer;
     KisAuthorityHandoffStateSnapshot authorityHandoff;
 

@@ -1988,7 +1988,8 @@ public:
         }
     };
     struct Publication {
-        explicit Publication(Storage storage) : deltas(storage), installRecords(storage) {}
+        explicit Publication(Storage storage)
+            : deltas(storage), installRecords(decltype(installRecords)::allocator_type(storage)) {}
         KisPageStateSnapshot next;
         struct PublicationDelta {
             KisPageVersion version;
@@ -1998,7 +1999,7 @@ public:
         Array<PublicationDelta> deltas;
         // Candidate values are contiguous; authoritative ordering is formed
         // by intrusive arena links only after full-batch revalidation.
-        Array<Version> installRecords;
+        KisPageWorkingArray<Version, 2> installRecords;
         MetadataArenaDemand arenaDemand;
         size_t arenaGrowthIndex = std::numeric_limits<size_t>::max();
     };
@@ -3658,7 +3659,8 @@ try {
         // Installation needs the original identities only to remove records
         // absent from the accepted result. No second replica/protection image
         // is needed through unlocked growth or retirement preparation.
-        KisPageWorkingArray<KisPageVersion> inputVersions(workingStorage);
+        KisPageWorkingArray<KisPageVersion, 2> inputVersions{
+            KisPageWorkingArray<KisPageVersion, 2>::allocator_type(workingStorage)};
         inputVersions.reserve(input.versions.size());
         for (const auto &version : input.versions)
             inputVersions.push_back(version.version);

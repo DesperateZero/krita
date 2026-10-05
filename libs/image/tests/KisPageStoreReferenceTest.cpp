@@ -19,9 +19,11 @@
 #include <atomic>
 #include <ctime>
 #include <functional>
+#include <map>
 #include <memory>
 #include <random>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -1274,6 +1276,15 @@ private Q_SLOTS:
     void metadataDirectoryPublicationIsImmutableAndConcurrent();
     void imageEpochCommitIsAtomicAndDetectsConflicts();
     void imageEpochRootUsesBalancedPersistentPageDelta();
+    void imageEpochSparseBatchMatchesFlatOracle_data()
+    {
+        QTest::addColumn<int>("pattern");
+        QTest::newRow("clustered") << 0;
+        QTest::newRow("left-boundary") << 1;
+        QTest::newRow("right-boundary") << 2;
+        QTest::newRow("scattered") << 3;
+    }
+    void imageEpochSparseBatchMatchesFlatOracle();
     void materializationOracleAndPublicationGuards();
     void fakeCpuProviderSupportsReorderingAndFailure();
     void productionCpuProviderPreservesFormatDefaultAndCowBytes();
@@ -8789,6 +8800,124 @@ void KisPageStoreReferenceTest::imageEpochRootUsesBalancedPersistentPageDelta()
     QCOMPARE(exported.size(), qsizetype(pageCount));
     QCOMPARE(exported.first().key.page.column, qint32(0));
     QCOMPARE(exported.last().key.page.column, pageCount - 1);
+}
+
+void KisPageStoreReferenceTest::imageEpochSparseBatchMatchesFlatOracle()
+{
+    QFETCH(int, pattern);
+    using Key = std::tuple<quint64, qint32, qint32>;
+    const auto key = [](const KisPageKey &value) {
+        return Key(value.surface.value, value.page.row, value.page.column);
+    };
+    std::map<Key, KisPageVersion> oracle;
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    for (quint64 surface = 1; surface <= 3; ++surface) {
+        initial.surfaces.append(surfaceEpochState({surface}));
+        for (int column = -256; column < 256; ++column) {
+            auto version = pageVersion(column * 2, 1, int(surface) - 2);
+            version.key.surface = {surface};
+            initial.manifest.append(version);
+            oracle.emplace(key(version.key), version);
+        }
+    }
+    const auto manifest = [&] {
+        QVector<KisPageVersion> result;
+        for (const auto &item : oracle) result.append(item.second);
+        return result;
+    };
+    KisImageEpochReferenceModel model;
+    QVERIFY(model.initialize(initial));
+    const auto original = model.captureCommittedRoot();
+    const auto originalManifest = manifest();
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    std::mt19937 random(260926 + pattern);
+    for (int step = 0; step < 96; ++step) {
+        const auto before = model.captureCommittedRoot();
+        const auto previous = manifest();
+        const auto tx = model.beginTransaction(before.epoch());
+        QVERIFY(tx.isValid());
+        KisPreparedPageSet delta;
+        delta.transaction = tx.id;
+        const int work = qMin(64, previous.size() / 8);
+        QVERIFY(work > 0);
+        QSet<int> selected;
+        for (int i = 0; i < work; ++i) {
+            int index = pattern == 0 ? previous.size() / 2 - work / 2 + i
+                : pattern == 1 ? i : pattern == 2 ? previous.size() - work + i : int(random() % previous.size());
+            while (selected.contains(index)) index = (index + 1) % previous.size();
+            selected.insert(index);
+            auto version = previous.at(index);
+            if (pattern == 1 || i % 3 == 0) {
+                delta.removedPages.append(version.key);
+                oracle.erase(key(version.key));
+            } else {
+                ++version.generation.value;
+                delta.proofs.append(preparedProof(version, tx.id, ticket, quint64(i + 1)));
+                oracle[key(version.key)] = version;
+            }
+        }
+        const int additions = pattern == 1 ? work : work / 2;
+        for (int i = 0; i < additions; ++i) {
+            // An absent page on an existing surface resolves to semantic
+            // default generation 1; its first explicit write must advance it.
+            auto version = pageVersion((step % 2 ? -1 : 1) * (1000 + step * 64 + i), 2, step % 5 - 2);
+            version.key.surface = {quint64(1 + step % 3)};
+            QVERIFY(oracle.emplace(key(version.key), version).second);
+            delta.proofs.append(preparedProof(version, tx.id, ticket, quint64(work + i + 1)));
+        }
+        // Stay below the original dense threshold, including boundary erasure
+        // that removes a whole subtree and requires more than one rotation.
+        QVERIFY(delta.proofs.size() + delta.removedPages.size() < (before.pageCount() + 3) / 4);
+        for (const auto &proof : delta.proofs) {
+            KisPageVersion old;
+            QVERIFY2(!before.resolve(proof.authority.version.key, &old)
+                || proof.authority.version.generation.value > old.generation.value,
+                qPrintable(QStringLiteral("step %1: proof %2:%3,%4 generation %5 <= %6")
+                    .arg(step).arg(proof.authority.version.key.surface.value)
+                    .arg(proof.authority.version.key.page.column).arg(proof.authority.version.key.page.row)
+                    .arg(proof.authority.version.generation.value).arg(old.generation.value)));
+        }
+        QString error;
+        QVERIFY2(model.prepare(delta, &error), qPrintable(QStringLiteral("step %1: %2").arg(step).arg(error)));
+        const auto committed = model.commit(tx);
+        QVERIFY2(committed.isCommitted(), qPrintable(committed.error));
+        const auto expected = manifest();
+        QCOMPARE(committed.root.manifest(), expected);
+        QCOMPARE(committed.root.pageCount(), expected.size());
+        // An AVL tree of height h needs at least F(h+2)-1 nodes.
+        qsizetype lower = 0, upper = 1;
+        for (int h = 1; h < committed.root.pageTreeHeight(); ++h) {
+            const auto next = lower + upper + 1;
+            lower = upper; upper = next;
+        }
+        QVERIFY(upper <= committed.root.pageCount());
+        for (const auto &version : expected) {
+            KisPageVersion found;
+            QVERIFY(committed.root.resolve(version.key, &found));
+            QCOMPARE(found, version);
+        }
+        for (const auto &removed : delta.removedPages) QVERIFY(!committed.root.containsPage(removed));
+        for (quint64 surface = 1; surface <= 3; ++surface) {
+            QRect expectedExtent;
+            for (const auto &version : expected) {
+                if (version.key.surface.value == surface) {
+                    const QRect tile(version.key.page.column * 64, version.key.page.row * 64, 64, 64);
+                    expectedExtent = expectedExtent.isNull() ? tile : expectedExtent.united(tile);
+                }
+            }
+            QRect actual;
+            QVERIFY(committed.root.contentExtentAfterDelta({surface}, QSize(64, 64), {}, &actual));
+            QCOMPARE(actual, expectedExtent);
+        }
+        QCOMPARE(before.manifest(), previous);
+        model.collectFinishedTransactions();
+        model.collectUnretainedRoots();
+    }
+    QCOMPARE(original.manifest(), originalManifest);
 }
 
 void KisPageStoreReferenceTest::materializationOracleAndPublicationGuards()

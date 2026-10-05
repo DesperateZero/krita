@@ -1235,7 +1235,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisImageEpochReferenceModel.cpp": {
-      "container_declarations": 28,
+      "container_declarations": 29,
       "include_edges": [
         "KisImageEpochReferenceModel.h",
         "KisPageStoreReclamation_p.h",
@@ -1251,7 +1251,7 @@
         "utility",
         "vector"
       ],
-      "lines": 1903,
+      "lines": 1913,
       "member_fields": [
         "m_validated"
       ],
@@ -1269,7 +1269,7 @@
         "PageBounds",
         "ReachabilityScan"
       ],
-      "sha256": "edd7aa6a82bee54ecf8584a28deb8de30d41004725a01439db0b4a9b8570e436",
+      "sha256": "6bb3618a2996725ad4ddf10b4bbaf4bf0013166217316cd76b0b29fc3bb0e4b8",
       "synchronization_declarations": 4
     },
     "libs/image/pagestore/KisImageEpochReferenceModel.h": {
@@ -1351,7 +1351,7 @@
         "utility",
         "vector"
       ],
-      "lines": 586,
+      "lines": 591,
       "member_fields": [
         "m_accepting",
         "m_attached",
@@ -1393,7 +1393,7 @@
         "ReleasedBlocks",
         "Slot"
       ],
-      "sha256": "48e358375777e4f2d5b5ecc47a4237fbd47d444d5ffcf4469bddd1f79cb10ca3",
+      "sha256": "78fce2b081ea3765b18391d2f7d83094982ffe410be4226553d133f0c97277aa",
       "synchronization_declarations": 2
     },
     "libs/image/pagestore/KisPageByteArray_p.h": {
@@ -1621,7 +1621,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4062,
+      "lines": 4064,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1655,7 +1655,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "0b4b7508e5a984932803b049f3316d40c5ddbb14898415b318cd31cd69f7012b",
+      "sha256": "8ec5d9571757cdc4cc55a696bb9cb6d5de3d512f7b8d6586b6a958dd6b97a1c7",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -2376,9 +2376,11 @@
       "container_declarations": 1,
       "include_edges": [
         "KisMutationStorage_p.h",
-        "KisPageStateMachine.h"
+        "KisPageStateMachine.h",
+        "boost/container/small_vector.hpp",
+        "type_traits"
       ],
-      "lines": 140,
+      "lines": 148,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [
@@ -2387,7 +2389,7 @@
         "KisPageWorkingState",
         "KisPageWorkingVersion"
       ],
-      "sha256": "383fdb39fafaf396093dfbbb05862d21fab4dd26086333e2847226d252563db0",
+      "sha256": "22a2107b236f6ece311f3bfe0dc0c96bc589bd0ad3774bb0a61dea267dcc10bf",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStore.cpp": {
@@ -3682,7 +3684,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 95,
+      "container_declarations": 98,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -3723,6 +3725,7 @@
         "ctime",
         "functional",
         "kis_image_config.h",
+        "map",
         "memory",
         "random",
         "thread",
@@ -3732,11 +3735,12 @@
         "tiles3/kis_tile_data_store.h",
         "tiles3/kis_vline_iterator.h",
         "tiles3/tests/kis_tile_data_store_test_access.h",
+        "tuple",
         "type_traits",
         "utility",
         "vector"
       ],
-      "lines": 12224,
+      "lines": 12353,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3801,7 +3805,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "db695c5642559f51d42f91a6da6335f0d3c928b192a613dfd2cb74994564371d",
+      "sha256": "145d9d5117630e59e98ccdacfd0170352d15516df467297069d0085c0c0348eb",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6554,5 +6558,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "9c707902d68130a17de4cbd6d64a761215387be0"
+  "working_tree_head": "822456732bd02a13d128b855ed9856415544ec00"
 }
