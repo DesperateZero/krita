@@ -1612,6 +1612,8 @@
         "QScopeGuard",
         "algorithm",
         "atomic",
+        "bitset",
+        "cstddef",
         "limits",
         "map",
         "memory",
@@ -1619,9 +1621,11 @@
         "utility",
         "vector"
       ],
-      "lines": 4067,
+      "lines": 4160,
       "member_fields": [
+        "m_capacity",
         "m_mutex",
+        "m_size",
         "m_storageOwner"
       ],
       "pagestore_identifiers": [
@@ -1651,7 +1655,7 @@
         "ShardArenaGrowth",
         "ShardRecordStore"
       ],
-      "sha256": "17ef2fff612d561c5f717962591b51b3ef34b57a9abbae7d41c4b52dbf92fabe",
+      "sha256": "dc29b4ff2f35ea8f48871ff981d08c6136eb353f3f0daba7d9776bd8ff5e1a3f",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -3736,7 +3740,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12701,
+      "lines": 12711,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3801,7 +3805,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "79be783da8f617be85ecce7b2f7a5547ca9661d8063b3cc31394c797422d5a39",
+      "sha256": "44e2df83883c74ef455a79d91d7c7c8c162c9b4c2499a79eaa3d923a7041cdc8",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6554,5 +6558,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "84b5d5aad9f4c0c890ea2fc6dd5fb92548111524"
+  "working_tree_head": "864627f95737c62fe79da87677c8f4b0ab44c55a"
 }

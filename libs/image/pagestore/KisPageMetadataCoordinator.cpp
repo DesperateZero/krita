@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bitset>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <map>
@@ -1953,12 +1955,45 @@ public:
     using Storage = KisMutationStorageAllocator<char>;
     template<class T> using Array = std::vector<T, KisMutationStorageAllocator<T>>;
 
+    // These bounded views construct only prepared values in Data's paid
+    // trailing storage. They neither allocate nor own a second storage fee.
+    template<class T> class Payload {
+    public:
+        Payload(T *values, size_t capacity) : m_values(values), m_capacity(capacity) {}
+        ~Payload() { while (!empty()) pop_back(); }
+        Payload(const Payload &) = delete;
+        Payload &operator=(const Payload &) = delete;
+        T *begin() { return m_values; }
+        T *end() { return m_values + m_size; }
+        const T *begin() const { return m_values; }
+        const T *end() const { return m_values + m_size; }
+        const T *cbegin() const { return begin(); }
+        const T *cend() const { return end(); }
+        size_t size() const { return m_size; }
+        bool empty() const { return m_size == 0; }
+        T &front() { return at(0); }
+        T &back() { return at(m_size - 1); }
+        T &at(size_t index) { Q_ASSERT(index < m_size); return m_values[index]; }
+        const T &at(size_t index) const { Q_ASSERT(index < m_size); return m_values[index]; }
+        T &operator[](size_t index) { return at(index); }
+        const T &operator[](size_t index) const { return at(index); }
+        void push_back(T &&value)
+        {
+            Q_ASSERT(m_size < m_capacity);
+            new (m_values + m_size) T(std::move(value));
+            ++m_size;
+        }
+        void pop_back() { Q_ASSERT(m_size); m_values[--m_size].~T(); }
+    private:
+        T *m_values;
+        size_t m_capacity;
+        size_t m_size = 0;
+    };
+
     // The same paid values serve the transition and installation, without a
     // second Qt-to-install copy or independent representation of protection.
     using Version = KisPageWorkingVersion;
-    explicit Data(Storage allocator)
-        : storage(allocator), entries(allocator), publications(allocator), arenaGrowth(allocator)
-        , backingAuthorities(allocator) {}
+    static DataPointer create(Storage storage, size_t count, size_t shardCount, bool detachment);
     ~Data();
     void invoke() override;
     void dispose() noexcept override { DataDeleter{}(this); }
@@ -2006,30 +2041,74 @@ public:
     };
     void cancel() noexcept;
 
-    KisMutationStorageAllocator<Data> storage;
+    using AllocationUnit = std::max_align_t;
+    KisMutationStorageAllocator<AllocationUnit> storage;
+    size_t allocationUnits;
     std::shared_ptr<DeferredMetadataCleanupStatistics> cleanupStatistics;
     QElapsedTimer cleanupAge;
     std::shared_ptr<const quint8> owner;
     KisPageTransaction transaction;
     KisImageEpochId minimumEpoch;
     PreparationKind kind = PreparationKind::Publication;
-    Array<Entry> entries;
+    Payload<Entry> entries;
     // Publication images belong only to publication/recoverable candidates.
     // Detachment retains the same claims and terminal policy in entries.
-    Array<Publication> publications;
-    Array<ShardArenaGrowth> arenaGrowth;
+    Payload<Publication> publications;
+    Payload<ShardArenaGrowth> arenaGrowth;
     // Page keys and projected versions are already unique. This candidate is
     // immutable before any authority lookup; one sorted paid array avoids
     // buckets and one charged allocation for every copied version identity.
     Array<std::pair<KisPageVersion, KisReplicaHandle>> backingAuthorities;
+
+private:
+    Data(Storage allocator, size_t units, Entry *entryData, size_t entryCount,
+         Publication *publicationData, size_t publicationCount,
+         ShardArenaGrowth *growthData, size_t growthCount)
+        : storage(allocator), allocationUnits(units), entries(entryData, entryCount)
+        , publications(publicationData, publicationCount), arenaGrowth(growthData, growthCount)
+        , backingAuthorities(allocator) {}
+
+    template<class T> static size_t appendPayload(size_t &bytes, size_t count)
+    {
+        static_assert(alignof(T) <= alignof(AllocationUnit));
+        const size_t maximum = size_t(std::numeric_limits<qint64>::max());
+        if (bytes > maximum - (alignof(T) - 1)) throw std::bad_alloc();
+        const size_t offset = (bytes + alignof(T) - 1) / alignof(T) * alignof(T);
+        if (count > (maximum - offset) / sizeof(T)) throw std::bad_alloc();
+        bytes = offset + count * sizeof(T);
+        return offset;
+    }
 };
+
+KisPageMetadataCoordinator::PreparedPublication::DataPointer
+KisPageMetadataCoordinator::PreparedPublication::Data::create(
+    Storage storage, size_t count, size_t shardCount, bool detachment)
+{
+    static_assert(alignof(Data) <= alignof(AllocationUnit));
+    const size_t publicationCount = detachment ? 0 : count;
+    size_t bytes = sizeof(Data);
+    const size_t entryOffset = appendPayload<Entry>(bytes, count);
+    const size_t publicationOffset = appendPayload<Publication>(bytes, publicationCount);
+    const size_t growthOffset = appendPayload<ShardArenaGrowth>(bytes, shardCount);
+    const size_t units = (bytes + sizeof(AllocationUnit) - 1) / sizeof(AllocationUnit);
+    KisMutationStorageAllocator<AllocationUnit> allocator(storage);
+    auto *raw = allocator.allocate(units);
+    auto *base = reinterpret_cast<char *>(raw);
+    try {
+        return DataPointer(new (raw) Data(storage, units,
+            reinterpret_cast<Entry *>(base + entryOffset), count,
+            reinterpret_cast<Publication *>(base + publicationOffset), publicationCount,
+            reinterpret_cast<ShardArenaGrowth *>(base + growthOffset), shardCount));
+    } catch (...) { allocator.deallocate(raw, units); throw; }
+}
 
 void KisPageMetadataCoordinator::PreparedPublication::DataDeleter::operator()(Data *value) const noexcept
 {
     if (!value) return;
     auto allocator = value->storage;
-    std::allocator_traits<decltype(allocator)>::destroy(allocator, value);
-    allocator.deallocate(value, 1);
+    const size_t units = value->allocationUnits;
+    value->~Data();
+    allocator.deallocate(reinterpret_cast<Data::AllocationUnit *>(value), units);
 }
 
 KisPageMetadataCoordinator::PreparedPublication::Data::~Data()
@@ -2283,18 +2362,32 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
         return result;
     }
-    auto storage = d->budgetAuthority->storage<PreparedPublication::Data>();
-    PreparedPublication::DataPointer data;
-    auto *raw = storage.allocate(1);
-    try { std::allocator_traits<decltype(storage)>::construct(storage, raw, storage); }
-    catch (...) { storage.deallocate(raw, 1); throw; }
-    data.reset(raw);
+    auto storage = d->budgetAuthority->storage<char>();
+    const size_t bytesPerPage = sizeof(PreparedPublication::Data::Entry)
+        + (detachment ? 0 : sizeof(PreparedPublication::Data::Publication));
+    if (size_t(count) > size_t(std::numeric_limits<qint64>::max()) / bytesPerPage)
+        throw std::bad_alloc();
+    size_t shardCount = 0;
+    if (!detachment && count) {
+        if (count == 1) shardCount = 1;
+        else {
+            // configure() bounds shards at4096. This stack capacity census
+            // supplies no page authority; the existing preparation below
+            // still validates and retains each exact shard/page identity.
+            std::bitset<4096> usedShards;
+            for (qsizetype i = 0; i < count; ++i) {
+                const auto &key = versions ? versions[i].key
+                    : changes ? changes[i].version.key : transitions[i].version.key;
+                usedShards.set(kisStablePageKeyHash(key) % d->shards.size());
+            }
+            shardCount = usedShards.count();
+        }
+    }
+    auto data = PreparedPublication::Data::create(storage, size_t(count), shardCount, detachment);
     data->owner = d->publicationOwner;
     data->transaction = transaction;
     data->minimumEpoch = minimumEpoch;
     data->kind = kind;
-    data->entries.reserve(size_t(count));
-    if (!detachment) data->publications.reserve(size_t(count));
     const KisPageStateMachine stateMachine;
     for (qsizetype i = 0; i < count; ++i) {
         KisPageTransition input;

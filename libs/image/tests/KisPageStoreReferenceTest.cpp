@@ -1119,9 +1119,16 @@ private Q_SLOTS:
     {
         QTest::addColumn<int>("kind");
         QTest::addColumn<int>("outcome");
+        QTest::addColumn<int>("pages");
+        QTest::addColumn<int>("shards");
         for (int k : {0, 2, 3})
-            for (int o = 0; o < 6; ++o)
-                QTest::newRow(qPrintable(QStringLiteral("kind%1-outcome%2").arg(k).arg(o))) << k << o;
+            for (int n : {0, 1, 2, 33})
+                for (int s : {1, 4})
+                    for (int o = 0; o < 6; ++o) {
+                        if (!n && o == 1) continue;
+                        QTest::newRow(qPrintable(QStringLiteral("kind%1-pages%2-shards%3-outcome%4")
+                            .arg(k).arg(n).arg(s).arg(o))) << k << o << n << s;
+                    }
     }
     void preparedPublicationStorageIsBound();
     void deferredPublicationCleanupOwnsCandidate_data()
@@ -6623,21 +6630,23 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
 {
     QFETCH(int, kind);
     QFETCH(int, outcome);
+    QFETCH(int, pages);
+    QFETCH(int, shards);
     const bool mutation = kind == 2, synthesizedDefault = kind == 3;
     const KisPageTransaction tx{{74}, {1}};
     auto coordinator = std::make_unique<KisPageMetadataCoordinator>();
-    QVERIFY(coordinator->configure(4));
+    QVERIFY(coordinator->configure(shards));
     KisPageMetadataCoordinator foreign;
     QVERIFY(foreign.configure(4));
     QVector<KisPageStateSnapshot> expected;
     QVector<KisPageTransition> transitions;
-    for (int x = 0; x < 2; ++x) {
+    for (int x = 0; x < pages; ++x) {
         const KisPageVersion initial{pageKey(x), {1}, synthesizedDefault ? 1u : 0u};
-        auto state = initialPageState(initial, replica(initial, 1, 1, 1));
+        auto state = initialPageState(initial, replica(initial, 1, 1, quint64(x) * 3 + 1));
         if (synthesizedDefault)
             state.publishedDefaultPixelRevision = 1;
         if (!synthesizedDefault) {
-            const auto authority = replica(pageVersion(x, 2), 1, 1, 2);
+            const auto authority = replica(pageVersion(x, 2), 1, 1, quint64(x) * 3 + 2);
             state.versions.append({pageVersion(x, 2),
                                    KisPagePublicationState::Prepared,
                                    {{authority, KisReplicaValidity::Valid, {}, {}, 0, {}}},
@@ -6665,42 +6674,43 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
                               : coordinator->preparePublication(tx, {2}, transitions);
     QVERIFY(candidate.isValid());
     const auto reservedFootprint = coordinator->footprint();
-    QCOMPARE(reservedFootprint.pageActivities, quint64(2));
-    if (!mutation && synthesizedDefault) {
+    QCOMPARE(reservedFootprint.pageActivities, quint64(pages));
+    if (pages && !mutation && synthesizedDefault) {
         QVERIFY(reservedFootprint.versionArena.outstandingReservations > 0);
         QVERIFY(reservedFootprint.exactVersionIndex.outstandingReservations > 0);
     }
     const auto prepared = coordinator->metrics();
-    QCOMPARE(prepared.publicationHistoryNodesPrepared, quint64(2));
+    QCOMPARE(prepared.publicationHistoryNodesPrepared, quint64(pages));
     QCOMPARE(prepared.publicationHistoryNodesTransferred, quint64(0));
-    QCOMPARE(prepared.publicationAdditionRecordsPrepared, quint64(synthesizedDefault ? 2 : 0));
+    QCOMPARE(prepared.publicationAdditionRecordsPrepared, quint64(synthesizedDefault ? pages : 0));
     QCOMPARE(prepared.publicationAdditionRecordsTransferred, quint64(0));
-    for (int x = 0; x < 2; ++x) {
+    for (int x = 0; x < pages; ++x) {
         KisPageStateSnapshot actual;
         QVERIFY(coordinator->pageSnapshot(pageKey(x), &actual));
         comparePageRecords(actual, expected.at(x));
     }
     if (outcome == 1) {
+        const int changedPage = pages - 1;
         KisPageTransition change;
         if (mutation) {
             change.kind = KisPageTransitionKind::AcquireWrite;
-            change.baseVersion = pageVersion(1, 2);
-            change.source = replica(change.baseVersion, 1, 1, 2);
-            change.version = pageVersion(1, 3);
-            change.target = replica(change.version, 1, 1, 3);
+            change.baseVersion = pageVersion(changedPage, 2);
+            change.source = replica(change.baseVersion, 1, 1, quint64(changedPage) * 3 + 2);
+            change.version = pageVersion(changedPage, 3);
+            change.target = replica(change.version, 1, 1, quint64(changedPage) * 3 + 3);
             change.transaction = tx.id;
             change.writer = {51};
             change.operation = {52};
         } else {
             change.kind = KisPageTransitionKind::AcquireRead;
-            change.version = expected.at(1).versions.first().version;
-            change.target = expected.at(1).versions.first().authority;
+            change.version = expected.at(changedPage).versions.first().version;
+            change.target = expected.at(changedPage).versions.first().authority;
             change.lease = {19};
         }
-        const auto changed = KisPageStateMachine().apply(expected.at(1), change);
+        const auto changed = KisPageStateMachine().apply(expected.at(changedPage), change);
         QVERIFY(changed.accepted);
-        QVERIFY(coordinator->applyOwner(pageKey(1), change).accepted);
-        expected[1] = changed.next;
+        QVERIFY(coordinator->applyOwner(pageKey(changedPage), change).accepted);
+        expected[changedPage] = changed.next;
     }
     if (outcome == 4) {
         auto moved = std::move(candidate);
@@ -6741,7 +6751,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     QCOMPARE(installed.publicationAdditionRecordsPrepared, prepared.publicationAdditionRecordsPrepared);
     QCOMPARE(installed.publicationAdditionRecordsTransferred,
              success ? prepared.publicationAdditionRecordsPrepared : quint64(0));
-    for (int x = 0; x < 2; ++x) {
+    for (int x = 0; x < pages; ++x) {
         if (success) {
             const auto next = KisPageStateMachine().apply(expected.at(x), transitions.at(x));
             QVERIFY(next.accepted);
