@@ -1801,7 +1801,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageOwnerLedger.cpp": {
-      "container_declarations": 33,
+      "container_declarations": 32,
       "include_edges": [
         "KisPageOwnerLedger.h",
         "KisPageRetirementRecord_p.h",
@@ -1817,10 +1817,9 @@
         "boost/intrusive/set.hpp",
         "limits",
         "map",
-        "unordered_map",
         "unordered_set"
       ],
-      "lines": 2222,
+      "lines": 2260,
       "member_fields": [
         "m_claims",
         "m_cookie",
@@ -1839,6 +1838,7 @@
         "PreparedBackingChangeSlot",
         "PreparedRetirementCredit",
         "Probe",
+        "Projection",
         "ProofLess",
         "ProviderLess",
         "ProviderRegistration",
@@ -1846,7 +1846,7 @@
         "Reservation",
         "SealedProofRecord"
       ],
-      "sha256": "71b2a9a816046f46448360f9887f9e97a2a2265614fde2caa28708857ade3929",
+      "sha256": "e8e195f7ad854674158aebd5b47c1fa63c3daab4c226c00fe43b67524f48b08b",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageOwnerLedger.h": {
@@ -3684,7 +3684,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 98,
+      "container_declarations": 100,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -3740,7 +3740,7 @@
         "utility",
         "vector"
       ],
-      "lines": 12353,
+      "lines": 12445,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -3805,7 +3805,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "145d9d5117630e59e98ccdacfd0170352d15516df467297069d0085c0c0348eb",
+      "sha256": "f40a5e294bacfdd5a6d21ed0ba601a61d0f4da44b2a877e0a041fd9637193df7",
       "synchronization_declarations": 11
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6558,5 +6558,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "6d439e0437c86b5214064eef5bc5134f2160cf43"
+  "working_tree_head": "58b4dfc09c3048d2f344ccb35a3d92d80adc390f"
 }

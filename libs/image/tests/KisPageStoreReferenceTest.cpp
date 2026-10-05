@@ -1266,6 +1266,7 @@ private Q_SLOTS:
     void writeAdmissionTokenExhaustion();
     void mutationActivityAdmissionPreservesExisting();
     void freshWriteSelectorAndBackingBudgetAreBounded();
+    void backingBatchMatchesFlatPhysicalAccounting();
     void preparedMutationPreservesLateProtection_data()
     {
         QTest::addColumn<int>("protection");
@@ -8085,6 +8086,97 @@ void KisPageStoreReferenceTest::mutationActivityAdmissionPreservesExisting()
     QVERIFY(coordinator.beginSessionActivity({5}, lock, &error));
     coordinator.endSessionActivity({5});
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, quint64(0));
+}
+
+void KisPageStoreReferenceTest::backingBatchMatchesFlatPhysicalAccounting()
+{
+    using Class = KisBackingBudgetClass;
+    const std::array<Class, 6> priority{Class::Current, Class::ActivePending, Class::InFlight,
+                                     Class::RetainedHistory, Class::RetirementDebt, Class::OptionalCache};
+    for (unsigned seed = 0; seed < 8; ++seed) {
+        KisPageBackingLimits limits;
+        limits.metadataArenaBytes = 4 * 1024 * 1024;
+        KisBackingBudgetController budget(limits);
+        KisPageOwnerLedger owner;
+        owner.attachBackingBudget(budget);
+        auto completions = std::make_shared<KisCompletionRegistry>();
+        auto provider = std::make_shared<KisCpuPageReplicaProvider>();
+        KisCpuResidentReplicaProviderConfig config;
+        config.provider = {1}; config.providerEpoch = {1}; config.budgetBytes = 64 * 1024 * 1024;
+        QString error;
+        QVERIFY(owner.configure(completions, &error));
+        QVERIFY(provider->configure(config, completions, &error));
+        QVERIFY(owner.registerProvider(provider, &error));
+        std::array<KisReplicaHandle, 24> replicas;
+        std::array<Class, 24> before, after;
+        std::mt19937 random(seed);
+        QVector<KisBackingClassChange> changes;
+        QVector<KisPageTransitionEffect> effects;
+        for (size_t i = 0; i < replicas.size(); ++i) {
+            replicas[i] = replica(pageVersion(qint32(i), 1), 1, 1, i / 3 + 1, i % 3 + 1);
+            before[i] = i % 3 == 0 ? Class::Current
+                      : i % 3 == 1 ? Class::ActivePending : Class::RetainedHistory;
+            after[i] = i < 3 ? Class::RetirementDebt
+                     : i % 5 == 0 ? before[i] : priority[random() % priority.size()];
+            KisBackingBudgetDelta initial;
+            initial.buckets[size_t(before[i])].cpuRam = replicas[i].layout.byteSize;
+            auto reservation = budget.reserve(initial, &error);
+            QVERIFY2(reservation.isValid(), qPrintable(error));
+            QVERIFY2(owner.registerBacking(replicas[i], reservation, before[i], &error), qPrintable(error));
+            if (after[i] == Class::RetirementDebt) {
+                effects.push_back({replicas[i], {}});
+                effects.push_back({replicas[i], {}}); // Repeated effects are one logical transition.
+                if (i % 2 == 0) changes.push_back({replicas[i], before[i], after[i]});
+            } else if (after[i] != before[i]) {
+                changes.push_back({replicas[i], before[i], after[i]});
+            }
+        }
+        std::shuffle(changes.begin(), changes.end(), random);
+        std::shuffle(effects.begin(), effects.end(), random);
+        const auto unchanged = [&] {
+            for (size_t i = 0; i < replicas.size(); ++i) QCOMPARE(owner.backingClass(replicas[i]), before[i]);
+            const auto usage = budget.usage();
+            for (Class c : priority) {
+                QCOMPARE(usage.buckets[size_t(c)].live.cpuRam, c == Class::Current ? quint64(8 * 4096) : quint64(0));
+                QCOMPARE(usage.buckets[size_t(c)].reserved.cpuRam, quint64(0));
+            }
+        };
+        unchanged();
+        const KisBackingClassChange duplicate{replicas[0], before[0], Class::RetirementDebt};
+        QVERIFY(!owner.prepareBackingChanges({duplicate, duplicate}, effects, &error).isValid());
+        QVERIFY(error.contains(QStringLiteral("more than once")));
+        unchanged();
+        QVERIFY(!owner.prepareBackingChanges({{replicas[0], before[0], Class::OptionalCache}}, effects, &error).isValid());
+        QVERIFY(error.contains(QStringLiteral("competing target")));
+        unchanged();
+        auto prepared = owner.prepareBackingChanges(changes, effects, &error);
+        QVERIFY2(prepared.isValid(), qPrintable(error));
+        QVERIFY(!owner.prepareBackingChanges({duplicate}, {}, &error).isValid()); // Same physical claim is exclusive.
+        for (size_t i = 0; i < replicas.size(); ++i) QCOMPARE(owner.backingClass(replicas[i]), before[i]);
+        prepared.release();
+        unchanged();
+        prepared = owner.prepareBackingChanges(changes, effects, &error);
+        QVERIFY2(prepared.isValid(), qPrintable(error));
+        owner.commitBackingChanges(std::move(prepared));
+        for (size_t i = 0; i < replicas.size(); ++i) QCOMPARE(owner.backingClass(replicas[i]), after[i]);
+        // Independent flat model: scan all aliases of each physical page in
+        // documented charging priority, rather than replay the batch algorithm.
+        std::array<quint64, size_t(Class::Count)> expected{};
+        for (size_t physical = 0; physical < 8; ++physical) {
+            for (Class c : priority) {
+                bool present = false;
+                for (size_t alias = 0; alias < 3; ++alias) present |= after[physical * 3 + alias] == c;
+                if (present) { expected[size_t(c)] += 4096; break; }
+            }
+        }
+        const auto installed = budget.usage();
+        for (Class c : priority) {
+            QCOMPARE(installed.buckets[size_t(c)].live.cpuRam, expected[size_t(c)]);
+            QCOMPARE(installed.buckets[size_t(c)].reserved.cpuRam, quint64(0));
+        }
+        for (const auto &handle : replicas) owner.releaseRetiredBacking(handle);
+        for (Class c : priority) QCOMPARE(budget.usage().buckets[size_t(c)].live.cpuRam, quint64(0));
+    }
 }
 
 void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
