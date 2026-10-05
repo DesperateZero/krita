@@ -1621,7 +1621,7 @@
         "utility",
         "vector"
       ],
-      "lines": 4064,
+      "lines": 4065,
       "member_fields": [
         "m_mutex",
         "m_storageOwner"
@@ -1655,7 +1655,7 @@
         "ShardRecordStore",
         "VersionHash"
       ],
-      "sha256": "8ec5d9571757cdc4cc55a696bb9cb6d5de3d512f7b8d6586b6a958dd6b97a1c7",
+      "sha256": "da78b04268ac22bf7e6a2492e5609030f374d01233b902cf6cb28c1ebcf04095",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -2334,11 +2334,11 @@
         "algorithm",
         "limits"
       ],
-      "lines": 1221,
+      "lines": 1212,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [],
-      "sha256": "3ec61c33b5b52ba08099b356abb546481cf281324fc64dad2dc9ec6ac0dbd491",
+      "sha256": "a677e9baec027808324a051ae3480c9b61f31f96a47f7772818e7ce80e8f55f2",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStateMachine.h": {
@@ -2348,7 +2348,7 @@
         "QString",
         "QVector"
       ],
-      "lines": 271,
+      "lines": 272,
       "member_fields": [],
       "pagestore_identifiers": [],
       "public_types": [
@@ -2369,7 +2369,7 @@
         "KisReplicaStateSnapshot",
         "KisReplicaValidity"
       ],
-      "sha256": "3e874a7e1e0d157acf08be98e3614deb6b46c281f76b3fa91cd5f060dbadb845",
+      "sha256": "3d751cee735184a12f93de17965f9ac533f63eb3e5f50ab13fe8b1a56ee8e4da",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStateMachine_p.h": {
@@ -2389,7 +2389,7 @@
         "KisPageWorkingState",
         "KisPageWorkingVersion"
       ],
-      "sha256": "22a2107b236f6ece311f3bfe0dc0c96bc589bd0ad3774bb0a61dea267dcc10bf",
+      "sha256": "79e627ddd5e1fe87875d5ca2fa4cbb758e1407c59d229c943a841a6f8204a7c5",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStore.cpp": {
@@ -6558,5 +6558,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "822456732bd02a13d128b855ed9856415544ec00"
+  "working_tree_head": "6d439e0437c86b5214064eef5bc5134f2160cf43"
 }

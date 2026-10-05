@@ -2342,7 +2342,8 @@ try {
         PreparedPublication::Data::Entry entry;
         entry.shardOwner = std::move(shardOwner);
         entry.version = transition.version;
-        KisPageWorkingState before(storage);
+        KisPageWorkingResult step(storage);
+        auto &before = step.next;
         if (recoverable) before.versions.reserve(2);
         {
             QMutexLocker locker(&shard->mutex);
@@ -2427,7 +2428,7 @@ try {
             for (const auto &version : before.versions)
                 publication.deltas.push_back({version.version, version.publication, version.preparedBy});
         }
-        auto step = stateMachine.applyKnownValid(std::move(before), transition);
+        stateMachine.applyKnownValid(step, transition);
         if (!step.accepted) {
             KisPageStoreDetail::setError(error, step.rejectionReason);
             return result;
@@ -2435,7 +2436,7 @@ try {
         if (recoverable) {
             auto ready = transition;
             ready.kind = KisPageTransitionKind::PrepareWrite;
-            step = stateMachine.applyKnownValid(std::move(step.next), ready);
+            stateMachine.applyKnownValid(step, ready);
             if (!step.accepted) {
                 KisPageStoreDetail::setError(error, step.rejectionReason);
                 return result;
@@ -3612,7 +3613,8 @@ try {
             result.rejectionReason = QStringLiteral("page is missing or reserved for publication");
             return result;
         }
-        KisPageWorkingState input(workingStorage);
+        KisPageWorkingResult step(workingStorage);
+        auto &input = step.next;
         input.setHeader(shard->header(key, page->second));
         const auto add = [&](const KisPageVersion &identity) {
             if (!identity.isValid() || input.findVersion(identity))
@@ -3664,17 +3666,16 @@ try {
         inputVersions.reserve(input.versions.size());
         for (const auto &version : input.versions)
             inputVersions.push_back(version.version);
-        auto next = std::move(input);
+        auto &next = input;
         const KisPageStateMachine machine;
         for (qsizetype i = 0; i < count; ++i) {
             const auto &transition = transitions[i];
-            auto step = machine.applyKnownValid(std::move(next), transition);
+            machine.applyKnownValid(step, transition);
             if (!step.accepted) {
                 ++shard->rejectedTransitions;
                 result.rejectionReason = step.rejectionReason;
                 return result; // no authoritative record has changed
             }
-            next = std::move(step.next);
             effects.insert(effects.end(), step.effects.cbegin(), step.effects.cend());
         }
         // Only projected records are installed/removed. Unrelated history and its

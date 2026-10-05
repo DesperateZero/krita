@@ -260,10 +260,11 @@ public:
 
 private:
     // Only indexed coordinator-owned values may omit the full boundary scans.
-    // Both entry points use the same transition-local policy. The working value
-    // is consumed; on rejection the coordinator discards it without installation.
-    KisPageWorkingResult applyKnownValid(
-        KisPageWorkingState current,
+    // Both entry points use the same transition-local policy. The coordinator
+    // owns one working result through the sequence; rejection discards it
+    // without installation, while the public oracle preserves its input.
+    void applyKnownValid(
+        KisPageWorkingResult &result,
         const KisPageTransition &transition) const;
     friend class KisPageMetadataCoordinator;
 };

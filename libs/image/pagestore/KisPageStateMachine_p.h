@@ -112,8 +112,8 @@ struct KisPageWorkingState
 
 struct KisPageWorkingResult
 {
-    explicit KisPageWorkingResult(KisPageWorkingState current)
-        : next(std::move(current)), effects(next.versions.get_allocator()) {}
+    explicit KisPageWorkingResult(KisPageWorkingStorage storage)
+        : next(storage), effects(storage) {}
     bool accepted = false;
     KisPageWorkingState next;
     KisPageWorkingArray<KisPageTransitionEffect> effects;

@@ -166,41 +166,28 @@ void appendReplica(Version &version, const KisReplicaHandle &handle,
     version.replicas.push_back(std::move(value));
 }
 
-KisPageTransitionResult transitionResult(const KisPageStateSnapshot &current)
-{
-    KisPageTransitionResult result;
-    result.next = current;
-    return result;
-}
-KisPageWorkingResult transitionResult(KisPageWorkingState &current)
-{
-    return KisPageWorkingResult(std::move(current));
-}
-
-template<class State, class Validate>
-auto applyPolicy(State current, const KisPageTransition &transition,
+template<class Result, class Validate>
+void applyPolicy(Result &result, const KisPageTransition &transition,
                  bool validateBoundaryInvariants, Validate validate)
 {
-    auto result = transitionResult(current);
-    using Version = typename decltype(current.versions)::value_type;
+    result.accepted = false;
+    result.effects.clear();
+    result.rejectionReason.clear();
+    using Version = typename decltype(result.next.versions)::value_type;
     using Replica = typename decltype(std::declval<Version>().replicas)::value_type;
 
     if (validateBoundaryInvariants) {
         QString currentFailure;
-        if (!validate(current, &currentFailure)) {
+        if (!validate(result.next, &currentFailure)) {
             result.rejectionReason = currentFailure;
-            return result;
+            return;
         }
     }
 
-    auto reject = [&result, &current, validateBoundaryInvariants](const QString &reason) {
+    auto reject = [&result](const QString &reason) {
         result.accepted = false;
-        // The public oracle returns the original snapshot on rejection. The
-        // private consumed work has no consumer until the whole sequence accepts.
-        if (validateBoundaryInvariants) result.next = current;
         result.effects.clear();
         result.rejectionReason = reason;
-        return std::move(result);
     };
 
     auto requireVersion = [&result](const KisPageVersion &version)
@@ -988,7 +975,6 @@ auto applyPolicy(State current, const KisPageTransition &transition,
 
     result.accepted = true;
     result.rejectionReason.clear();
-    return result;
 }
 
 } // namespace
@@ -996,19 +982,24 @@ auto applyPolicy(State current, const KisPageTransition &transition,
 KisPageTransitionResult KisPageStateMachine::apply(
     const KisPageStateSnapshot &current, const KisPageTransition &transition) const try
 {
-    return applyPolicy(current, transition, true,
+    KisPageTransitionResult result;
+    result.next = current;
+    applyPolicy(result, transition, true,
         [this](const KisPageStateSnapshot &state, QString *reason) { return validateInvariants(state, reason); });
+    if (!result.accepted) result.next = current;
+    return result;
 }
 catch (const std::bad_alloc &) {
-    auto refused = transitionResult(current);
+    KisPageTransitionResult refused;
+    refused.next = current;
     refused.rejectionReason = QStringLiteral("oracle transition storage was refused");
     return refused;
 }
 
-KisPageWorkingResult KisPageStateMachine::applyKnownValid(
-    KisPageWorkingState current, const KisPageTransition &transition) const
+void KisPageStateMachine::applyKnownValid(
+    KisPageWorkingResult &result, const KisPageTransition &transition) const
 {
-    return applyPolicy(std::move(current), transition, false,
+    applyPolicy(result, transition, false,
         [](const KisPageWorkingState &, QString *) { return true; });
 }
 
