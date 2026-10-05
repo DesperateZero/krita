@@ -1001,6 +1001,14 @@ private Q_SLOTS:
     }
     void indexedHistorySlices();
     void metadataCompactRecordsRoundTrip();
+    void metadataAcceptedBatchPreservesPhysicalOwnership_data()
+    {
+        QTest::addColumn<int>("replicas"); QTest::addColumn<int>("collision");
+        for (int count : {1, 2, 3, 33}) for (int variant = 0; variant < 6; ++variant)
+            QTest::newRow(qPrintable(QStringLiteral("replicas%1-case%2").arg(count).arg(variant)))
+                << count << variant;
+    }
+    void metadataAcceptedBatchPreservesPhysicalOwnership();
     void metadataArenaGrowthCausalBaseline();
     void metadataSlotArenaGenerationAndRelease();
     void metadataArenaDirectoryGrowthAtCapacity();
@@ -5163,6 +5171,94 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         QCOMPARE(bucket.reserved.cpuRam, quint64(0));
 }
 
+void KisPageStoreReferenceTest::metadataAcceptedBatchPreservesPhysicalOwnership()
+{
+    QFETCH(int, replicas); QFETCH(int, collision);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageMetadataCoordinator coordinator;
+    coordinator.attachBackingBudget(budget);
+    QVERIFY(coordinator.configure(1));
+    const auto current = pageVersion(0, 1);
+    auto initial = initialPageState(current, replica(current, 1, 1, 7));
+    for (int i = 1; i < replicas; ++i) {
+        // Repeated numeric slots differ by the full provider/epoch identity.
+        // Allocation generation is deliberately independent of physical identity.
+        const auto handle = replica(current, 1 + i % 3, 1 + (i / 3) % 3, 7 + i / 9, i + 1);
+        initial.versions.first().replicas.append({handle, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    }
+    std::mt19937 random(unsigned(replicas * 7 + collision));
+    auto &records = initial.versions.first().replicas;
+    std::shuffle(records.begin(), records.end(), random);
+    const KisPageStateMachine machine;
+    QString error;
+    QVERIFY2(machine.validateInvariants(initial, &error), qPrintable(error));
+    QVERIFY(coordinator.registerPage(initial));
+    const auto foreignVersion = pageVersion(1, 1);
+    const auto foreign = replica(foreignVersion, 91, 1, 7002);
+    QVERIFY(coordinator.registerPage(initialPageState(foreignVersion, foreign)));
+    KisPageTransition first;
+    first.kind = KisPageTransitionKind::AttachHistoricalDefault;
+    first.version = {initial.key, {1}, 2};
+    first.target = replica(first.version, 50, 1, 900);
+    auto second = first;
+    second.version.defaultPixelRevision = 3;
+    second.target.version = second.version;
+    ++second.target.allocation.generation;
+    switch (collision) {
+    case 1: ++second.target.provider.value; break;
+    case 2: ++second.target.providerEpoch.value; break;
+    case 3: ++second.target.allocation.slot; break;
+    case 4:
+        second.target = foreign;
+        second.target.version = second.version;
+        ++second.target.allocation.generation;
+        break;
+    case 5:
+        second.target = initial.versions.first().authority;
+        second.target.version = second.version;
+        ++second.target.allocation.generation;
+        break;
+    }
+    KisPageTransition read;
+    read.kind = KisPageTransitionKind::AcquireRead;
+    read.version = current;
+    read.target = initial.versions.first().authority;
+    read.lease = {99};
+    auto release = read;
+    release.kind = KisPageTransitionKind::ReleaseRead;
+    const QVector<KisPageTransition> sequence{first, second, read, release};
+    auto expected = initial;
+    bool accepted = true;
+    QString rejection;
+    for (const auto &transition : sequence) {
+        const auto result = machine.apply(expected, transition);
+        if (!result.accepted) { accepted = false; rejection = result.rejectionReason; break; }
+        QVERIFY(result.effects.isEmpty());
+        expected = result.next;
+    }
+    QCOMPARE(accepted, collision != 0 && collision != 5);
+    const auto before = coordinator.metrics();
+    const auto result = coordinator.applyOwnerSequence(initial.key, sequence);
+    QCOMPARE(result.accepted, accepted && collision != 4);
+    QVERIFY(!result.storageRefused);
+    if (!accepted) QCOMPARE(result.rejectionReason, rejection);
+    if (collision == 4) {
+        QVERIFY2(accepted, qPrintable(rejection)); // The page-local oracle cannot know the other page.
+        QVERIFY(result.rejectionReason.contains(QStringLiteral("physical ownership conflict")));
+    }
+    KisPageStateSnapshot actual;
+    QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
+    comparePageRecords(actual, result.accepted ? expected : initial);
+    QVERIFY(machine.validateInvariants(actual));
+    if (!result.accepted) QCOMPARE(coordinator.metrics().localVersionInstalls, before.localVersionInstalls);
+    const auto footprint = coordinator.footprint();
+    QCOMPARE(footprint.physicalSlotIndex.entries, quint64(replicas + 1 + (result.accepted ? 2 : 0)));
+    QCOMPARE(footprint.exactVersionIndex.outstandingReservations, quint64(0));
+    QCOMPARE(footprint.physicalSlotIndex.outstandingReservations, quint64(0));
+    for (const auto &bucket : budget.usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+}
+
 void KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership()
 {
     KisPageMetadataCoordinator coordinator;
@@ -5764,6 +5860,21 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     }
     QVERIFY(KisPageStateMachine().validateInvariants(initial));
     QVERIFY(coordinator.registerPage(initial));
+    if (variant != 0) {
+        // Debt acceptance fills the budget. Occupy the actual spare replica
+        // slots too, so the subsequent atomic install requires arena growth
+        // rather than relying on a redundant temporary hash allocation.
+        const quint64 spare = coordinator.footprint().replicaArena.freeSlots;
+        if (spare) {
+            const auto fillerVersion = pageVersion(1, 1);
+            auto fillerPage = initialPageState(fillerVersion, replica(fillerVersion, 99, 1, 200000));
+            for (quint64 i = 1; i < spare; ++i)
+                fillerPage.versions.first().replicas.append(
+                    {replica(fillerVersion, 99, 1, 200000 + i), KisReplicaValidity::Valid, {}, {}, 0, {}});
+            QVERIFY(coordinator.registerPage(fillerPage));
+        }
+        QCOMPARE(coordinator.footprint().replicaArena.freeSlots, quint64(0));
+    }
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const quint64 baseline = live();
     bool accepted = false;

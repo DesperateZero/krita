@@ -25,7 +25,6 @@
 #include <map>
 #include <tuple>
 #include <utility>
-#include <unordered_set>
 #include <vector>
 
 namespace KisPageStoreDetail {
@@ -1478,25 +1477,22 @@ struct ShardRecordStore {
         return true;
     }
 
-    template<class Snapshots>
-    bool putBatch(MetadataPage *page, const Snapshots &snapshots, KisPageWorkingStorage storage)
+    bool putAcceptedBatch(MetadataPage *page, const KisPageWorkingResult &accepted)
     {
+        Q_ASSERT(accepted.accepted);
+        if (!accepted.accepted) return false;
+        // The original transition result preserves physical uniqueness: inputs
+        // come from this canonical index, and every identity-introducing state
+        // transition checks physicalSlotInUse before appending/replacing it.
+        // Recheck canonical ownership after unlocked growth; no second scratch
+        // identity index is needed for the already accepted local sequence.
+        const auto &snapshots = accepted.next.versions;
         qsizetype newVersions = 0;
         qsizetype replicaCount = 0;
-        struct PhysicalHash {
-            size_t operator()(const PhysicalSlot &value) const noexcept { return qHash(value); }
-        };
-        std::unordered_set<PhysicalSlot, PhysicalHash, std::equal_to<PhysicalSlot>,
-            KisMutationStorageAllocator<PhysicalSlot>> batchPhysicalSlots(0, PhysicalHash{}, {}, storage);
-        batchPhysicalSlots.reserve(snapshots.size());
         for (auto snapshotIt = snapshots.cbegin(); snapshotIt != snapshots.cend(); ++snapshotIt) {
             KisVersionSlotId existing;
             if (!findVersion(snapshotIt->version, &existing))
                 ++newVersions;
-            for (const auto &replica : snapshotIt->replicas) {
-                if (!batchPhysicalSlots.insert(replica.replica.physicalSlotIdentity()).second)
-                    return false;
-            }
             if (!canInstallPhysical(*snapshotIt, existing))
                 return false;
             replicaCount += snapshotIt->replicas.size();
@@ -3766,7 +3762,7 @@ try {
         });
         // The next values already witness retention. No second removal set
         // may allocate after installation starts.
-        if (!shard->records.putBatch(&page->second, next.versions, workingStorage)) {
+        if (!shard->records.putAcceptedBatch(&page->second, step)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             return result;

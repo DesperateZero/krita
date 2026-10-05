@@ -8442,6 +8442,9 @@ void KisPageStoreCpuMutationTest::sealStorageRefusalKeepsFrozenOwner()
         auto guard = scope.beginWrite(key(x)); QVERIFY(guard.isValid());
         static_cast<quint8 *>(guard.data())[0] = 0x71;
     }
+    // Finish the initial fill's old-root reclamation before occupying the
+    // exact hard limit; a concurrent legitimate free would change pressure.
+    QVERIFY(f.store->waitForRetirementIdle());
     const auto sealedBefore = f.store->mutationStatistics().pagesSealed;
     int providerPreparations = 0;
     const auto observePreparation = [&] { ++providerPreparations; };
@@ -8452,16 +8455,26 @@ void KisPageStoreCpuMutationTest::sealStorageRefusalKeepsFrozenOwner()
     const auto live = [&] {
         return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
-    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
-    void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+    size_t fillerBytes = 0;
+    void *filler = nullptr;
     {
         const auto release = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
         for (int attempt = 0; attempt < 3; ++attempt) {
+            freeTestStoragePressure(parent.get(), std::exchange(filler, nullptr), fillerBytes, 1);
+            fillerBytes = size_t(limits.metadataArenaBytes - live());
+            filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
+            QCOMPARE(live(), limits.metadataArenaBytes);
             QVERIFY(checkpoint ? !scope.checkpointForRead(&f.error).isValid() : !scope.seal(&f.error));
             QVERIFY(!f.error.isEmpty()); QVERIFY(scope.isActive());
             QCOMPARE(f.store->sessionStats().activeProviderCalls, qsizetype(0));
             QCOMPARE(f.store->mutationStatistics().pagesSealed, sealedBefore);
-            QCOMPARE(live(), limits.metadataArenaBytes);
+            // Accepted private metadata can wake old-root reclamation during
+            // refusal. Its real free is allowed; every attempt starts full.
+            QVERIFY(f.store->waitForRetirementIdle());
+            const auto usage = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+            QVERIFY(usage.live.cpuRam <= limits.metadataArenaBytes);
+            QVERIFY(usage.peak.cpuRam <= limits.metadataArenaBytes);
+            QCOMPARE(usage.reserved.cpuRam, quint64(0));
             QVERIFY(!scope.beginWrite(key()).isValid());
             QVERIFY(!scope.borrowExecution({1}, {{0, 0}}).isActive());
             QVERIFY(!scope.removePage(key()));
