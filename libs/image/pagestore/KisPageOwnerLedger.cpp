@@ -453,7 +453,7 @@ public:
             freePreparedChanges.pop_back();
         }
         PreparedBackingChangeSlot &slot = preparedChanges.at(slotIndex);
-        slot.handoffClaimNode = {};
+        if (!handoffTarget.isValid()) slot.handoffClaimNode = {};
         ++slot.generation;
         if (!slot.generation)
             ++slot.generation;
@@ -488,7 +488,15 @@ public:
         slot.physicals.erase(std::unique(slot.physicals.begin(), slot.physicals.end()), slot.physicals.end());
         if (handoffTarget.isValid()) {
             preparedHandoffTargets.reserve(preparedHandoffTargets.size() + 1);
-            preparedHandoffTargets.insert(handoffTarget.allocationIdentity());
+            if (slot.handoffClaimNode.empty()) {
+                preparedHandoffTargets.insert(handoffTarget.allocationIdentity());
+            } else {
+                // The detached node is still charged to this cold slot. Its
+                // old key is inert; only the new insertion acquires a claim.
+                slot.handoffClaimNode.value() = handoffTarget.allocationIdentity();
+                auto inserted = preparedHandoffTargets.insert(std::move(slot.handoffClaimNode));
+                Q_ASSERT(inserted.inserted);
+            }
         }
         for (const auto &key : slot.physicals)
             physicalBackings.find(key)->second.classClaim = cookie;
@@ -1605,11 +1613,20 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     }
     auto reservation = d->backingBudget->reserveChange(change, error);
     if (!reservation.isValid()) return {};
+    // A completed slot already owns an empty, funded changes buffer. Borrow
+    // that storage through the existing preparation input, then return it to
+    // the same slot. Refusal destroys the local input and releases its charge.
+    ChargedVector<KisBackingClassChange> changes{
+        KisMutationStorageAllocator<KisBackingClassChange>(d->backingBudget)};
+    if (!d->freePreparedChanges.empty()) {
+        auto &reusable = d->preparedChanges.at(d->freePreparedChanges.back()).changes;
+        // Preserve cold shrinkage after a larger ordinary class-change batch.
+        if (reusable.capacity() == 1) changes.swap(reusable);
+    }
+    Q_ASSERT(changes.empty());
+    changes.push_back({source, backing->second.budgetClass, KisBackingBudgetClass::ActivePending});
     const quint64 cookie = d->storePreparedChange(
-        ChargedVector<KisBackingClassChange>(
-            {{source, backing->second.budgetClass, KisBackingBudgetClass::ActivePending}},
-            KisMutationStorageAllocator<KisBackingClassChange>(d->backingBudget)),
-        std::move(reservation), target);
+        std::move(changes), std::move(reservation), target);
     KisPageStoreDetail::setError(error, {});
     return KisBackingHandoffReservation{KisBackingClassChangeReservation{this, cookie}};
 }

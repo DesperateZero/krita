@@ -1820,7 +1820,7 @@
         "map",
         "unordered_set"
       ],
-      "lines": 2266,
+      "lines": 2283,
       "member_fields": [
         "m_claims",
         "m_cookie",
@@ -1847,7 +1847,7 @@
         "Reservation",
         "SealedProofRecord"
       ],
-      "sha256": "dec8ebbc6e2282a1cb9db329b0e3177cc624a71efec2b91036e1a58c26ba5d5c",
+      "sha256": "78845089bb8013b9d57818e09a9631206c8e331d1f27eb9228b14a0136a158e7",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageOwnerLedger.h": {
@@ -3640,7 +3640,7 @@
         "tiles3/kis_tile_data_store.h",
         "tiles3/kis_tile_data_store_iterators.h"
       ],
-      "lines": 1331,
+      "lines": 1397,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStorePhysicalClaimTest",
@@ -3650,7 +3650,7 @@
         "Fixture",
         "KisPageStorePhysicalClaimTest"
       ],
-      "sha256": "2ad19d8a13fee9adfcc717f496cb3ce4687a28103c9088967ccfb71892813030",
+      "sha256": "412233b44c91609073fbbf103b406cfd0ce808984b7bff06a0ff9d0a5d269c5a",
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReadBaselineTest.cpp": {
@@ -5846,7 +5846,7 @@
         "tiles_test_utils.h",
         "type_traits"
       ],
-      "lines": 6907,
+      "lines": 6913,
       "member_fields": [
         "m_accessRect",
         "m_index",
@@ -5882,7 +5882,7 @@
         "Observation",
         "TestableTiledDataManager"
       ],
-      "sha256": "dc6ce2efff005717e3c64d3d6ccbe06a7ff71703e1f19f616ba866c9c52bcc1c",
+      "sha256": "e1e6cbf08a43a377e227b2f3b69ee5a75e9f95e6c1cd97433e2c374329c7bf75",
       "synchronization_declarations": 9
     },
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": {
@@ -6564,5 +6564,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "57e59e6b0e53c625b0e4853985a242b5433ca618"
+  "working_tree_head": "0a00bd3fe3fe71e44c04b987f9558bcd37f00dc6"
 }

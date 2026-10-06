@@ -3885,6 +3885,9 @@ void KisTiledDataManagerTest::testPageStoreBatchCachePreparationFailure()
     warm.reset();
     const auto generations = store->mutationStatistics().generationsReserved;
 
+    // Global pressure needs a global cleanup boundary, including detached
+    // root/task storage whose final free is outside this store's idle count.
+    kisDrainPageStoreReclamation();
     auto process = kisAcquirePageStoreBootstrapBudget();
     QVERIFY(process);
     const auto used = [&] {
@@ -3951,6 +3954,9 @@ void KisTiledDataManagerTest::testPageStoreTileSelectionFailure()
     dm.writeBytes(bytes(changed), 0, 0, 1, 1);
     auto *store = dm.m_pageStoreBackend->store();
     QVERIFY(store->waitForRetirementIdle());
+    // Other stores and detached root jobs share the process capacity too.
+    // Drain their physical frees before computing an exactly full filler.
+    kisDrainPageStoreReclamation();
     auto process = kisAcquirePageStoreBootstrapBudget();
     QVERIFY(process);
     const auto used = [&] {

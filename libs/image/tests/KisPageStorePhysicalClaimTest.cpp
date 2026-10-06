@@ -127,6 +127,7 @@ private Q_SLOTS:
     void backingHandoffAccountingGuards_data();
     void backingHandoffAccountingGuards();
     void backingHandoffAccountingAcrossIndexGrowth();
+    void backingHandoffReusesFundedPreparation();
     void handoffDebtFollowsTerminal_data();
     void handoffDebtFollowsTerminal();
     void sharedHandoffDebt_data();
@@ -804,6 +805,71 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
         const auto &bucket = finalUsage.buckets[i];
         QCOMPARE(bucket.live.cpuRam, i == size_t(KisBackingBudgetClass::MetadataArena) ? retainedCache : quint64(0)); QCOMPARE(bucket.reserved.cpuRam, 0u);
     }
+}
+
+void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
+{
+    Fixture f; QVERIFY(f.init());
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger ledger;
+    QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider));
+    KisBackingBudgetDelta initial;
+    initial.buckets[size_t(KisBackingBudgetClass::Current)].cpuRam = f.replica.layout.byteSize;
+    auto backing = budget.reserve(initial, &f.error);
+    QVERIFY(ledger.registerBacking(f.replica, backing, KisBackingBudgetClass::Current, &f.error));
+    auto source = f.replica;
+    for (quint64 generation = 2; generation <= 4; ++generation) {
+        auto physical = KisCpuBackingHandoff::prepare(f.provider, source, {key(0), {generation}}, f.desc);
+        QVERIFY(physical.isValid());
+        KisBackingBudgetReservation pressure;
+        if (generation > 2) {
+            // Already funded preparation must work without additional metadata
+            // headroom. Reusing storage must still acquire the new identity.
+            {
+                auto first = budget.reserve({}, &f.error);
+                auto second = budget.reserve({}, &f.error);
+                QVERIFY(first.isValid()); QVERIFY(second.isValid());
+            }
+            const auto usage = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+            KisBackingBudgetDelta remaining;
+            remaining.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
+                limits.metadataArenaBytes - usage.live.cpuRam - usage.reserved.cpuRam;
+            pressure = budget.reserve(remaining, &f.error);
+            QVERIFY2(pressure.isValid(), qPrintable(f.error));
+        }
+        KisBackingHandoffReservation prepared;
+        try {
+            prepared = ledger.prepareBackingHandoff(source, physical.target(), &f.error);
+        } catch (const std::bad_alloc &) {
+            QFAIL("funded handoff preparation requested additional metadata storage");
+        }
+        QVERIFY2(prepared.isValid(), qPrintable(f.error));
+        QVERIFY(!ledger.prepareBackingHandoff(source, physical.target(), &f.error).isValid());
+        if (generation == 3) {
+            // Cancellation releases the new claim. A retry must neither keep
+            // the detached old key live nor skip the new class/physical claim.
+            prepared.release();
+            prepared = ledger.prepareBackingHandoff(source, physical.target(), &f.error);
+            QVERIFY2(prepared.isValid(), qPrintable(f.error));
+        }
+        QVERIFY(physical.tryClaim());
+        auto writer = physical.commit(); QVERIFY(writer.isValid());
+        QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
+        QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::Count);
+        source = physical.target();
+        QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::ActivePending);
+        writer.reset();
+        pressure.release();
+    }
+    // The same cold slot can next serve an ordinary class change and release
+    // the retained handoff storage at its original cleanup boundary.
+    QVERIFY(ledger.reclassifyBacking(source, KisBackingBudgetClass::RetirementDebt, &f.error));
+    QVERIFY(f.provider->retire({900}, source, {}).isValid());
+    ledger.releaseRetiredBacking(source);
+    for (const auto &bucket : budget.usage().buckets) QCOMPARE(bucket.reserved.cpuRam, 0u);
 }
 
 void KisPageStorePhysicalClaimTest::cachedBindingRequiresExactIdentity_data()
