@@ -314,6 +314,7 @@ private:
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
         quint64 durableBytes, bool emptyUsage = false,
         quint64 irreducibleMetadataBytes = 0) const;
+    bool fitsMetadataStorageLocked(quint64 bytes) const;
     bool priorWaiterConflictsLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
         quint64 durableBytes, quint64 beforeSequence = std::numeric_limits<quint64>::max()) const;
@@ -360,6 +361,13 @@ private:
     SharedChildMap m_sharedChildren;
     quint64 m_nextSharedChild = 1;
     const bool m_processStorage;
+    // Under m_mutex: only the six non-metadata buckets' zero-delta policy is
+    // cached. Reservation/commit, non-metadata release, retirement-domain
+    // movement and limit configuration invalidate it. Metadata/process usage
+    // and the global durable reservation remain live inputs on every check.
+    mutable quint64 m_nonMetadataLiveSsd = 0;
+    mutable bool m_nonMetadataFitsValid = false;
+    mutable bool m_nonMetadataFits = false;
 
     friend class KisBackingBudgetReservation;
     friend class KisBackingBudgetWaiter;

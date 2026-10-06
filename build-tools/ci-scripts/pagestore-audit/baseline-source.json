@@ -2973,7 +2973,7 @@
         "unistd.h",
         "utility"
       ],
-      "lines": 3162,
+      "lines": 3210,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStoreDetail",
@@ -2991,7 +2991,7 @@
         "ProcessStorageState",
         "Resource"
       ],
-      "sha256": "8c9d789b30670b41c3fa413d1f6fd3939b022c599cb68ecb19751d667154cf33",
+      "sha256": "c440d7b938a6e3a5757fa1a814eefe113b8b5f8dc4de094d44cd45ee2db4bfe8",
       "synchronization_declarations": 14
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -3016,7 +3016,7 @@
         "utility",
         "vector"
       ],
-      "lines": 692,
+      "lines": 700,
       "member_fields": [
         "m_claims",
         "m_firstFreeSlot",
@@ -3024,6 +3024,9 @@
         "m_mutex",
         "m_nextClaimToken",
         "m_nextSharedChild",
+        "m_nonMetadataFits",
+        "m_nonMetadataFitsValid",
+        "m_nonMetadataLiveSsd",
         "m_processStorage",
         "m_reservedAggregateBytes",
         "m_reservedDurableBytes",
@@ -3096,7 +3099,7 @@
         "TransactionActivity",
         "alignas"
       ],
-      "sha256": "bf24dd5038f65841954c67347fb28fd2bcef661023e66f58e879a3feca589564",
+      "sha256": "ce7ee07a30c1bbf3e135dea21466b1d0e6ef4381b7958caffa836eac9f2ba8ec",
       "synchronization_declarations": 14
     },
     "libs/image/pagestore/KisSurfaceCodecRegistry.cpp": {
@@ -6561,5 +6564,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "6ffe097909e23adf3afd229a2a14e93986fae00b"
+  "working_tree_head": "57e59e6b0e53c625b0e4853985a242b5433ca618"
 }

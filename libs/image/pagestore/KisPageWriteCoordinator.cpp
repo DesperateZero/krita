@@ -281,6 +281,26 @@ quint64 sumComponents(const std::array<quint64, 4> &values)
     return result;
 }
 
+bool fitsBudgetBucket(const KisPageDomainBytes &liveBytes,
+    const KisPageDomainBytes &reservedBytes, const KisPageDomainByteDelta &delta,
+    const std::array<quint64, 4> &limits, quint64 aggregateBytes,
+    quint64 pending, quint64 classLimit)
+{
+    const auto live = components(liveBytes);
+    const auto reserved = components(reservedBytes);
+    const auto requested = components(delta);
+    for (size_t domain = 0; domain < requested.size(); ++domain) {
+        if (requested[domain] < 0) return false;
+        const quint64 addition = quint64(requested[domain]);
+        const quint64 limit = limits[domain];
+        if (addition > limit || live[domain] > limit - addition ||
+            reserved[domain] > limit - addition - live[domain]) return false;
+    }
+    const auto current = sumComponents(live);
+    return aggregateBytes <= classLimit && current <= classLimit - aggregateBytes &&
+        pending <= classLimit - aggregateBytes - current;
+}
+
 bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDelta *prepared,
     std::array<quint64, budgetClassCount> *aggregateBytes, quint64 *durableBytes, QString *error)
 {
@@ -501,34 +521,60 @@ bool KisBackingBudgetController::fitsLocked(
     for (size_t i = 0; i < budgetClassCount; ++i) {
         const auto budgetClass = static_cast<KisBackingBudgetClass>(i);
         const auto limits = domainLimits(m_limits, budgetClass);
-        auto live = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].live);
-        auto reserved = components(emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved);
-        const auto requested = components(delta.buckets[i]);
+        auto live = emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].live;
+        auto reserved = emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved;
         if (emptyUsage && budgetClass == KisBackingBudgetClass::MetadataArena)
-            live[0] = irreducibleMetadataBytes;
+            live.cpuRam = irreducibleMetadataBytes;
         if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena) {
-            live[0] = saturatedAdd(live[0], process.live);
-            reserved[0] = saturatedAdd(reserved[0], process.reserved);
+            live.cpuRam = saturatedAdd(live.cpuRam, process.live);
+            reserved.cpuRam = saturatedAdd(reserved.cpuRam, process.reserved);
         }
-        for (size_t domain = 0; domain < requested.size(); ++domain) {
-            if (requested[domain] < 0) return false;
-            const quint64 addition = quint64(requested[domain]);
-            const quint64 limit = limits[domain];
-            if (addition > limit || live[domain] > limit - addition ||
-                reserved[domain] > limit - addition - live[domain]) return false;
-        }
-        const auto limit = classLimits[i];
-        const auto current = sumComponents(live);
         auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
         if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena)
             pending = saturatedAdd(pending, process.reserved);
-        if (aggregateBytes[i] > limit || current > limit - aggregateBytes[i] ||
-            pending > limit - aggregateBytes[i] - current) return false;
-        liveSsd = saturatedAdd(liveSsd, live[3]);
+        if (!fitsBudgetBucket(live, reserved, delta.buckets[i], limits,
+                              aggregateBytes[i], pending, classLimits[i])) return false;
+        liveSsd = saturatedAdd(liveSsd, live.ssd);
     }
     const auto limit = m_limits.durableStoreCapacity;
     return durableBytes <= limit && liveSsd <= limit - durableBytes &&
         (emptyUsage ? 0 : m_reservedDurableBytes) <= limit - durableBytes - liveSsd;
+}
+
+bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes) const
+{
+    if (bytes > quint64(std::numeric_limits<qint64>::max())) return false;
+    constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    static_assert(metadata + 1 == budgetClassCount);
+    if (!m_nonMetadataFitsValid) {
+        m_nonMetadataFits = true;
+        m_nonMetadataLiveSsd = 0;
+        const auto classLimits = aggregateLimits(m_limits);
+        for (size_t i = 0; i < metadata; ++i) {
+            const auto &usage = m_usage.buckets[i];
+            if (!fitsBudgetBucket(usage.live, usage.reserved, {},
+                    domainLimits(m_limits, static_cast<KisBackingBudgetClass>(i)),
+                    0, m_reservedAggregateBytes[i], classLimits[i])) {
+                m_nonMetadataFits = false;
+                break;
+            }
+            m_nonMetadataLiveSsd = saturatedAdd(m_nonMetadataLiveSsd, usage.live.ssd);
+        }
+        m_nonMetadataFitsValid = true;
+    }
+    if (!m_nonMetadataFits) return false;
+    const auto process = m_processStorage ? processStorageSnapshot() : ProcessStorageSnapshot{};
+    auto live = m_usage.buckets[metadata].live;
+    auto reserved = m_usage.buckets[metadata].reserved;
+    live.cpuRam = saturatedAdd(live.cpuRam, process.live);
+    reserved.cpuRam = saturatedAdd(reserved.cpuRam, process.reserved);
+    const auto pending = saturatedAdd(m_reservedAggregateBytes[metadata], process.reserved);
+    if (!fitsBudgetBucket(live, reserved, {qint64(bytes), 0, 0, 0},
+            domainLimits(m_limits, KisBackingBudgetClass::MetadataArena),
+            bytes, pending, m_limits.metadataArenaBytes)) return false;
+    const auto liveSsd = saturatedAdd(m_nonMetadataLiveSsd, live.ssd);
+    const auto limit = m_limits.durableStoreCapacity;
+    return liveSsd <= limit && m_reservedDurableBytes <= limit - liveSsd;
 }
 
 bool KisBackingBudgetController::priorWaiterConflictsLocked(
@@ -1064,7 +1110,7 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
         KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage waits for an earlier admission request"));
         return false;
     }
-    if (!fitsLocked(storageDelta, aggregate, 0)) {
+    if (!fitsMetadataStorageLocked(bytes)) {
         lock.unlock();
         KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage exceeds its hard budget"));
         return false;
@@ -1142,6 +1188,7 @@ void KisBackingBudgetController::activateReservationLocked(
 {
     auto *slot = activeReservation(cookie);
     Q_ASSERT(slot && !hasPositiveBytes(slot->delta));
+    m_nonMetadataFitsValid = false;
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
     slot->delta = delta;
     slot->aggregateBytes = aggregateBytes;
@@ -1257,6 +1304,7 @@ bool KisBackingBudgetController::configureLimits(const KisPageBackingLimits &lim
         }
     }
     m_limits = limits;
+    m_nonMetadataFitsValid = false;
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -1423,6 +1471,8 @@ void KisBackingBudgetController::releaseLive(KisBackingBudgetClass budgetClass,
         if (!live) return;
         Q_ASSERT(*live >= bytes);
         *live = bytes > *live ? 0 : *live - bytes;
+        if (budgetClass != KisBackingBudgetClass::MetadataArena)
+            m_nonMetadataFitsValid = false;
         notifyWaitersLocked();
     }
     if (m_sharedNonPayloadBudget
@@ -1466,6 +1516,7 @@ bool KisBackingBudgetController::commitRetaining(
     const quint32 slotIndex = quint32(cookie);
     ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return 0;
+    m_nonMetadataFitsValid = false;
 
     SharedChildUsage *sharedUsage = nullptr;
     if (slot->sharedChild) {
@@ -1573,6 +1624,7 @@ void KisBackingBudgetController::moveRetirementHeadroom(
     const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
     Q_ASSERT(slot && slot->durableBytes == 0 && slot->aggregateBytes[debt] == bytes);
     if (!slot) return;
+    m_nonMetadataFitsValid = false;
     auto *before = kisPageDomainComponent(slot->delta.buckets[debt], source);
     auto *after = kisPageDomainComponent(slot->delta.buckets[debt], target);
     Q_ASSERT(before && after && before != after && *before == qint64(bytes) && *after == 0);
@@ -1739,11 +1791,7 @@ void kisReservePageProcessStorage(size_t bytes)
         if (bytes > state.limit || current > state.limit - bytes) throw std::bad_alloc();
         if (parent) {
             QMutexLocker budget(&parent->m_mutex);
-            KisBackingBudgetDelta delta;
-            delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(bytes);
-            std::array<quint64, budgetClassCount> aggregate{};
-            aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = bytes;
-            if (!parent->fitsLocked(delta, aggregate, 0)) {
+            if (!parent->fitsMetadataStorageLocked(bytes)) {
                 ++parent->m_usage.backpressureCount;
                 throw std::bad_alloc();
             }
@@ -2055,7 +2103,7 @@ void *kisAllocateMutationStorage(KisBackingBudgetController *budget, size_t byte
             shared = &found->second;
         }
         if (owner->priorWaiterConflictsLocked(delta, aggregate, 0)
-            || !owner->fitsLocked(delta, aggregate, 0)) {
+            || !owner->fitsMetadataStorageLocked(capacity)) {
             ++owner->m_usage.backpressureCount;
             return false;
         }
