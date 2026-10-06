@@ -35,6 +35,7 @@
 #include "KisPageDefaultStorage_p.h"
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageMetadataCoordinator_p.h"
+#include "KisPageStateMachine_p.h"
 #include "KisPageOwnerLedger.h"
 #include "KisPageReplicaProvider.h"
 #include "KisPageStore.h"
@@ -1058,6 +1059,7 @@ private Q_SLOTS:
     void reclamationTaskStorageBeforeOwnerRelease();
     void reclamationTaskRejectedPreparation();
     void retainedStorageWeakTailAndCapacity();
+    void borrowedWorkingStorageFollowsRootLifetime();
     void retainedStorageConcurrentTeardown();
     void retainedWakeInFlightAfterController();
     void preparedReclamationRunsAtCapacity();
@@ -4808,6 +4810,67 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
     QVERIFY(lifetime.expired());
 }
 
+void KisPageStoreReferenceTest::borrowedWorkingStorageFollowsRootLifetime()
+{
+    using Storage = KisMutationStorageAllocator<char>;
+    static_assert(!std::is_constructible_v<KisPageWorkingStorage, Storage>);
+    static_assert(!std::is_constructible_v<Storage, KisPageWorkingStorage>);
+    static_assert(std::is_trivially_copyable_v<KisPageWorkingStorage>);
+    struct Candidate {
+        explicit Candidate(const Storage &storage)
+            : owner(storage), value(owner.borrowed()), moved(owner.borrowed()) {}
+        Storage owner;
+        KisPageWorkingResult value;
+        KisPageWorkingResult moved;
+    };
+    auto parent = std::make_shared<KisBackingBudgetController>();
+    auto warm = parent->reserve({}, nullptr);
+    QVERIFY(warm.isValid());
+    warm.release();
+    const auto live = [&] {
+        return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    };
+    const quint64 baseline = live();
+    auto child = std::make_unique<KisBackingBudgetController>();
+    QVERIFY(child->configureSharedNonPayloadBudget(parent));
+    auto candidate = std::make_unique<Candidate>(Storage::retained(child.get()));
+    for (int v = 0; v < 5; ++v) {
+        auto version = kisPageVersionValue(candidate->value.next);
+        version.version = pageVersion(0, quint64(v + 1));
+        for (int r = 0; r < 3; ++r) {
+            auto replica = kisPageReplicaValue(version);
+            for (quint64 lease = 1; lease <= 7; ++lease)
+                replica.readLeases.push_back({lease});
+            version.replicas.push_back(std::move(replica));
+        }
+        candidate->value.next.versions.push_back(std::move(version));
+    }
+    candidate->moved = std::move(candidate->value);
+    // Reusing the moved-from small_vector must retain the same accounting
+    // affinity without adding an independent owner to any nested value.
+    candidate->value.next.versions.push_back(kisPageVersionValue(candidate->value.next));
+    QCOMPARE(candidate->moved.next.versions.size(), size_t(5));
+    QCOMPARE(candidate->moved.next.versions[4].replicas[2].readLeases.size(), size_t(7));
+    const auto retained = live();
+    QVERIFY(retained > baseline);
+    child.reset();
+    QCOMPARE(live(), retained);
+    auto view = candidate->owner.borrowed();
+    QVERIFY_EXCEPTION_THROWN(view.allocate(1), std::bad_alloc);
+    QCOMPARE(live(), retained);
+    bool contentsPreserved = false;
+    std::thread cleanup([value = std::move(candidate), &contentsPreserved]() mutable {
+        contentsPreserved = value->moved.next.versions[4].version == pageVersion(0, 5)
+            && value->moved.next.versions[4].replicas[2].readLeases[6].value == 7;
+        value.reset();
+    });
+    cleanup.join();
+    QVERIFY(contentsPreserved);
+    QCOMPARE(live(), baseline);
+    for (const auto &bucket : parent->usage().buckets)
+        QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+}
+
 void KisPageStoreReferenceTest::retainedStorageConcurrentTeardown()
 {
     auto parent = std::make_shared<KisBackingBudgetController>();
@@ -5104,7 +5167,7 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
     {
         Arena arena(8 * Arena::blockByteSize(), storage);
         QCOMPARE(live(), baseline); // Empty arenas have no directory allocation.
-        Arena::PreparedDirectory first(storage);
+        Arena::PreparedDirectory first(storage.borrowed());
         first.prepare(arena.directoryCapacityForBlocks(1));
         QVERIFY(arena.installPreparedDirectory(&first, 1));
         auto block = Arena::prepareBlock();
@@ -5118,7 +5181,7 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         const auto original = live();
         quint64 bytes = 0;
         {
-            Arena::PreparedDirectory measured(storage);
+            Arena::PreparedDirectory measured(storage.borrowed());
             measured.prepare(arena.directoryCapacityForBlocks(1));
             bytes = live() - original;
         }
@@ -5128,7 +5191,7 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         auto *filler = allocateTestStoragePressure(storage, shortFill);
         auto release = qScopeGuard([&] { freeTestStoragePressure(filler); });
         const auto filled = live();
-        Arena::PreparedDirectory next(storage);
+        Arena::PreparedDirectory next(storage.borrowed());
         QVERIFY_EXCEPTION_THROWN(next.prepare(arena.directoryCapacityForBlocks(1)), std::bad_alloc);
         QCOMPARE(live(), filled);
         QCOMPARE(arena.get(id), address);
@@ -5151,9 +5214,9 @@ void KisPageStoreReferenceTest::metadataArenaDirectoryGrowthAtCapacity()
         QCOMPARE(*address, 19);
         releaseFull.dismiss();
         freeTestStoragePressure(filler);
-        next = Arena::PreparedDirectory(storage); // Retired array is freed outside the gate.
+        next = Arena::PreparedDirectory(storage.borrowed()); // Retired array is freed outside the gate.
 
-        Arena::PreparedDirectory stale(storage), competitor(storage);
+        Arena::PreparedDirectory stale(storage.borrowed()), competitor(storage.borrowed());
         stale.prepare(arena.directoryCapacityForBlocks(1));
         competitor.prepare(arena.directoryCapacityForBlocks(3));
         QVERIFY(arena.installPreparedDirectory(&competitor, 3));

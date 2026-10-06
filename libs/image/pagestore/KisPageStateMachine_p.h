@@ -11,13 +11,14 @@
 #include <type_traits>
 
 // Temporary values, never metadata authority. Publication keeps these same
-// values through installation; the allocator follows every nested capacity.
-// Retained inline values are part of their enclosing paid allocation. Spills
-// use that same allocator; protection arrays keep their unbounded capacity.
-using KisPageWorkingStorage = KisMutationStorageAllocator<char>;
+// values through installation. The enclosing local scope or prepared Data
+// retains the storage owner; nested values borrow it, including after a move.
+// Inline values belong to that scope/allocation. Spills retain their actual
+// allocation charge; protection arrays keep their unbounded capacity.
+using KisPageWorkingStorage = KisMutationStorageAllocator<char, false>;
 template<class T, size_t InlineCapacity = 0> using KisPageWorkingArray = std::conditional_t<
-    InlineCapacity == 0, std::vector<T, KisMutationStorageAllocator<T>>,
-    boost::container::small_vector<T, InlineCapacity, KisMutationStorageAllocator<T>>>;
+    InlineCapacity == 0, std::vector<T, KisMutationStorageAllocator<T, false>>,
+    boost::container::small_vector<T, InlineCapacity, KisMutationStorageAllocator<T, false>>>;
 
 struct KisPageWorkingReplica
 {

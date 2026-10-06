@@ -99,11 +99,12 @@ public:
     static void operator delete(void *data) noexcept;
 };
 
-template<class T>
+template<class T, bool RetainOwner = true>
 class KisMutationStorageAllocator
 {
 public:
     using value_type = T;
+    template<class U> struct rebind { using other = KisMutationStorageAllocator<U, RetainOwner>; };
     using propagate_on_container_move_assignment = std::true_type;
     using propagate_on_container_swap = std::true_type;
 
@@ -114,15 +115,28 @@ public:
     KisMutationStorageAllocator(const KisMutationStorageAllocator &) = default;
     KisMutationStorageAllocator &operator=(const KisMutationStorageAllocator &) = default;
     template<class U>
-    KisMutationStorageAllocator(const KisMutationStorageAllocator<U> &other) noexcept
+    KisMutationStorageAllocator(const KisMutationStorageAllocator<U, RetainOwner> &other) noexcept
         : budget(other.budget), owner(other.owner) {}
 
     static KisMutationStorageAllocator retained(KisBackingBudgetController *budget)
     {
+        static_assert(RetainOwner, "Only an owning allocator acquires a lifetime reference");
         KisMutationStorageAllocator result(budget);
         result.owner.reset(kisMutationStorageOwner(budget));
         return result;
     }
+
+    // The enclosing scope/object must retain this owner through every use of
+    // the view, including empty and moved-from containers. Actual allocations
+    // retain their own reference until deallocate, as on the owning path.
+    KisMutationStorageAllocator<T, false> borrowed() const & noexcept
+    {
+        static_assert(RetainOwner, "Borrow from the enclosing lifetime owner");
+        KisMutationStorageAllocator<T, false> result(budget);
+        result.owner = owner.get();
+        return result;
+    }
+    KisMutationStorageAllocator<T, false> borrowed() const && = delete;
 
     T *allocate(size_t count)
     {
@@ -136,15 +150,15 @@ public:
         if (owner) owner->deallocate(data, count * sizeof(T), alignof(T));
         else kisFreeMutationStorage(budget, data, count * sizeof(T), alignof(T));
     }
-    template<class U> bool operator==(const KisMutationStorageAllocator<U> &other) const noexcept
+    template<class U> bool operator==(const KisMutationStorageAllocator<U, RetainOwner> &other) const noexcept
     { return budget == other.budget && owner == other.owner; }
-    template<class U> bool operator!=(const KisMutationStorageAllocator<U> &other) const noexcept
+    template<class U> bool operator!=(const KisMutationStorageAllocator<U, RetainOwner> &other) const noexcept
     { return !(*this == other); }
 
     KisBackingBudgetController *budget = nullptr;
 private:
-    boost::intrusive_ptr<KisMutationStorageOwner> owner;
-    template<class> friend class KisMutationStorageAllocator;
+    std::conditional_t<RetainOwner, boost::intrusive_ptr<KisMutationStorageOwner>, KisMutationStorageOwner *> owner{};
+    template<class, bool> friend class KisMutationStorageAllocator;
 };
 
 struct KisPageKey;

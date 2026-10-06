@@ -152,7 +152,7 @@ private:
         quint16 blockGeneration = 1;
         DirectoryState state = DirectoryState::Released;
     };
-    using Directory = std::vector<DirectoryEntry, KisMutationStorageAllocator<DirectoryEntry>>;
+    using Directory = std::vector<DirectoryEntry, KisMutationStorageAllocator<DirectoryEntry, false>>;
     static_assert(std::is_nothrow_move_constructible_v<DirectoryEntry>);
 
 public:
@@ -164,7 +164,9 @@ public:
     {
         friend class KisShardSlotArena;
     public:
-        explicit PreparedDirectory(KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>())
+        // The preparing scope retains storage; after swap the arena's own
+        // root covers the installed array, and the scope covers the old one.
+        explicit PreparedDirectory(KisMutationStorageAllocator<char, false> storage = KisMutationStorageAllocator<char, false>())
             : m_entries(storage) {}
         PreparedDirectory(PreparedDirectory &&) noexcept = default;
         PreparedDirectory &operator=(PreparedDirectory &&) noexcept = default;
@@ -283,7 +285,8 @@ public:
     explicit KisShardSlotArena(quint64 maximumBytes = std::numeric_limits<quint64>::max(),
                               KisMutationStorageAllocator<char> storage = KisMutationStorageAllocator<char>())
         : m_maximumBytes(maximumBytes)
-        , m_directory(storage)
+        , m_storage(storage)
+        , m_directory(m_storage.borrowed())
     {}
 
     ~KisShardSlotArena()
@@ -684,6 +687,8 @@ private:
     }
 
     const quint64 m_maximumBytes;
+    // Destroy the directory before its original accounting-lifetime root.
+    KisMutationStorageAllocator<char> m_storage;
     Directory m_directory;
     Statistics m_statistics;
     quint64 m_outstandingReservations = 0;

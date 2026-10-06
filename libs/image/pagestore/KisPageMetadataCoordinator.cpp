@@ -326,15 +326,15 @@ bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataAren
  * couples the resulting capacity to explicit slot/index reservations.
  */
 struct MetadataArenaGrowth {
-    explicit MetadataArenaGrowth(KisMutationStorageAllocator<char> storage)
+    explicit MetadataArenaGrowth(KisPageWorkingStorage storage)
         : versions(storage), replicas(storage), overflow(storage)
         , versionDirectory(storage), replicaDirectory(storage), overflowDirectory(storage) {}
     // Candidate payloads are destroyed before the reservation that accounts
     // for them when preparation exits early.
     KisBackingBudgetReservation budgetReservation;
-    std::vector<VersionArena::PreparedBlock, KisMutationStorageAllocator<VersionArena::PreparedBlock>> versions;
-    std::vector<ReplicaArena::PreparedBlock, KisMutationStorageAllocator<ReplicaArena::PreparedBlock>> replicas;
-    std::vector<OverflowArena::PreparedBlock, KisMutationStorageAllocator<OverflowArena::PreparedBlock>> overflow;
+    KisPageWorkingArray<VersionArena::PreparedBlock> versions;
+    KisPageWorkingArray<ReplicaArena::PreparedBlock> replicas;
+    KisPageWorkingArray<OverflowArena::PreparedBlock> overflow;
     VersionArena::PreparedDirectory versionDirectory;
     ReplicaArena::PreparedDirectory replicaDirectory;
     OverflowArena::PreparedDirectory overflowDirectory;
@@ -555,11 +555,11 @@ struct MetadataKeyLess {
 // Observational only: rebind reports the retained library node capacity. The
 // underlying original storage allocator remains the sole charging authority.
 template<class T>
-struct MetadataMapAllocator : KisMutationStorageAllocator<T> {
-    using Base = KisMutationStorageAllocator<T>;
+struct MetadataMapAllocator : KisMutationStorageAllocator<T, false> {
+    using Base = KisMutationStorageAllocator<T, false>;
     using value_type = T;
     template<class U> struct rebind { using other = MetadataMapAllocator<U>; };
-    MetadataMapAllocator(const KisMutationStorageAllocator<char> &storage, std::atomic<quint64> *bytes)
+    MetadataMapAllocator(KisPageWorkingStorage storage, std::atomic<quint64> *bytes)
         : Base(storage), bytes(bytes) {}
     template<class U> MetadataMapAllocator(const MetadataMapAllocator<U> &other)
         : Base(other), bytes(other.bytes) {}
@@ -1630,11 +1630,13 @@ struct MetadataShard : KisPageMetadataShardMetrics {
         , budgetCharge(budgetAuthority, 0)
         , arenas(storage)
         , records(&arenas, storage)
-        , pages(MetadataKeyLess{}, decltype(pages)::allocator_type(storage, &mapAllocationBytes))
-        , activities(MetadataKeyLess{}, decltype(activities)::allocator_type(storage, &mapAllocationBytes))
-        , cpuBindings(MetadataKeyLess{}, decltype(cpuBindings)::allocator_type(storage, &mapAllocationBytes)) {}
+        , pages(MetadataKeyLess{}, decltype(pages)::allocator_type(storage.borrowed(), &mapAllocationBytes))
+        , activities(MetadataKeyLess{}, decltype(activities)::allocator_type(storage.borrowed(), &mapAllocationBytes))
+        , cpuBindings(MetadataKeyLess{}, decltype(cpuBindings)::allocator_type(storage.borrowed(), &mapAllocationBytes)) {}
 
     mutable QMutex mutex;
+    // Retains the original storage owner beyond all borrowing maps below,
+    // including when a prepared candidate outlives the coordinator.
     std::shared_ptr<MetadataBudgetAuthority> budgetAuthority;
     // Declared before arenas so arena payloads are destroyed before their
     // remaining live charge is released.
@@ -1953,7 +1955,7 @@ class KisPageMetadataCoordinator::PreparedPublication::Data final : public KisPa
 {
 public:
     using Storage = KisMutationStorageAllocator<char>;
-    template<class T> using Array = std::vector<T, KisMutationStorageAllocator<T>>;
+    template<class T> using Array = KisPageWorkingArray<T>;
 
     // These bounded views construct only prepared values in Data's paid
     // trailing storage. They neither allocate nor own a second storage fee.
@@ -1993,7 +1995,7 @@ public:
     // The same paid values serve the transition and installation, without a
     // second Qt-to-install copy or independent representation of protection.
     using Version = KisPageWorkingVersion;
-    static DataPointer create(Storage storage, size_t count, size_t shardCount, bool detachment);
+    static DataPointer create(const Storage &storage, size_t count, size_t shardCount, bool detachment);
     ~Data();
     void invoke() override;
     void dispose() noexcept override { DataDeleter{}(this); }
@@ -2014,7 +2016,7 @@ public:
         }
     };
     struct Publication {
-        explicit Publication(Storage storage)
+        explicit Publication(KisPageWorkingStorage storage)
             : deltas(storage), installRecords(decltype(installRecords)::allocator_type(storage)) {}
         KisPageStateSnapshot next;
         struct PublicationDelta {
@@ -2030,7 +2032,7 @@ public:
         size_t arenaGrowthIndex = std::numeric_limits<size_t>::max();
     };
     struct ShardArenaGrowth {
-        explicit ShardArenaGrowth(Storage storage) : blocks(storage) {}
+        explicit ShardArenaGrowth(KisPageWorkingStorage storage) : blocks(storage) {}
         std::shared_ptr<MetadataShard> shardOwner;
         MetadataArenaDemand totalDemand;
         MetadataArenaGrowth blocks;
@@ -2042,6 +2044,8 @@ public:
     void cancel() noexcept;
 
     using AllocationUnit = std::max_align_t;
+    // This original root outlives every borrowing payload, including deferred
+    // worker cleanup. The deleter separately keeps it through Data's free.
     KisMutationStorageAllocator<AllocationUnit> storage;
     size_t allocationUnits;
     std::shared_ptr<DeferredMetadataCleanupStatistics> cleanupStatistics;
@@ -2061,12 +2065,12 @@ public:
     Array<std::pair<KisPageVersion, KisReplicaHandle>> backingAuthorities;
 
 private:
-    Data(Storage allocator, size_t units, Entry *entryData, size_t entryCount,
+    Data(const Storage &allocator, size_t units, Entry *entryData, size_t entryCount,
          Publication *publicationData, size_t publicationCount,
          ShardArenaGrowth *growthData, size_t growthCount)
         : storage(allocator), allocationUnits(units), entries(entryData, entryCount)
         , publications(publicationData, publicationCount), arenaGrowth(growthData, growthCount)
-        , backingAuthorities(allocator) {}
+        , backingAuthorities(storage.borrowed()) {}
 
     template<class T> static size_t appendPayload(size_t &bytes, size_t count)
     {
@@ -2082,7 +2086,7 @@ private:
 
 KisPageMetadataCoordinator::PreparedPublication::DataPointer
 KisPageMetadataCoordinator::PreparedPublication::Data::create(
-    Storage storage, size_t count, size_t shardCount, bool detachment)
+    const Storage &storage, size_t count, size_t shardCount, bool detachment)
 {
     static_assert(alignof(Data) <= alignof(AllocationUnit));
     const size_t publicationCount = detachment ? 0 : count;
@@ -2362,7 +2366,7 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
         return result;
     }
-    auto storage = d->budgetAuthority->storage<char>();
+    const auto storageOwner = d->budgetAuthority->storage<char>();
     const size_t bytesPerPage = sizeof(PreparedPublication::Data::Entry)
         + (detachment ? 0 : sizeof(PreparedPublication::Data::Publication));
     if (size_t(count) > size_t(std::numeric_limits<qint64>::max()) / bytesPerPage)
@@ -2383,7 +2387,8 @@ try {
             shardCount = usedShards.count();
         }
     }
-    auto data = PreparedPublication::Data::create(storage, size_t(count), shardCount, detachment);
+    auto data = PreparedPublication::Data::create(storageOwner, size_t(count), shardCount, detachment);
+    const auto storage = data->storage.borrowed();
     data->owner = d->publicationOwner;
     data->transaction = transaction;
     data->minimumEpoch = minimumEpoch;
@@ -3074,7 +3079,8 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
         return false;
     }
     const MetadataArenaDemand demand = newMetadataDemand(initial.versions);
-    MetadataArenaGrowth growth(shard->budgetAuthority->storage<char>());
+    const auto storageOwner = shard->budgetAuthority->storage<char>();
+    MetadataArenaGrowth growth(storageOwner.borrowed());
     QMutexLocker locker(&shard->mutex);
     if ((shard->pages.find(initial.key) != shard->pages.end())) {
         KisPageStoreDetail::setError(error, QStringLiteral("page is already registered"));
@@ -3323,7 +3329,8 @@ bool KisPageMetadataCoordinator::discardHistory(
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
     if (!shard || count < 0 || count > HistorySlice::Limit) return false;
     for (;;) {
-        KisPageWorkingArray<KisPageTransitionEffect> prepared(shard->budgetAuthority->storage<char>());
+        const auto storageOwner = shard->budgetAuthority->storage<char>();
+        KisPageWorkingArray<KisPageTransitionEffect> prepared(storageOwner.borrowed());
         MetadataArenas::ReleasedBlocks released;
         quint64 debtCookie = 0;
         bool debtPrepared = false;
@@ -3594,7 +3601,8 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtect
         return result;
     }
     for (;;) {
-        MetadataArenaGrowth growth(shard->budgetAuthority->storage<char>());
+        const auto storageOwner = shard->budgetAuthority->storage<char>();
+        MetadataArenaGrowth growth(storageOwner.borrowed());
         MetadataArenas::ReleasedBlocks released;
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
@@ -3699,7 +3707,8 @@ try {
         return result;
     }
     for (;;) {
-        const auto workingStorage = shard->budgetAuthority->storage<char>();
+        const auto storageOwner = shard->budgetAuthority->storage<char>();
+        const auto workingStorage = storageOwner.borrowed();
         MetadataArenaGrowth growth(workingStorage);
         KisPageWorkingArray<KisPageTransitionEffect> effects(workingStorage);
         QMutexLocker lock(&shard->mutex);

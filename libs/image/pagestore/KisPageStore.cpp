@@ -628,6 +628,9 @@ public:
         Private *owner;
     };
     template<class T> struct MutationAllocator : KisMutationStorageAllocator<T> {
+        // Control-block rebind must keep MutationLifetime, not inherit the
+        // base allocator's rebind and discard the original Store protection.
+        template<class U> struct rebind { using other = MutationAllocator<U>; };
         explicit MutationAllocator(Private *owner)
             : KisMutationStorageAllocator<T>(&owner->backingBudget), lifetime(owner) {}
         template<class U> MutationAllocator(const MutationAllocator<U> &other)
@@ -638,6 +641,8 @@ public:
         { return !(*this == other); }
         MutationLifetime lifetime;
     };
+    static_assert(std::is_same_v<std::allocator_traits<MutationAllocator<char>>::rebind_alloc<int>,
+                                 MutationAllocator<int>>);
 
     Storage storage;
     mutable QMutex mutex;
