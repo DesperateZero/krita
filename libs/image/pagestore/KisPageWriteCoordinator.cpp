@@ -2779,21 +2779,18 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         std::shared_ptr<KisPageReplicaProvider> beforeProvider;
         std::shared_ptr<KisCpuResidentBinding> beforeBinding;
         bool beforePinned = false;
-        KisCpuBackingHandoff physical;
         KisBackingHandoffReservation accounting;
         KisPageMetadataCoordinator::PreparedPublication metadata;
         KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
         KisPagePublicationCoordinator::DescriptorMap descriptors;
         ~Prepared()
         {
-            physical.reset();
             if (beforePinned) beforeBinding->releaseRead();
         }
     };
-    // Invocation-local storage needs no separate allocation. Reset below
-    // still destroys all owning members while the owner gate is open.
-    std::optional<Prepared> prepared(std::in_place);
-    prepared->beforeProvider = ownerLedger->provider(before.provider, before.providerEpoch);
+    // A rejected physical observation needs none of the remaining cold state.
+    KisCpuBackingHandoff physical;
+    std::optional<Prepared> prepared;
     // Even rejected metadata candidates can own real arena/index storage.
     // Destroy them, the before pin and provider references outside owner gates.
     const auto cleanup = qScopeGuard([&] {
@@ -2801,24 +2798,33 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         // requires a held lock for unlock(); always restore it for the caller.
         if (locker.isLocked()) locker.unlock();
         diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableCleanup, 1);
+        physical.reset();
         prepared.reset();
         locker.relock();
     });
-    if (!prepared->beforeProvider) return fallback;
 
     locker.unlock();
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepare, 1);
     // Check the source before pinning the independent before or preparing
     // fallible storage. This observes eligibility but acquires no write claim.
-    prepared->physical = KisCpuBackingHandoff::prepare(provider, write.source, write.version, descriptor);
-    if (!prepared->physical.isValid()) return fallback;
-    prepared->beforeBinding = prepared->beforeProvider->cpuResidentBinding(before);
+    physical = KisCpuBackingHandoff::prepare(provider, write.source, write.version, descriptor);
+    if (!physical.isValid()) return fallback;
+    prepared.emplace();
+    // The caller already retains this exact source provider across the plan
+    // and its cleanup. Only an independent provider needs another ledger owner.
+    auto *beforeProvider = provider.get();
+    if (!(before.provider == write.source.provider) || !(before.providerEpoch == write.source.providerEpoch)) {
+        prepared->beforeProvider = ownerLedger->provider(before.provider, before.providerEpoch);
+        beforeProvider = prepared->beforeProvider.get();
+    }
+    if (!beforeProvider) return fallback;
+    prepared->beforeBinding = beforeProvider->cpuResidentBinding(before);
     prepared->beforePinned = prepared->beforeBinding
         && prepared->beforeBinding->acquireRead(before.allocationIdentity(), true);
     auto recoverable = write;
     recoverable.kind = KisPageTransitionKind::AcquireRecoverableWrite;
     recoverable.source = before;
-    recoverable.target = prepared->physical.target();
+    recoverable.target = physical.target();
     if (prepared->beforePinned) {
         prepared->accounting = ownerLedger->prepareBackingHandoff(write.source, recoverable.target);
         if (prepared->accounting.isValid())
@@ -2833,10 +2839,10 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor);
     const auto plan = select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
-    if (plan != KisPageWritePlanKind::RecoverableHandoff || !prepared->physical.tryClaim()) return fallback;
+    if (plan != KisPageWritePlanKind::RecoverableHandoff || !physical.tryClaim()) return fallback;
     if (!metadata->installRecoverableWrite(std::move(prepared->metadata), transaction,
                                            nullptr, &prepared->cleanup)) return fallback;
-    writable = prepared->physical.commit();
+    writable = physical.commit();
     const bool accounted = ownerLedger->commitBackingHandoff(std::move(prepared->accounting));
     Q_ASSERT(writable.isValid() && accounted);
     Q_UNUSED(accounted);

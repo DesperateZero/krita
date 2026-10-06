@@ -10858,19 +10858,42 @@ void KisPageStoreCpuMutationTest::initialReplicaImportFailure()
 void KisPageStoreCpuMutationTest::productionRecoverableHandoff_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<int>("route"); QTest::addColumn<int>("terminal");
+    QTest::addColumn<bool>("foreignBefore");
     for (int bpp : {1, 4, 8, 16}) for (int route : {0, 1, 2, 3, 4}) for (int terminal : {0, 1, 2, 3})
-        QTest::newRow(qPrintable(QString("%1-route%2-terminal%3").arg(bpp).arg(route).arg(terminal)))
-            << bpp << route << terminal;
+        for (bool foreign : {false, true}) {
+            if (foreign && route != 2 && route != 3) continue; // Native routing requires a single provider.
+            QTest::newRow(qPrintable(QString("%1-route%2-terminal%3-foreign%4").arg(bpp).arg(route).arg(terminal).arg(foreign)))
+                << bpp << route << terminal << foreign;
+        }
 }
 
 void KisPageStoreCpuMutationTest::productionRecoverableHandoff()
 {
-    QFETCH(int, bpp); QFETCH(int, route); QFETCH(int, terminal);
+    QFETCH(int, bpp); QFETCH(int, route); QFETCH(int, terminal); QFETCH(bool, foreignBefore);
     Fixture f;
     KisPageBackingLimits limits;
     limits.activePendingBytes = limits.retirementDebtBytes = 64 * 64 * bpp;
     QVERIFY(f.store->configureBackingLimits(limits));
-    QVERIFY2(f.init(bpp, 2), qPrintable(f.error));
+    QVERIFY2(f.init(bpp, foreignBefore ? 1 : 2, foreignBefore), qPrintable(f.error));
+    std::shared_ptr<TestProvider> beforeProvider;
+    if (foreignBefore) {
+        beforeProvider = std::make_shared<TestProvider>();
+        KisCpuResidentReplicaProviderConfig config;
+        config.provider = {191}; config.providerEpoch = {1}; config.budgetBytes = 64 * 1024 * 1024;
+        QVERIFY(beforeProvider->p->configure(config, f.completions, &f.error));
+        QVERIFY(f.store->registerReplicaProvider(beforeProvider));
+        KisPageOwnerLedger identities; QVERIFY(identities.configure(f.completions));
+        const auto alternate = beforeProvider->p->prepareWrite(identities.nextOperationId(),
+            f.initialReplicas.first().version, f.importedDescriptor, cpu.domain,
+            KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+        QVERIFY(alternate.isValid());
+        auto binding = beforeProvider->cpuResidentBinding(alternate.replica);
+        void *bytes = binding ? binding->acquireWrite(alternate.replica.allocationIdentity()) : nullptr;
+        QVERIFY(bytes); std::memset(bytes, 0x31, size_t(alternate.replica.layout.byteSize)); binding->releaseWrite();
+        QVERIFY2(f.store->adoptInitialPage(f.initialReplicas.first().version, f.importedDescriptor,
+            f.initialReplicas.first(), {alternate.replica}, &f.error), qPrintable(f.error));
+        QVERIFY(f.store->finalizeInitialization(&f.error));
+    }
     const auto original = f.initialReplicas.first();
     KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
     const auto descriptor = surface.allocationDescriptor();
@@ -10944,6 +10967,7 @@ void KisPageStoreCpuMutationTest::productionRecoverableHandoff()
     mutation = {};
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    if (beforeProvider) QCOMPARE(beforeProvider->memoryUsage().committedBytes, quint64(0));
     const auto usage = f.store->backingUsage();
     for (size_t i = 0; i < usage.buckets.size(); ++i) {
         // Closing retires payloads. The still-live Store continues to own
