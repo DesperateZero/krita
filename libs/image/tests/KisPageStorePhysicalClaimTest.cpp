@@ -313,6 +313,7 @@ void KisPageStorePhysicalClaimTest::tileReadCacheLifetime()
     f.provider->releaseAccess(std::move(access), {});
     QVERIFY(!f.swap());
     auto handoff = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
+    QVERIFY(!handoff.isValid()); // Already pinned: no candidate is retained for a later retry.
     QVERIFY(!handoff.tryClaim());
     QVERIFY(!f.provider->retire({112}, f.replica, {}).isValid());
     QVERIFY(cache->finish());
@@ -340,6 +341,7 @@ void KisPageStorePhysicalClaimTest::tileReadCacheLifetime()
     if (terminal == 0) {
         // No legacy wrapper/storage ref in this primitive fixture: the idle
         // candidate itself neither pins RAM nor claims a canonical version.
+        handoff = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
         QVERIFY(handoff.tryClaim());
         auto target = handoff.target();
         auto reserved = handoff.commit();
@@ -1184,6 +1186,10 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffGuards()
     if (blocker == 9) QVERIFY(source);
     if (blocker == 10) QVERIFY(alias.isValid());
     if (blocker == 11) QVERIFY(foreignAlias.isValid());
+    // A new candidate rejects an already known native blocker. The candidate
+    // prepared before the blocker must still reject at the final claim below.
+    if (blocker >= 1 && blocker <= 3)
+        QVERIFY(!KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc).isValid());
     QCOMPARE(candidate.tryClaim(), blocker == 0);
     candidate.reset();
     QVERIFY(f.provider->validate(f.replica, f.desc)); // No retag on rejection/cancel.

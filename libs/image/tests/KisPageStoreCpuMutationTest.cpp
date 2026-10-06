@@ -11000,6 +11000,12 @@ void KisPageStoreCpuMutationTest::productionHandoffFallback()
     }
     if (blocker == 5) f.provider->rejectBindingFor = f.initialReplicas[1];
     const auto originalBytes = f.provider->memoryUsage().committedBytes;
+    int recoverablePrepare = 0, recoverablePrepared = 0;
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase == KisPageStoreDiagnosticPhase::RecoverablePrepare) ++recoverablePrepare;
+        if (phase == KisPageStoreDiagnosticPhase::RecoverablePrepared) ++recoverablePrepared;
+    });
     const auto tx = f.store->beginCurrentTransaction();
     if (generic) {
         auto request = f.store->acquireWrite(tx, key(), cpu,
@@ -11020,6 +11026,9 @@ void KisPageStoreCpuMutationTest::productionHandoffFallback()
         }
         QVERIFY(mutation.cancel());
     }
+    recorder.setPhaseObserver({});
+    if (blocker == 2 || blocker == 3) QCOMPARE(recoverablePrepare, 0);
+    if (blocker >= 1 && blocker <= 3) QCOMPARE(recoverablePrepared, 0);
     QVERIFY(f.provider->validate(source, surface.allocationDescriptor()));
     QVERIFY(f.store->abort(tx));
     f.provider->rejectBindingFor = {};
@@ -11029,6 +11038,19 @@ void KisPageStoreCpuMutationTest::productionHandoffFallback()
         QTRY_COMPARE(f.store->sessionStats().pendingLastUses, qsizetype(0));
     }
     if (raw) { raw->deref(); raw = nullptr; }
+    if (blocker >= 1 && blocker <= 3) {
+        QVERIFY(f.store->waitForRetirementIdle());
+        const void *address = nullptr;
+        { auto read = old.readResidentPage(key()); QVERIFY(read.isValid()); address = read.data(); }
+        const auto retryBytes = f.provider->memoryUsage().committedBytes;
+        const auto retry = f.store->beginCurrentTransaction();
+        auto mutation = f.begin(retry);
+        auto write = mutation.beginWrite(key(), &f.error); QVERIFY2(write.isValid(), qPrintable(f.error));
+        QCOMPARE(write.data(), address);
+        QCOMPARE(f.provider->memoryUsage().committedBytes, retryBytes);
+        std::memset(write.data(), 0x73, size_t(bpp)); write = {};
+        QVERIFY(mutation.cancel()); QVERIFY(f.store->abort(retry));
+    }
     auto read = old.readResidentPage(key()); QVERIFY(read.isValid());
     QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x31)); read = {}; old = {};
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));

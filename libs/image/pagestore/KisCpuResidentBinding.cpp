@@ -39,7 +39,10 @@ bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
     KisReplicaHandle *result) const
 {
     QMutexLocker lock(&m_mutex);
+    // Advisory rejection only: readers may arrive after this mutex is released,
+    // so tryClaimHandoff must still perform the final physical exclusion.
     if (!supportsBackingHandoff() || m_retired || !(m_handle == source) ||
+        m_readers || m_writeState != WriteState::Idle ||
         source.domain != KisPageAccessDomain::CpuRam || !source.layout.matches(descriptor) ||
         !target.isValid() || !(target.key == source.version.key) ||
         target.generation.value <= source.version.generation.value ||

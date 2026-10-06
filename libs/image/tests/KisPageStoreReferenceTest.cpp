@@ -6112,6 +6112,25 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
     QVERIFY(!coordinator.queryMutationBase(base, foreign, true, &info));
     QCOMPARE(info.selected.version, base); // Refusal leaves caller output intact.
 
+    // A live authority lease, then its deferred last use, excludes discovery.
+    // Releasing the protection re-enables the same independent before, even
+    // though that before itself still has readers and the version is captured.
+    KisPageTransition read;
+    read.kind = KisPageTransitionKind::AcquireRead;
+    read.version = base; read.target = page.versions.first().authority; read.lease = {76};
+    QVERIFY(coordinator.applyOwner(page.key, read).accepted);
+    QVERIFY(coordinator.queryMutationBase(base, {}, true, &info));
+    QVERIFY(!info.recoverableBefore.isValid());
+    const auto pending = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    read.kind = KisPageTransitionKind::ReleaseRead; read.completion = pending;
+    QVERIFY(coordinator.applyOwner(page.key, read).accepted);
+    QVERIFY(coordinator.queryMutationBase(base, {}, true, &info));
+    QVERIFY(!info.recoverableBefore.isValid());
+    QVERIFY(completions.complete(pending, KisCompletionStatus::Succeeded));
+    QVERIFY(coordinator.acknowledgeLastUse(base, read.target, completions.verifyTerminal(pending)).accepted);
+    QVERIFY(coordinator.queryMutationBase(base, {}, true, &info));
+    QCOMPARE(info.recoverableBefore, beforeReplica);
+
     KisPageTransition write;
     write.kind = KisPageTransitionKind::AcquireWrite;
     write.baseVersion = base; write.version = {base.key, page.nextGeneration};
@@ -6139,7 +6158,7 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
         QVERIFY(info.baseExists && info.hasWriter);
         QCOMPARE(info.nextGeneration, expected.next.nextGeneration);
         QCOMPARE(info.selected.version, base);
-        QCOMPARE(info.recoverableBefore, beforeReplica);
+        QVERIFY(!info.recoverableBefore.isValid());
         QVERIFY(coordinator.queryMutationBase(base, {}, false, &info));
         QVERIFY(!info.recoverableBefore.isValid());
         auto missing = base; missing.generation = {50000};

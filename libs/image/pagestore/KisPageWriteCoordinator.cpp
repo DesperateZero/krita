@@ -2808,16 +2808,18 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
 
     locker.unlock();
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepare, 1);
+    // Check the source before pinning the independent before or preparing
+    // fallible storage. This observes eligibility but acquires no write claim.
+    prepared->physical = KisCpuBackingHandoff::prepare(provider, write.source, write.version, descriptor);
+    if (!prepared->physical.isValid()) return fallback;
     prepared->beforeBinding = prepared->beforeProvider->cpuResidentBinding(before);
     prepared->beforePinned = prepared->beforeBinding
         && prepared->beforeBinding->acquireRead(before.allocationIdentity(), true);
-    if (prepared->beforePinned)
-        prepared->physical = KisCpuBackingHandoff::prepare(provider, write.source, write.version, descriptor);
     auto recoverable = write;
     recoverable.kind = KisPageTransitionKind::AcquireRecoverableWrite;
     recoverable.source = before;
     recoverable.target = prepared->physical.target();
-    if (prepared->physical.isValid()) {
+    if (prepared->beforePinned) {
         prepared->accounting = ownerLedger->prepareBackingHandoff(write.source, recoverable.target);
         if (prepared->accounting.isValid())
             prepared->metadata = metadata->prepareRecoverableWrite(transaction, recoverable);

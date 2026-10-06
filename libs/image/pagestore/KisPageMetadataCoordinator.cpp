@@ -3159,23 +3159,31 @@ bool KisPageMetadataCoordinator::queryMutationBase(const KisPageVersion &base,
     Q_ASSERT(published);
     const auto selected = sealed.isValid() ? sealed : base;
     next.selected = shard->records.versionInfo<VersionInfo>(selected, published->version.generation);
-    if (discoverBefore && next.selected.version.isValid() && !selected.isDefaultPixel()
+    if (discoverBefore && !next.hasWriter && next.selected.version.isValid() && !selected.isDefaultPixel()
         && next.selected.replicaCount > 1) {
         KisVersionSlotId slot;
         const bool found = shard->records.findVersion(selected, &slot);
         Q_ASSERT(found); Q_UNUSED(found);
         const auto *version = shard->records.version(slot);
-        for (auto replicaSlot = version->firstReplica; replicaSlot.isValid();) {
-            const auto *replica = shard->records.replica(replicaSlot);
-            const auto handle = replicaHandle(*replica, selected);
-            if (replica->validity == KisReplicaValidity::Valid && !replica->activeOperation.isValid()
-                && handle.domain == KisPageAccessDomain::CpuRam
-                && handle.layout == next.selected.authority.layout
-                && !(handle.physicalSlotIdentity() == next.selected.authority.physicalSlotIdentity())) {
-                next.recoverableBefore = handle;
-                break;
+        const auto *authority = shard->records.replica(version->authorityReplica);
+        // Replica overflow contains read leases and pending last uses; captured
+        // views belong to the version and do not exclude an independent before.
+        // This only rejects known blockers. Install still revalidates the cut.
+        if (authority && authority->validity == KisReplicaValidity::Valid
+            && !authority->activeOperation.isValid() && !authority->pinCount
+            && !authority->overflow.isValid()) {
+            for (auto replicaSlot = version->firstReplica; replicaSlot.isValid();) {
+                const auto *replica = shard->records.replica(replicaSlot);
+                const auto handle = replicaHandle(*replica, selected);
+                if (replica->validity == KisReplicaValidity::Valid && !replica->activeOperation.isValid()
+                    && handle.domain == KisPageAccessDomain::CpuRam
+                    && handle.layout == next.selected.authority.layout
+                    && !(handle.physicalSlotIdentity() == next.selected.authority.physicalSlotIdentity())) {
+                    next.recoverableBefore = handle;
+                    break;
+                }
+                replicaSlot = replica->nextReplica;
             }
-            replicaSlot = replica->nextReplica;
         }
     }
     const quint64 inputs = quint64(next.baseExists)

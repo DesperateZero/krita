@@ -310,7 +310,9 @@ private:
 
 /** Prepared physical transfer only; no logical write or recovery permission.
  * prepare() retains the provider and mints the target before metadata/storage
- * preparation. tryClaim() excludes physical consumers without exposing bytes.
+ * preparation, rejecting already known readers/writers. Retry preparation
+ * after such a refusal; an observation never grants future write permission.
+ * tryClaim() rechecks and excludes physical consumers without exposing bytes.
  * After logical installation, commit() retags once and returns an already
  * pinned writer reservation. No allocation or provider-index edit is needed.
  * Claimed tokens are thread-affine and short lived; all other preparation
