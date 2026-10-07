@@ -56,11 +56,15 @@ private Q_SLOTS:
     void testSparsePixelOperationBounds();
     void testMultiDabOperation_data();
     void testMultiDabOperation();
+    void testMultiDabPageOrder_data();
+    void testMultiDabPageOrder();
+    void testMultiDabUnknownCompositeOrder();
     void testMultiDabReuse_data();
     void testMultiDabReuse();
     void testMultiDabConcurrent();
     void testMultiDabCancellation();
     void testMultiDabSelectionSnapshot();
+    void testMultiDabOwnerRejection_data();
     void testMultiDabOwnerRejection();
 
     void testSimpleBlt();

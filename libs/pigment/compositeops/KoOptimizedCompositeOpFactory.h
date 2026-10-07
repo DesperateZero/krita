@@ -39,6 +39,11 @@ public:
     static KoCompositeOp* createCopyOp32(const KoColorSpace *cs);
     static KoCompositeOp* createAlphaDarkenOpHardU64(const KoColorSpace *cs);
     static KoCompositeOp* createAlphaDarkenOpCreamyU64(const KoColorSpace *cs);
+private:
+    friend class KisPainter;
+    // Exact factory implementations with independent pixels and no state
+    // across calls. An arbitrary third-party op with id="over" is excluded.
+    static bool isIndependentOver32(const KoCompositeOp *operation);
 };
 
 #endif /* KOOPTIMIZEDCOMPOSITEOPFACTORY_H */

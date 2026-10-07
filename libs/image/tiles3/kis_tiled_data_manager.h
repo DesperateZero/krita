@@ -45,6 +45,7 @@ class KisTiledDataManagerPageStoreBackend;
 class KisCapturedReadView;
 class KisPageStoreIteratorReadScope;
 struct KisLogicalPageId;
+struct KisOrderedPixelOperation;
 
 /**
  * Opaque lifetime token for a writable iterator's native mutation. Iterators
@@ -107,14 +108,20 @@ public:
         bool writable, std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
         beginIteratorWriteScope();
-    KisPageStoreWriteOperationResult writePageStoreOperation(
+    using PixelOperationResult = KisPageStoreWriteOperationResult;
+    PixelOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
         QString *error = nullptr, const KisMementoSP &historyOwner = {});
+    PixelOperationResult writePageStoreOperation(
+        const KisOrderedPixelOperation &operation, QString *error,
+        const KisMementoSP &historyOwner = {});
     bool beginStrokeMutation(const KisMementoSP &historyOwner, QString *error = nullptr);
     // Business endpoints consume native results here; immutable read scopes
     // remain at the existing data-manager read boundary. Coordinates are local.
     bool applyStrokePixelOperation(const KisMementoSP &historyOwner, const QVector<QRect> &targetRects,
         const std::function<bool(KisPixelWriteCursor *)> &operation, QString *error = nullptr);
+    bool applyStrokePixelOperation(const KisMementoSP &historyOwner,
+        const KisOrderedPixelOperation &operation, QString *error = nullptr);
     bool checkpointStrokeMutation(const KisMementoSP &historyOwner, QString *error = nullptr);
 
 
@@ -329,6 +336,10 @@ public:
     qint32 rowStride(qint32 x, qint32 y) const;
 
 private:
+    template<class Rectangles>
+    PixelOperationResult writePageStoreOperationImpl(
+        const Rectangles &rects, const std::function<bool(KisPixelWriteCursor *)> &operation,
+        const KisOrderedPixelOperation *ordered, QString *error, const KisMementoSP &historyOwner);
     KisTileHashTable *m_hashTable;
     // Only the active history holds this compatibility default backing.
     // It is a physical reference, not a second history or write authority.
@@ -374,7 +385,7 @@ private:
     void refreshPageStorePage(const KisLogicalPageId &page, bool present);
     bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
     bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
-    KisPageStoreWriteOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,
+    PixelOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,
                                       bool oldSource, bool rough, QString *error);
 
     bool writeTilesHeader(KisPaintDeviceWriter &store, quint32 numTiles);

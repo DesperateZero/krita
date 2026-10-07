@@ -43,6 +43,7 @@
 #include "config-limit-long-tests.h"
 #include "kis_br1_stress_profile.h"
 #include "KisStrokeJobFailureContext.h"
+#include "KisOrderedPixelOperation_p.h"
 
 // Exercise both template implementations without changing the production
 // manager configuration or building a second copy of kritaimage.
@@ -2456,8 +2457,115 @@ void KisTiledDataManagerTest::testPageStorePixelOperation()
     }), KisPageStoreWriteOperationResult::Succeeded);
 }
 
+void KisTiledDataManagerTest::testPageStoreOrderedPixelOperation_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("failure");
+    for (int bpp : {1, 4, 8, 16}) for (int failure : {0, 1, 2})
+        QTest::newRow(qPrintable(QString("B%1-failure%2").arg(bpp).arg(failure))) << bpp << failure;
+}
+
+void KisTiledDataManagerTest::testPageStoreOrderedPixelOperation()
+{
+    QFETCH(int, bpp); QFETCH(int, failure);
+    const QByteArray initial(bpp, char(0x31));
+    KisDataManager dm(bpp, reinterpret_cast<const quint8 *>(initial.constData()));
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    auto old = backend->captureReadView(); QVERIFY(old.isValid());
+    const auto before = store->mutationStatistics();
+    const QRect window(-64, -64, 128, 128);
+    const QVector<KisOrderedPixelRect> rects{{window, 1}, {window, 2}, {QRect(-32,-32,64,64), 3}};
+    QByteArray expected(window.width() * window.height() * bpp, char(0x31));
+    for (const auto &item : rects)
+        for (int y = item.area.top(); y <= item.area.bottom(); ++y)
+            for (int x = item.area.left(); x <= item.area.right(); ++x)
+                for (int c = 0; c < bpp; ++c) {
+                    auto &byte = expected[((y-window.y())*window.width()+x-window.x())*bpp+c];
+                    byte = char((quint8(byte) * 17 + item.sourceOrdinal) % 251);
+                }
+    QVector<QPair<qsizetype,QRect>> calls, expectedCalls;
+    for (int col : {-1, 0}) for (int row : {-1, 0}) {
+        const QRect page(col*64,row*64,64,64);
+        for (const auto &item : rects) expectedCalls.append({item.sourceOrdinal, page & item.area});
+    }
+    const KisOrderedPixelOperation input{rects, [&](KisPixelWriteCursor *cursor, qsizetype ordinal, const QRect &area) {
+        calls.append({ordinal, area});
+        for (int y = area.top(); y <= area.bottom(); ++y) for (int x = area.left(); x <= area.right(); ++x) {
+            cursor->moveTo(x,y); auto *pixel = cursor->rawData(); if (!pixel) return false;
+            for (int c=0;c<bpp;++c) pixel[c]=quint8((pixel[c]*17+ordinal)%251);
+        }
+        if (failure == 2) {
+            cursor->moveTo(64,0); if (cursor->rawData()) return false;
+            cursor->moveTo(0,0); if (cursor->rawData()) return false; // remains poisoned
+        }
+        return failure != 1;
+    }};
+    QString error;
+    QCOMPARE(dm.writePageStoreOperation(input, &error), failure ? KisPageStoreWriteOperationResult::Failed
+                                                               : KisPageStoreWriteOperationResult::Succeeded);
+    const auto after = store->mutationStatistics();
+    QCOMPARE(after.generationsReserved-before.generationsReserved, quint64(4));
+    QCOMPARE(after.maximumPinnedPagesPerExecution, quint64(1));
+    QCOMPARE(after.writablePinsAcquired, after.writablePinsReleased);
+    if (!failure) {
+        QCOMPARE(calls, expectedCalls);
+        QCOMPARE(after.writablePinsAcquired-before.writablePinsAcquired, quint64(8));
+    }
+    QByteArray actual(expected.size(), Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), window.x(), window.y(), window.width(), window.height());
+    QCOMPARE(actual, failure ? QByteArray(actual.size(), char(0x31)) : expected);
+    auto previous = old.readResidentPage({backend->surface(), {-1,-1}}); QVERIFY(previous.isValid());
+    QCOMPARE(static_cast<const quint8 *>(previous.data())[0], quint8(0x31));
+}
+
+void KisTiledDataManagerTest::testPageStoreOrderedPlanRejection()
+{
+    DefaultBudgetScope limits;
+    const quint8 blank = 0x13;
+    KisDataManager dm(1, &blank); auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    const auto owner = dm.getMemento(); QVERIFY(owner); QVERIFY(dm.beginStrokeMutation(owner));
+    using Result = KisPageStoreWriteOperationResult;
+    QCOMPARE(backend->writeOperation({{0,0}}, false, [](KisPixelWriteCursor *cursor) {
+        cursor->moveTo(0,0); if (!cursor->rawData()) return false; *cursor->rawData()=0x47; return true;
+    }, nullptr, nullptr, owner), Result::Succeeded);
+    const auto before = store->mutationStatistics();
+    // Two declared pages, but a real charged fragment buffer beyond the 8MiB
+    // metadata limit. Refusal must precede all pixel work and cold preparation.
+    QVector<KisOrderedPixelRect> rects(262144, {QRect(0,0,128,1), 0});
+    bool called = false;
+    const KisOrderedPixelOperation refused{rects, [&](KisPixelWriteCursor *, qsizetype, const QRect &) {
+        called = true; return true;
+    }};
+    QString error;
+    QCOMPARE(dm.writePageStoreOperation(refused, &error, owner), Result::Failed);
+    QVERIFY(!called); QVERIFY(!error.isEmpty());
+    QCOMPARE(store->mutationStatistics().generationsReserved, before.generationsReserved);
+    rects = {{QRect(0,1,128,1), 0}, {QRect(0,1,128,1), 1}};
+    const KisOrderedPixelOperation retry{rects, [&](KisPixelWriteCursor *cursor, qsizetype, const QRect &area) {
+        called = true;
+        for (int x=area.left();x<=area.right();++x) {
+            cursor->moveTo(x,1); if (!cursor->rawData()) return false; *cursor->rawData()=0x61;
+        }
+        return true;
+    }};
+    QCOMPARE(dm.writePageStoreOperation(retry, &error, owner), Result::Succeeded); QVERIFY(called);
+    QVERIFY(dm.tryCommit()); auto view = backend->captureReadView();
+    auto read = view.readResidentPage({backend->surface(), {0,0}}); QVERIFY(read.isValid());
+    QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x47));
+    QCOMPARE(static_cast<const quint8 *>(read.data())[read.rowStride()], quint8(0x61));
+    read={};view={};dm.purgeHistory(owner);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+}
+
+void KisTiledDataManagerTest::testPageStorePixelOperationPreflightBudgetPressure_data()
+{
+    QTest::addColumn<bool>("ordered");
+    QTest::newRow("generic") << false;
+    QTest::newRow("ordered") << true;
+}
+
 void KisTiledDataManagerTest::testPageStorePixelOperationPreflightBudgetPressure()
 {
+    QFETCH(bool, ordered);
     DefaultBudgetScope budget;
     quint8 blank = 0x13;
     KisDataManager dm(1, &blank);
@@ -2468,43 +2576,54 @@ void KisTiledDataManagerTest::testPageStorePixelOperationPreflightBudgetPressure
     QVERIFY(dm.beginStrokeMutation(owner));
     using Result = KisPageStoreWriteOperationResult;
 
-    QCOMPARE(backend->writeOperation({{0, 0}}, false, [](KisPixelWriteCursor *cursor) {
-        cursor->moveTo(0, 0);
-        if (!cursor->rawData()) return false;
-        *cursor->rawData() = 0x31;
-        return true;
-    }, nullptr, nullptr, owner), Result::Succeeded);
-
-    budget.saturate(1, &blank);
     bool called = false;
     QString error;
-    QCOMPARE(backend->writeOperation({{0, 0}, {1, 0}}, false,
-        [&](KisPixelWriteCursor *cursor) {
+    const auto write = [&](bool wide) {
+        if (ordered) {
+            const QVector<KisOrderedPixelRect> rects = wide
+                ? QVector<KisOrderedPixelRect>{{QRect(0, 0, 65, 1), 0}, {QRect(0, 0, 65, 1), 1}}
+                : QVector<KisOrderedPixelRect>{{QRect(0, 0, 1, 1), 0}};
+            const KisOrderedPixelOperation operation{rects,
+                [&](KisPixelWriteCursor *cursor, qsizetype, const QRect &rect) {
+                    called = true;
+                    for (int x = rect.left(); x <= rect.right(); ++x) {
+                        cursor->moveTo(x, 0);
+                        if (!cursor->rawData()) return false;
+                        *cursor->rawData() = wide ? (x < 64 ? 0x51 : 0x52) : 0x31;
+                    }
+                    return true;
+                }};
+            return dm.writePageStoreOperation(operation, &error, owner);
+        }
+        const QVector<KisLogicalPageId> pages = wide
+            ? QVector<KisLogicalPageId>{{0, 0}, {1, 0}} : QVector<KisLogicalPageId>{{0, 0}};
+        return backend->writeOperation(pages, false, [&](KisPixelWriteCursor *cursor) {
             called = true;
             cursor->moveTo(0, 0);
             if (!cursor->rawData()) return false;
-            *cursor->rawData() = 0x51;
-            cursor->moveTo(64, 0);
-            if (!cursor->rawData()) return false;
-            *cursor->rawData() = 0x52;
+            *cursor->rawData() = wide ? 0x51 : 0x31;
+            if (wide) {
+                cursor->moveTo(64, 0);
+                if (!cursor->rawData()) return false;
+                *cursor->rawData() = 0x52;
+            }
             return true;
-        }, nullptr, &error, owner), Result::Failed);
+        }, nullptr, &error, owner);
+    };
+    QCOMPARE(write(false), Result::Succeeded);
+    const auto prepared = store->mutationStatistics().generationsReserved;
+
+    budget.saturate(1, &blank);
+    called = false;
+    QCOMPARE(write(true), Result::Failed);
     QVERIFY(!called);
     QVERIFY(!error.isEmpty());
+    QCOMPARE(store->mutationStatistics().generationsReserved, prepared);
 
     budget.release();
-    QCOMPARE(backend->writeOperation({{0, 0}, {1, 0}}, false,
-        [&](KisPixelWriteCursor *cursor) {
-            called = true;
-            cursor->moveTo(0, 0);
-            if (!cursor->rawData()) return false;
-            *cursor->rawData() = 0x51;
-            cursor->moveTo(64, 0);
-            if (!cursor->rawData()) return false;
-            *cursor->rawData() = 0x52;
-            return true;
-        }, nullptr, &error, owner), Result::Succeeded);
+    QCOMPARE(write(true), Result::Succeeded);
     QVERIFY(called);
+    QCOMPARE(store->mutationStatistics().generationsReserved, prepared + 1);
     QVERIFY(dm.tryCommit());
 
     auto view = backend->captureReadView();

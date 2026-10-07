@@ -10,6 +10,7 @@
 #include "kis_paint_device.h"
 #include "KisStrokeJobFailureContext.h"
 #include "kis_transaction.h"
+#include "KisOrderedPixelOperation_p.h"
 
 #include <QRect>
 #include <QRegion>
@@ -1907,6 +1908,20 @@ bool KisPaintDevice::applyPixelOperation(
     const bool result = m_d->currentStrategy()->applyPixelOperation(rects, operation, strokeOwner);
     m_d->cache()->invalidate();
     return result;
+}
+
+bool KisPaintDevice::applyOrderedPixelOperation(const KisOrderedPixelOperation &operation,
+                                               KisTransaction *strokeOwner) try
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed() || !operation.apply) return false;
+    if (operation.rects.isEmpty() && !strokeOwner) return true;
+    m_d->cache()->invalidate();
+    const bool result = m_d->currentStrategy()->applyOrderedPixelOperation(operation, strokeOwner);
+    m_d->cache()->invalidate();
+    return result;
+}
+catch (const std::bad_alloc &) {
+    return false;
 }
 
 KisPaintDevice::WriteContext::WriteContext() = default;

@@ -12,6 +12,7 @@
 #include "kis_wrapped_vline_iterator.h"
 #include "kis_wrapped_random_accessor.h"
 #include <limits>
+#include <optional>
 
 // Coordinate decoration only. Native pixel ownership stays in the operation
 // cursor; this adapter never acquires a compatibility tile or retains a pointer.
@@ -173,6 +174,11 @@ public:
         return applyPixelOperationImpl(rects, operation, {}, strokeOwner);
     }
 
+    virtual bool applyOrderedPixelOperation(const KisOrderedPixelOperation &operation,
+                                            KisTransaction *strokeOwner) {
+        return applyPixelOperationImpl({}, {}, {}, strokeOwner, &operation);
+    }
+
     virtual bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,
                                      QVector<QVector<QRect>> *jobs) {
         return partitionWriteRectsImpl(rects, patchSize, {}, jobs);
@@ -278,15 +284,30 @@ protected:
     }
 
     bool applyPixelOperationImpl(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
-                                 const QRect &wrap, KisTransaction *strokeOwner) {
+                                 const QRect &wrap, KisTransaction *strokeOwner,
+                                 const KisOrderedPixelOperation *ordered = nullptr) {
         const QPoint offset(m_d->x(), m_d->y());
         QVector<QRect> localRects;
-        for (const auto &rect : rects) if (!rect.isEmpty()) {
+        QVector<KisOrderedPixelRect> localOrdered;
+        const auto mapRect = [&](const QRect &rect, QRect *local) {
             const qint64 x = qint64(rect.x()) - offset.x(), y = qint64(rect.y()) - offset.y();
             if (!KisOperationMappedAccessor::fits(x) || !KisOperationMappedAccessor::fits(y) ||
                 !KisOperationMappedAccessor::fits(x + rect.width() - 1) ||
                 !KisOperationMappedAccessor::fits(y + rect.height() - 1)) return false;
-            localRects.append(QRect(qint32(x), qint32(y), rect.width(), rect.height()));
+            *local = QRect(qint32(x), qint32(y), rect.width(), rect.height());
+            return true;
+        };
+        if (ordered) {
+            localOrdered.reserve(ordered->rects.size());
+            for (const auto &item : ordered->rects) if (!item.area.isEmpty()) {
+                QRect local;
+                if (!mapRect(item.area, &local)) return false;
+                localOrdered.append({local, item.sourceOrdinal});
+            }
+        } else for (const auto &rect : rects) if (!rect.isEmpty()) {
+            QRect local;
+            if (!mapRect(rect, &local)) return false;
+            localRects.append(local);
         }
         // Retain the selected animation/LOD manager for the synchronous
         // callback and cache update. Device metadata must not be mutated here.
@@ -297,11 +318,20 @@ protected:
             const bool accepted = operation(&mapped);
             return accepted && mapped.isValid();
         };
+        std::optional<KisOrderedPixelOperation> mappedOrdered;
+        if (ordered) mappedOrdered.emplace(KisOrderedPixelOperation{localOrdered,
+            [&](KisPixelWriteCursor *cursor, qsizetype ordinal, const QRect &rect) {
+                KisOperationMappedAccessor mapped(cursor, offset, {}, m_device->defaultBounds()->wrapAroundModeAxis());
+                const bool accepted = ordered->apply(&mapped, ordinal, rect.translated(offset));
+                return accepted && mapped.isValid();
+            }});
         if (strokeOwner) {
+            if (ordered) return strokeOwner->applyStrokePixelOperation(KisPaintDeviceSP(m_device), *mappedOrdered, &error);
             return strokeOwner->applyStrokePixelOperation(KisPaintDeviceSP(m_device), localRects,
                                                          mappedOperation, &error);
         }
-        const auto result = manager->writePageStoreOperation(localRects, mappedOperation, &error);
+        const auto result = ordered ? manager->writePageStoreOperation(*mappedOrdered, &error)
+                                    : manager->writePageStoreOperation(localRects, mappedOperation, &error);
         using Result = KisPageStoreWriteOperationResult;
         if (result == Result::Succeeded) return true;
         if (result != Result::Unavailable && result != Result::Borrowed) {
@@ -323,6 +353,11 @@ protected:
             qint32 y() const override { return cursor->y(); }
             KisRandomAccessorNG *cursor;
         } destination(cursor.data());
+        if (ordered) {
+            for (const auto &item : ordered->rects)
+                if (!ordered->apply(&destination, item.sourceOrdinal, item.area)) return false;
+            return true;
+        }
         return operation(&destination);
     }
     virtual void readBytesImpl(quint8 *data, const QRect &rect, int dataRowStride) const {
@@ -524,6 +559,19 @@ public:
             if (!rect.isEmpty()) parts += KisWrappedRect(rect, m_wrapRect, m_device->defaultBounds()->wrapAroundModeAxis());
         }
         return applyPixelOperationImpl(parts, operation, m_wrapRect, strokeOwner);
+    }
+
+    bool applyOrderedPixelOperation(const KisOrderedPixelOperation &operation,
+                                    KisTransaction *strokeOwner) override {
+        // Wrapped aliases do not inherit the independent-page proof. Use the
+        // original ordered callback and the original wrap-aware preparation.
+        QVector<QRect> rects;
+        for (const auto &item : operation.rects) rects.append(item.area);
+        return applyPixelOperation(rects, [&](KisPixelWriteCursor *cursor) {
+            for (const auto &item : operation.rects)
+                if (!operation.apply(cursor, item.sourceOrdinal, item.area)) return false;
+            return true;
+        }, strokeOwner);
     }
 
     bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,

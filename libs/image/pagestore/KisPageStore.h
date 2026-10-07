@@ -214,6 +214,10 @@ public:
     bool cancel();
 
 private:
+    // Native adapter input has one immutable column/row ordering. Authority
+    // is still acquired by the original admission and stable-entry binding.
+    KisPageMutationExecution borrowCanonicalExecution(KisSurfaceId,
+        const KisPageSnapshotArray<KisLogicalPageId> &pages, QString *error);
     // A shared legacy tile may perform its final unlock on a reader thread.
     // Only the bridge can hand off terminal sealing; no active guard or new
     // write access is permitted at this boundary.

@@ -20,6 +20,7 @@
 
 #include "kis_tile.h"
 #include "kis_tiled_data_manager.h"
+#include "KisOrderedPixelOperation_p.h"
 #include "kis_tile_data_wrapper.h"
 #include "kis_tiled_data_manager_p.h"
 #include "kis_memento_manager.h"
@@ -1766,9 +1767,33 @@ bool KisTiledDataManager::checkpointStrokeMutation(
     return view.isValid();
 }
 
-KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
+bool KisTiledDataManager::applyStrokePixelOperation(const KisMementoSP &historyOwner,
+    const KisOrderedPixelOperation &operation, QString *error)
+{
+    if (!historyOwner) {
+        if (error) *error = QStringLiteral("Stroke mutation requires its history owner");
+        return false;
+    }
+    return writePageStoreOperation(operation, error, historyOwner) == PixelOperationResult::Succeeded;
+}
+
+PixelOperationResult KisTiledDataManager::writePageStoreOperation(
     const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation, QString *error,
     const KisMementoSP &historyOwner)
+{
+    return writePageStoreOperationImpl(targetRects, operation, nullptr, error, historyOwner);
+}
+
+PixelOperationResult KisTiledDataManager::writePageStoreOperation(
+    const KisOrderedPixelOperation &operation, QString *error, const KisMementoSP &historyOwner)
+{
+    return writePageStoreOperationImpl(operation.rects, {}, &operation, error, historyOwner);
+}
+
+template<class Rectangles>
+PixelOperationResult KisTiledDataManager::writePageStoreOperationImpl(
+    const Rectangles &targetRects, const std::function<bool(KisPixelWriteCursor *)> &operation,
+    const KisOrderedPixelOperation *ordered, QString *error, const KisMementoSP &historyOwner) try
 {
     using Result = PixelOperationResult;
     if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return Result::Unavailable;
@@ -1776,7 +1801,11 @@ KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
     // registry. Union page rectangles before touching compatibility tiles so
     // repeated/overlapping dabs do not repeat those lookups or claim empty gaps.
     QRegion pageCoverage;
-    for (const QRect &rect : targetRects) {
+    for (const auto &item : targetRects) {
+        const QRect &rect = [&]() -> const QRect & {
+            if constexpr (std::is_same_v<typename Rectangles::value_type, QRect>) return item;
+            else return item.area;
+        }();
         if (rect.isEmpty()) continue;
         const QPoint first(xToCol(rect.left()), yToRow(rect.top()));
         const QPoint last(xToCol(rect.right()), yToRow(rect.bottom()));
@@ -1787,7 +1816,7 @@ KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
         }
         pageCoverage += QRect(first, last);
     }
-    QSet<KisLogicalPageId> targets;
+    KisPageSnapshotArray<KisLogicalPageId> targets;
     bool legacyIntent = false;
     {
         QReadLocker lock(&m_lock);
@@ -1796,14 +1825,20 @@ KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
                 for (qint64 col = pages.left(); col <= pages.right(); ++col) {
                     auto tile = m_hashTable->getExistingTile(qint32(col), qint32(row));
                     legacyIntent |= tile && tile->hasPageStoreWriteIntent();
-                    targets.insert({qint32(col), qint32(row)});
+                    targets.append({qint32(col), qint32(row)});
                 }
         }
     }
+    // QRegion rectangles are disjoint; enumerate once, then keep the same
+    // column/row order through admission and execution. No duplicate set or
+    // compatibility export is needed for this native input.
+    std::sort(targets.begin(), targets.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.column, a.row) < std::tie(b.column, b.row);
+    });
     QVector<KisLogicalPageId> changed;
     OperationDelivery delivery;
     PreparedTileUpdates preparedTiles;
-    const auto result = m_pageStoreBackend->writeOperation(targets.values(), legacyIntent, operation, &changed, error,
+    const auto result = m_pageStoreBackend->writeCanonicalOperation(targets, legacyIntent, operation, ordered, &changed, error,
         historyOwner, &delivery, [&](QString *failure) {
             if (!prepareExtent(m_extentManager, pageCoverage.boundingRect(), failure)) return false;
             QReadLocker lock(&m_lock);
@@ -1814,6 +1849,10 @@ KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
             return preparedTiles.install(lock, *m_hashTable, m_extentManager, m_pageStoreBackend, changed, failure);
         });
     return result;
+}
+catch (const std::bad_alloc &) {
+    if (error) *error = QStringLiteral("pixel operation geometry preparation was refused");
+    return PixelOperationResult::Failed;
 }
 
 QVector<quint8*>

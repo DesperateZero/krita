@@ -190,6 +190,13 @@ public:
         return m_transactionData->text();
     }
 
+private:
+    friend class KisPaintDevice;
+    bool applyStrokePixelOperation(KisPaintDeviceSP target, const KisOrderedPixelOperation &operation,
+                                    QString *error) {
+        return m_transactionData && m_transactionData->applyStrokePixelOperation(target, operation, error);
+    }
+
 protected:
     Q_DISABLE_COPY(KisTransaction);
 
