@@ -10,7 +10,6 @@
 #include <kis_debug.h>
 #include <QRect>
 #include <QRegion>
-#include <QSet>
 #include <brushengine/kis_paintop_utils.h>
 #include <QElapsedTimer>
 #include <QScopeGuard>
@@ -715,114 +714,6 @@ void KisPainterTest::testSparsePixelOperationBounds()
     QCOMPARE(actual, QByteArray(129, char(initial)));
 }
 
-void KisPainterTest::testMultiDabPageOrder_data()
-{
-    QTest::addColumn<int>("pattern"); QTest::addColumn<bool>("overlap"); QTest::addColumn<int>("mode");
-    for (int pattern : {0, 1, 2}) for (bool overlap : {false, true}) for (int mode : {0, 1, 2})
-        QTest::newRow(qPrintable(QString("pattern%1-overlap%2-mode%3").arg(pattern).arg(overlap).arg(mode)))
-            << pattern << overlap << mode;
-}
-
-void KisPainterTest::testMultiDabPageOrder()
-{
-    QFETCH(int, pattern); QFETCH(bool, overlap); QFETCH(int, mode);
-    const auto *cs = KoColorSpaceRegistry::instance()->rgb8();
-    const QPoint offset(-13, 17), localStart(-64, -64);
-    const QSize dabSize = pattern == 1 ? QSize(128, 128) : QSize(16, 16);
-    const QRect window(localStart + offset, pattern == 2 ? QSize(16 * 64, 64) : QSize(128, 128));
-    KisPaintDeviceSP device = new KisPaintDevice(cs); device->moveTo(offset);
-    QByteArray initial(window.width() * window.height() * 4, Qt::Uninitialized);
-    for (qsizetype i = 0; i < initial.size(); i += 4) {
-        initial[i] = char(31); initial[i+1] = char(47); initial[i+2] = char(83);
-        initial[i+3] = char((i / 4) % 7 ? 113 : 0); // transparent hidden RGB is observable
-    }
-    device->writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), window);
-    QByteArray expected = initial;
-    QList<KisRenderedDab> dabs;
-    for (int i = 0; i < 16; ++i) {
-        KisFixedPaintDeviceSP fixed = new KisFixedPaintDevice(cs);
-        const QRect source(QPoint(-7, 9), dabSize); fixed->setRect(source); QVERIFY(fixed->initialize());
-        fixed->fill(source, KoColor(QColor(17 + i * 11, 233 - i * 7, 41 + i * 9, 83 + i * 9), cs));
-        KisRenderedDab dab(fixed); dab.offset = window.topLeft() + QPoint(pattern == 2 ? i * 64 : 0, 0);
-        dab.opacity = 0.25 + i * 0.03; dab.averageOpacity = 0.8 - i * 0.02; dab.flow = 0.4 + i * 0.02;
-        dabs.append(dab);
-    }
-    QVector<QRect> clips{window};
-    if (overlap) { clips.append(window.adjusted(7, 5, -9, -3)); clips.append(window); }
-    QSet<QPoint> pages;
-    const auto coordinate = [](int value) { return int(std::floor(double(value) / 64)); };
-    // The oracle visits pixels in original dab/clip order and has no page
-    // planner or cursor. Duplicate clips deliberately apply more than once.
-    const auto reference = [&] {
-        for (const auto &dab : dabs) for (const QRect &clip : std::as_const(clips)) {
-            const QRect rect = clip & dab.realBounds();
-            for (int y = rect.top(); y <= rect.bottom(); ++y) for (int x = rect.left(); x <= rect.right(); ++x) {
-                pages.insert({coordinate(x - offset.x()), coordinate(y - offset.y())});
-                KoCompositeOp::ParameterInfo params;
-                params.dstRowStart = reinterpret_cast<quint8 *>(expected.data()) +
-                    ((y - window.y()) * window.width() + x - window.x()) * 4;
-                params.srcRowStart = dab.device->constData() +
-                    ((y - dab.offset.y()) * dabSize.width() + x - dab.offset.x()) * 4;
-                params.srcRowStride = params.dstRowStride = 4; params.rows = params.cols = 1;
-                params.setOpacityAndAverage(dab.opacity, dab.averageOpacity); params.flow = dab.flow;
-                cs->bitBlt(cs, params, cs->compositeOp(COMPOSITE_OVER),
-                    KoColorConversionTransformation::internalRenderingIntent(), KoColorConversionTransformation::internalConversionFlags());
-            }
-        }
-    };
-    KisTransaction owner(device); if (mode) QVERIFY(owner.beginStrokeMutation());
-    KisPainter painter(device); painter.setStrokeMutationOwner(mode ? &owner : nullptr);
-    KisStrokeJobFailureContext failure(true);
-    KisPageStoreDiagnosticRecorder recorder(true);
-    const auto pins = [&] { return recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::WriteWritablePin)].intervals; };
-    for (int repeat = 0; repeat < 2; ++repeat) {
-        const auto before = pins(); painter.bltFixed(clips, dabs); QVERIFY(!failure.failed()); reference();
-        QCOMPARE(pins() - before, quint64(pages.size() * (repeat && mode ? 1 : 2)));
-    }
-    if (mode) QVERIFY(owner.checkpointStrokeMutation());
-    QByteArray actual(expected.size(), Qt::Uninitialized);
-    device->readBytes(reinterpret_cast<quint8 *>(actual.data()), window); QCOMPARE(actual, expected);
-    KisSurrogateUndoAdapter undo;
-    if (mode == 2) { QVERIFY(owner.tryRevert()); device->readBytes(reinterpret_cast<quint8 *>(actual.data()), window); QCOMPARE(actual, initial); }
-    else {
-        QVERIFY(owner.tryCommit(&undo)); undo.undo(); device->readBytes(reinterpret_cast<quint8 *>(actual.data()), window); QCOMPARE(actual, initial);
-        undo.redo(); device->readBytes(reinterpret_cast<quint8 *>(actual.data()), window); QCOMPARE(actual, expected);
-    }
-}
-
-void KisPainterTest::testMultiDabUnknownCompositeOrder()
-{
-    auto *cs = const_cast<KoColorSpace *>(KoColorSpaceRegistry::instance()->rgb8());
-    const auto *original = cs->compositeOp(COMPOSITE_OVER);
-    class RecordingOver final : public KoCompositeOp {
-    public:
-        RecordingOver(const KoColorSpace *cs, const KoCompositeOp *original)
-            : KoCompositeOp(cs, COMPOSITE_OVER), original(original) {}
-        void composite(const ParameterInfo &params) const override {
-            sources.append(params.srcRowStart[0]); original->composite(params);
-        }
-        const KoCompositeOp *original;
-        mutable QVector<quint8> sources;
-    } recording(cs, original);
-    KisPaintDeviceSP device = new KisPaintDevice(cs);
-    QList<KisRenderedDab> dabs;
-    for (const QColor &color : {QColor(31,47,83,211), QColor(131,147,183,179)}) {
-        KisFixedPaintDeviceSP fixed = new KisFixedPaintDevice(cs);
-        fixed->setRect(QRect(0,0,128,16)); QVERIFY(fixed->initialize()); fixed->fill(fixed->bounds(), KoColor(color,cs));
-        dabs.append(KisRenderedDab(fixed));
-    }
-    // KoColorSpace owns its registered operations. Restore the exact original
-    // before this stack implementation leaves scope, including test failure.
-    cs->addCompositeOp(&recording);
-    const auto restore = qScopeGuard([&] { cs->addCompositeOp(original); });
-    KisPainter painter(device); KisStrokeJobFailureContext failure(true);
-    KisPageStoreDiagnosticRecorder recorder(true);
-    painter.bltFixed(QRect(0,0,128,16), dabs); QVERIFY(!failure.failed());
-    const quint8 a=dabs[0].device->constData()[0], b=dabs[1].device->constData()[0]; QVERIFY(a!=b);
-    QCOMPARE(recording.sources, (QVector<quint8>{a,a,b,b}));
-    QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::WriteWritablePin)].intervals, quint64(6));
-}
-
 void KisPainterTest::testMultiDabOperation_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<int>("mode");
@@ -1185,17 +1076,9 @@ void KisPainterTest::testMultiDabSelectionSnapshot()
     QVERIFY(owner.tryRevert());
 }
 
-void KisPainterTest::testMultiDabOwnerRejection_data()
-{
-    QTest::addColumn<int>("bpp");
-    QTest::newRow("generic-alpha") << 1;
-    QTest::newRow("ordered-rgba") << 4;
-}
-
 void KisPainterTest::testMultiDabOwnerRejection()
 {
-    QFETCH(int, bpp);
-    const auto *cs = bpp == 1 ? KoColorSpaceRegistry::instance()->alpha8() : KoColorSpaceRegistry::instance()->rgb8();
+    const auto *cs = KoColorSpaceRegistry::instance()->alpha8();
     KisPaintDeviceSP dev = new KisPaintDevice(cs), other = new KisPaintDevice(cs);
     KisTransaction owner(dev); QVERIFY(owner.beginStrokeMutation()); int calls = 0;
     const auto body = [&](KisPixelWriteCursor *) { ++calls; return true; };

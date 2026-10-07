@@ -5,7 +5,6 @@
  */
 
 #include "KisTiledDataManagerPageStoreBackend.h"
-#include "KisOrderedPixelOperation_p.h"
 
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageStoreIteratorReadScope_p.h"
@@ -45,60 +44,6 @@ qint32 pageCoordinate(qint32 pixel, qint32 pageExtent)
     qint32 coordinate = pixel / pageExtent;
     if (pixel % pageExtent < 0) --coordinate;
     return coordinate;
-}
-
-using OrderedFragments = std::vector<KisOrderedPixelRect, KisMutationStorageAllocator<KisOrderedPixelRect>>;
-
-OrderedFragments prepareOrderedFragments(const KisOrderedPixelOperation &operation,
-    const KisPageSnapshotArray<KisLogicalPageId> &targets, const KisMutationStorageAllocator<char> &storage)
-{
-    const auto less = [](const auto &a, const auto &b) {
-        return std::tie(a.column, a.row) < std::tie(b.column, b.row);
-    };
-    // Count and fill exactly the rectangles the original cursor would give
-    // the kernel. Never merge overlapping clips or alter SIMD block shapes.
-    const auto enumerate = [&](auto &&consume) {
-        for (const auto &item : operation.rects) {
-            const QRect &area = item.area;
-            for (qint64 y = area.top(); !area.isEmpty() && y <= area.bottom();) {
-                const auto row = pageCoordinate(qint32(y), KisTileData::HEIGHT);
-                const auto height = qMin<qint64>(qint64(area.bottom()) - y + 1,
-                    (qint64(row) + 1) * KisTileData::HEIGHT - y);
-                for (qint64 x = area.left(); x <= area.right();) {
-                    const auto col = pageCoordinate(qint32(x), KisTileData::WIDTH);
-                    const auto width = qMin<qint64>(qint64(area.right()) - x + 1,
-                        (qint64(col) + 1) * KisTileData::WIDTH - x);
-                    const KisLogicalPageId key{col, row};
-                    const auto found = std::lower_bound(targets.cbegin(), targets.cend(), key, less);
-                    if (found == targets.cend() || !(*found == key))
-                        qFatal("Ordered pixel geometry is outside its canonical target range");
-                    consume(qsizetype(found - targets.cbegin()), key,
-                        KisOrderedPixelRect{QRect(qint32(x), qint32(y), qint32(width), qint32(height)), item.sourceOrdinal});
-                    x += width;
-                }
-                y += height;
-            }
-        }
-    };
-    std::vector<size_t, KisMutationStorageAllocator<size_t>> offsets(
-        size_t(targets.size()), 0, KisMutationStorageAllocator<size_t>(storage));
-    size_t fragments = 0, runs = 0;
-    KisLogicalPageId previous;
-    enumerate([&](qsizetype index, KisLogicalPageId key, const KisOrderedPixelRect &) {
-        if (fragments == std::numeric_limits<size_t>::max()) throw std::bad_alloc();
-        ++fragments; ++offsets[size_t(index)];
-        if (!runs || !(previous == key)) { ++runs; previous = key; }
-    });
-    OrderedFragments result{KisMutationStorageAllocator<KisOrderedPixelRect>(storage)};
-    if (runs == size_t(targets.size())) return result;
-    if (fragments > result.max_size()) throw std::bad_alloc();
-    result.resize(fragments);
-    size_t first = 0;
-    for (auto &offset : offsets) { const auto count = offset; offset = first; first += count; }
-    enumerate([&](qsizetype index, KisLogicalPageId, const KisOrderedPixelRect &fragment) {
-        result[offsets[size_t(index)]++] = fragment;
-    });
-    return result;
 }
 
 struct ProductBackingPolicy
@@ -2182,7 +2127,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         if (targets.isEmpty()) return Result::Succeeded;
         transaction = d->activeHistory.transaction;
         locker.unlock();
-        execution = d->historyMutation.borrowCanonicalExecution(d->surface, targets, error);
+        execution = d->historyMutation.borrowExecution(d->surface, targets, error);
     } else {
         bool storeBorrowed = false;
         auto range = store()->reserveManagedRange(d->surface, targets, legacyIntent,
@@ -2192,7 +2137,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         batch = beginMutationBatch(error);
         if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return Result::Failed;
         transaction = batch->d->transaction;
-        execution = batch->d->mutation.borrowCanonicalExecution(d->surface, targets, error);
+        execution = batch->d->mutation.borrowExecution(d->surface, targets, error);
     }
     if (!execution.isActive()) return Result::Failed;
     const auto selection = KisPageReadView::transactionOverlay(transaction.id);
@@ -2281,41 +2226,16 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     const std::function<bool(QString *)> &prepareAdapter,
     const AdapterCompletion &completeAdapter) try
 {
-    KisPageSnapshotArray<KisLogicalPageId> targets(pages.cbegin(), pages.cend());
-    std::sort(targets.begin(), targets.end(), [](const auto &a, const auto &b) {
-        return std::tie(a.column, a.row) < std::tie(b.column, b.row);
-    });
-    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
-    return writeCanonicalOperation(targets, legacyIntent, operation, nullptr, changed, error,
-        historyOwner, delivery, prepareAdapter, completeAdapter);
-}
-catch (const std::bad_alloc &) {
-    if (changed) changed->clear();
-    KisPageStoreDetail::setError(error, QStringLiteral("pixel operation storage was refused"));
-    return KisPageStoreWriteOperationResult::Failed;
-}
-
-KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeCanonicalOperation(
-    const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent,
-    const KisPageStorePixelOperation &operation, const KisOrderedPixelOperation *ordered,
-    QVector<KisLogicalPageId> *changed, QString *error, const KisMementoSP &historyOwner,
-    OperationDelivery *delivery, const std::function<bool(QString *)> &prepareAdapter,
-    const AdapterCompletion &completeAdapter) try
-{
-    if (ordered ? !ordered->apply : !operation) {
+    if (!operation) {
         if (changed) changed->clear();
         KisPageStoreDetail::setError(error, QStringLiteral("pixel operation callback is absent"));
         return KisPageStoreWriteOperationResult::Failed;
     }
-    OrderedFragments fragments;
-    std::function<bool(QString *)> orderedPreparation;
-    if (ordered) orderedPreparation = [&](QString *failure) {
-        // Use the original pre-pixel preparation hook: unsupported/borrowed
-        // routes do no grouping. Refusal returns the execution normally and
-        // preserves earlier pending history, just like adapter refusal.
-        fragments = prepareOrderedFragments(*ordered, targets, store()->storageAllocator());
-        return !prepareAdapter || prepareAdapter(failure);
-    };
+    KisPageSnapshotArray<KisLogicalPageId> targets(pages.cbegin(), pages.cend());
+    std::sort(targets.begin(), targets.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.row, a.column) < std::tie(b.row, b.column);
+    });
+    targets.erase(std::unique(targets.begin(), targets.end()), targets.end());
     return runCpuMutationOperation(targets, legacyIntent, true,
         [&](KisPageMutationExecution &mutation, const KisPageTransaction &, const KisSurfaceEpochState &state,
             QString *error) {
@@ -2323,14 +2243,16 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeCanon
     // move. A later successful move cannot hide an earlier acquisition failure.
     class BoundedCursor final : public KisPixelWriteCursor {
     public:
-        BoundedCursor(KisPageMutationExecution &mutation, KisSurfaceId surface, quint32 pixelSize)
-            : mutation(mutation), surface(surface), pixelSize(pixelSize) {}
+        BoundedCursor(KisPageMutationExecution &mutation, KisSurfaceId surface, quint32 pixelSize,
+                       const KisPageSnapshotArray<KisLogicalPageId> &targets)
+            : mutation(mutation), surface(surface), pixelSize(pixelSize), targets(targets) {}
         void moveTo(qint32 x, qint32 y) override {
             if (failed) return;
             position = {x,y}; data = nullptr;
             const KisLogicalPageId next{pageCoordinate(x, KisTileData::WIDTH), pageCoordinate(y, KisTileData::HEIGHT)};
             if (!guard.isValid() || !(next == current)) {
                 guard = {};
+                if (!targets.contains(next)) { failed = true; failure = QStringLiteral("pixel operation left its reserved pages"); return; }
                 guard = mutation.beginWrite({surface, next}, &failure);
                 if (!guard.isValid()) { failed = true; return; }
                 current = next;
@@ -2356,29 +2278,22 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeCanon
         KisPageMutationExecution &mutation;
         KisSurfaceId surface;
         quint32 pixelSize;
+        const KisPageSnapshotArray<KisLogicalPageId> &targets;
         KisLogicalPageId current;
         QPoint position;
         KisCpuWriteGuard guard;
         quint8 *data = nullptr;
         bool failed = false;
         QString failure;
-    } cursor(mutation, surface(), state.format.pixelStride);
-    bool accepted = true;
-    if (ordered) {
-        const auto apply = [&](const auto &items) {
-            for (const auto &item : items)
-                if (!ordered->apply(&cursor, item.sourceOrdinal, item.area)) return false;
-            return true;
-        };
-        accepted = fragments.empty() ? apply(ordered->rects) : apply(fragments);
-    } else accepted = operation(&cursor);
+    } cursor(mutation, surface(), state.format.pixelStride, targets);
+    const bool accepted = operation(&cursor);
     cursor.release();
     if (!accepted || cursor.failed) {
         KisPageStoreDetail::setError(error, cursor.failed ? cursor.failure : QStringLiteral("pixel operation callback failed or used invalid coordinates"));
         return false;
     }
     return true;
-    }, changed, error, historyOwner, delivery, ordered ? orderedPreparation : prepareAdapter, completeAdapter);
+    }, changed, error, historyOwner, delivery, prepareAdapter, completeAdapter);
 }
 catch (const std::bad_alloc &) {
     if (changed) changed->clear();
@@ -2407,10 +2322,10 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
     }
     const QRect rect(x, y, width, height);
     KisPageSnapshotArray<KisLogicalPageId> pages;
-    for (qint64 col = pageCoordinate(x, KisTileData::WIDTH);
-         col <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++col)
-        for (qint64 row = pageCoordinate(y, KisTileData::HEIGHT);
-             row <= pageCoordinate(rect.bottom(), KisTileData::HEIGHT); ++row)
+    for (qint64 row = pageCoordinate(y, KisTileData::HEIGHT);
+         row <= pageCoordinate(rect.bottom(), KisTileData::HEIGHT); ++row)
+        for (qint64 col = pageCoordinate(x, KisTileData::WIDTH);
+             col <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++col)
             pages.append({qint32(col), qint32(row)});
 
     const auto &targets = pages;

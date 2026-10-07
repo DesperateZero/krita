@@ -15,13 +15,6 @@
 #include "KoOptimizedCompositeOpCopy128.h"
 
 #include <KoCompositeOpRegistry.h>
-#include <typeinfo>
-
-template<>
-bool KoOptimizedOver32TypePerArch::matches<xsimd::current_arch>(const KoCompositeOp *operation)
-{
-    return operation && typeid(*operation) == typeid(KoOptimizedCompositeOpOver32<xsimd::current_arch>);
-}
 
 template<>
 template<>

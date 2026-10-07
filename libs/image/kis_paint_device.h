@@ -24,7 +24,6 @@
 #include <kritaimage_export.h>
 
 class KUndo2Command;
-struct KisOrderedPixelOperation;
 class QRect;
 class QImage;
 class QPoint;
@@ -1004,9 +1003,6 @@ private:
 
     // Only KisPainter is allowed to have access to these low-level methods
     friend class KisPainter;
-
-    bool applyOrderedPixelOperation(const KisOrderedPixelOperation &operation,
-                                    KisTransaction *strokeOwner);
 
     /**
      * Return a vector with in order the size in bytes of the channels

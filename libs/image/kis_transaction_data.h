@@ -15,7 +15,6 @@
 
 class KisTransactionWrapperFactory;
 class KisPixelWriteCursor;
-struct KisOrderedPixelOperation;
 class QRect;
 
 /**
@@ -68,12 +67,6 @@ protected:
     virtual void restoreSelectionOutlineCache(bool undo);
 
 private:
-    friend class KisTransaction;
-    bool applyStrokePixelOperation(KisPaintDeviceSP target, const KisOrderedPixelOperation &operation,
-                                    QString *error);
-    bool applyStrokePixelOperationImpl(KisPaintDeviceSP target, const QVector<QRect> &rects,
-        const std::function<bool(KisPixelWriteCursor *)> &operation,
-        const KisOrderedPixelOperation *ordered, QString *error);
     void init(KisPaintDeviceSP device);
     void startUpdates();
     void possiblyNotifySelectionChanged();

@@ -1367,30 +1367,21 @@ public:
 KisPageMutationExecution KisPageMutationSession::borrowExecution(
     KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &inputPages, QString *error) try
 {
+    KisPageMutationExecution result;
+    if (!d || !surface.isValid() || inputPages.isEmpty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("execution range is absent"));
+        return result;
+    }
     // This was a set-valued input. Preserve that contract at the boundary;
-    // canonical native callers use the private const binding directly.
+    // canonical adapter ranges share the array without another allocation.
+    auto pages = inputPages;
     const auto less = [](const auto &a, const auto &b) {
         return std::make_tuple(a.column, a.row) < std::make_tuple(b.column, b.row);
     };
-    if (std::is_sorted(inputPages.cbegin(), inputPages.cend(), less)
-        && std::adjacent_find(inputPages.cbegin(), inputPages.cend()) == inputPages.cend())
-        return borrowCanonicalExecution(surface, inputPages, error);
-    auto pages = inputPages;
-    std::sort(pages.begin(), pages.end(), less);
-    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
-    return borrowCanonicalExecution(surface, pages, error);
-} catch (const std::bad_alloc &) {
-    KisPageStoreDetail::setError(error, QStringLiteral("execution range storage is unavailable"));
-    return {};
-}
-
-KisPageMutationExecution KisPageMutationSession::borrowCanonicalExecution(
-    KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &pages, QString *error) try
-{
-    KisPageMutationExecution result;
-    if (!d || !surface.isValid() || pages.isEmpty()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("execution range is absent"));
-        return result;
+    if (!std::is_sorted(pages.cbegin(), pages.cend(), less)
+        || std::adjacent_find(pages.cbegin(), pages.cend()) != pages.cend()) {
+        std::sort(pages.begin(), pages.end(), less);
+        pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
     }
     // Actual record, control block and range storage precede any authority.
     auto candidate = std::allocate_shared<KisPageMutationExecution::Private>(
@@ -1450,8 +1441,7 @@ KisPageMutationExecution KisPageMutationSession::borrowCanonicalExecution(
     if (!d->admission.isValid()) d->admission = d->owner->writeAdmission.beginClaimSet(d->writes);
     if (!d->owner->writeAdmission.claimRange(d->admission, surface, pages, ownerLock, error))
         return result;
-    // One surface and the original column/row input already match BoundEntry
-    // ordering. Binding never mutates/detaches that borrowed input.
+    std::sort(range, range + candidate->count, &KisPageMutationExecution::Private::less);
     candidate->next = d->executions;
     if (candidate->next) candidate->next->previous = candidate.get();
     d->executions = candidate.get();

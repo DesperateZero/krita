@@ -55,8 +55,4 @@ struct KoOptimizedCompositeOpFactoryPerArch {
     static KoCompositeOp *create(const KoColorSpace *);
 };
 
-struct KoOptimizedOver32TypePerArch {
-    template<typename Impl> static bool matches(const KoCompositeOp *);
-};
-
 #endif /* KOOPTIMIZEDCOMPOSITEOPFACTORYPERARCH_H */

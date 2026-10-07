@@ -32,7 +32,6 @@ class KisPageStoreReadPage;
 class KisTile;
 class KisPageStoreWriteReservation;
 class KisTiledDataManagerIteratorWriteScope;
-struct KisOrderedPixelOperation;
 
 /**
  * Opaque RAII anchor for one legacy multi-tile write operation. Keeping the
@@ -243,13 +242,6 @@ private:
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;
-    KisPageStoreWriteOperationResult writeCanonicalOperation(
-        const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent,
-        const KisPageStorePixelOperation &operation, const KisOrderedPixelOperation *ordered,
-        QVector<KisLogicalPageId> *changed, QString *error,
-        const KisMementoSP &historyOwner, OperationDelivery *delivery,
-        const std::function<bool(QString *)> &prepareAdapter,
-        const AdapterCompletion &completeAdapter);
     std::shared_ptr<std::pmr::memory_resource> extentStorage() const;
 
     // A new manager read selects current; a retained TileSP keeps its existing

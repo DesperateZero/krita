@@ -5,7 +5,6 @@
  */
 
 #include "kis_transaction_data.h"
-#include "KisOrderedPixelOperation_p.h"
 
 #include "kis_pixel_selection.h"
 #include "kis_paint_device.h"
@@ -200,28 +199,13 @@ bool KisTransactionData::beginStrokeMutation(QString *error)
 bool KisTransactionData::applyStrokePixelOperation(KisPaintDeviceSP target, const QVector<QRect> &rects,
     const std::function<bool(KisPixelWriteCursor *)> &operation, QString *error)
 {
-    return applyStrokePixelOperationImpl(target, rects, operation, nullptr, error);
-}
-
-bool KisTransactionData::applyStrokePixelOperation(KisPaintDeviceSP target,
-    const KisOrderedPixelOperation &operation, QString *error)
-{
-    return applyStrokePixelOperationImpl(target, {}, {}, &operation, error);
-}
-
-bool KisTransactionData::applyStrokePixelOperationImpl(KisPaintDeviceSP target, const QVector<QRect> &rects,
-    const std::function<bool(KisPixelWriteCursor *)> &operation,
-    const KisOrderedPixelOperation *ordered, QString *error)
-{
     if (!m_d->persistentMutation) {
         if (error) *error = QStringLiteral("Stroke mutation was not admitted");
         return false;
     }
     if (!strokeMutationTargetIsCurrent(target, error)) return false;
     target->invalidateTransactionCache();
-    const bool succeeded = ordered
-        ? m_d->savedDataManager->applyStrokePixelOperation(m_d->memento, *ordered, error)
-        : m_d->savedDataManager->applyStrokePixelOperation(m_d->memento, rects, operation, error);
+    const bool succeeded = m_d->savedDataManager->applyStrokePixelOperation(m_d->memento, rects, operation, error);
     target->invalidateTransactionCache();
     return succeeded;
 }

@@ -13,8 +13,6 @@
 #include "KisRenderedDab.h"
 #include "KisPixelWriteCursor.h"
 #include "KisStrokeJobFailureContext.h"
-#include "KisOrderedPixelOperation_p.h"
-#include <compositeops/KoOptimizedCompositeOpFactory.h>
 #include <utility>
 
 bool KisPainter::Private::applyDevice(const QRect &applyRect,
@@ -179,16 +177,8 @@ void KisPainter::bltFixedImpl(const QVector<QRect> &applyRects,
                               KisTransaction *strokeOwner)
 {
     if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
-    if (allSrcDevices.isEmpty()) return;
-    const KoColorSpace *srcColorSpace = allSrcDevices.first().device->colorSpace();
-    // Resolve into operation-local state: this painter is shared by disjoint
-    // jobs. Factory identity, not a user-visible op id, grants reordering.
-    const KoCompositeOp *operation = d->colorSpace->compositeOp(d->compositeOpId, srcColorSpace);
-    const bool ordered = !d->selection && !d->device->defaultBounds()->wrapAroundMode()
-        && *srcColorSpace == *d->colorSpace && d->compositeOpId == COMPOSITE_OVER
-        && KoOptimizedCompositeOpFactory::isIndependentOver32(operation);
+    const KoColorSpace *srcColorSpace = 0;
     QList<KisRenderedDab> devices;
-    QVector<KisOrderedPixelRect> orderedRects;
     QVector<QRect> clips;
     const QRect selectionBounds = d->selection ? d->selection->selectedRect() : QRect();
     for (QRect rc : applyRects) {
@@ -198,33 +188,30 @@ void KisPainter::bltFixedImpl(const QVector<QRect> &applyRects,
 
     QVector<QRect> targetRects;
 
-    for (qsizetype ordinal = 0; ordinal < allSrcDevices.size(); ++ordinal) {
-        const KisRenderedDab &dab = allSrcDevices[ordinal];
-        KIS_SAFE_ASSERT_RECOVER_RETURN(*srcColorSpace == *dab.device->colorSpace());
+    Q_FOREACH (const KisRenderedDab &dab, allSrcDevices) {
         bool intersects = false;
         for (const QRect &rc : std::as_const(clips)) {
             const QRect target = rc & dab.realBounds();
             if (!target.isEmpty()) {
                 intersects = true;
-                if (ordered) orderedRects.append({target, ordinal});
-                else targetRects.append(target);
+                targetRects.append(target);
             }
         }
-        if (intersects && !ordered) devices.append(dab);
+        if (intersects) devices.append(dab);
+
+        if (!srcColorSpace) {
+            srcColorSpace = dab.device->colorSpace();
+        } else {
+            KIS_SAFE_ASSERT_RECOVER_RETURN(*srcColorSpace == *dab.device->colorSpace());
+        }
     }
 
-    if (ordered ? orderedRects.isEmpty() : devices.isEmpty()) return;
+    if (devices.isEmpty()) return;
 
     KoCompositeOp::ParameterInfo localParamInfo = d->paramInfo;
-    if (ordered) {
-        const KisOrderedPixelOperation input{orderedRects,
-            [&](KisPixelWriteCursor *cursor, qsizetype ordinal, const QRect &rect) {
-                return d->applyDevice(rect, allSrcDevices[ordinal], cursor, srcColorSpace, operation, localParamInfo);
-            }};
-        if (!d->device->applyOrderedPixelOperation(input, strokeOwner))
-            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter multi-dab pixel operation failed"));
-        return;
-    }
+    // This painter is shared by non-overlapping brush jobs. Resolve once into
+    // this operation's local state, without writing the painter-wide cache.
+    const KoCompositeOp *operation = d->colorSpace->compositeOp(d->compositeOpId, srcColorSpace);
     KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : nullptr;
     const bool painted = d->device->applyPixelOperation(targetRects, [&](KisPixelWriteCursor *dstIt) {
         for (const KisRenderedDab &dab : std::as_const(devices)) {

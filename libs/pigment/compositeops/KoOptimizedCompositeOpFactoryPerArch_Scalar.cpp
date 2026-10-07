@@ -12,13 +12,6 @@
 #include "KoAlphaDarkenParamsWrapper.h"
 #include "KoCompositeOpOver.h"
 #include "KoCompositeOpCopy2.h"
-#include <typeinfo>
-
-template<>
-bool KoOptimizedOver32TypePerArch::matches<xsimd::generic>(const KoCompositeOp *operation)
-{
-    return operation && typeid(*operation) == typeid(KoCompositeOpOver<KoBgrU8Traits>);
-}
 
 template<>
 template<>
@@ -127,3 +120,4 @@ KoCompositeOp *KoOptimizedCompositeOpFactoryPerArch<
 {
     return new KoCompositeOpAlphaDarken<KoBgrU16Traits, KoAlphaDarkenParamsWrapperCreamy>(param);
 }
+
