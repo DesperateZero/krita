@@ -1327,6 +1327,7 @@ private Q_SLOTS:
     void sparseDefaultPageFirstWriteAndUndoStayVersioned();
     void virtualDefaultRemovalPreservesReaderAndDefaultRevision();
     void surfaceDefaultAndExtentMutateAtomicallyWithEpoch();
+    void exactGenerationArchivePreservesPublishedAuthorityOnFailure_data();
     void exactGenerationArchivePreservesPublishedAuthorityOnFailure();
     void asyncArchiveCompletionCancellationAndShutdownAreFailClosed();
     void metadataShardsSurviveConcurrentLeaseStressWithinBudget();
@@ -11736,8 +11737,19 @@ void KisPageStoreReferenceTest::surfaceDefaultAndExtentMutateAtomicallyWithEpoch
     QVERIFY(!store.sessionStats().hasOutstandingCapabilities());
 }
 
+void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorityOnFailure_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("bounded");
+    QTest::newRow("ample-original") << 1 << false;
+    for (int bpp : {1, 4, 8, 16})
+        QTest::newRow(qPrintable(QString("one-page-budget-%1").arg(bpp))) << bpp << true;
+}
+
 void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorityOnFailure()
 {
+    QFETCH(int, bpp);
+    QFETCH(bool, bounded);
     auto completions = std::make_shared<KisCompletionRegistry>();
     auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig providerConfig;
@@ -11751,7 +11763,7 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
     KisLegacySwapArchiveConfig archiveConfig;
     archiveConfig.archive = KisReplicaProviderId{70};
     archiveConfig.epoch = KisReplicaProviderEpoch{1};
-    archiveConfig.byteBudget = 1024 * 1024;
+    archiveConfig.byteBudget = bounded ? 64 * 64 * bpp : 1024 * 1024;
     QVERIFY2(archive->configureLegacySwapArchive(archiveConfig, completions, &error), qPrintable(error));
 
     KisImageEpochSnapshot initial;
@@ -11761,6 +11773,18 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
     initial.extentRevision = 1;
     initial.propertyRevision = 1;
     initial.surfaces = {surfaceEpochState(KisSurfaceId{1}, 1, 0x2a)};
+    auto &format = initial.surfaces.first().format;
+    if (bpp != 1) {
+        format.formatId = bpp;
+        format.colorModelId = "RGBA";
+        format.colorDepthId = bpp == 4 ? "U8" : bpp == 8 ? "U16" : "F32";
+        format.channelOrder = "RGBA";
+        format.channelCount = 4;
+        format.pixelStride = bpp;
+        format.pixelAlignment = bpp >= 8 ? 8 : 4;
+        format.alphaSemantic = KisSurfaceAlphaSemantic::Premultiplied;
+        format.defaultPixel = QByteArray(bpp, char(0x2a));
+    }
 
     KisPageStore store;
     QVERIFY2(store.configure(initial, completions, 4, &error), qPrintable(error));
@@ -11787,8 +11811,7 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
             return {};
         return store.commit(transaction, store.preparedPages(transaction));
     };
-    auto currentVersionAndByte = [&]() -> QPair<KisPageVersion, int> {
-        KisPageReadView current;
+    auto currentVersionAndByte = [&](const KisPageReadView &current = {}) -> QPair<KisPageVersion, int> {
         const KisPageAccessRequirement cpuAccess{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
         const KisReadRequest request = store.acquireRead(key, current, cpuAccess, KisPagePriority::Normal);
         if (!request.isValid())
@@ -11817,6 +11840,16 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
                                &archivedLayout));
     QCOMPARE(quint8(archivedBytes.at(0)), quint8(0x8d));
     QVERIFY(archivedLayout.matches(initial.surfaces.first().allocationDescriptor()));
+    QCOMPARE(archivedBytes.size(), qsizetype(64 * 64 * bpp));
+    QByteArray expectedArchived(archivedBytes.size(), char(0x2a));
+    expectedArchived[0] = char(0x8d);
+    QCOMPARE(archivedBytes, expectedArchived);
+    const auto retainedGeneration2 = store.captureRetainedEpoch();
+    QVERIFY(retainedGeneration2.isValid());
+    KisPageReadView generation2View;
+    generation2View.kind = KisPageReadViewKind::CommittedEpoch;
+    generation2View.epoch = retainedGeneration2.snapshot.epoch;
+    generation2View.retention = retainedGeneration2.token;
 
     QVERIFY(writeAndCommit(0x44).isValid());
     const QPair<KisPageVersion, int> generation3 = currentVersionAndByte();
@@ -11828,10 +11861,30 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
     QVERIFY(!archive->contains(generation3.first));
     QCOMPARE(currentVersionAndByte(), generation3);
 
+    if (bounded) {
+        // This refusal comes from real occupied archive capacity, independently
+        // of the already consumed injected failure above.
+        QVERIFY(!store.archiveRead(key, {}, KisPagePriority::Background, &error).isValid());
+        QVERIFY2(error.contains("budget is exhausted"), qPrintable(error));
+        QVERIFY(!archive->contains(generation3.first));
+        QVERIFY(archive->loadExact(generation2.first,
+            initial.surfaces.first().allocationDescriptor(), &archivedBytes));
+        QCOMPARE(archivedBytes, expectedArchived);
+        QCOMPARE(currentVersionAndByte(), generation3);
+        QCOMPARE(currentVersionAndByte(generation2View), generation2);
+        QVERIFY(archive->forget(generation2.first));
+        QVERIFY(!archive->contains(generation2.first));
+    }
     QVERIFY(store.archiveRead(key, {}, KisPagePriority::Background, &error).isValid());
     QVERIFY(archive->contains(generation3.first));
+    QVERIFY(archive->loadExact(generation3.first,
+        initial.surfaces.first().allocationDescriptor(), &archivedBytes));
+    expectedArchived[0] = char(0x44);
+    QCOMPARE(archivedBytes, expectedArchived);
+    QCOMPARE(currentVersionAndByte(generation2View), generation2);
     QVERIFY(!store.archiveRead(key, {}, KisPagePriority::Background, &error).isValid());
     QCOMPARE(currentVersionAndByte(), generation3);
+    if (bounded) QVERIFY(archive->forget(generation3.first));
 
     KisPageReadView initialView;
     initialView.kind = KisPageReadViewKind::CommittedEpoch;
@@ -11842,12 +11895,15 @@ void KisPageStoreReferenceTest::exactGenerationArchivePreservesPublishedAuthorit
     QVERIFY(archive->contains(initialDefault));
     QVERIFY(archive->loadExact(initialDefault, initial.surfaces.first().allocationDescriptor(), &archivedBytes));
     QCOMPARE(quint8(archivedBytes.at(0)), quint8(0x2a));
-    QVERIFY(archive->forget(generation2.first));
-    QVERIFY(archive->forget(generation3.first));
+    if (!bounded) {
+        QVERIFY(archive->forget(generation2.first));
+        QVERIFY(archive->forget(generation3.first));
+    }
     QVERIFY(archive->forget(initialDefault));
     QVERIFY(!archive->contains(generation2.first));
     QVERIFY(!archive->contains(generation3.first));
     QVERIFY(!archive->contains(initialDefault));
+    QVERIFY(store.releaseSnapshot(retainedGeneration2.token));
     QVERIFY(store.releaseSnapshot(retainedInitial.token));
     QVERIFY(!store.sessionStats().hasOutstandingCapabilities());
 }
