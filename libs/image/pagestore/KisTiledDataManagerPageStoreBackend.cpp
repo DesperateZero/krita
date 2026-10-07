@@ -2004,6 +2004,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     for (int x = 0; x < KisTileData::WIDTH; ++x)
         memcpy(rowBytes.data() + x * pixel.size(), pixel.constData(), size_t(pixel.size()));
     std::shared_ptr<const KisPageReplicaSource> uniform;
+    const bool clearsToDefault = pixel == surfaceState.format.defaultPixel;
     for (qint64 row = firstRow; row <= lastRow; ++row) {
         for (qint64 column = firstColumn; column <= lastColumn; ++column) {
             KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::FillPage, 1);
@@ -2014,10 +2015,14 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                 int(row * KisTileData::HEIGHT),
                 KisTileData::WIDTH, KisTileData::HEIGHT);
             const QRect affected = rect.intersected(pageRect);
-            if (affected == pageRect) {
+            if (affected == pageRect || clearsToDefault) {
                 KisPageVersion old; if (!before.resolvePageVersion(key, &old)) return false;
-                if (pixel == surfaceState.format.defaultPixel) {
-                    if (old.isDefaultPixel()) continue;
+                // A partial clear of a sparse default page is also a no-op.
+                // The fixed before view is protected by this batch's range claim.
+                if (clearsToDefault && old.isDefaultPixel()) continue;
+            }
+            if (affected == pageRect) {
+                if (clearsToDefault) {
                     if (!batch->replaceFullTile(key.page.column, key.page.row, nullptr, true, error)) return false;
                 } else {
                     if (!uniform) uniform = uniformSourceFor(surfaceState.allocationDescriptor(), pixel, error);

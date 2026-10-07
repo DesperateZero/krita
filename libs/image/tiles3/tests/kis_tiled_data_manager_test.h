@@ -56,6 +56,8 @@ private Q_SLOTS:
     void testPageStoreSaveReopenRoundTrip();
     void testPageStoreSparsePurge();
     void testPageStoreVirtualDefaultReadStaysSparse();
+    void testPageStorePartialDefaultClearStaysSparse_data();
+    void testPageStorePartialDefaultClearStaysSparse();
     void testPageStoreCompatibilityBehavior();
     void testPageStorePackedReadCapturesOneView_data();
     void testPageStorePackedReadCapturesOneView();

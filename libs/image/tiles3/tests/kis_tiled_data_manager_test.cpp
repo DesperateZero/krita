@@ -1140,6 +1140,60 @@ void KisTiledDataManagerTest::testPageStoreVirtualDefaultReadStaysSparse()
     QCOMPARE(dm.extent(), QRect());
 }
 
+void KisTiledDataManagerTest::testPageStorePartialDefaultClearStaysSparse_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<bool>("history");
+    for (int bpp : {1, 4, 8, 16}) for (bool history : {false, true})
+        QTest::newRow(qPrintable(QStringLiteral("bpp%1-history%2").arg(bpp).arg(history))) << bpp << history;
+}
+
+void KisTiledDataManagerTest::testPageStorePartialDefaultClearStaysSparse()
+{
+    QFETCH(int, bpp); QFETCH(bool, history);
+    const QByteArray blank(bpp, char(0x13)), color(bpp, char(0x47));
+    KisDataManager dm(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    dm.clear(0, 0, 64, 64, reinterpret_cast<const quint8 *>(color.constData()));
+    dm.clear(128, 0, 64, 64, reinterpret_cast<const quint8 *>(color.constData()));
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    auto frozen = backend->captureReadView(); QVERIFY(frozen.isValid());
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    const auto counts = store->mutationStatistics(); const auto payload = backend->payloadWork();
+    const QRect hole(65, 1, 62, 62);
+    dm.clear(hole.x(), hole.y(), hole.width(), hole.height(), reinterpret_cast<const quint8 *>(blank.constData()));
+    QCOMPARE(store->mutationStatistics().generationsReserved, counts.generationsReserved);
+    QCOMPARE(backend->payloadWork().defaultInitializedPages, payload.defaultInitializedPages);
+    QCOMPARE(backend->payloadWork().nativeDuplicatePages, payload.nativeDuplicatePages);
+    QCOMPARE(dm.extent(), QRect(0, 0, 192, 64));
+    auto current = backend->captureReadView(); KisPageVersion version;
+    QVERIFY(current.resolvePageVersion({backend->surface(), {1, 0}}, &version));
+    QVERIFY(version.isDefaultPixel()); current = {};
+
+    // A different fill must still materialize the hole, preserve its border,
+    // and leave the captured default page and surrounding painted pages intact.
+    dm.clear(hole.x(), hole.y(), hole.width(), hole.height(), reinterpret_cast<const quint8 *>(color.constData()));
+    QCOMPARE(store->mutationStatistics().generationsReserved - counts.generationsReserved, quint64(1));
+    QByteArray expected(192 * 64 * bpp, char(0x13)), actual(expected.size(), Qt::Uninitialized);
+    for (int y = 0; y < 64; ++y) {
+        std::memset(expected.data() + y * 192 * bpp, 0x47, size_t(64 * bpp));
+        std::memset(expected.data() + (y * 192 + 128) * bpp, 0x47, size_t(64 * bpp));
+        if (y >= hole.top() && y <= hole.bottom())
+            std::memset(expected.data() + (y * 192 + hole.x()) * bpp, 0x47, size_t(hole.width() * bpp));
+    }
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 64); QCOMPARE(actual, expected);
+    QVERIFY(frozen.resolvePageVersion({backend->surface(), {1, 0}}, &version)); QVERIFY(version.isDefaultPixel());
+    if (history) {
+        dm.commit(); dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 65, 1, 62, 62);
+        QCOMPARE(actual.left(62 * 62 * bpp), QByteArray(62 * 62 * bpp, char(0x13)));
+        dm.rollforward(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 64); QCOMPARE(actual, expected);
+    }
+    frozen = {};
+    QVERIFY(store->waitForRetirementIdle());
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+}
+
 void KisTiledDataManagerTest::testPageStoreCompatibilityBehavior()
 {
     quint8 defaultPixel = 0;
