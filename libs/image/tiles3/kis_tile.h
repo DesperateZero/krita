@@ -169,7 +169,8 @@ private:
               KisTileData *defaultTileData, KisMementoManager* mm);
 
     inline bool blockSwapping() const;
-    inline void unblockSwapping() const;
+    // Caller holds m_swapBarrierLock through the final pin/ownership cleanup.
+    inline void unblockSwappingLocked() const;
 
     inline void safeReleaseOldTileData(KisTileData *td);
     bool ensurePageStoreWriteAccess() const;

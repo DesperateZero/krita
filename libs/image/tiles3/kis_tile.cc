@@ -324,9 +324,8 @@ inline bool KisTile::blockSwapping() const
     return true;
 }
 
-inline void KisTile::unblockSwapping() const
+inline void KisTile::unblockSwappingLocked() const
 {
-    QMutexLocker locker(&m_swapBarrierLock);
     Q_ASSERT(m_lockCounter > 0);
 
     if(--m_lockCounter == 0) {
@@ -530,14 +529,16 @@ bool KisTile::lockForWrite()
             KisTileData *tileData = m_tileData->clone();
             if (!tileData) {
                 m_COWMutex.unlock();
-                unblockSwapping();
+                QMutexLocker locker(&m_swapBarrierLock);
+                unblockSwappingLocked();
                 return false;
             }
             tileData->acquire();
             if (!tileData->blockSwapping()) {
                 tileData->release();
                 m_COWMutex.unlock();
-                unblockSwapping();
+                QMutexLocker locker(&m_swapBarrierLock);
+                unblockSwappingLocked();
                 return false;
             }
             KisTileData *oldTileData = m_tileData;
@@ -577,8 +578,8 @@ void KisTile::unlockForWrite()
             DEBUG_LOG_ACTION("unlock [W/PageStore]");
             return;
         }
+        unblockSwappingLocked();
     }
-    unblockSwapping();
     DEBUG_LOG_ACTION("unlock [W]");
 
 }
@@ -595,8 +596,8 @@ void KisTile::unlockForRead() const
             DEBUG_LOG_ACTION("unlock [R/PageStore]");
             return;
         }
+        unblockSwappingLocked();
     }
-    unblockSwapping();
     DEBUG_LOG_ACTION("unlock [R]");
 
 }
