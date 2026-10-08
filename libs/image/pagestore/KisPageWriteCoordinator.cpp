@@ -2613,15 +2613,26 @@ bool KisPageWriteAdmission::ownsClaimSetLocked(const ClaimSet &claims) const
     return true;
 }
 
-void KisPageWriteAdmission::rebindClaimSetLocked(ClaimSet &claims, const KisMutationWriteSet &writeSet) noexcept
+bool KisPageWriteAdmission::ownsClaimLocked(const ClaimSet &claims, const KisPageKey &key) const
 {
-    Q_ASSERT(claims.isValid() && claims.owner == this);
-    Q_ASSERT(writeSet.size() > 0);
-    for (auto slot = writeSet.firstEntry(); slot.isValid(); slot = writeSet.nextEntry(slot)) {
-        const auto *found = m_claims.find(writeSet.at(slot)->key());
-        Q_ASSERT(found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token);
-    }
-    claims.writeSet = &writeSet;
+    if (!claims.isValid() || claims.owner != this) return false;
+    const auto *found = m_claims.find(key);
+    return found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token;
+}
+
+bool KisPageWriteAdmission::adoptReservationLocked(KisPageStoreWriteReservation &range,
+                                                  KisMutationWriteSet &writes, ClaimSet &claims) noexcept
+{
+    if (!range.admission.isValid() || range.admission.owner != this
+        || range.admission.writeSet != &range.writes || range.writes.size() == 0
+        || writes.size() != 0 || claims.isValid() || (m_operational && !*m_operational)) return false;
+    // A unique reservation is returned only after claimAll succeeds. Its
+    // private set cannot grow or release a key before this atomic transfer.
+    Q_ASSERT(ownsClaimSetLocked(range.admission));
+    writes = std::move(range.writes);
+    claims = std::move(range.admission);
+    claims.writeSet = &writes;
+    return true;
 }
 
 void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept

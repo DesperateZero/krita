@@ -551,7 +551,10 @@ public:
     bool claimRange(ClaimSet &, KisSurfaceId, const KisPageSnapshotArray<KisLogicalPageId> &,
                     QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;
-    void rebindClaimSetLocked(ClaimSet &, const KisMutationWriteSet &) noexcept;
+    bool ownsClaimLocked(const ClaimSet &, const KisPageKey &) const;
+    // Only reserveManagedRange can populate a reservation's private claims.
+    // Transfer that complete acceptance without re-admitting its keys.
+    bool adoptReservationLocked(KisPageStoreWriteReservation &, KisMutationWriteSet &, ClaimSet &) noexcept;
 
 private:
     struct ActiveClaim {
@@ -593,6 +596,7 @@ private:
 
     friend class KisPageStore;
     friend class KisPageMutationSession;
+    friend class KisPageWriteAdmission;
 };
 
 class KRITAIMAGE_EXPORT KisPageWriteCoordinator final

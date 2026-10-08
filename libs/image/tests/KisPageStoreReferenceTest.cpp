@@ -7973,7 +7973,6 @@ void KisPageStoreReferenceTest::writeAdmissionReleasesSubsetClaims()
         intent.key = pageKey(i);
         writes.getOrCreate(intent);
     }
-    KisMutationWriteSet moved;
     KisMutationWriteSet competing;
     intent.key = pageKey(100);
     competing.getOrCreate(intent);
@@ -7998,9 +7997,10 @@ void KisPageStoreReferenceTest::writeAdmissionReleasesSubsetClaims()
     QVERIFY(!admission.releaseOneLocked(foreign, competing.handleAt(0)));
     QVERIFY(admission.pageClaimedLocked(pageKey(100)));
     QVERIFY(admission.claimDirectLocked(pageKey(8), 99, lock));
-    moved = std::move(writes);
-    admission.rebindClaimSetLocked(claims, moved);
     QVERIFY(admission.ownsClaimSetLocked(claims));
+    QVERIFY(admission.ownsClaimLocked(claims, pageKey(100)));
+    QVERIFY(!admission.ownsClaimLocked(foreign, pageKey(100)));
+    QVERIFY(!admission.ownsClaimLocked(claims, pageKey(8)));
     claims.releaseLocked();
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(0));
     QVERIFY(admission.pageClaimedLocked(pageKey(8)));
@@ -8128,33 +8128,29 @@ void KisPageStoreReferenceTest::writeAdmissionClaimsWholeSetsAtomically()
     }
     secondClaims.release();
 
-    // A managed adapter moves the exact write set into its session. Rebind
-    // the move-only claim without releasing/reacquiring any PageKey between
-    // the two owners; the previous storage may then be destroyed.
-    KisMutationWriteSet adapterWrites;
-    intent.key = pageKey(3);
-    adapterWrites.getOrCreate(intent);
-    intent.key = pageKey(4);
-    adapterWrites.getOrCreate(intent);
-    KisPageWriteAdmission::ClaimSet adapterClaims;
+    // A generic claim set cannot confer reservation authority. An empty
+    // reservation has no accepted range, even when the destination already
+    // owns unrelated keys. Real transfers are exercised through the managed
+    // operation/fill adapters, the only producers of accepted reservations.
+    KisPageStoreWriteReservation empty(nullptr);
+    KisMutationWriteSet sessionWrites;
+    KisPageWriteAdmission::ClaimSet sessionClaims;
     {
         QMutexLocker lock(&mutex);
-        adapterClaims = admission.beginClaimSet(adapterWrites);
-        QCOMPARE(admission.claimAll(adapterClaims, lock, &error), KisPageWriteAdmission::Result::Acquired);
-    }
-    KisMutationWriteSet sessionWrites = std::move(adapterWrites);
-    {
-        QMutexLocker lock(&mutex);
-        admission.rebindClaimSetLocked(adapterClaims, sessionWrites);
-        QVERIFY(admission.ownsClaimSetLocked(adapterClaims));
-        QCOMPARE(admission.activeNativeClaimCountLocked()
-                     + admission.activeGenericClaimCountLocked(), 2);
-    }
-    adapterClaims.release();
-    {
-        QMutexLocker lock(&mutex);
-        QCOMPARE(admission.activeNativeClaimCountLocked()
-                     + admission.activeGenericClaimCountLocked(), 0);
+        QVERIFY(!admission.adoptReservationLocked(empty, sessionWrites, sessionClaims));
+        QCOMPARE(sessionWrites.size(), qsizetype(0));
+        QVERIFY(!sessionClaims.isValid());
+        sessionClaims = admission.beginClaimSet(firstWrites);
+        QVERIFY(admission.claimOne(sessionClaims, firstWrites.handleAt(0), lock, &error));
+        QVERIFY(admission.ownsClaimLocked(sessionClaims, pageKey(0)));
+        QVERIFY(!admission.ownsClaimLocked(sessionClaims, pageKey(1))); // IntentOnly
+        QMutex foreignMutex;
+        KisPageWaitCondition foreignCondition;
+        KisPageWriteAdmission foreign(foreignMutex, foreignCondition);
+        QVERIFY(!foreign.ownsClaimLocked(sessionClaims, pageKey(0)));
+        QVERIFY(!admission.adoptReservationLocked(empty, sessionWrites, sessionClaims));
+        sessionClaims.releaseLocked();
+        QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(0));
     }
 }
 

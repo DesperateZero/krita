@@ -2135,9 +2135,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         if (!range) return storeBorrowed ? Result::Borrowed : Result::Failed;
         phase.next(Phase::PixelOperationRangeReserved, quint64(targets.size()));
         batch = beginMutationBatch(error);
-        if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return Result::Failed;
+        if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error, &execution)) return Result::Failed;
         transaction = batch->d->transaction;
-        execution = batch->d->mutation.borrowExecution(d->surface, targets, error);
     }
     if (!execution.isActive()) return Result::Failed;
     const auto selection = KisPageReadView::transactionOverlay(transaction.id);
@@ -2243,16 +2242,14 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     // move. A later successful move cannot hide an earlier acquisition failure.
     class BoundedCursor final : public KisPixelWriteCursor {
     public:
-        BoundedCursor(KisPageMutationExecution &mutation, KisSurfaceId surface, quint32 pixelSize,
-                       const KisPageSnapshotArray<KisLogicalPageId> &targets)
-            : mutation(mutation), surface(surface), pixelSize(pixelSize), targets(targets) {}
+        BoundedCursor(KisPageMutationExecution &mutation, KisSurfaceId surface, quint32 pixelSize)
+            : mutation(mutation), surface(surface), pixelSize(pixelSize) {}
         void moveTo(qint32 x, qint32 y) override {
             if (failed) return;
             position = {x,y}; data = nullptr;
             const KisLogicalPageId next{pageCoordinate(x, KisTileData::WIDTH), pageCoordinate(y, KisTileData::HEIGHT)};
             if (!guard.isValid() || !(next == current)) {
                 guard = {};
-                if (!targets.contains(next)) { failed = true; failure = QStringLiteral("pixel operation left its reserved pages"); return; }
                 guard = mutation.beginWrite({surface, next}, &failure);
                 if (!guard.isValid()) { failed = true; return; }
                 current = next;
@@ -2278,14 +2275,13 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
         KisPageMutationExecution &mutation;
         KisSurfaceId surface;
         quint32 pixelSize;
-        const KisPageSnapshotArray<KisLogicalPageId> &targets;
         KisLogicalPageId current;
         QPoint position;
         KisCpuWriteGuard guard;
         quint8 *data = nullptr;
         bool failed = false;
         QString failure;
-    } cursor(mutation, surface(), state.format.pixelStride, targets);
+    } cursor(mutation, surface(), state.format.pixelStride);
     const bool accepted = operation(&cursor);
     cursor.release();
     if (!accepted || cursor.failed) {
@@ -2348,7 +2344,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
         // never a per-page selection of the changing current head.
         auto before = store()->captureReadView(selection, error);
         if (!before.isValid()) return false;
-        for (const auto &page : pages) {
+        for (const auto &page : targets) {
             const KisPageKey key{surface(), page};
             const QRect pageRect(page.column * KisTileData::WIDTH, page.row * KisTileData::HEIGHT,
                                  KisTileData::WIDTH, KisTileData::HEIGHT);

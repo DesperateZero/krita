@@ -2456,6 +2456,47 @@ void KisTiledDataManagerTest::testPageStorePixelOperation()
     }), KisPageStoreWriteOperationResult::Succeeded);
 }
 
+void KisTiledDataManagerTest::testPageStorePixelOperationCanonicalRange()
+{
+    const quint8 blank = 0x13;
+    KisDataManager dm(1, &blank);
+    auto *store = dm.m_pageStoreBackend->store();
+    using Result = KisPageStoreWriteOperationResult;
+    const auto before = store->mutationStatistics();
+    // Preflight prepares the accepted range. An out-of-range access cannot
+    // add a generation, and a later valid move cannot clear the failure latch.
+    quint64 prepared = 0;
+    QCOMPARE(dm.writePageStoreOperation({QRect(-64, -64, 9 * 64, 8 * 64)},
+        [&](KisPixelWriteCursor *cursor) {
+            prepared = store->mutationStatistics().generationsReserved;
+            cursor->moveTo(-65, -64);
+            if (cursor->rawData()) return false;
+            cursor->moveTo(-64, -64);
+            return !cursor->rawData();
+        }), Result::Failed);
+    QCOMPARE(store->mutationStatistics().generationsReserved, prepared);
+    QCOMPARE(prepared - before.generationsReserved, quint64(72));
+    // Reversed and duplicate rectangles cross both the inline index and
+    // touched bitmap boundaries. Search every accepted page in reverse order.
+    QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 8 * 64, 7 * 64),
+                                         QRect(-64, -64, 9 * 64, 8 * 64),
+                                         QRect(-64, -64, 64, 64)},
+        [](KisPixelWriteCursor *cursor) {
+            for (int row = 6; row >= -1; --row) for (int column = 7; column >= -1; --column) {
+                cursor->moveTo(column * 64, row * 64);
+                if (!cursor->rawData()) return false;
+                *cursor->rawData() = quint8(0x40 + row + column);
+            }
+            return true;
+        }), Result::Succeeded);
+    for (int row = -1; row <= 6; ++row) for (int column = -1; column <= 7; ++column) {
+        quint8 pixel = 0;
+        dm.readBytes(&pixel, column * 64, row * 64, 1, 1);
+        QCOMPARE(pixel, quint8(0x40 + row + column));
+    }
+    QCOMPARE(store->mutationStatistics().generationsReserved - prepared, quint64(72));
+}
+
 void KisTiledDataManagerTest::testPageStorePixelOperationPreflightBudgetPressure()
 {
     DefaultBudgetScope budget;

@@ -1753,6 +1753,18 @@ KisPagePublicationCoordinator::prepareDescriptorAdditionsLocked(const PreparedDe
     return nodes;
 }
 
+void KisPagePublicationCoordinator::discardDescriptorAdditionsLocked(
+    DescriptorMap *prepared, QMutexLocker<QMutex> &ownerLock)
+{
+    // An empty prepared map has no node to free. Its retained allocator is
+    // either absent or also retained by m_descriptors, so dropping that
+    // reference cannot destroy the accounting owner under this gate.
+    if (prepared->empty()) return;
+    if (ownerLock.isLocked()) ownerLock.unlock();
+    *prepared = {};
+    ownerLock.relock();
+}
+
 void KisPagePublicationCoordinator::installDescriptorAdditionsLocked(DescriptorMap *prepared)
 {
     Q_ASSERT(prepared->empty() || prepared->get_allocator() == m_descriptors.get_allocator());

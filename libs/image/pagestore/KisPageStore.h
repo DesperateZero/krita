@@ -227,7 +227,7 @@ private:
     // Adapter reservations claim their targets before capture or pixel
     // exposure; adopting them does not create pending generations.
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,
-                           QString *error);
+                           QString *error, KisPageMutationExecution *execution = nullptr);
     bool reserveLegacyMutationPage(const KisPageKey &key, QString *error);
     // Original parked target only; never selects current or prepares a page.
     KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;

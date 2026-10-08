@@ -209,6 +209,7 @@ public:
         const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
     DescriptorMap prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count);
     KRITAIMAGE_EXPORT void installDescriptorAdditionsLocked(DescriptorMap *prepared);
+    void discardDescriptorAdditionsLocked(DescriptorMap *, QMutexLocker<QMutex> &ownerLock);
 
     KisPageStorePublicationStatistics statisticsLocked() const;
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
