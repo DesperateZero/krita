@@ -20,6 +20,62 @@
 #include "tiles3/kis_tile_data_store_iterators.h"
 
 
+void KisTileDataStoreTest::testDefaultPixelInitialization_data()
+{
+    QTest::addColumn<int>("pixelSize");
+    QTest::addColumn<bool>("nonzero");
+    // Include ordinary formats, odd strides, and sizes outside the 4/8 BPP pools.
+    for (int bpp : {1, 2, 3, 4, 6, 8, 12, 16, 32}) {
+        QTest::newRow(qPrintable(QStringLiteral("zero-%1").arg(bpp))) << bpp << false;
+        QTest::newRow(qPrintable(QStringLiteral("pattern-%1").arg(bpp))) << bpp << true;
+    }
+}
+
+void KisTileDataStoreTest::testDefaultPixelInitialization()
+{
+    QFETCH(int, pixelSize);
+    QFETCH(bool, nonzero);
+    auto *store = KisTileDataStore::instance();
+    const int pixels = KisTileData::WIDTH * KisTileData::HEIGHT;
+
+    // Return storage between rounds so a previous nonzero page cannot leak into
+    // a later default. The caller's source is deliberately offset by one byte.
+    for (int round = 0; round < 3; ++round) {
+        QByteArray source(pixelSize + 2, char(0x6d));
+        for (int byte = 0; byte < pixelSize; ++byte) {
+            source[byte + 1] = nonzero ? char(17 + byte * 29 + round * 31) : char(0);
+        }
+        // Preserve hidden color bytes even when the final alpha bytes are zero.
+        if (pixelSize > 1) source[pixelSize] = 0;
+        const QByteArray input = source;
+        const QByteArray expected = source.mid(1, pixelSize).repeated(pixels);
+        auto *tile = store->createDefaultTileData(pixelSize,
+            reinterpret_cast<const quint8 *>(source.constData() + 1));
+        QVERIFY(tile);
+        QVERIFY(tile->ref());
+        const auto release = qScopeGuard([&] { tile->deref(); });
+        QVERIFY(tile->blockSwapping());
+        const auto unlock = qScopeGuard([&] { tile->unblockSwapping(); });
+        QCOMPARE(source, input);
+        source.fill(char(0x7e));
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(tile->data()), expected.size()), expected);
+
+        auto *other = store->createDefaultTileData(pixelSize,
+            reinterpret_cast<const quint8 *>(source.constData() + 1));
+        QVERIFY(other);
+        QVERIFY(other->ref());
+        const auto releaseOther = qScopeGuard([&] { other->deref(); });
+        QVERIFY(other->blockSwapping());
+        const auto unlockOther = qScopeGuard([&] { other->unblockSwapping(); });
+        QVERIFY(other->data() != tile->data());
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(other->data()), expected.size()),
+                 QByteArray(expected.size(), char(0x7e)));
+        memset(other->data(), 0xa5, size_t(expected.size()));
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(tile->data()), expected.size()), expected);
+    }
+}
+
+
 void KisTileDataStoreTest::testClockIterator()
 {
     KisTileDataStore *store = KisTileDataStore::instance();

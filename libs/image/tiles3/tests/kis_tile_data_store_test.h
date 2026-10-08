@@ -21,6 +21,8 @@ private Q_SLOTS:
     void testTileLockPropagatesSwapInFailure_data();
     void testTileLockPropagatesSwapInFailure();
     void testResidentHardAdmission();
+    void testDefaultPixelInitialization_data();
+    void testDefaultPixelInitialization();
 };
 
 #endif /* KIS_TILE_DATA_STORE_TEST_H */

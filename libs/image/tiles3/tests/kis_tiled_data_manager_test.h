@@ -185,6 +185,7 @@ private Q_SLOTS:
     void testPageStoreWriteIntentDoesNotAllocateUntilDataExposure();
     void testPageStoreNestedTileCapabilityLifetime_data();
     void testPageStoreNestedTileCapabilityLifetime();
+    void testPageStoreReadLastReleasesWriteIntentPin();
     void testPageStoreClearBarrierCancelsLegacyWriter();
     void testIteratorClearBarrier_data();
     void testIteratorClearBarrier();

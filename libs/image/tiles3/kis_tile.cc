@@ -331,6 +331,9 @@ inline void KisTile::unblockSwapping() const
 
     if(--m_lockCounter == 0) {
         m_tileData->unblockSwapping();
+        // The final native unlock may belong to a reader that outlived an
+        // unexposed writer. Its pin and the write-intent ownership end together.
+        m_pageStoreWriteIntentOwnsNativePin = false;
 
         if(!m_oldTileData.isEmpty()) {
             Q_FOREACH (KisTileData *td, m_oldTileData) {
@@ -572,16 +575,6 @@ void KisTile::unlockForWrite()
         }
         if (releasePageStoreLeasesLocked()) {
             DEBUG_LOG_ACTION("unlock [W/PageStore]");
-            return;
-        }
-        if (m_pageStoreWriteIntentOwnsNativePin) {
-            Q_ASSERT(m_lockCounter > 0);
-            --m_lockCounter;
-            if (m_lockCounter == 0) {
-                m_tileData->unblockSwapping();
-                m_pageStoreWriteIntentOwnsNativePin = false;
-            }
-            DEBUG_LOG_ACTION("unlock [W/PageStore intent]");
             return;
         }
     }

@@ -5645,6 +5645,44 @@ void KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime()
     }
 }
 
+void KisTiledDataManagerTest::testPageStoreReadLastReleasesWriteIntentPin()
+{
+    const quint8 blank = 0, initial = 0x31;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(QRect(0, 0, 64, 64), &initial);
+    KisTileSP tile = dm.getTile(0, 0, true);
+    QVERIFY(tile);
+
+    // An unexposed writer can finish before a nested reader. That reader owns
+    // the final unlock of the native pin originally acquired by write intent.
+    QVERIFY(tile->lockForWrite());
+    QVERIFY(tile->lockForRead());
+    tile->unlockForWrite();
+    tile->unlockForRead();
+
+    QVERIFY(tile->lockForRead());
+    const auto unlockRead = qScopeGuard([&] { tile->unlockForRead(); });
+    KisTileData *before = tile->tileData();
+    QVERIFY(before);
+    quint8 *bytes = before->data();
+    QVERIFY(bytes);
+    QCOMPARE(*bytes, initial);
+
+    QVERIFY(tile->lockForWrite());
+    const auto unlockWrite = qScopeGuard([&] { tile->unlockForWrite(); });
+    auto *write = tile->tryWriteData();
+    QVERIFY(write);
+    QVERIFY(write != bytes);
+    *write = 0x62;
+
+    // Retention of the old identity alone is insufficient: the outstanding
+    // reader's actual storage must remain pinned after the new writer resolves.
+    QVERIFY(!KisTileDataStore::instance()->trySwapTileData(before));
+    QCOMPARE(before->data(), bytes);
+    QCOMPARE(*bytes, initial);
+    QCOMPARE(*write, quint8(0x62));
+}
+
 void KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter()
 {
     const quint8 blank = 0;
