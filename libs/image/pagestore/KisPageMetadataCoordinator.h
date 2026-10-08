@@ -315,7 +315,10 @@ private:
                                                const KisReplicaHandle &replica,
                                                const KisVerifiedCompletion &completion,
                                                KisPageMetadataReadCleanup *cleanup);
-    KisPageMetadataTransitionResult applyOwnerSequence(const KisPageKey &key, const KisPageSnapshotArray<KisPageTransition> &transitions);
+    // Synchronous input borrow: owner transitions never retain this sequence.
+    // Native prepare/publish use stack arrays, not owning snapshot storage.
+    KisPageMetadataTransitionResult applyOwnerSequence(const KisPageKey &key,
+        const KisPageTransition *transitions, qsizetype count);
     // Directory invalidation, not a read-side counter. PageStore samples it
     // under its registration gate around a whole-directory default/restore
     // plan; per-page revision claims alone cannot detect a newly added key.

@@ -1514,8 +1514,18 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
     const OverlayChange *changes, size_t count,
     QString *error, bool *storageRefused)
 {
+    return prepareOverlayInputLocked(transaction, changes, count,
+        [](const void *input, size_t i) { return static_cast<const OverlayChange *>(input)[i]; },
+        error, storageRefused);
+}
+
+KisPagePublicationCoordinator::KisPreparedOverlayUpdate
+KisPagePublicationCoordinator::prepareOverlayInputLocked(
+    const KisPageTransaction &transaction, const void *input, size_t count,
+    OverlayChange (*readChange)(const void *, size_t), QString *error, bool *storageRefused)
+{
     if (storageRefused) *storageRefused = false;
-    if (!hasActiveTransactionLocked(transaction) || !changes || !count) {
+    if (!hasActiveTransactionLocked(transaction) || !input || !count || !readChange) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
         return {};
     }
@@ -1531,7 +1541,7 @@ KisPagePublicationCoordinator::prepareOverlayUpdateLocked(
         candidate->owner = this;
         candidate->transaction = transaction;
         candidate->changes.reserve(count);
-        for (size_t i = 0; i < count; ++i) candidate->changes.push_back({changes[i], {}, false, false});
+        for (size_t i = 0; i < count; ++i) candidate->changes.push_back({readChange(input, i), {}, false, false});
         std::sort(candidate->changes.begin(), candidate->changes.end(), [](const auto &a, const auto &b) {
             return overlayKeyLess(a.replacement.key, b.replacement.key);
         });

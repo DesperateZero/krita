@@ -144,6 +144,9 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
     mutable QMutex mutex;
     std::shared_ptr<KisCompletionRegistry> completions;
     quint64 completionSource = 0;
+    // Synchronous producers return this only after their operation succeeds.
+    // Retirement remains a distinct, pending ticket owned by each allocation.
+    KisCompletionTicket readyCompletion;
     quint64 nextSlot = 1;
     quint64 committedBytes = 0;
     KisCpuBindingLeaseMap activeLeases;
@@ -160,7 +163,7 @@ KRITAIMAGE_EXPORT KisReplicaAccess kisAcquireCpuBindingAccess(KisCpuBindingLease
 KRITAIMAGE_EXPORT void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
     const std::shared_ptr<KisCpuResidentBinding> &binding, const KisReplicaAccess &access);
 KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
-    const std::shared_ptr<KisCompletionRegistry> &completions, quint64 completionSource,
+    const KisCompletionTicket &readyCompletion,
     const std::shared_ptr<KisCpuResidentBinding> &source,
     const std::shared_ptr<KisCpuResidentBinding> &target);
 
@@ -250,7 +253,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
             !request.source.layout.matches(request.descriptor) ||
             !request.target.layout.matches(request.descriptor) ||
             !source->second.binding || !target->second.binding) return fail(QStringLiteral("transfer allocation is stale"));
-        return kisTransferCpuBinding(request, completions, completionSource,
+        return kisTransferCpuBinding(request, readyCompletion,
                                      source->second.binding, target->second.binding);
     }
 

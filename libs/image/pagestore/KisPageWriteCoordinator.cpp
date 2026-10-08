@@ -2729,7 +2729,8 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(Kis
         return metadata->applyOwner(write.version.key, write);
     auto prepare = write;
     prepare.kind = KisPageTransitionKind::PrepareWrite;
-    return metadata->applyOwnerSequence(write.version.key, {write, prepare});
+    const KisPageTransition transitions[] = {write, prepare};
+    return metadata->applyOwnerSequence(write.version.key, transitions, 2);
 }
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::publishPrivateWrite(KisPageTransition write)
@@ -2748,7 +2749,8 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::publishPrivateWrite(Kis
     write.kind = KisPageTransitionKind::BeginPublish;
     auto publish = write;
     publish.kind = KisPageTransitionKind::PublishWrite;
-    return metadata->applyOwnerSequence(write.version.key, {write, publish});
+    const KisPageTransition transitions[] = {write, publish};
+    return metadata->applyOwnerSequence(write.version.key, transitions, 2);
 }
 
 KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(

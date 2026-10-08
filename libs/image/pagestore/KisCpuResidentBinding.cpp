@@ -139,11 +139,20 @@ bool KisCpuResidentProviderState::configure(
         return fail(QStringLiteral("provider configuration is invalid"));
     QMutexLocker locker(&mutex);
     if (config.isValid()) return fail(QStringLiteral("provider is already configured"));
-    const quint64 source = registry->registerSource(KisCompletionDomain::CpuJob);
-    if (!source) return fail(QStringLiteral("provider completion source registration failed"));
+    if (completions && completions != registry)
+        return fail(QStringLiteral("provider configuration retry changed its completion registry"));
+    if (!completionSource) {
+        completionSource = registry->registerSource(KisCompletionDomain::CpuJob);
+        if (completionSource) completions = registry;
+    }
+    if (!completionSource) return fail(QStringLiteral("provider completion source registration failed"));
+    // A refused ready record leaves this original source unissued. Retry it
+    // after pressure relief instead of accumulating abandoned registrations.
+    const auto ready = registry->allocatePending(completionSource);
+    if (!ready.isValid()) return fail(QStringLiteral("provider ready completion preparation failed"));
+    registry->completePrepared(ready, KisCompletionStatus::Succeeded);
     config = requested;
-    completions = registry;
-    completionSource = source;
+    readyCompletion = ready;
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -401,16 +410,14 @@ void kisReleaseCpuBindingAccess(KisCpuBindingLeaseMap &activeLeases,
 }
 
 KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &request,
-    const std::shared_ptr<KisCompletionRegistry> &completions, quint64 completionSource,
+    const KisCompletionTicket &readyCompletion,
     const std::shared_ptr<KisCpuResidentBinding> &source,
     const std::shared_ptr<KisCpuResidentBinding> &target)
 {
-    const KisCompletionTicket completion = completions->allocatePending(completionSource);
-    if (!completion.isValid()) {
+    if (!readyCompletion.isValid()) {
         return KisReplicaOperation::failed(request.operation,
-            QStringLiteral("transfer completion allocation failed"));
+            QStringLiteral("transfer ready completion is unavailable"));
     }
-    auto failCompletion = qScopeGuard([&] { completions->completePrepared(completion, KisCompletionStatus::Failed); });
     const void *sourceData = source->acquireRead(request.source.allocationIdentity(), false);
     if (!sourceData) {
         return KisReplicaOperation::failed(request.operation,
@@ -426,7 +433,5 @@ KisReplicaOperation kisTransferCpuBinding(const KisReplicaTransferRequest &reque
     target->releaseWrite();
     source->releaseRead();
     releaseSource.dismiss();
-    completions->completePrepared(completion, KisCompletionStatus::Succeeded);
-    failCompletion.dismiss();
-    return {KisPageRequestStatus::Ready, request.operation, request.target, completion, {}};
+    return {KisPageRequestStatus::Ready, request.operation, request.target, readyCompletion, {}};
 }

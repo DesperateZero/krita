@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <boost/intrusive/list.hpp>
+#include <boost/intrusive/set.hpp>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -249,11 +250,19 @@ public:
             KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
             quint64 transition = 0;
             quint64 logicalReferences = 1;
+            boost::intrusive::set_member_hook<> slotIndex;
         };
         using PayloadMap = std::map<KisTileData *, Payload, std::less<KisTileData *>,
             KisMutationStorageAllocator<std::pair<KisTileData *const, Payload>>>;
-        using SlotMap = std::map<quint64, Payload *, std::less<quint64>,
-            KisMutationStorageAllocator<std::pair<const quint64, Payload *>>>;
+        struct SlotKey {
+            using type = quint64;
+            const quint64 &operator()(const Payload &payload) const { return payload.slot; }
+        };
+        // Both lookup keys have the exact lifetime of the original Payload.
+        // The slot index borrows that node; it owns no second allocation.
+        using SlotMap = boost::intrusive::set<Payload,
+            boost::intrusive::member_hook<Payload, boost::intrusive::set_member_hook<>, &Payload::slotIndex>,
+            boost::intrusive::key_of_value<SlotKey>>;
         using Admissions = std::vector<std::shared_ptr<KisReplicaBackingDomainAdmission>,
             KisMutationStorageAllocator<std::shared_ptr<KisReplicaBackingDomainAdmission>>>;
         using WeakAdmissions = std::vector<std::weak_ptr<KisReplicaBackingDomainAdmission>,
@@ -261,7 +270,6 @@ public:
     public:
         struct PreparedPayload {
             PayloadMap::node_type payload;
-            SlotMap::node_type slot;
         };
         auto storageAllocator() const { return m_admissions.get_allocator(); }
         explicit ResidencyObserver(const std::shared_ptr<KisBackingBudgetController> &process)
@@ -269,7 +277,6 @@ public:
             if (process && !m_budget.configureSharedNonPayloadBudget(process)) throw std::bad_alloc();
             const auto storage = KisMutationStorageAllocator<Payload>::retained(&m_budget);
             m_payloads = PayloadMap(storage);
-            m_slots = SlotMap(storage);
             m_admissions = WeakAdmissions(storage);
         }
         class Transition final : public KisTileDataResidencyTransition
@@ -412,10 +419,8 @@ public:
         PreparedPayload preparePayload(quint64 identity, quint64 bytes) const
         {
             PayloadMap payloads(m_payloads.get_allocator());
-            SlotMap slots(m_slots.get_allocator());
             payloads.try_emplace(nullptr, identity, bytes);
-            slots.emplace(identity, nullptr);
-            return {payloads.extract(nullptr), slots.extract(identity)};
+            return {payloads.extract(nullptr)};
         }
 
         quint64 physicalIdentity(KisTileData *tile) const
@@ -438,13 +443,12 @@ public:
         bool track(KisTileData *tile, PreparedPayload &prepared)
         {
             QMutexLocker locker(&m_mutex);
-            if (!tile || prepared.payload.empty() || prepared.slot.empty()
-                || m_payloads.count(tile) || m_slots.count(prepared.slot.key())) return false;
+            if (!tile || prepared.payload.empty()
+                || m_payloads.count(tile) || m_slots.count(prepared.payload.mapped().slot)) return false;
             prepared.payload.key() = tile;
             auto installed = m_payloads.insert(std::move(prepared.payload));
-            prepared.slot.mapped() = &installed.position->second;
-            m_slots.insert(std::move(prepared.slot));
-            return true; // Both actual nodes were prepared before physical creation/adoption.
+            m_slots.insert(installed.position->second);
+            return true; // Both indexes install the single preallocated payload record.
         }
 
         bool releaseReference(KisTileData *tile, quint64 identity)
@@ -540,7 +544,6 @@ public:
         void untrack(KisTileData *tileData, quint64 slot)
         {
             PayloadMap::node_type released;
-            SlotMap::node_type releasedSlot;
             QMutexLocker locker(&m_mutex);
             auto tracked = m_payloads.find(tileData);
             while (tracked != m_payloads.cend() && tracked->second.transition) {
@@ -549,7 +552,7 @@ public:
             }
             if (tracked == m_payloads.end() || tracked->second.slot != slot) return;
             if (tracked->second.is_linked()) m_dirty.erase(m_dirty.iterator_to(tracked->second));
-            releasedSlot = m_slots.extract(slot);
+            m_slots.erase(m_slots.iterator_to(tracked->second));
             released = m_payloads.extract(tracked);
             m_hasChanges.store(!m_dirty.empty(), std::memory_order_release);
         }
@@ -576,7 +579,7 @@ public:
             QMutexLocker locker(&m_mutex);
             const auto entry = m_slots.find(slot);
             if (entry != m_slots.end()) {
-                auto &payload = *entry->second;
+                auto &payload = *entry;
                 if (payload.is_linked() && payload.revision == revision)
                     m_dirty.erase(m_dirty.iterator_to(payload));
             }
@@ -796,16 +799,8 @@ public:
                 operation,
                 QStringLiteral("tiles3 page budget or identity is exhausted"));
         }
-        const KisCompletionTicket completion =
-            completions->allocatePending(completionSource);
-        if (!completion.isValid()) {
-            return KisReplicaOperation::failed(
-                operation,
-                QStringLiteral("tiles3 completion allocation failed"));
-        }
         const auto retirementCompletion = completions->allocatePending(completionSource);
         auto failCompletion = qScopeGuard([&]() {
-            completions->completePrepared(completion, KisCompletionStatus::Failed);
             if (retirementCompletion.isValid()) completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
         });
         if (!retirementCompletion.isValid())
@@ -861,9 +856,8 @@ public:
             return KisReplicaOperation::failed(operation,
                                    QStringLiteral("tiles3 physical payload budget is exhausted"));
         }
-        completions->completePrepared(completion, KisCompletionStatus::Succeeded);
         failCompletion.dismiss();
-        return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
+        return {KisPageRequestStatus::Ready, operation, handle, readyCompletion, {}};
     }
     catch (const std::bad_alloc &)
     {
@@ -1170,11 +1164,8 @@ try
     if (!d->canAllocateHandle())
         return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias budget or identity is exhausted"));
     d->consumeOperation(operation);
-    const auto completion = d->completions->allocatePending(d->completionSource);
-    if (!completion.isValid()) return KisReplicaOperation::failed(operation, QStringLiteral("alias completion is unavailable"));
     const auto retirementCompletion = d->completions->allocatePending(d->completionSource);
     auto failCompletion = qScopeGuard([&] {
-        d->completions->completePrepared(completion, KisCompletionStatus::Failed);
         if (retirementCompletion.isValid()) d->completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
     });
     if (!retirementCompletion.isValid())
@@ -1185,9 +1176,8 @@ try
         return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias physical budget is exhausted"));
     }
     ++d->work.adoptedPages; d->work.adoptedBytes += bytes;
-    d->completions->completePrepared(completion, KisCompletionStatus::Succeeded);
     failCompletion.dismiss();
-    return {KisPageRequestStatus::Ready, operation, handle, completion, {}};
+    return {KisPageRequestStatus::Ready, operation, handle, d->readyCompletion, {}};
 }
 catch (const std::bad_alloc &)
 {

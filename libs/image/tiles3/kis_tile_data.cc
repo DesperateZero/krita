@@ -11,6 +11,7 @@
 
 #include <kis_debug.h>
 #include <QScopeGuard>
+#include <algorithm>
 #include <new>
 
 #include <boost/pool/singleton_pool.hpp>
@@ -117,10 +118,11 @@ KisTileData::~KisTileData()
 
 void KisTileData::fillWithPixel(const quint8 *defPixel)
 {
-    quint8 *it = m_data;
-
-    for (int i = 0; i < WIDTH * HEIGHT; i++, it += m_pixelSize) {
-        memcpy(it, defPixel, m_pixelSize);
+    const size_t pixelBytes = size_t(m_pixelSize);
+    memcpy(m_data, defPixel, pixelBytes);
+    for (size_t pixels = 1; pixels < size_t(WIDTH * HEIGHT); pixels *= 2) {
+        const size_t copiedPixels = std::min(pixels, size_t(WIDTH * HEIGHT) - pixels);
+        memcpy(m_data + pixels * pixelBytes, m_data, copiedPixels * pixelBytes);
     }
 }
 

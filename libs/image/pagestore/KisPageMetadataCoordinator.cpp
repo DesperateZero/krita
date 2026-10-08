@@ -3525,14 +3525,15 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwner(const Kis
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const KisPageKey &key,
-                                                                       const KisPageSnapshotArray<KisPageTransition> &transitions)
+                                                                       const KisPageTransition *transitions,
+                                                                       qsizetype count)
 {
-    if (transitions.size() == 1 && transitions.first().kind == KisPageTransitionKind::ReleaseRead)
-        return applyReadProtection(key, transitions.first());
-    if (transitions.size() == 1 && (transitions.first().kind == KisPageTransitionKind::RetainCapturedVersion
-                                  || transitions.first().kind == KisPageTransitionKind::ReleaseCapturedVersion))
-        return applyCapturedProtection(key, transitions.first());
-    return applyProjectedSequence(key, transitions.constData(), transitions.size());
+    if (transitions && count == 1 && transitions->kind == KisPageTransitionKind::ReleaseRead)
+        return applyReadProtection(key, *transitions);
+    if (transitions && count == 1 && (transitions->kind == KisPageTransitionKind::RetainCapturedVersion
+                                    || transitions->kind == KisPageTransitionKind::ReleaseCapturedVersion))
+        return applyCapturedProtection(key, *transitions);
+    return applyProjectedSequence(key, transitions, count);
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(

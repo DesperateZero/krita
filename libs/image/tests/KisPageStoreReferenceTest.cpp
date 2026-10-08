@@ -4136,7 +4136,7 @@ void KisPageStoreReferenceTest::metadataReadProtectionMatchesReference()
         ? coordinator.acknowledgeLastUse(transition.version, transition.target,
                                          completions.verifyTerminal(transition.completion))
         : variant >= 18 && variant <= 21
-            ? coordinator.applyOwnerSequence(initial.key, sequence)
+            ? coordinator.applyOwnerSequence(initial.key, sequence.constData(), sequence.size())
             : coordinator.applyOwner(initial.key, transition);
     QCOMPARE(result.accepted, accepted);
     KisPageStateSnapshot actual;
@@ -5310,7 +5310,7 @@ void KisPageStoreReferenceTest::metadataAcceptedBatchPreservesPhysicalOwnership(
     }
     QCOMPARE(accepted, collision != 0 && collision != 5);
     const auto before = coordinator.metrics();
-    const auto result = coordinator.applyOwnerSequence(initial.key, sequence);
+    const auto result = coordinator.applyOwnerSequence(initial.key, sequence.constData(), sequence.size());
     QCOMPARE(result.accepted, accepted && collision != 4);
     QVERIFY(!result.storageRefused);
     if (!accepted) QCOMPARE(result.rejectionReason, rejection);
@@ -5664,7 +5664,7 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
             result.accepted = publication.isValid()
                 && coordinator.installPublication(std::move(publication), tx, transitions.first().imageEpoch);
         } else {
-            result = coordinator.applyOwnerSequence(expected.key, transitions);
+            result = coordinator.applyOwnerSequence(expected.key, transitions.constData(), transitions.size());
         }
         QCOMPARE(result.accepted, accepted);
         QCOMPARE(result.rejectionReason, rejection);
@@ -5837,8 +5837,8 @@ void KisPageStoreReferenceTest::concurrentRetirementDebtRefusalPreservesPage()
     const QVector<KisPageTransition> transitions{discard};
     const auto before = coordinator.metrics();
     KisPageMetadataTransitionResult results[2];
-    std::thread first([&] { results[0] = coordinator.applyOwnerSequence(initial.key, transitions); });
-    std::thread second([&] { results[1] = coordinator.applyOwnerSequence(initial.key, transitions); });
+    std::thread first([&] { results[0] = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size()); });
+    std::thread second([&] { results[1] = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size()); });
     first.join();
     second.join();
     QCOMPARE(debt.entered.load(), 2);
@@ -5957,7 +5957,7 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
             freeTestStoragePressure(&budget, std::exchange(debt.filler, nullptr), debt.bytes, 1);
         });
         const auto before = coordinator.metrics();
-        const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
+        const auto result = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size());
         accepted = result.accepted;
         if (headroom == 0 || variant != 0) {
             QVERIFY(!result.accepted);
@@ -5982,7 +5982,7 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         const auto step = KisPageStateMachine().apply(expected, transition);
         QVERIFY(step.accepted); expected = step.next; effects += step.effects;
     }
-    const auto result = coordinator.applyOwnerSequence(initial.key, transitions);
+    const auto result = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size());
     QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
     QCOMPARE(debt.receiver.effects.size(), effects.size());
     for (qsizetype i = 0; i < effects.size(); ++i) QCOMPARE(debt.receiver.effects[i].replica, effects[i].replica);

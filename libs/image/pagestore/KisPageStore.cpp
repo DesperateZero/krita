@@ -435,6 +435,8 @@ public:
                                  KisPageAccessRequirement access,
                                  KisPagePriority priority,
                                  QMutexLocker<QMutex> *locker,
+                                 decltype(std::declval<KisPagePublicationCoordinator &>()
+                                              .prepareDescriptorLocked({}, {})) &descriptors,
                                  QString *error)
     {
         KisPageMetadataCoordinator::VersionInfo existing;
@@ -484,12 +486,10 @@ public:
         }
         KisBackingBudgetClass backingClass = currentVersion == version
             ? KisBackingBudgetClass::Current : KisBackingBudgetClass::RetainedHistory;
-        decltype(publicationCoordinator.prepareDescriptorLocked(version, descriptor)) descriptors;
-        const auto discardDescriptors = qScopeGuard([&] {
-            if (locker->isLocked()) locker->unlock();
-            descriptors = {};
-            locker->relock();
-        });
+        Q_ASSERT(descriptors.empty());
+        // The acquiring read owns cleanup through registration of its pin.
+        // Unlocking here, even to dispose an empty map, allows historical
+        // default collection between materialization and AcquireRead.
         try { descriptors = publicationCoordinator.prepareDescriptorLocked(version, descriptor); }
         catch (const std::bad_alloc &) {
             KisPageStoreDetail::setError(error, QStringLiteral("implicit default descriptor storage budget was refused"));
@@ -2494,38 +2494,42 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     phase.next(Phase::MutationSealInputs, pageWork);
     validateClaims();
     using OverlayChange = KisPagePublicationCoordinator::OverlayChange;
-    std::vector<OverlayChange, KisMutationStorageAllocator<OverlayChange>> overlayChanges{
-        KisMutationStorageAllocator<OverlayChange>(&owner->backingBudget)};
+    size_t overlayChangeCount = 0;
     quint64 sealedCpuWrites = 0;
     quint64 sealedRemovals = 0;
     quint64 sealedSources = 0;
-    if (success) try {
-        overlayChanges.reserve(d->writes.size());
+    if (success) {
         for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
             const auto index = slot.index;
             auto *entry = d->writes.at(index);
             auto *page = d->pageAtEntry(index);
             if (entry->isRemoval()) {
-                overlayChanges.push_back(
-                    {entry->key(), {}, true});
+                ++overlayChangeCount;
                 ++sealedRemovals;
             } else if (page) {
-                overlayChanges.push_back(
-                    {entry->key(), page->proof, false});
+                ++overlayChangeCount;
                 sealedCpuWrites += entry->isCpuWrite();
             }
             sealedSources += bool(entry->initializationSource());
         }
-    } catch (const std::bad_alloc &) {
-        success = false;
-        storageRefused = true;
-        failure = QStringLiteral("overlay input storage preparation was refused");
     }
-    const bool hasOverlay = success && !overlayChanges.empty();
-    phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChanges.size()));
+    auto nextInput = d->writes.firstEntry();
+    const auto readChange = [&](size_t) -> OverlayChange {
+        while (nextInput.isValid()) {
+            const auto index = nextInput.index;
+            nextInput = d->writes.nextEntry(nextInput);
+            const auto *entry = d->writes.at(index);
+            if (entry->isRemoval()) return {entry->key(), {}, true};
+            if (const auto *page = d->pageAtEntry(index))
+                return {entry->key(), page->proof, false};
+        }
+        return {}; // The common validator rejects an inconsistent input count.
+    };
+    const bool hasOverlay = success && overlayChangeCount != 0;
+    phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
-              d->transaction, overlayChanges.data(), overlayChanges.size(), &failure, &storageRefused)
+              d->transaction, overlayChangeCount, readChange, &failure, &storageRefused)
         : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
@@ -2534,9 +2538,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     }
     const qsizetype metadataChangeCount = overlay.metadataChangeCount();
     lock.unlock();
-    // The candidate owns these inputs now; free the producer's paid copy
-    // before admitting the metadata candidate in the same shared budget.
-    overlayChanges = decltype(overlayChanges){overlayChanges.get_allocator()};
+    // Candidate storage owns the input values; no borrowed iterator survives
+    // this call or the following unlocked metadata preparation.
     phase.next(Phase::MutationSealMetadataPrepare,
                quint64(metadataChangeCount));
     if (success && hasOverlay && !overlay.prepare(&failure, &storageRefused)) {
@@ -3793,6 +3796,7 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
     KisReadRequest request;
     request.access = access;
     KisPageReadCleanup cleanup(d->readCoordinator);
+    decltype(d->publicationCoordinator.prepareDescriptorLocked({}, {})) defaultDescriptors;
     QMutexLocker locker(&d->mutex);
     d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup);
     if (!d->operational || !view.isValidFor(key) || !access.isValid()
@@ -3834,7 +3838,12 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
     bool hasPage = false;
     try { hasPage = snapshotVersion(); }
     catch (const std::bad_alloc &) { return fail(QStringLiteral("exact replica candidate storage was refused")); }
-    if (!hasPage || page.needsDefaultMaterialization(version)) {
+    while (!hasPage || page.needsDefaultMaterialization(version)) {
+        if (!defaultDescriptors.empty()) {
+            locker.unlock();
+            defaultDescriptors = {};
+            locker.relock();
+        }
         KisSurfaceEpochState surface;
         KisImageEpochId publishedEpoch;
         if (captured) {
@@ -3866,12 +3875,14 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
                     ? QStringLiteral("committed default identity is unavailable") : failure);
             }
         }
-        if (!d->ensureDefaultPageLocked(version, publishedEpoch, surface, access, priority, &locker, &failure)) {
+        if (!d->ensureDefaultPageLocked(version, publishedEpoch, surface, access, priority,
+                                       &locker, defaultDescriptors, &failure)) {
             return fail(failure.isEmpty()
                 ? QStringLiteral("PageStore default page materialization failed") : failure);
         }
         try {
-            if (!snapshotVersion()) return fail(QStringLiteral("PageStore default metadata is unavailable"));
+            hasPage = snapshotVersion();
+            if (!hasPage) return fail(QStringLiteral("PageStore default metadata is unavailable"));
         } catch (const std::bad_alloc &) { return fail(QStringLiteral("exact replica candidate storage was refused")); }
     }
     // Keep the exact version captured above, including across provider work.

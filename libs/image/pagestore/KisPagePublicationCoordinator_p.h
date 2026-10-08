@@ -189,6 +189,17 @@ public:
         const KisPageTransaction &transaction,
         const OverlayChange *changes, size_t count,
         QString *error, bool *storageRefused = nullptr);
+    // Consume the caller's stable sequence directly into candidate storage.
+    // The reader is borrowed synchronously and is never kept by the candidate.
+    template<class ReadChange>
+    KisPreparedOverlayUpdate prepareOverlayUpdateLocked(
+        const KisPageTransaction &transaction, size_t count, const ReadChange &readChange,
+        QString *error, bool *storageRefused = nullptr)
+    {
+        return prepareOverlayInputLocked(transaction, &readChange, count,
+            [](const void *input, size_t i) { return (*static_cast<const ReadChange *>(input))(i); },
+            error, storageRefused);
+    }
 
     KRITAIMAGE_EXPORT DescriptorMap prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     void removeDescriptorLocked(const KisPageVersion &version);
@@ -203,6 +214,9 @@ public:
     KisPagePublicationCoordinatorSnapshot snapshotLocked() const;
 
 private:
+    KRITAIMAGE_EXPORT KisPreparedOverlayUpdate prepareOverlayInputLocked(
+        const KisPageTransaction &transaction, const void *input, size_t count,
+        OverlayChange (*readChange)(const void *, size_t), QString *error, bool *storageRefused);
     void revokePreparedProofLocked(const KisPreparedPageProof &proof) noexcept;
     struct PreparedTransactionState {
         explicit PreparedTransactionState(const KisMutationStorageAllocator<char> &storage)
