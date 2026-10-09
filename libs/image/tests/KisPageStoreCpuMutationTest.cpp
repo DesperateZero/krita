@@ -2273,6 +2273,19 @@ void KisPageStoreCpuMutationTest::retainedHistoryReclaimsInBackground()
             f.store->commit(tx, f.store->preparedPages(tx)).isValid() && f.store->waitForRetirementIdle();
     };
     QVERIFY(fill(0x31));
+    // Exercise empty-history requests before the first superseding publication.
+    // Skipping those requests must not lose later history or its last-reader wake.
+    {
+        auto current = f.store->captureReadView();
+        for (int i = 0; i < pages; ++i) {
+            auto read = current.readResidentPage(key(i));
+            QVERIFY(read.isValid());
+            QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x31));
+        }
+    }
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(pages));
+    QCOMPARE(f.store->sessionStats().pendingHistoricalPages, qsizetype(0));
     auto view = f.store->captureReadView();
     QVERIFY(fill(0x77));
     auto old = view.readResidentPage(key(95));
