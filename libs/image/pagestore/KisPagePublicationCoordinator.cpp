@@ -1699,8 +1699,18 @@ KisPagePublicationCoordinator::DescriptorMap
 KisPagePublicationCoordinator::prepareDescriptorLocked(const KisPageVersion &version,
                                                        const KisPageAllocationDescriptor &descriptor)
 {
+    return prepareDescriptorLocked(version, descriptor, {});
+}
+
+KisPagePublicationCoordinator::DescriptorMap
+KisPagePublicationCoordinator::prepareDescriptorLocked(const KisPageVersion &version,
+                                                       const KisPageAllocationDescriptor &descriptor,
+                                                       const KisPageVersion &base)
+{
     const PreparedDescriptorChange change{version, descriptor};
-    return prepareDescriptorAdditionsLocked(&change, 1);
+    const auto found = base.isValid() ? m_descriptors.find(base) : m_descriptors.end();
+    return prepareDescriptorAdditionsLocked(&change, 1,
+        found != m_descriptors.end() ? &found->second : nullptr);
 }
 
 void KisPagePublicationCoordinator::removeDescriptorLocked(const KisPageVersion &version)
@@ -1721,7 +1731,8 @@ const KisPageAllocationDescriptor *KisPagePublicationCoordinator::descriptorLock
 }
 
 KisPagePublicationCoordinator::DescriptorMap
-KisPagePublicationCoordinator::prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count)
+KisPagePublicationCoordinator::prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count,
+    const std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout)
 {
     const auto storage = KisMutationStorageAllocator<DescriptorMap::value_type>::retained(&m_budget);
     if (m_descriptors.get_allocator() != storage) {
@@ -1737,7 +1748,11 @@ KisPagePublicationCoordinator::prepareDescriptorAdditionsLocked(const PreparedDe
         // layouts share that value instead of paying for a copy per version;
         // the candidate is storage only, never another visible descriptor map.
         std::shared_ptr<const KisPageAllocationDescriptor> value;
+        // This is a borrowed exact map value, never a layout cache. Validate
+        // the complete descriptor again at consumption, including revision.
+        if (sharedLayout && **sharedLayout == changes[i].descriptor) value = *sharedLayout;
         for (const auto *index : {&m_descriptors, &nodes}) {
+            if (value) break;
             const auto same = std::find_if(index->cbegin(), index->cend(), [&](const auto &entry) {
                 return *entry.second == changes[i].descriptor;
             });

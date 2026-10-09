@@ -168,7 +168,10 @@ void appendReplica(Version &version, const KisReplicaHandle &handle,
 
 template<class Result, class Validate>
 void applyPolicy(Result &result, const KisPageTransition &transition,
-                 bool validateBoundaryInvariants, Validate validate)
+                 bool validateBoundaryInvariants, Validate validate,
+                 void *publicationContext = nullptr,
+                 void (*publicationDelta)(void *, const KisPageVersion &,
+                     KisPagePublicationState, KisPageTransactionId) = nullptr)
 {
     result.accepted = false;
     result.effects.clear();
@@ -193,6 +196,16 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
     auto requireVersion = [&result](const KisPageVersion &version)
         -> Version * {
         return result.next.findVersion(version);
+    };
+
+    // Emit the actual semantic edits into the original publication candidate.
+    // The reference value model consumes this same policy without a receiver.
+    const auto setPublication = [&](Version &version, KisPagePublicationState state,
+                                    KisPageTransactionId preparedBy = {}) {
+        if (publicationDelta && (version.publication != state || !(version.preparedBy == preparedBy)))
+            publicationDelta(publicationContext, version.version, state, preparedBy);
+        version.publication = state;
+        version.preparedBy = preparedBy;
     };
 
     switch (transition.kind) {
@@ -701,17 +714,15 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
                               published->version.generation.value) {
             return reject(QStringLiteral("transaction would not advance the published generation"));
         }
-        published->publication = KisPagePublicationState::Historical;
+        setPublication(*published, KisPagePublicationState::Historical, published->preparedBy);
         for (Version &candidate : result.next.versions) {
             if (candidate.publication == KisPagePublicationState::Prepared &&
                 candidate.preparedBy == transition.transaction &&
                 !(candidate.version == prepared->version)) {
-                candidate.publication = KisPagePublicationState::Historical;
-                candidate.preparedBy = {};
+                setPublication(candidate, KisPagePublicationState::Historical);
             }
         }
-        prepared->publication = KisPagePublicationState::Published;
-        prepared->preparedBy = {};
+        setPublication(*prepared, KisPagePublicationState::Published);
         result.next.publishedEpoch = transition.imageEpoch;
         result.next.publishedGeneration = prepared->version.generation;
         result.next.publishedDefaultPixelRevision =
@@ -786,9 +797,9 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
             return reject(QStringLiteral(
                 "default replacement source is not an implicit default"));
         }
-        published->publication = KisPagePublicationState::Historical;
+        setPublication(*published, KisPagePublicationState::Historical, published->preparedBy);
         if (existingReplacement) {
-            existingReplacement->publication = KisPagePublicationState::Published;
+            setPublication(*existingReplacement, KisPagePublicationState::Published, existingReplacement->preparedBy);
         } else {
             auto replacement = kisPageVersionValue(result.next);
             replacement.version = transition.version;
@@ -816,9 +827,10 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         // An absent page is recoverable from its exact default revision, not
         // from a newly allocated/fill-produced pixel replica. Keep the page's
         // nextGeneration high-water mark intact when returning to absence.
-        if (transition.version.isValid() && transition.version.isDefaultPixel() &&
+        const bool addition = transition.version.isValid() && transition.version.isDefaultPixel() &&
             transition.version.key == result.next.key &&
-            !result.next.findVersion(transition.version)) {
+            !result.next.findVersion(transition.version);
+        if (addition) {
             auto implicit = kisPageVersionValue(result.next);
             implicit.version = transition.version;
             implicit.publication = KisPagePublicationState::Historical;
@@ -836,8 +848,11 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
             return reject(QStringLiteral("historical restore has no published source"));
         }
         if (!(published->version == target->version)) {
-            published->publication = KisPagePublicationState::Historical;
-            target->publication = KisPagePublicationState::Published;
+            setPublication(*published, KisPagePublicationState::Historical, published->preparedBy);
+            // A genuinely new default is installed as an addition, never a
+            // delta referring to an authoritative record that does not exist.
+            if (addition) target->publication = KisPagePublicationState::Published;
+            else setPublication(*target, KisPagePublicationState::Published, target->preparedBy);
         }
         result.next.publishedEpoch = transition.imageEpoch;
         result.next.publishedGeneration = target->version.generation;
@@ -997,10 +1012,13 @@ catch (const std::bad_alloc &) {
 }
 
 void KisPageStateMachine::applyKnownValid(
-    KisPageWorkingResult &result, const KisPageTransition &transition) const
+    KisPageWorkingResult &result, const KisPageTransition &transition,
+    void *publicationContext,
+    void (*publicationDelta)(void *, const KisPageVersion &,
+        KisPagePublicationState, KisPageTransactionId)) const
 {
     applyPolicy(result, transition, false,
-        [](const KisPageWorkingState &, QString *) { return true; });
+        [](const KisPageWorkingState &, QString *) { return true; }, publicationContext, publicationDelta);
 }
 
 bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,

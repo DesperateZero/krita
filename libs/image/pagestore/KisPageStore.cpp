@@ -1154,7 +1154,7 @@ public:
             owner->publicationCoordinator.discardDescriptorAdditionsLocked(&descriptors, lock);
         });
         if (!page) {
-            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(adoption.version, descriptor); }
+            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(adoption.version, descriptor, adoption.baseVersion); }
             catch (const std::bad_alloc &) {
                 if (storageRefused) *storageRefused = true;
                 KisPageStoreDetail::setError(error, QStringLiteral("alias descriptor storage budget was refused"));
@@ -2157,7 +2157,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             const auto discardDescriptors = qScopeGuard([&] {
                 owner->publicationCoordinator.discardDescriptorAdditionsLocked(&descriptors, lock);
             });
-            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor); }
+            try { descriptors = owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor, acquire.baseVersion); }
             catch (const std::bad_alloc &) {
                 fail(QStringLiteral("mutation descriptor storage budget was refused"));
                 return result;
@@ -4110,7 +4110,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     const auto discardDescriptors = qScopeGuard([&] {
         d->publicationCoordinator.discardDescriptorAdditionsLocked(&descriptors, locker);
     });
-    try { descriptors = d->publicationCoordinator.prepareDescriptorLocked(writeVersion, descriptor); }
+    try { descriptors = d->publicationCoordinator.prepareDescriptorLocked(writeVersion, descriptor, baseVersion); }
     catch (const std::bad_alloc &) {
         d->writeRequests.erase(requestId.value);
         return fail(QStringLiteral("write descriptor storage budget was refused"));

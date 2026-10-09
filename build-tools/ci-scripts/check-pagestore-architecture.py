@@ -1333,7 +1333,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "reservePublicationActivity",
             "releasePublicationActivity",
             "entry.shardOwner->setPublicationClaim(entry.key(), data.get())",
-            "entry.releaseActivity()",
+            "releaseActivities(first, end)",
+            "entry.shardOwner->releasePublicationActivity(entry.key())",
             "static_assert(sizeof(MetadataPage) <= 96)",
             "static_assert(sizeof(MetadataPageActivity) <= 96)",
             "MetadataMap<KisPageKey, MetadataPageActivity> activities",
@@ -1364,8 +1365,14 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(f"R2/M2 shard arena authority is missing: {contract}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
-        for forbidden in ("consumePublicationActivity", "entry.activityReservation = false"):
-            if forbidden in metadata_text:
+        install_begin = metadata_text.find("bool KisPageMetadataCoordinator::installPublicationImpl(")
+        install_end = metadata_text.find("KisPageMetadataCoordinator::KisPageMetadataCoordinator()", install_begin)
+        if install_begin < 0 or install_end < 0:
+            errors.append("R2/M2 publication install boundary is missing")
+        install_text = metadata_text[install_begin:install_end]
+        for forbidden in ("consumePublicationActivity", "activityReservation = false",
+                          "releaseActivities(", "releasePublicationActivity("):
+            if forbidden in install_text:
                 errors.append(f"R2/M2 publication consumes activity storage protection during install: {forbidden}")
         for forbidden in (
             "struct VersionRecords",

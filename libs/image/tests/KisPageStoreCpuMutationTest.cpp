@@ -5550,6 +5550,15 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
         QVERIFY(publication->m_defaultRevisionHighWater.empty());
         freeTestStoragePressure(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
         QCOMPARE(f.live(), beforeFull);
+        auto shared = publication->prepareDescriptorLocked({key(5), {2}}, descriptor, {key(1), {2}});
+        QCOMPARE(shared.at({key(5), {2}}).get(), publication->m_descriptors.at({key(1), {2}}).get());
+        auto changedDescriptor = descriptor;
+        ++changedDescriptor.layoutRevision;
+        auto changed = publication->prepareDescriptorLocked({key(6), {2}}, changedDescriptor, {key(1), {2}});
+        QCOMPARE(*changed.at({key(6), {2}}), changedDescriptor);
+        QVERIFY(changed.at({key(6), {2}}).get() != publication->m_descriptors.at({key(1), {2}}).get());
+        shared = {}; changed = {};
+        QCOMPARE(f.live(), beforeFull);
         auto duplicate = surface;
         QVERIFY(!publication->prepareDefaultRevisionsLocked({surface, duplicate}, &f.error));
         QVERIFY(publication->m_defaultRevisionHighWater.empty());

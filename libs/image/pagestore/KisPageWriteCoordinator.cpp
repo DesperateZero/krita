@@ -2748,20 +2748,7 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::publishPrivateWrite(Kis
 {
     // The original private generation is the acceptance record. A later
     // preparation refusal must not replay its already consumed writer.
-    KisPageMetadataCoordinator::VersionInfo accepted;
-    if (metadata->versionSnapshot(write.version, &accepted)
-        && accepted.version == write.version
-        && accepted.publication == KisPagePublicationState::Prepared
-        && accepted.preparedBy == write.transaction && accepted.authority == write.target) {
-        KisPageMetadataTransitionResult result;
-        result.accepted = true;
-        return result;
-    }
-    write.kind = KisPageTransitionKind::BeginPublish;
-    auto publish = write;
-    publish.kind = KisPageTransitionKind::PublishWrite;
-    const KisPageTransition transitions[] = {write, publish};
-    return metadata->applyOwnerSequence(write.version.key, transitions, 2);
+    return metadata->publishPrivateWrite(write);
 }
 
 KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
@@ -2849,7 +2836,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
 
     // All fallible storage exists before taking the physical claim. Metadata
     // install strictly rechecks the page revision and exact recovery identity.
-    prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor);
+    prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
     const auto plan = select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
     if (plan != KisPageWritePlanKind::RecoverableHandoff || !physical.tryClaim()) return fallback;

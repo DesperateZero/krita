@@ -1124,7 +1124,7 @@ private Q_SLOTS:
         QTest::addColumn<int>("pages");
         QTest::addColumn<int>("shards");
         for (int k : {0, 2, 3})
-            for (int n : {0, 1, 2, 33})
+            for (int n : {0, 1, 2, 16, 17, 33})
                 for (int s : {1, 4})
                     for (int o = 0; o < 6; ++o) {
                         if (!n && o == 1) continue;
@@ -1133,6 +1133,7 @@ private Q_SLOTS:
                     }
     }
     void preparedPublicationStorageIsBound();
+    void groupedPublicationOrderAndDuplicateGuards();
     void deferredPublicationCleanupOwnsCandidate_data()
     {
         QTest::addColumn<int>("history");
@@ -6977,6 +6978,73 @@ void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
     QCOMPARE(metadata.footprint().pageActivities, quint64(0));
     QCOMPARE(live(budget), before);
     for (const auto &bucket : parent->usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+}
+
+void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
+{
+    const KisPageTransaction tx{{74}, {1}};
+    for (int shards : {1, 4}) {
+        KisPageMetadataCoordinator metadata;
+        QVERIFY(metadata.configure(shards));
+        QVector<KisPageStateSnapshot> expected;
+        QVector<KisPageTransition> transitions;
+        // Descending negative coordinates exercise arbitrary caller order,
+        // complete keys within one hash shard, and the 16/17 run boundary.
+        for (int i = 0; i < 33; ++i) {
+            const auto base = pageVersion(-i - 1, 1);
+            const KisPageVersion target{base.key, {2}};
+            auto page = initialPageState(base, replica(base, 1, 1, quint64(2 * i + 1)));
+            const auto backing = replica(target, 1, 1, quint64(2 * i + 2));
+            page.versions.append({target, KisPagePublicationState::Prepared,
+                {{backing, KisReplicaValidity::Valid, {}, {}, 0, {}}}, backing, tx.id, {}});
+            page.nextGeneration = {3};
+            for (quint64 lease = 1; lease <= 20; ++lease) {
+                page.versions.first().replicas.first().readLeases.append({lease});
+                page.versions.last().capturedReadViews.append({lease});
+            }
+            QVERIFY(metadata.registerPage(page));
+            expected.append(page);
+            KisPageTransition commit;
+            commit.kind = KisPageTransitionKind::CommitTransaction;
+            commit.version = target; commit.transaction = tx.id; commit.imageEpoch = {2};
+            transitions.append(commit);
+        }
+        auto duplicate = transitions;
+        duplicate.append(transitions.first());
+        QVERIFY(!metadata.preparePublication(tx, {2}, duplicate).isValid());
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+        QCOMPARE(metadata.metrics().publicationHistoryNodesTransferred, quint64(0));
+        auto stale = metadata.preparePublication(tx, {2}, transitions);
+        QVERIFY(stale.isValid());
+        int late = 0;
+        for (int i = 1; i < transitions.size(); ++i) {
+            const auto a = metadata.shardFor(transitions[i].version.key);
+            const auto b = metadata.shardFor(transitions[late].version.key);
+            if (a > b) late = i;
+        }
+        KisPageTransition read;
+        read.kind = KisPageTransitionKind::AcquireRead;
+        read.version = expected[late].versions.first().version;
+        read.target = expected[late].versions.first().authority; read.lease = {99};
+        const auto changed = KisPageStateMachine().apply(expected[late], read);
+        QVERIFY(changed.accepted);
+        QVERIFY(metadata.applyOwner(read.version.key, read).accepted);
+        expected[late] = changed.next;
+        QVERIFY(!metadata.installPublication(std::move(stale), tx, {2}));
+        QCOMPARE(metadata.metrics().publicationHistoryNodesTransferred, quint64(0));
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+        auto candidate = metadata.preparePublication(tx, {2}, transitions);
+        QVERIFY(candidate.isValid());
+        QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}));
+        for (int i = 0; i < transitions.size(); ++i) {
+            const auto oracle = KisPageStateMachine().apply(expected[i], transitions[i]);
+            QVERIFY(oracle.accepted);
+            KisPageStateSnapshot actual;
+            QVERIFY(metadata.pageSnapshot(transitions[i].version.key, &actual));
+            comparePageRecords(actual, oracle.next);
+        }
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+    }
 }
 
 void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()

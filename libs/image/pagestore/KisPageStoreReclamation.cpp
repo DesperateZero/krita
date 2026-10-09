@@ -95,7 +95,7 @@ void releaseWake(KisPageReclamationWakeState *wake) noexcept
 // dynamic-library thread_local flag can allocate TLS storage on a caller's
 // first cleanup (notably on Darwin), when allocation must no longer be needed.
 // Publish the active worker identity instead. It stays valid through capture
-// destruction, and is cleared before the worker can leave this job or exit.
+// destruction and finished callbacks, and is cleared before worker exit.
 std::atomic<Qt::HANDLE> reclaimerThread{nullptr};
 
 // The function/context live inside the prepared executor. Darwin needs no
@@ -253,10 +253,11 @@ public:
         if (m_jobsStopping && !kisOnPageStoreReclamationThread()) return false;
         if (!job) return true;
         Q_ASSERT(job && !job->next);
+        const bool startIdleWorker = !m_firstJob && !m_jobRunning;
         if (m_lastJob) m_lastJob->next = job;
         else m_firstJob = job;
         m_lastJob = job;
-        m_jobChanged.notify_one();
+        if (startIdleWorker) m_jobChanged.notify_one();
         return true;
     }
 
@@ -366,30 +367,26 @@ private:
     void runJobs()
     {
         const auto worker = QThread::currentThreadId();
-        {
-            std::lock_guard<std::mutex> lock(m_jobMutex);
-            m_workerReady = true;
-            m_jobsDrained.notify_all();
-        }
+        reclaimerThread.store(worker, std::memory_order_release);
+        const auto clearIdentity = qScopeGuard([&] { reclaimerThread.store(nullptr, std::memory_order_release); });
+        std::unique_lock<std::mutex> lock(m_jobMutex);
+        m_workerReady = true;
+        m_jobsDrained.notify_all();
         for (;;) {
-            KisPageReclamationJob *job = nullptr;
-            {
-                std::unique_lock<std::mutex> lock(m_jobMutex);
-                m_jobChanged.wait(lock, [this] { return m_firstJob || m_jobsStopping; });
-                job = m_firstJob;
-                if (!job) return;
-                m_firstJob = job->next;
-                if (!m_firstJob) m_lastJob = nullptr;
-                job->next = nullptr;
-                m_jobRunning = true;
-            }
+            m_jobChanged.wait(lock, [this] { return m_firstJob || m_jobsStopping; });
+            auto *job = m_firstJob;
+            if (!job) return;
+            m_firstJob = job->next;
+            if (!m_firstJob) m_lastJob = nullptr;
+            job->next = nullptr;
+            m_jobRunning = true;
+            lock.unlock();
             // The original composition-root reference must outlive captures,
             // physical task storage and its charge. In particular, releasing
             // it from the callback body can destroy the budget too early.
             const auto finished = job->finished;
             void *context = job->finishContext;
             const bool reusable = job->reusable;
-            reclaimerThread.store(worker, std::memory_order_release);
             {
                 const auto cleanup = qScopeGuard([&] {
                     if (!reusable) job->dispose();
@@ -397,12 +394,11 @@ private:
                 });
                 job->invoke();
             }
-            reclaimerThread.store(nullptr, std::memory_order_release);
-            {
-                std::lock_guard<std::mutex> lock(m_jobMutex);
-                m_jobRunning = false;
-                if (!m_firstJob) m_jobsDrained.notify_all();
-            }
+            // Completion and the next dequeue share the original gate. A
+            // finished callback may destroy or requeue job; never touch it.
+            lock.lock();
+            m_jobRunning = false;
+            if (!m_firstJob) m_jobsDrained.notify_all();
         }
     }
 
@@ -508,8 +504,11 @@ void KisPageReclamationDelay::cancel()
     const auto clock = d->clock.lock();
     if (!clock) return;
     std::shared_ptr<KisPageReclamationDelayState> queued;
+    bool changed = false;
     {
         std::lock_guard<std::mutex> lock(clock->mutex);
+        const auto before = clock->tasks.empty() ? KisPageReclamationDelayClock::Time::time_point::max()
+            : clock->tasks.begin()->deadline;
         d->armed = false;
         d->readyGeneration = 0;
         if (d->queued) {
@@ -517,8 +516,10 @@ void KisPageReclamationDelay::cancel()
             queued = std::move(d->queuedPin);
             d->queued = false;
         }
+        changed = before != (clock->tasks.empty() ? KisPageReclamationDelayClock::Time::time_point::max()
+            : clock->tasks.begin()->deadline);
     }
-    clock->changed.notify_one();
+    if (changed) clock->changed.notify_one();
 }
 bool KisPageReclamationDelay::isValid() const { return bool(d); }
 bool KisPageReclamationDelay::arm(int delayMs)
@@ -526,10 +527,13 @@ bool KisPageReclamationDelay::arm(int delayMs)
     if (!d) return false;
     const auto clock = d->clock.lock();
     if (!clock) return false;
+    bool changed = false;
     {
         std::lock_guard<std::mutex> lock(clock->mutex);
         if (clock->stopping || !d->dispatch || d->generation == std::numeric_limits<quint64>::max())
             return false;
+        const auto before = clock->tasks.empty() ? KisPageReclamationDelayClock::Time::time_point::max()
+            : clock->tasks.begin()->deadline;
         if (d->queued) clock->tasks.erase(clock->tasks.iterator_to(*d));
         ++d->generation;
         d->readyGeneration = 0;
@@ -539,8 +543,9 @@ bool KisPageReclamationDelay::arm(int delayMs)
         d->queuedPin = d;
         clock->tasks.insert(*d);
         d->queued = true;
+        changed = before != clock->tasks.begin()->deadline;
     }
-    clock->changed.notify_one();
+    if (changed) clock->changed.notify_one();
     return true;
 }
 bool KisPageReclamationDelay::takeReady()
@@ -581,12 +586,14 @@ void KisPageReclamationWake::notify() const noexcept
     if (!d) return;
     const auto clock = d->clock.lock();
     if (!clock) return;
+    bool changed = false;
     {
         std::lock_guard<std::mutex> lock(clock->mutex);
         if (!d->registered || d->ready || clock->stopping) return;
+        changed = !clock->readyWakes.first;
         placeWake(*clock, *d, WakeQueue::Ready);
     }
-    clock->changed.notify_one();
+    if (changed) clock->changed.notify_one();
 }
 KisPageReclamationWake kisPreparePageStoreReclamationWake(
     KisPageReadinessCallback dispatch,

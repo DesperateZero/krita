@@ -391,20 +391,31 @@ void KisImageEpochTreeStorage::drain() noexcept
 {
     quint64 dropped = 0;
     while (dropped < 128) {
-        KisImageEpochPageRoot *node;
+        KisImageEpochPageRoot *node = nullptr;
         {
             QMutexLocker lock(&mutex);
             node = first;
             if (!node) break;
-            first = node->nextReleased;
+            auto *tail = node;
+            quint64 count = 1;
+            while (count < 128 - dropped && tail->nextReleased) {
+                tail = tail->nextReleased;
+                ++count;
+            }
+            first = tail->nextReleased;
             if (!first) last = nullptr;
+            tail->nextReleased = nullptr;
         }
         // Child final references splice their original nodes into this same
         // owner's list. Nothing recurses, allocates, or returns a live charge
         // before the actual node storage has been freed.
-        std::destroy_at(node);
-        nodes.deallocate(node, 1);
-        ++dropped;
+        while (node) {
+            auto *next = node->nextReleased;
+            std::destroy_at(node);
+            nodes.deallocate(node, 1);
+            ++dropped;
+            node = next;
+        }
     }
     auto &destructions = kisOnPageStoreReclamationThread()
         ? backgroundNodeDestructions : foregroundNodeDestructions;

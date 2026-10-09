@@ -220,11 +220,16 @@ void KisPageReadCoordinator::notifyLastUse(
         context->tail = record.get();
         ++context->readyCount;
     }
-    context->retry.cancel();
-    context->retryScheduled = false;
+    if (context->retryScheduled) {
+        context->retry.cancel();
+        context->retryScheduled = false;
+    }
     // The producer may still hold provider/registry gates. Only splice an
     // already prepared monitor node here; never enter the owner or metadata.
-    context->wake.notify();
+    // A scheduled task owns the progress guarantee, including events after
+    // its bounded ready census. Its finished callback examines this same
+    // chain under this gate and schedules the next pass.
+    if (!context->jobScheduled) context->wake.notify();
 }
 
 void KisPageReadCoordinator::dispatchLastUses(const std::weak_ptr<LastUseWakeContext> &weakContext)

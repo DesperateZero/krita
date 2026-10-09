@@ -202,12 +202,15 @@ public:
     }
 
     KRITAIMAGE_EXPORT DescriptorMap prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
+    KRITAIMAGE_EXPORT DescriptorMap prepareDescriptorLocked(const KisPageVersion &version,
+        const KisPageAllocationDescriptor &descriptor, const KisPageVersion &base);
     void removeDescriptorLocked(const KisPageVersion &version);
     // A borrow lasts until its version's descriptor is replaced or removed.
     // The native page's original claim/session excludes both during its use.
     const KisPageAllocationDescriptor *descriptorLocked(
         const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
-    DescriptorMap prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count);
+    DescriptorMap prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count,
+        const std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout = nullptr);
     KRITAIMAGE_EXPORT void installDescriptorAdditionsLocked(DescriptorMap *prepared);
     void discardDescriptorAdditionsLocked(DescriptorMap *, QMutexLocker<QMutex> &ownerLock);
 

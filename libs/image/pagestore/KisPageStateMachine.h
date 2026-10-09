@@ -265,7 +265,10 @@ private:
     // without installation, while the public oracle preserves its input.
     void applyKnownValid(
         KisPageWorkingResult &result,
-        const KisPageTransition &transition) const;
+        const KisPageTransition &transition,
+        void *publicationContext = nullptr,
+        void (*publicationDelta)(void *, const KisPageVersion &,
+            KisPagePublicationState, KisPageTransactionId) = nullptr) const;
     friend class KisPageMetadataCoordinator;
 };
 
