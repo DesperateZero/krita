@@ -226,13 +226,18 @@ KisTileHashTableTraits<T>::getTileLazy(qint32 col, qint32 row,
 
 template<class T>
 typename KisTileHashTableTraits<T>::PreparedTile
-KisTileHashTableTraits<T>::prepareMissingTile(qint32 col, qint32 row)
+KisTileHashTableTraits<T>::prepareTileUpdate(qint32 col, qint32 row, Update update)
 {
     PreparedTile prepared;
     {
         QReadLocker locker(&m_lock);
-        if (getTile(col, row, calculateHash(col, row))) return prepared;
-        prepared.m_tile = new TileType(col, row, m_defaultTileData, nullptr);
+        prepared.m_tile = getTile(col, row, calculateHash(col, row));
+        if (prepared.m_tile && update == Update::Present) return {};
+        if (!prepared.m_tile && update != Update::Absent)
+            prepared.m_tile = new TileType(col, row, m_defaultTileData, nullptr);
+        prepared.m_col = col;
+        prepared.m_row = row;
+        prepared.m_update = update;
         prepared.m_identity = m_preparationIdentity;
     }
     if (!prepared.m_identity) {
@@ -251,7 +256,7 @@ typename KisTileHashTableTraits<T>::TileTypeSP
 KisTileHashTableTraits<T>::installPreparedTile(PreparedTile &prepared, bool &newTile)
 {
     newTile = false;
-    if (!prepared) return {};
+    if (!prepared || !prepared.m_tile) return {};
     QWriteLocker locker(&m_lock);
     if (prepared.m_identity != m_preparationIdentity) return {};
     const auto col = prepared.col(), row = prepared.row();
@@ -262,6 +267,16 @@ KisTileHashTableTraits<T>::installPreparedTile(PreparedTile &prepared, bool &new
     prepared.m_tile->notifyAttachedToDataManager(m_mementoManager);
     newTile = true;
     return prepared.m_tile;
+}
+
+template<class T>
+bool KisTileHashTableTraits<T>::removePreparedTile(PreparedTile &prepared)
+{
+    if (!prepared || prepared.m_update == Update::Present) return false;
+    QWriteLocker locker(&m_lock);
+    if (prepared.m_identity != m_preparationIdentity) return false;
+    prepared.m_consumed = true;
+    return unlinkTile(prepared.col(), prepared.row(), calculateHash(prepared.col(), prepared.row()));
 }
 
 template<class T>

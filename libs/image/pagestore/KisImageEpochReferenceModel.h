@@ -8,6 +8,7 @@
 #define KIS_IMAGE_EPOCH_REFERENCE_MODEL_H
 
 #include <array>
+#include <functional>
 #include <map>
 #include <memory>
 #include <QMutex>
@@ -51,6 +52,9 @@ public:
     qsizetype pageCount() const;
     qint32 pageTreeHeight() const;
     bool containsPage(const KisPageKey &key, KisPageVersion *version = nullptr) const;
+    // Synchronous immutable enumeration without a manifest export. The visitor
+    // borrows each version; false stops delivery of further versions.
+    bool forEachPage(KisSurfaceId surface, const std::function<bool(const KisPageVersion &)> &visit) const;
     KisPageSnapshotArray<KisSurfaceEpochState> surfaces() const;
     KisImageEpochSnapshot snapshot() const;
     bool resolve(const KisPageKey &key, KisPageVersion *version) const;

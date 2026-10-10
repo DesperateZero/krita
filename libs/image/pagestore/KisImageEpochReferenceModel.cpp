@@ -533,6 +533,16 @@ bool KisImageEpochRootSnapshot::appendRestoreTargets(
     return true;
 }
 
+bool KisImageEpochRootSnapshot::forEachPage(
+    KisSurfaceId surface, const std::function<bool(const KisPageVersion &)> &visit) const
+{
+    bool accepted = isValid();
+    appendPageRoot(m_pageRoot, [&](const KisPageVersion &version) {
+        if (accepted && version.key.surface == surface) accepted = visit(version);
+    });
+    return accepted;
+}
+
 QVector<KisLogicalPageId> KisImageEpochRootSnapshot::allocatedPages(
     KisSurfaceId surface, KisPageKeyStorage &additions, KisPageKeyStorage &removals) const
 {

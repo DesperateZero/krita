@@ -70,10 +70,13 @@ public:
     bool close(QString *error = nullptr);
 
 private:
+    friend class KisTiledDataManagerPageStoreBackend;
     KisImageEpochCommitTicket restore(
         const KisPageStoreMemento &memento,
         bool before,
-        QString *error);
+        QString *error,
+        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter = {},
+        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter = {});
     class Private;
     struct PrivateReleaser { static void cleanup(Private *); };
     QScopedPointer<Private, PrivateReleaser> d;

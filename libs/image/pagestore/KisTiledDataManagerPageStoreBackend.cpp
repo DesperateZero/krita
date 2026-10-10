@@ -1923,10 +1923,13 @@ bool KisTiledDataManagerPageStoreBackend::rollforward(const KisMementoSP &mement
 }
 
 bool KisTiledDataManagerPageStoreBackend::restoreHistory(
-    const KisMementoSP &memento, bool before, QString *error)
+    const KisMementoSP &memento, bool before, QString *error,
+    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
 {
     if (!memento) return false;
     QMutexLocker transactionLocker(&d->transactionMutex);
+    QWriteLocker publicationLocker(&d->publicationLock);
     QMutexLocker locker(&d->mutex);
     const auto entry = d->mementos.find(memento.data());
     const KisPageStoreMemento stored = entry != d->mementos.end() ? entry->second : KisPageStoreMemento{};
@@ -1934,8 +1937,15 @@ bool KisTiledDataManagerPageStoreBackend::restoreHistory(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore memento is unknown"));
         return false;
     }
-    return (before ? d->history->rollback(stored, error)
-                   : d->history->rollforward(stored, error)).isValid();
+    // The transaction gate preserves this memento capability. A Tile reader
+    // can hold its swap barrier while entering backend selection; neither
+    // this mutex nor publication write may enclose adapter barrier acquisition.
+    locker.unlock();
+    return d->history->restore(stored, before, error, prepareAdapter,
+        [&](const KisPageVersion *targets, qsizetype count) {
+            publicationLocker.unlock(); // canonical acceptance already succeeded
+            if (completeAdapter) completeAdapter(targets, count);
+        }).isValid();
 }
 
 bool KisTiledDataManagerPageStoreBackend::purgeHistory(
@@ -1974,7 +1984,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     const QByteArray &pixel,
     QString *error, QVector<KisLogicalPageId> *changed,
     OperationDelivery *delivery,
-    const std::function<bool(QString *)> &prepareAdapter,
+    const std::function<bool(bool, QString *)> &prepareAdapter,
     const AdapterCompletion &completeAdapter,
     QVarLengthArray<quint8, 64> *changedPresence) try
 {
@@ -2017,8 +2027,6 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     if (!range) return false;
     auto batch = beginMutationBatch(error);
     if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
-    if (prepareAdapter && !prepareAdapter(error)) return false;
-    if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     auto before = captureReadView(false, error);
     KisSurfaceEpochState surfaceState;
     if (!before.resolveSurfaceState(d->surface, &surfaceState) ||
@@ -2026,11 +2034,13 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 fill surface is invalid"));
         return false;
     }
+    const bool clearsToDefault = pixel == surfaceState.format.defaultPixel;
+    if (prepareAdapter && !prepareAdapter(clearsToDefault, error)) return false;
+    if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     std::vector<char, KisMutationStorageAllocator<char>> rowBytes(size_t(KisTileData::WIDTH * pixel.size()));
     for (int x = 0; x < KisTileData::WIDTH; ++x)
         memcpy(rowBytes.data() + x * pixel.size(), pixel.constData(), size_t(pixel.size()));
     std::shared_ptr<const KisPageReplicaSource> uniform;
-    const bool clearsToDefault = pixel == surfaceState.format.defaultPixel;
     for (qint64 row = firstRow; row <= lastRow; ++row) {
         for (qint64 column = firstColumn; column <= lastColumn; ++column) {
             KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::FillPage, 1);
@@ -2445,7 +2455,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
     const KisCapturedReadView &sourceView, const QRect &requestedRect,
     const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed,
     OperationDelivery *delivery,
-    const std::function<bool(QString *)> &prepareAdapter,
+    const std::function<bool(bool, QString *)> &prepareAdapter,
     const AdapterCompletion &completeAdapter,
     QVarLengthArray<quint8, 64> *changedPresence) try
 {
@@ -2494,7 +2504,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
     }
     auto batch = beginMutationBatch(error);
     if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
-    if (prepareAdapter && !prepareAdapter(error)) return false;
+    if (prepareAdapter && !prepareAdapter(sourceState.format.defaultPixel == targetState.format.defaultPixel, error)) return false;
     if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     const auto recordChange = [&](const KisLogicalPageId &page, bool present) {
         if (!changed) return;

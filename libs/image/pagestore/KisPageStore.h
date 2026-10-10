@@ -10,6 +10,7 @@
 #include <QScopedPointer>
 #include <QSet>
 #include <QSharedPointer>
+#include <functional>
 
 #include <limits>
 #include <memory>
@@ -20,6 +21,7 @@
 #include "KisMutationStorage_p.h"
 
 class KisPageStoreMementoManager;
+class KisImageEpochRootSnapshot;
 class KisBackingBudgetController;
 class KisCpuReadGuard;
 class KisCpuResidentBinding;
@@ -623,6 +625,12 @@ private:
     // Memento retention uses the original immutable root without exporting
     // its manifest. Restore/release never infer scope from a memento delta.
     KisRetainedImageEpochSnapshot captureRetainedEpochRoot();
+    // Synchronous compatibility delivery borrows the original restore targets.
+    // Prepare may refuse before publication; complete must not allocate/refuse.
+    // Neither callback nor the target span escapes this call.
+    KisImageEpochCommitTicket restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained,
+        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter);
     class Private;
     static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {

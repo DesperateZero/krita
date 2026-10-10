@@ -117,6 +117,11 @@ private Q_SLOTS:
     void testPageStoreAdapterPreparationRefusal_data();
     void testPageStoreAdapterPreparationRefusal();
     void testPageStoreRestoreLateAdmission();
+    void testPageStoreRestoreSparseDelivery_data();
+    void testPageStoreRestoreSparseDelivery();
+    void testPageStoreRestoreDeliveryRefusal();
+    void testPageStoreRestoreDeliveryAllowsTileReader();
+    void testPageStoreRestoreReconcilesBackendPages();
     void testPageStoreAdapterAfterAbort_data();
     void testPageStoreAdapterAfterAbort();
     void testPageStoreAdapterBarrier_data();

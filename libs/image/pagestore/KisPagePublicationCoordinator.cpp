@@ -1240,7 +1240,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
 KisImageEpochCommitTicket
 KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                           const KisPageStore *diagnosticOwner,
-                                                          QMutexLocker<QMutex> &ownerLock)
+                                                          QMutexLocker<QMutex> &ownerLock,
+    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
 {
     using Phase = KisPageStoreDiagnosticPhase;
     if (!m_operational || !m_epochs.validateRetainedSnapshot(retained) || !m_restoreIsIdle(m_ownerContext)) {
@@ -1281,6 +1283,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     };
     KisImageEpochCommitResult restored;
     KisCompletionTicket completion;
+    bool adapterPrepared = false;
     for (;;) {
         const quint64 directoryRevision = m_metadata.pageRegistrationCount();
         KisPreparedMutationCommit preparedCommit;
@@ -1348,6 +1351,14 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                                                Phase::RestoreTransitionPreflight,
                                                quint64(restoreTargets.size()));
         const quint64 restoreTransitionCount = quint64(restoreTargets.size());
+        // Current/retained roots are fixed across retries. Directory growth
+        // can only add virtual-default targets; it cannot add cold allocated
+        // wrappers. The caller's original manager gate preserves prepared
+        // table identity and warm coverage until the successful delivery.
+        if (!adapterPrepared) {
+            if (prepareAdapter && !prepareAdapter(retainedRoot)) return {};
+            adapterPrepared = true;
+        }
         auto &publication = preparedCommit.data->metadata;
         publication = m_metadata.prepareRestoration(nextEpoch, restoreTargets.data(), qsizetype(restoreTargets.size()));
         KisImageEpochCommitResult candidateFailure;
@@ -1405,6 +1416,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                 m_history.requestKeyLocked(target.key);
         }
         ownerLock.unlock();
+        if (installed && completeAdapter)
+            completeAdapter(restoreTargets.data(), qsizetype(restoreTargets.size()));
         m_disposeMetadataCleanup(m_ownerContext, std::move(metadataCleanup));
         preparedCommit = {};
         ownerLock.relock();

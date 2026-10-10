@@ -222,7 +222,7 @@ public:
                   const QByteArray &pixel,
                   QString *error = nullptr, QVector<KisLogicalPageId> *changed = nullptr,
                   OperationDelivery *delivery = nullptr,
-                  const std::function<bool(QString *)> &prepareAdapter = {},
+                  const std::function<bool(bool mayRemove, QString *)> &prepareAdapter = {},
                   const AdapterCompletion &completeAdapter = {},
                   QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Source pixels use the caller's fixed source selection. Destination
@@ -235,7 +235,7 @@ public:
                   const QRect &rect, bool rough, QString *error = nullptr,
                   QVector<KisLogicalPageId> *changed = nullptr,
                   OperationDelivery *delivery = nullptr,
-                  const std::function<bool(QString *)> &prepareAdapter = {},
+                  const std::function<bool(bool mayRemove, QString *)> &prepareAdapter = {},
                   const AdapterCompletion &completeAdapter = {},
                   QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Borrowed backing: the caller must retain the exact read page throughout
@@ -295,7 +295,9 @@ private:
     // Cold compatibility-index preparation for cancellation, not a pixel lease.
     bool prepareHistoryAbort(const KisMementoSP &memento,
                              QVector<KisLogicalPageId> *pages, QString *error);
-    bool restoreHistory(const KisMementoSP &memento, bool before, QString *error);
+    bool restoreHistory(const KisMementoSP &memento, bool before, QString *error,
+        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter = {},
+        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter = {});
     class Private;
     QScopedPointer<Private> d;
 };

@@ -335,7 +335,9 @@ KisImageEpochCommitTicket KisPageStoreMementoManager::rollforward(
 KisImageEpochCommitTicket KisPageStoreMementoManager::restore(
     const KisPageStoreMemento &memento,
     bool before,
-    QString *error)
+    QString *error,
+    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
 {
     QMutexLocker locker(&d->mutex);
     auto it = d->find(memento, error);
@@ -346,7 +348,7 @@ KisImageEpochCommitTicket KisPageStoreMementoManager::restore(
     }
     const KisRetainedImageEpochSnapshot &target =
         before ? it->second.before : it->second.after;
-    const KisImageEpochCommitTicket restored = d->store->restoreRetainedEpoch(target);
+    const KisImageEpochCommitTicket restored = d->store->restoreRetainedEpoch(target, prepareAdapter, completeAdapter);
     if (!restored.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore memento restore failed"));
         return {};

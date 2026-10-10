@@ -63,6 +63,7 @@ public:
      */
     TileTypeSP getTileLazy(qint32 col, qint32 row, bool& newTile);
 
+    enum class Update { Present, MayRemove, Absent };
     class PreparedTile {
     public:
         PreparedTile() = default;
@@ -70,19 +71,23 @@ public:
         PreparedTile &operator=(PreparedTile &&) = default;
         PreparedTile(const PreparedTile &) = delete;
         PreparedTile &operator=(const PreparedTile &) = delete;
-        explicit operator bool() const { return m_tile && bool(m_identity) && !m_consumed; }
-        qint32 col() const { return m_tile->col(); }
-        qint32 row() const { return m_tile->row(); }
+        explicit operator bool() const { return bool(m_identity) && !m_consumed; }
+        qint32 col() const { return m_col; }
+        qint32 row() const { return m_row; }
+        bool removesTile() const { return m_update == Update::Absent; }
     private:
         friend class KisTileHashTableTraits<T>;
         bool m_consumed = false;
+        qint32 m_col = 0, m_row = 0;
+        Update m_update = Update::Present;
         TileTypeSP m_tile;
         // A cold, immutable storage identity; it retains no old table or tile
         // index. Even address reuse cannot attach this candidate to a new table.
         std::shared_ptr<const char> m_identity;
     };
-    PreparedTile prepareMissingTile(qint32 col, qint32 row);
+    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
+    bool removePreparedTile(PreparedTile &prepared);
     TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row)
     {
         return getExistingTile(col, row);

@@ -4951,8 +4951,15 @@ bool KisPageStore::commitPreparedTransaction(
 
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained)
 {
+    return restoreRetainedEpoch(retained, {}, {});
+}
+
+KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained,
+    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
+{
     QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.restoreRetainedEpochLocked(retained, this, locker);
+    return d->publicationCoordinator.restoreRetainedEpochLocked(retained, this, locker, prepareAdapter, completeAdapter);
 }
 bool KisPageStore::abort(const KisPageTransaction &transaction)
 {

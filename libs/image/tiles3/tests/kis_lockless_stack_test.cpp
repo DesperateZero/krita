@@ -756,10 +756,10 @@ void checkPreparedTileCandidates()
     alignas(Table) unsigned char memory[sizeof(Table)];
     auto *table = new (memory) Table(nullptr);
     {
-        auto candidate = table->prepareMissingTile(1, 1);
+        auto candidate = table->prepareTileUpdate(1, 1);
         QVERIFY(candidate); QCOMPARE(table->numTiles(), 0);
         QVERIFY(!table->getExistingTileForPreparedUpdate(1, 1));
-        auto loser = table->prepareMissingTile(1, 1);
+        auto loser = table->prepareTileUpdate(1, 1);
         bool added = false;
         // Unrelated growth may migrate the actual reserved key.
         for (int i = 2; i < 1024; ++i) table->getTileLazy(i, 1, added);
@@ -768,18 +768,31 @@ void checkPreparedTileCandidates()
         QVERIFY(!candidate); QVERIFY(!table->installPreparedTile(candidate, added)); QVERIFY(!added);
         const auto winner = table->installPreparedTile(loser, added);
         QCOMPARE(winner, survivor); QVERIFY(!added); QVERIFY(!loser);
-        QVERIFY(!table->prepareMissingTile(1, 1));
+        QVERIFY(!table->prepareTileUpdate(1, 1));
         QCOMPARE(table->numTiles(), 1023);
-        auto cancelled = table->prepareMissingTile(1025, 1);
-        QVERIFY(cancelled); QCOMPARE(table->numTiles(), 1023);
-        late = table->prepareMissingTile(1026, 1);
+        auto removed = table->prepareTileUpdate(1, 1, Table::Update::Absent);
+        const int live = hashTilesAlive.load();
+        auto absent = table->prepareTileUpdate(1100, 1, Table::Update::Absent);
+        QCOMPARE(hashTilesAlive.load(), live); // removal preparation creates no wrapper
+        for (int i = 1024; i <= 1100; ++i) table->getTileLazy(i, 1, added);
+        QVERIFY(table->removePreparedTile(removed));
+        QVERIFY(!removed); QVERIFY(!table->removePreparedTile(removed));
+        QCOMPARE(survivor->detached, 1);
+        QVERIFY(table->removePreparedTile(absent)); // late cold insertion, migrated key
+        QVERIFY(!table->getExistingTileForPreparedUpdate(1, 1));
+        QVERIFY(!table->getExistingTileForPreparedUpdate(1100, 1));
+        QCOMPARE(table->numTiles(), 1098);
+        auto cancelled = table->prepareTileUpdate(1101, 1);
+        QVERIFY(cancelled); QCOMPARE(table->numTiles(), 1098);
+        late = table->prepareTileUpdate(1102, 1, Table::Update::MayRemove);
     }
     table->~Table();
     QCOMPARE(survivor->detached, 1);
     table = new (memory) Table(nullptr);
-    auto newCandidate = table->prepareMissingTile(1026, 1);
+    auto newCandidate = table->prepareTileUpdate(1102, 1);
     bool added = true;
     QVERIFY(!table->installPreparedTile(late, added)); QVERIFY(!added);
+    QVERIFY(!table->removePreparedTile(late));
     auto installed = table->installPreparedTile(newCandidate, added);
     QVERIFY(installed); QVERIFY(added);
     table->~Table();

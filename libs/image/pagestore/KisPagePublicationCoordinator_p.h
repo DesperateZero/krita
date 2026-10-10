@@ -211,7 +211,9 @@ public:
                                                 QWriteLocker *publicationLock = nullptr);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                          const KisPageStore *diagnosticOwner,
-                                                         QMutexLocker<QMutex> &ownerLock);
+                                                         QMutexLocker<QMutex> &ownerLock,
+        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
+        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter);
     bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,
                      KisPageReadCleanup &cleanup);
 

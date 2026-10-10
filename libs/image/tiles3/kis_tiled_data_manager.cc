@@ -32,6 +32,7 @@
 #include "KisStrokeJobFailureContext.h"
 #include "pagestore/KisTiledDataManagerPageStoreBackend.h"
 #include "pagestore/KisPageStoreDiagnostics_p.h"
+#include "pagestore/KisImageEpochReferenceModel.h"
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
 
 namespace {
@@ -59,38 +60,77 @@ bool prepareExtent(KisTiledExtentManager &extent, const QRect &tileRange, QStrin
     return false;
 }
 
-// Operation-local storage only for absent wrappers. Warm declared pages do
-// not allocate a key record, retain another tile, or grow this collection.
+QRect completelyCoveredPages(const QRect &pixels, QRect pages)
+{
+    if (pixels.left() != qint64(pages.left()) * KisTileData::WIDTH) pages.adjust(1, 0, 0, 0);
+    if (pixels.top() != qint64(pages.top()) * KisTileData::HEIGHT) pages.adjust(0, 1, 0, 0);
+    if (qint64(pixels.right()) + 1 != (qint64(pages.right()) + 1) * KisTileData::WIDTH) pages.adjust(0, 0, -1, 0);
+    if (qint64(pixels.bottom()) + 1 != (qint64(pages.bottom()) + 1) * KisTileData::HEIGHT) pages.adjust(0, 0, 0, -1);
+    return pages.isEmpty() ? QRect{} : pages;
+}
+
+// Operation-local storage for missing wrappers and possible removals. Ordinary
+// warm writes need no record. Semantic producers reserve removal GC actions
+// here so successful publication cannot be followed by a late allocation.
 // The caller owns the original page admission through delivery and destroys
 // this storage outside the manager/install gates, before releasing admission.
 class PreparedTileUpdates
 {
 public:
     template<class Coverage>
-    bool prepare(KisTileHashTable &table, const Coverage &coverage, QString *error)
+    bool prepare(KisTileHashTable &table, const Coverage &coverage, QString *error, const QRect &removable = {})
     {
         try {
             for (const QRect &pages : coverage) {
                 for (qint64 row = pages.top(); row <= pages.bottom(); ++row) {
                     for (qint64 col = pages.left(); col <= pages.right(); ++col) {
-                        auto candidate = table.prepareMissingTile(qint32(col), qint32(row));
-                        if (!candidate) continue;
-                        const auto size = m_missing.size();
-                        if (size == m_missing.capacity()) {
-                            if (size > std::numeric_limits<qsizetype>::max() / 2) throw std::bad_alloc();
-                            m_missing.reserve(size * 2);
-                        }
-                        if (m_missing.capacity() <= size) throw std::bad_alloc();
-                        m_missing.append(std::move(candidate));
+                        preparePage(table, {qint32(col), qint32(row)}, !removable.isEmpty() && removable.contains(qint32(col), qint32(row))
+                            ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present);
                     }
                 }
             }
-            std::sort(m_missing.begin(), m_missing.end(), [](const auto &a, const auto &b) {
-                return std::make_pair(a.row(), a.col()) < std::make_pair(b.row(), b.col());
-            });
+            sortPrepared();
             return true;
         } catch (const std::bad_alloc &) {
             if (error) *error = QStringLiteral("Compatibility tile storage preparation was rejected");
+            return false;
+        }
+    }
+
+    bool prepare(KisTileHashTable &table, KisTiledExtentManager &extent, KisSurfaceId surface,
+                 const KisImageEpochRootSnapshot &root)
+    {
+        try {
+            // Legacy writable intent can add an indexed wrapper without ever
+            // changing the canonical root. Actual root D alone cannot discover
+            // it. Audit the original index against the retained root, retaining
+            // only absent keys in this same operation-local preparation array.
+            // Finish iteration before acquiring any table preparation locks.
+            {
+                KisTileHashTableConstIterator it(&table);
+                while (!it.isDone()) {
+                    const auto tile = it.tile();
+                    const KisLogicalPageId page{tile->col(), tile->row()};
+                    if (!root.containsPage({surface, page})) appendPrepared(page, {});
+                    it.next();
+                }
+            }
+            for (auto &candidate : m_prepared)
+                candidate.storage = table.prepareTileUpdate(candidate.page.column, candidate.page.row, KisTileHashTable::Update::Absent);
+            QRect coverage;
+            // Backend consumers can publish pages before a manager indexes
+            // them. Counts or root D cannot prove equal membership; visit the
+            // original target root without allocating a second N-key manifest.
+            if (!root.forEachPage(surface, [&](const KisPageVersion &version) {
+                const auto &page = version.key.page;
+                if (!KisTileHashTable::supportsCoordinates(page.column, page.row)) return false;
+                coverage |= QRect(page.column, page.row, 1, 1);
+                preparePage(table, page, KisTileHashTable::Update::Present);
+                return true;
+            })) return false;
+            sortPrepared();
+            return coverage.isEmpty() || extent.prepareTileRange(coverage);
+        } catch (const std::bad_alloc &) {
             return false;
         }
     }
@@ -105,33 +145,95 @@ public:
         // are consumed once because changed is a unique subset of coverage.
         // A concurrent cold insertion can only supply an equivalent winner.
         // Cursor/packed report writes; semantic producers supply final presence.
-        for (qsizetype i = 0; i < changed.size(); ++i) {
-            const auto &page = changed[i];
-            if (present && !present[i]) {
-                if (table.deleteTile(page.column, page.row))
-                    extent.notifyTileRemoved(page.column, page.row);
-                continue;
-            }
-            auto tile = table.getExistingTileForPreparedUpdate(page.column, page.row);
-            bool created = false;
-            if (!tile) {
-                const auto key = std::make_pair(page.row, page.column);
-                const auto it = std::lower_bound(m_missing.begin(), m_missing.end(), key,
-                    [](const auto &candidate, const auto &key) {
-                        return std::make_pair(candidate.row(), candidate.col()) < key;
-                    });
-                if (it != m_missing.end() && it->row() == page.row && it->col() == page.column)
-                    tile = table.installPreparedTile(*it, created);
-            }
-            Q_ASSERT_X(tile, "PreparedTileUpdates::installLocked", "admitted tile coverage was lost");
-            tile->setPageStoreBridge(bridge, false);
-            tile->invalidatePageStoreReadCache();
-            if (created) extent.notifyTileAdded(page.column, page.row);
+        for (qsizetype i = 0; i < changed.size(); ++i)
+            installPage(table, extent, bridge, changed[i], !present || present[i]);
+    }
+
+    void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
+                       KisTiledDataManagerPageStoreBackend *bridge, KisSurfaceId surface,
+                       const KisPageVersion *targets, qsizetype count)
+    {
+        // All original-index absences include both root removals and legacy
+        // intent-only wrappers. Retry adds virtual defaults, not new wrappers.
+        for (auto &candidate : m_prepared) {
+            if (candidate.storage.removesTile() && table.removePreparedTile(candidate.storage))
+                extent.notifyTileRemoved(candidate.page.column, candidate.page.row);
         }
+        for (qsizetype i = 0; i < count; ++i) {
+            const auto &version = targets[i];
+            if (version.key.surface == surface && !version.isDefaultPixel())
+                installPage(table, extent, bridge, version.key.page, true);
+        }
+        // A missing compatibility page need not belong to the root version D.
+        // Candidates already installed above have consumed their own token.
+        for (auto &candidate : m_prepared)
+            if (candidate.storage && !candidate.storage.removesTile())
+                installPage(table, extent, bridge, candidate.page, true);
     }
 
 private:
-    QVarLengthArray<KisTileHashTable::PreparedTile, 8> m_missing;
+    void preparePage(KisTileHashTable &table, const KisLogicalPageId &page, KisTileHashTable::Update update)
+    {
+        auto candidate = table.prepareTileUpdate(page.column, page.row, update);
+        if (!candidate) return;
+        appendPrepared(page, std::move(candidate));
+    }
+
+    void appendPrepared(const KisLogicalPageId &page, KisTileHashTable::PreparedTile candidate)
+    {
+        const auto size = m_prepared.size();
+        if (size == m_prepared.capacity()) {
+            if (size > std::numeric_limits<qsizetype>::max() / 2) throw std::bad_alloc();
+            m_prepared.reserve(size * 2);
+        }
+        if (m_prepared.capacity() <= size) throw std::bad_alloc();
+        m_prepared.append({page, std::move(candidate)});
+    }
+
+    void sortPrepared()
+    {
+        std::sort(m_prepared.begin(), m_prepared.end(), [](const auto &a, const auto &b) {
+            return std::make_pair(a.page.row, a.page.column) < std::make_pair(b.page.row, b.page.column);
+        });
+    }
+
+    void installPage(KisTileHashTable &table, KisTiledExtentManager &extent,
+                     KisTiledDataManagerPageStoreBackend *bridge, const KisLogicalPageId &page, bool present)
+    {
+        const auto prepared = [&] {
+            const auto key = std::make_pair(page.row, page.column);
+            auto it = std::lower_bound(m_prepared.begin(), m_prepared.end(), key,
+                [](const auto &candidate, const auto &key) {
+                    return std::make_pair(candidate.page.row, candidate.page.column) < key;
+                });
+            return it != m_prepared.end() && it->page == page ? it : m_prepared.end();
+        };
+        if (!present) {
+            const auto it = prepared();
+            if (it == m_prepared.end()) {
+                Q_ASSERT(!table.getExistingTileForPreparedUpdate(page.column, page.row));
+                return;
+            }
+            if (table.removePreparedTile(it->storage)) extent.notifyTileRemoved(page.column, page.row);
+            return;
+        }
+        auto tile = table.getExistingTileForPreparedUpdate(page.column, page.row);
+        bool created = false;
+        if (!tile) {
+            const auto it = prepared();
+            if (it != m_prepared.end()) tile = table.installPreparedTile(it->storage, created);
+        }
+        Q_ASSERT_X(tile, "PreparedTileUpdates::installPage", "admitted tile coverage was lost");
+        tile->setPageStoreBridge(bridge, false);
+        tile->invalidatePageStoreReadCache();
+        if (created) extent.notifyTileAdded(page.column, page.row);
+    }
+
+    struct Candidate {
+        KisLogicalPageId page;
+        KisTileHashTable::PreparedTile storage;
+    };
+    QVarLengthArray<Candidate, 8> m_prepared;
 };
 
 struct DefaultTileDataDeleter
@@ -497,19 +599,29 @@ void KisTiledDataManager::restoreHistory(KisMementoSP memento, bool before)
 {
     if (!memento) return;
     if (!tryCommit()) return;
+    PreparedTileUpdates preparedTiles;
+    PreparedDefaultTile defaultTile;
+    PreparedDefaultTile previousDefault;
     QWriteLocker locker(&m_lock);
     const quint8 *pixel = before ? memento->oldDefaultPixel() : memento->newDefaultPixel();
     const bool defaultChanged = pixel && std::memcmp(m_defaultPixel, pixel, m_pixelSize);
-    auto defaultTile = defaultChanged ? prepareDefaultTile(m_pixelSize, pixel) : PreparedDefaultTile{};
+    if (defaultChanged) {
+        previousDefault.reset(m_hashTable->refAndFetchDefaultTileData());
+        defaultTile = prepareDefaultTile(m_pixelSize, pixel);
+    }
     // Prepare every fallible default resource before moving either history.
     if (defaultChanged && !defaultTile) return;
 
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        const bool restored = before ? m_pageStoreBackend->rollback(memento)
-                                     : m_pageStoreBackend->rollforward(memento);
+        const auto surface = m_pageStoreBackend->surface();
+        const bool restored = m_pageStoreBackend->restoreHistory(memento, before, nullptr,
+            [&](const KisImageEpochRootSnapshot &root) {
+                return preparedTiles.prepare(*m_hashTable, m_extentManager, surface, root);
+            }, [&](const KisPageVersion *targets, qsizetype count) {
+                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, surface, targets, count);
+                if (defaultChanged) installDefaultPixel(pixel, defaultTile.get());
+            });
         if (!restored) return;
-        if (defaultChanged) installDefaultPixel(pixel, defaultTile.get());
-        rebuildPageStoreIndex();
     } else {
         if (before) m_mementoManager->rollback(m_hashTable, memento);
         else m_mementoManager->rollforward(m_hashTable, memento);
@@ -856,10 +968,13 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                           QPoint(xToCol(clearRect.right()), yToRow(clearRect.bottom())));
         if (!m_pageStoreBackend->fillRect(clearRect,
                 QByteArray(reinterpret_cast<const char *>(clearPixel), pixelSize), &error, &changed, &delivery,
-                [&](QString *failure) {
+                [&](bool mayRemove, QString *failure) {
                     if (!prepareExtent(m_extentManager, pages, failure)) return false;
                     QReadLocker lock(&m_lock);
-                    return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure);
+                    // The producer supplies its admitted default comparison.
+                    // Do not repeat the caller's stale pre-wait selection.
+                    return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure,
+                        mayRemove ? completelyCoveredPages(clearRect, pages) : QRect{});
                 }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
                     QWriteLocker lock(&m_lock);
                     if (!publish(failure)) return false;
@@ -1199,10 +1314,11 @@ PixelOperationResult KisTiledDataManager::copyPageStore(
                       QPoint(xToCol(rect.right()), yToRow(rect.bottom())));
     if (!m_pageStoreBackend->copyFrom(*source->m_pageStoreBackend, sourceView, requestedRect,
             rect, rough, error, &changed, &delivery,
-            [&](QString *failure) {
+            [&](bool mayRemove, QString *failure) {
                 if (!prepareExtent(m_extentManager, pages, failure)) return false;
                 QReadLocker lock(&m_lock);
-                return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure);
+                return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure,
+                    mayRemove ? (rough ? pages : completelyCoveredPages(rect, pages)) : QRect{});
             }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
                 QWriteLocker lock(&m_lock);
                 if (!publish(failure)) return false;

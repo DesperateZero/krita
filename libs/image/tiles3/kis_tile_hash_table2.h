@@ -81,11 +81,13 @@ public:
      */
     TileTypeSP getTileLazy(qint32 col, qint32 row, bool& newTile);
 
-    // Storage for a missing wrapper only. An existing tile needs no key
-    // record. Caller must own the original page operation through delivery.
+    // Ordinary writes prepare only missing wrappers. Semantic removal also
+    // prepares the original map key and GC action before publication.
+    enum class Update { Present, MayRemove, Absent };
     class PreparedTile;
-    PreparedTile prepareMissingTile(qint32 col, qint32 row);
+    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
+    bool removePreparedTile(PreparedTile &prepared);
     // Delivery must not run the collector or participate in map growth.
     TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row);
 
@@ -154,15 +156,19 @@ public:
         PreparedTile &operator=(PreparedTile &&) = default;
         PreparedTile(const PreparedTile &) = delete;
         PreparedTile &operator=(const PreparedTile &) = delete;
-        explicit operator bool() const { return m_tile && bool(m_key) && !m_consumed; }
-        qint32 col() const { return m_tile->col(); }
-        qint32 row() const { return m_tile->row(); }
+        explicit operator bool() const { return bool(m_key) && !m_consumed; }
+        qint32 col() const { return m_col; }
+        qint32 row() const { return m_row; }
+        bool removesTile() const { return m_update == Update::Absent; }
     private:
         friend class KisTileHashTableTraits2<T>;
         bool m_consumed = false;
+        qint32 m_col = 0, m_row = 0;
+        Update m_update = Update::Present;
         TileTypeSP m_tile;
         MapReference m_reference{nullptr, &releaseMapReference};
         typename LockFreeTileMap::PreparedKey m_key;
+        QSBR::PreparedAction m_removal;
     };
 
 private:
@@ -462,18 +468,23 @@ KisTileHashTableTraits2<T>::getExistingTileForPreparedUpdate(qint32 col, qint32 
 
 template <class T>
 typename KisTileHashTableTraits2<T>::PreparedTile
-KisTileHashTableTraits2<T>::prepareMissingTile(qint32 col, qint32 row)
+KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update update)
 {
     PreparedTile prepared;
-    if (getExistingTileForPreparedUpdate(col, row)) return prepared;
+    prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
+    if (prepared.m_tile && update == Update::Present) return {};
     const quint32 idx = calculateHashSafe(col, row);
     if (!idx) throw std::bad_alloc();
-    {
+    if (!prepared.m_tile && update != Update::Absent) {
         QReadLocker locker(&m_defaultPixelDataLock);
         // No attachment or memento registration until actual installation.
         prepared.m_tile = new TileType(col, row, m_defaultTileData, nullptr);
+        prepared.m_reference = prepareMapReference(prepared.m_tile.data());
     }
-    prepared.m_reference = prepareMapReference(prepared.m_tile.data());
+    if (update != Update::Present) prepared.m_removal = QSBR::prepare();
+    prepared.m_col = col;
+    prepared.m_row = row;
+    prepared.m_update = update;
     prepared.m_key = m_map.prepareKey(idx);
     if (!prepared.m_key) throw std::bad_alloc();
     return prepared;
@@ -498,6 +509,24 @@ KisTileHashTableTraits2<T>::installPreparedTile(PreparedTile &prepared, bool &ne
     // The caller retains the candidate and key until outside its install
     // gates. No collector update or candidate destruction occurs here.
     return prepared.m_tile;
+}
+
+template <class T>
+bool KisTileHashTableTraits2<T>::removePreparedTile(PreparedTile &prepared)
+{
+    if (!prepared || !prepared.m_removal || !prepared.m_key.belongsTo(m_map)) return false;
+    QReadLocker locker(&m_iteratorLock);
+    QSBR::RawPointerAccess access(m_map.getGC());
+    const auto result = prepared.m_key.exchangeValue(nullptr);
+    if (!result.accepted) return false;
+    prepared.m_consumed = true;
+    if (!result.previous) return false;
+    m_numTiles.fetchAndSubRelaxed(1);
+    retire(result.previous, std::move(prepared.m_removal));
+    result.previous->notifyDetachedFromDataManager();
+    // The original queue owns the removed map reference. Do not run its
+    // collector under the caller's manager/publication installation gates.
+    return true;
 }
 
 template <class T>
