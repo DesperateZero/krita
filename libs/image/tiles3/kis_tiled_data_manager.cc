@@ -150,6 +150,17 @@ public:
         }
     }
 
+    bool prepareRemovals(KisTileHashTable &table, const QVector<KisLogicalPageId> &pages, QString *error)
+    {
+        try {
+            for (const auto &page : pages) preparePage(table, page, KisTileHashTable::Update::Absent);
+            return true; // installRemovals consumes these directly, without lookup.
+        } catch (const std::bad_alloc &) {
+            if (error) *error = QStringLiteral("Removal compatibility preparation was refused");
+            return false;
+        }
+    }
+
     void installRemovals(KisTileHashTable &table, KisTiledExtentManager &extent)
     {
         for (auto &candidate : m_prepared)
@@ -950,7 +961,10 @@ wrongString:
 
 void KisTiledDataManager::purge(const QRect& area)
 {
-    QList<KisTileSP> tilesToDelete;
+    // Callers finish their iterators and sequence device writes before purge.
+    // Keep that boundary across comparison and removal; a later page claim
+    // alone would not validate a predicate observed before concurrent writes.
+    QVector<KisLogicalPageId> pages;
     {
         const qint32 tileDataSize = KisTileData::HEIGHT * KisTileData::WIDTH * pixelSize();
         KisTileData *tileData = m_hashTable->refAndFetchDefaultTileData();
@@ -974,24 +988,38 @@ void KisTiledDataManager::purge(const QRect& area)
                 const quint8 *data = tile->data();
                 if (!data) return;
                 if(memcmp(defaultData, data, tileDataSize) == 0) {
-                    tilesToDelete.push_back(tile);
+                    pages.append({tile->col(), tile->row()});
                 }
             }
             iter.next();
         }
 
     }
+    if (pages.isEmpty()) return;
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        QVector<KisLogicalPageId> pages;
-        pages.reserve(tilesToDelete.size());
-        for (const KisTileSP &tile : std::as_const(tilesToDelete)) {
-            pages.append({tile->col(), tile->row()});
-        }
-        if (!m_pageStoreBackend->removePages(pages)) return;
+        OperationDelivery delivery;
+        PreparedTileUpdates preparedTiles;
+        m_pageStoreBackend->removePages(pages, nullptr, &delivery,
+            [&](QString *failure) {
+                KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
+                    KisPageStoreDiagnosticPhase::MutationAdapterPrepare, quint64(pages.size()));
+                const bool prepared = preparedTiles.prepareRemovals(*m_hashTable, pages, failure);
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterPrepared, quint64(pages.size()));
+                return prepared;
+            }, [&](const auto &publish, QString *failure) {
+                if (!publish(failure)) return false;
+                KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
+                    KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(pages.size()));
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(pages.size()));
+                preparedTiles.installRemovals(*m_hashTable, m_extentManager);
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(pages.size()));
+                return true;
+            });
+        return;
     }
-    Q_FOREACH (KisTileSP tile, tilesToDelete) {
-        if (m_hashTable->deleteTile(tile)) {
-            m_extentManager.notifyTileRemoved(tile->col(), tile->row());
+    for (const auto &page : pages) {
+        if (m_hashTable->deleteTile(page.column, page.row)) {
+            m_extentManager.notifyTileRemoved(page.column, page.row);
         }
     }
 }

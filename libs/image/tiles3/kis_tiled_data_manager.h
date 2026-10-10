@@ -196,6 +196,8 @@ protected:
     bool write(KisPaintDeviceWriter &store);
     bool read(QIODevice *stream);
 
+    // Call after writable iterators have finished, with device writes sequenced.
+    // Removes whole default-valued tiles that intersect area.
     void purge(const QRect& area);
 
     inline quint32 pixelSize() const {

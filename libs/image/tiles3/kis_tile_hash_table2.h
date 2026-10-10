@@ -474,7 +474,10 @@ typename KisTileHashTableTraits2<T>::PreparedTile
 KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update update)
 {
     PreparedTile prepared;
-    prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
+    // An Absent candidate consumes only its key and retirement action. The
+    // map reference passes to QSBR at removal, so no old tile lookup or extra
+    // reference is needed here. Present/MayRemove still need their tile.
+    if (update != Update::Absent) prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
     if (prepared.m_tile && update == Update::Present) return {};
     const quint32 idx = calculateHashSafe(col, row);
     if (!idx) throw std::bad_alloc();

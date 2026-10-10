@@ -75,6 +75,10 @@ private Q_SLOTS:
     void testCloneCanonicalOrLegacySource();
     void testPageStoreSaveReopenRoundTrip();
     void testPageStoreSparsePurge();
+    void testPageStorePurgePreparedDelivery_data();
+    void testPageStorePurgePreparedDelivery();
+    void testPageStorePurgePublicationRefusal_data();
+    void testPageStorePurgePublicationRefusal();
     void testPageStoreVirtualDefaultReadStaysSparse();
     void testPageStorePartialDefaultClearStaysSparse_data();
     void testPageStorePartialDefaultClearStaysSparse();

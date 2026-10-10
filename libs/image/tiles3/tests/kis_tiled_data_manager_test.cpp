@@ -1792,6 +1792,117 @@ void KisTiledDataManagerTest::testPageStoreSparsePurge()
     tile->unlockForRead();
 }
 
+void KisTiledDataManagerTest::testPageStorePurgePreparedDelivery_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("history"); QTest::addColumn<int>("count");
+    for (int bpp : {1, 4, 8, 16}) for (bool history : {false, true}) for (int count : {0, 1, 17})
+        QTest::newRow(qPrintable(QString("bpp%1-history%2-count%3").arg(bpp).arg(history).arg(count)))
+            << bpp << history << count;
+}
+
+void KisTiledDataManagerTest::testPageStorePurgePreparedDelivery()
+{
+    QFETCH(int, bpp); QFETCH(bool, history); QFETCH(int, count);
+    const QByteArray blank(bpp, char(0x13)), color(bpp, char(0x71)), nextDefault(bpp, char(0x29));
+    const auto bytes = [](const QByteArray &v) { return reinterpret_cast<const quint8 *>(v.constData()); };
+    TestableTiledDataManager dm(bpp, bytes(blank));
+    const QByteArray input((count + 2) * 64 * 64 * bpp, char(0x13));
+    dm.writeBytes(bytes(input), -64, 0, (count + 2) * 64, 64);
+    // The last candidate differs only at its last pixel; page -1 is out of area.
+    dm.writeBytes(bytes(color), count * 64 + 63, 63, 1, 1);
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    auto *originalTable = dm.m_hashTable;
+    const auto retained = backend->captureReadView(); QVERIFY(retained.isValid());
+    auto reader = dm.getTile(0, 0, false); QVERIFY(reader && reader->lockForRead());
+    const auto unlock = qScopeGuard([&] { reader->unlockForRead(); });
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    if (history) QVERIFY(memento);
+    const auto sessions = store->mutationStatistics().operationSessionsCreated;
+    bool installed = false, held = false;
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::MutationAdapterInstalled) return;
+        installed = true; held = store->sessionStats().activeCpuWritePages == count;
+    });
+    // One pixel of the first page still selects the entire tile for comparison.
+    dm.purge(QRect(63, 0, count * 64 + 1, 64));
+    recorder.setPhaseObserver({});
+    QCOMPARE(installed, count != 0); QCOMPARE(held, count != 0);
+    QCOMPARE(store->mutationStatistics().operationSessionsCreated - sessions, quint64(count ? 1 : 0));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(dm.m_hashTable, originalTable); QCOMPARE(dm.m_hashTable->numTiles(), 2);
+    QCOMPARE(backend->allocatedPages().size(), 2);
+    bool exists = true; dm.getReadOnlyTileLazy(0, 0, exists); QCOMPARE(exists, count == 0);
+    dm.getReadOnlyTileLazy(-1, 0, exists); QVERIFY(exists);
+    dm.getReadOnlyTileLazy(count, 0, exists); QVERIFY(exists);
+    QCOMPARE(reader->data()[0], quint8(0x13));
+    auto old = retained.readResidentPage({backend->surface(), {0, 0}}); QVERIFY(old.isValid());
+    QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x13));
+    if (history) {
+        QVERIFY(dm.tryCommit()); dm.rollback(memento);
+        QCOMPARE(dm.m_hashTable->numTiles(), count + 2);
+        dm.rollforward(memento); QCOMPARE(dm.m_hashTable->numTiles(), 2);
+        dm.purgeHistory(memento);
+    }
+    dm.setDefaultPixel(bytes(nextDefault));
+    QByteArray actual(bpp, 0);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, count ? nextDefault : blank);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), -64, 0, 1, 1); QCOMPARE(actual, blank);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), count * 64 + 63, 63, 1, 1); QCOMPARE(actual, color);
+}
+
+void KisTiledDataManagerTest::testPageStorePurgePublicationRefusal_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("history"); QTest::addColumn<bool>("root");
+    for (int bpp : {1, 4, 8, 16}) for (bool history : {false, true}) for (bool root : {false, true}) {
+        if (history && root) continue; // Borrowed removal seals; history owns root publication.
+        QTest::newRow(qPrintable(QString("bpp%1-history%2-root%3").arg(bpp).arg(history).arg(root)))
+            << bpp << history << root;
+    }
+}
+
+void KisTiledDataManagerTest::testPageStorePurgePublicationRefusal()
+{
+    QFETCH(int, bpp); QFETCH(bool, history); QFETCH(bool, root);
+    const QByteArray blank(bpp, char(0x13)), input(17 * 64 * 64 * bpp, char(0x13));
+    TestableTiledDataManager dm(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    dm.writeBytes(reinterpret_cast<const quint8 *>(input.constData()), 0, 0, 17 * 64, 64);
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    const auto memento = history ? dm.getMemento() : KisMementoSP{}; if (history) QVERIFY(memento);
+    const auto extent = dm.extent(); const auto commits = store->sessionStats().committedTransactions;
+    kisDrainPageStoreReclamation(); auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
+    size_t count = 0; void *filler = nullptr;
+    const auto free = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, count, 1); });
+    bool injected = false, installed = false;
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase == KisPageStoreDiagnosticPhase::MutationAdapterInstalled) installed = true;
+        const auto target = root ? KisPageStoreDiagnosticPhase::CommitEpochPrepare
+                                 : KisPageStoreDiagnosticPhase::MutationAdapterPrepared;
+        if (phase != target || injected) return;
+        injected = true;
+        const auto usage = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        count = size_t(kisPageProcessStorageLimit() - usage.live.cpuRam - usage.reserved.cpuRam);
+        filler = allocateTestProcessStoragePressure(count, 1);
+    });
+    dm.purge(extent);
+    recorder.setPhaseObserver({});
+    if (filler) freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
+    QVERIFY(injected); QVERIFY(!installed);
+    QTRY_COMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(store->sessionStats().committedTransactions, commits);
+    QCOMPARE(dm.extent(), extent); QCOMPARE(dm.m_hashTable->numTiles(), 17);
+    QCOMPARE(backend->allocatedPages().size(), 17);
+    dm.purge(extent);
+    QCOMPARE(dm.m_hashTable->numTiles(), 0); QVERIFY(dm.extent().isEmpty());
+    QVERIFY(backend->allocatedPages().isEmpty());
+    if (history) {
+        QVERIFY(dm.tryCommit()); dm.rollback(memento); QCOMPARE(dm.m_hashTable->numTiles(), 17);
+        dm.purgeHistory(memento);
+    }
+}
+
 void KisTiledDataManagerTest::testPageStoreVirtualDefaultReadStaysSparse()
 {
     quint8 defaultPixel = 0x2a;
