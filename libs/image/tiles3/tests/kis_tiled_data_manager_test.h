@@ -142,6 +142,9 @@ private Q_SLOTS:
     void testPageStorePlanarWriteNoOpInputs();
     void testPageStoreTrimMutation_data();
     void testPageStoreTrimMutation();
+    void testPageStoreTrimPreparedDelivery_data();
+    void testPageStoreTrimPreparedDelivery();
+    void testPageStoreTrimPreparationRefusal();
     void testPageStoreRegionWriteFailure_data();
     void testPageStoreRegionWriteFailure();
     void testVoidDrawingFailure_data();

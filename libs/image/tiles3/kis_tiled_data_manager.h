@@ -370,7 +370,6 @@ private:
     void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
     void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
-    void rebuildPageStoreIndex();
     void refreshPageStoreIndex(const QRect &rect);
     void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
     void refreshPageStorePage(const KisLogicalPageId &page, bool present);

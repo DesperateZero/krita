@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <new>
+#include <tuple>
 
 #include "kis_tile.h"
 #include "kis_tiled_data_manager.h"
@@ -100,39 +101,28 @@ public:
     bool prepare(KisTileHashTable &table, KisTiledExtentManager &extent, KisSurfaceId surface,
                  const KisImageEpochRootSnapshot &root)
     {
-        try {
-            // Legacy writable intent can add an indexed wrapper without ever
-            // changing the canonical root. Actual root D alone cannot discover
-            // it. Audit the original index against the retained root, retaining
-            // only absent keys in this same operation-local preparation array.
-            // Finish iteration before acquiring any table preparation locks.
-            {
-                KisTileHashTableConstIterator it(&table);
-                while (!it.isDone()) {
-                    const auto tile = it.tile();
-                    const KisLogicalPageId page{tile->col(), tile->row()};
-                    if (!root.containsPage({surface, page})) appendPrepared(page, {});
-                    it.next();
-                }
-            }
-            for (auto &candidate : m_prepared)
-                candidate.storage = table.prepareTileUpdate(candidate.page.column, candidate.page.row, KisTileHashTable::Update::Absent);
-            QRect coverage;
-            // Backend consumers can publish pages before a manager indexes
-            // them. Counts or root D cannot prove equal membership; visit the
-            // original target root without allocating a second N-key manifest.
-            if (!root.forEachPage(surface, [&](const KisPageVersion &version) {
-                const auto &page = version.key.page;
-                if (!KisTileHashTable::supportsCoordinates(page.column, page.row)) return false;
-                coverage |= QRect(page.column, page.row, 1, 1);
-                preparePage(table, page, KisTileHashTable::Update::Present);
+        return prepareReconciliation(table, extent,
+            [&](const auto &page) { return root.containsPage({surface, page}); },
+            [&](const auto &visit) {
+                return root.forEachPage(surface, [&](const KisPageVersion &version) { return visit(version.key.page); });
+            });
+    }
+
+    bool prepare(KisTileHashTable &table, KisTiledExtentManager &extent,
+                 const QVector<KisLogicalPageId> &pages, const QRect &keptPages)
+    {
+        return prepareReconciliation(table, extent,
+            [&](const auto &page) {
+                return keptPages.contains(page.column, page.row) &&
+                    std::binary_search(pages.cbegin(), pages.cend(), page, [](const auto &a, const auto &b) {
+                        return std::tie(a.row, a.column) < std::tie(b.row, b.column);
+                    });
+            },
+            [&](const auto &visit) {
+                for (const auto &page : pages)
+                    if (keptPages.contains(page.column, page.row) && !visit(page)) return false;
                 return true;
-            })) return false;
-            sortPrepared();
-            return coverage.isEmpty() || extent.prepareTileRange(coverage);
-        } catch (const std::bad_alloc &) {
-            return false;
-        }
+            });
     }
 
     void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
@@ -155,23 +145,87 @@ public:
     {
         // All original-index absences include both root removals and legacy
         // intent-only wrappers. Retry adds virtual defaults, not new wrappers.
-        for (auto &candidate : m_prepared) {
-            if (candidate.storage.removesTile() && table.removePreparedTile(candidate.storage))
-                extent.notifyTileRemoved(candidate.page.column, candidate.page.row);
-        }
+        installRemovals(table, extent);
         for (qsizetype i = 0; i < count; ++i) {
             const auto &version = targets[i];
             if (version.key.surface == surface && !version.isDefaultPixel())
                 installPage(table, extent, bridge, version.key.page, true);
         }
-        // A missing compatibility page need not belong to the root version D.
-        // Candidates already installed above have consumed their own token.
+        installMissing(table, extent, bridge);
+    }
+
+    template<class TrimPage>
+    void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
+                       KisTiledDataManagerPageStoreBackend *bridge, const TrimPage *changes, qsizetype count)
+    {
+        installRemovals(table, extent);
+        for (qsizetype i = 0; i < count; ++i)
+            if (!changes[i].kept.isEmpty()) installPage(table, extent, bridge, changes[i].page, true);
+        installMissing(table, extent, bridge);
+    }
+
+private:
+    template<class Contains, class ForEach>
+    bool prepareReconciliation(KisTileHashTable &table, KisTiledExtentManager &extent,
+                               const Contains &contains, const ForEach &forEach)
+    {
+        Q_ASSERT(m_prepared.isEmpty());
+        try {
+            QRect coverage;
+            qsizetype targetCount = 0;
+            // Enumerate the unique target set, proving membership for every
+            // page and preparing only missing wrappers. No N-key copy is made.
+            if (!forEach([&](const KisLogicalPageId &page) {
+                if (!KisTileHashTable::supportsCoordinates(page.column, page.row)) return false;
+                ++targetCount;
+                coverage |= QRect(page.column, page.row, 1, 1);
+                preparePage(table, page, KisTileHashTable::Update::Present);
+                return true;
+            })) return false;
+            const auto missingCount = m_prepared.size();
+            // Equal raw counts alone prove nothing. After the exhaustive pass,
+            // H = N - missing proves that H has no extra members. Intent-only
+            // wrappers otherwise require the reverse membership scan.
+            if (table.numTiles() != targetCount - missingCount) {
+                {
+                    KisTileHashTableConstIterator it(&table);
+                    while (!it.isDone()) {
+                        const auto tile = it.tile();
+                        const KisLogicalPageId page{tile->col(), tile->row()};
+                        if (!contains(page)) appendPrepared(page, {});
+                        it.next();
+                    }
+                }
+                // Iterators release their table locks before preparation.
+                for (qsizetype i = missingCount; i < m_prepared.size(); ++i) {
+                    auto &candidate = m_prepared[i];
+                    candidate.storage = table.prepareTileUpdate(candidate.page.column, candidate.page.row, KisTileHashTable::Update::Absent);
+                }
+            }
+            sortPrepared();
+            return coverage.isEmpty() || extent.prepareTileRange(coverage);
+        } catch (const std::bad_alloc &) {
+            return false;
+        }
+    }
+
+    void installRemovals(KisTileHashTable &table, KisTiledExtentManager &extent)
+    {
+        for (auto &candidate : m_prepared)
+            if (candidate.storage.removesTile() && table.removePreparedTile(candidate.storage))
+                extent.notifyTileRemoved(candidate.page.column, candidate.page.row);
+    }
+
+    void installMissing(KisTileHashTable &table, KisTiledExtentManager &extent,
+                        KisTiledDataManagerPageStoreBackend *bridge)
+    {
+        // Missing wrappers need not belong to the canonical version D.
+        // Installation above already consumed any overlapping candidates.
         for (auto &candidate : m_prepared)
             if (candidate.storage && !candidate.storage.removesTile())
                 installPage(table, extent, bridge, candidate.page, true);
     }
 
-private:
     void preparePage(KisTileHashTable &table, const KisLogicalPageId &page, KisTileHashTable::Update update)
     {
         auto candidate = table.prepareTileUpdate(page.column, page.row, update);
@@ -1161,22 +1215,6 @@ void KisTiledDataManager::clear()
     m_extentManager.clear();
 }
 
-void KisTiledDataManager::rebuildPageStoreIndex()
-{
-    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational()) return;
-    const QVector<KisLogicalPageId> pages =
-        m_pageStoreBackend->allocatedPages();
-    m_hashTable->clear();
-    m_extentManager.clear();
-    for (const KisLogicalPageId &page : pages) {
-        bool newTile = false;
-        KisTileSP tile = m_hashTable->getTileLazy(
-            page.column, page.row, newTile);
-        tile->setPageStoreBridge(m_pageStoreBackend, false);
-        if (newTile) m_extentManager.notifyTileAdded(page.column, page.row);
-    }
-}
-
 void KisTiledDataManager::refreshPageStorePages(const QVector<KisLogicalPageId> &pages)
 {
     if (pages.isEmpty()) return;
@@ -1580,6 +1618,8 @@ void KisTiledDataManager::setExtent(qint32 x, qint32 y, qint32 w, qint32 h)
 void KisTiledDataManager::setExtent(QRect newRect)
 {
     if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+    KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+    PreparedTileUpdates prepared;
     QWriteLocker locker(&m_lock);
     QRect oldRect = m_extentManager.extent();
     newRect = newRect.normalized();
@@ -1590,9 +1630,18 @@ void KisTiledDataManager::setExtent(QRect newRect)
 
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         QString error;
-        if (m_pageStoreBackend->trimToRect(newRect, &error)) {
-            rebuildPageStoreIndex();
-        } else {
+        const QRect keptPages = newRect.isEmpty() ? QRect{} :
+            QRect(QPoint(xToCol(newRect.left()), yToRow(newRect.top())),
+                  QPoint(xToCol(newRect.right()), yToRow(newRect.bottom())));
+        if (!m_pageStoreBackend->trimToRect(newRect, &error, &delivery,
+            [&](const QVector<KisLogicalPageId> &pages, QString *failure) {
+                if (prepared.prepare(*m_hashTable, m_extentManager, pages, keptPages)) return true;
+                if (failure) *failure = QStringLiteral("Trim compatibility preparation was rejected");
+                return false;
+            },
+            [&](const auto *changes, qsizetype count) {
+                prepared.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changes, count);
+            })) {
             KisStrokeJobFailureContext::reportFailure(error);
         }
         return;

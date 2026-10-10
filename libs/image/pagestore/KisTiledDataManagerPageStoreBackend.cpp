@@ -2657,20 +2657,23 @@ bool KisTiledDataManagerPageStoreBackend::removePages(
 
 bool KisTiledDataManagerPageStoreBackend::trimToRect(
     const QRect &rect,
-    QString *error) try
+    QString *error)
 {
-    {
-        QMutexLocker lock(&d->mutex);
-        if (d->cpuMutationBatches.find(QThread::currentThreadId()) != d->cpuMutationBatches.end()) {
-            // Reject before joining the anonymous transaction: cancelling a
-            // newly joined client would also poison its still-live parent.
-            KisPageStoreDetail::setError(error, QStringLiteral("trim cannot nest inside a native CPU batch"));
-            return false;
-        }
+    return trimToRect(rect, error, nullptr, {}, {});
+}
+
+bool KisTiledDataManagerPageStoreBackend::trimToRect(
+    const QRect &rect, QString *error, OperationDelivery *delivery,
+    const std::function<bool(const QVector<KisLogicalPageId> &, QString *)> &prepareAdapter,
+    const std::function<void(const TrimPage *, qsizetype)> &completeAdapter) try
+{
+    if (delivery && !delivery->isEmpty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
+        return false;
     }
-    // The manager rebuilds the entire compatibility index after trimming,
-    // including retained pages. Completed native delivery still owns its
-    // original claims even after leaving the thread/client batch registry.
+    // Trim still reconciles the whole index, including intent-only wrappers.
+    // Completed native delivery owns its original claims even after leaving
+    // the thread/client registry. beginMutationBatch itself rejects nesting.
     if (d->store->sessionStats().activeCpuWritePages != 0) {
         KisPageStoreDetail::setError(error, QStringLiteral("trim requires adapter delivery to finish"));
         return false;
@@ -2679,11 +2682,6 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
     KisPageStore *pageStore = store();
     if (!batch || !pageStore) return false;
 
-    struct TrimPage {
-        KisLogicalPageId page;
-        QRect extent;
-        QRect kept;
-    };
     KisPageSnapshotArray<TrimPage> changes;
     const auto pages = allocatedPages();
     for (const auto &page : pages) {
@@ -2708,9 +2706,8 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim surface is unavailable or incompatible"));
         return false;
     }
-    std::sort(changes.begin(), changes.end(), [](const TrimPage &a, const TrimPage &b) {
-        return a.page.row == b.page.row ? a.page.column < b.page.column : a.page.row < b.page.row;
-    });
+    // allocatedPages is ordered and unique; filtering preserves that order.
+    if (prepareAdapter && !prepareAdapter(pages, error)) return false;
     const auto &pixel = state.format.defaultPixel;
     const qsizetype stride = qsizetype(KisTileData::WIDTH) * pixel.size();
     for (const auto &change : changes) {
@@ -2753,7 +2750,12 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
             return false;
         }
     }
-    return batch->finish(error);
+    return finishOperationBatch(batch, delivery,
+        [&](const auto &publish, QString *failure) {
+            if (!publish(failure)) return false;
+            if (completeAdapter) completeAdapter(changes.data(), changes.size());
+            return true;
+        }, error);
 }
 
 catch (const std::bad_alloc &) {

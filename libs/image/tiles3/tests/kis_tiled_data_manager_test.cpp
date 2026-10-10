@@ -3872,6 +3872,86 @@ void KisTiledDataManagerTest::testPageStoreTrimMutation()
     }
 }
 
+void KisTiledDataManagerTest::testPageStoreTrimPreparedDelivery_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("pages");
+    QTest::addColumn<bool>("history"); QTest::addColumn<bool>("changed");
+    for (int bpp : {1, 4, 8, 16}) for (int pages : {17, 257})
+        for (bool history : {false, true}) for (bool changed : {false, true})
+            QTest::newRow(qPrintable(QString("%1-%2-history%3-changed%4").arg(bpp).arg(pages).arg(history).arg(changed)))
+                << bpp << pages << history << changed;
+}
+
+void KisTiledDataManagerTest::testPageStoreTrimPreparedDelivery()
+{
+    QFETCH(int, bpp); QFETCH(int, pages); QFETCH(bool, history); QFETCH(bool, changed);
+    const QByteArray blank(bpp, char(0x13)), color(bpp, char(0x57));
+    auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager dm(bpp, bytes(blank));
+    for (int i = 0; i < pages; ++i) dm.clear(QRect(2 * i * 64, 0, 64, 64), bytes(color));
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    QVERIFY(backend->fillRect(QRect(3 * 64, 0, 64, 64), color)); // Missing adapter, inside the retained range.
+    auto extra = dm.getTile((2 * pages + 3), 0, true); QVERIFY(extra);
+    QCOMPARE(dm.m_hashTable->numTiles(), pages + 1);
+    QCOMPARE(backend->allocatedPages().size(), qsizetype(pages + 1)); // Equal counts, different members.
+    auto unchanged = dm.m_hashTable->getExistingTileForPreparedUpdate(2, 0); QVERIFY(unchanged);
+    auto held = dm.getTile(0, 0, false); QVERIFY(held && held->lockForRead());
+    bool locked = true;
+    const auto unlock = qScopeGuard([&] { if (locked) held->unlockForRead(); });
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    const QRect kept = changed ? QRect(1, 0, (2 * pages - 3) * 64 - 1, 64)
+                               : QRect(0, 0, (2 * pages - 1) * 64, 64);
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    {
+        KisStrokeJobFailureContext failure(true);
+        dm.setExtent(kept); QVERIFY2(!failure.failed(), qPrintable(failure.error()));
+    }
+    QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::ManifestExport)].intervals, quint64(0));
+    QCOMPARE(dm.m_hashTable->numTiles(), pages + (changed ? 0 : 1));
+    QVERIFY(!dm.m_hashTable->getExistingTileForPreparedUpdate(2 * pages + 3, 0));
+    QVERIFY(dm.m_hashTable->getExistingTileForPreparedUpdate(3, 0));
+    QCOMPARE(dm.m_hashTable->getExistingTileForPreparedUpdate(2, 0), unchanged);
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(held->data()), bpp), color);
+    held->unlockForRead(); locked = false;
+    QByteArray actual(bpp, 0);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, changed ? blank : color);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 3 * 64, 0, 1, 1); QCOMPARE(actual, color);
+    if (history) {
+        QVERIFY(dm.tryCommit()); dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1); QCOMPARE(actual, color);
+        dm.rollforward(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1); QCOMPARE(actual, changed ? blank : color);
+        dm.purgeHistory(memento);
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreTrimPreparationRefusal()
+{
+    const quint8 blank = 0x13, color = 0x57;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(QRect(-64, 0, 128, 64), &color);
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    const int beyondIndex = 0x7fff;
+    QVERIFY(backend->fillRect(QRect(beyondIndex * 64, 0, 64, 64), QByteArray(1, char(color))));
+    auto unchanged = dm.m_hashTable->getExistingTileForPreparedUpdate(-1, 0); QVERIFY(unchanged);
+    const auto head = store->captureCommittedEpoch().epoch;
+    const auto counts = store->mutationStatistics();
+    {
+        KisStrokeJobFailureContext failure(true);
+        dm.setExtent(QRect(0, 0, (beyondIndex + 1) * 64, 64));
+        QVERIFY(failure.failed());
+    }
+    QCOMPARE(store->captureCommittedEpoch().epoch, head);
+    QCOMPARE(store->mutationStatistics().generationsReserved, counts.generationsReserved);
+    QCOMPARE(store->mutationStatistics().removalsCancelled, counts.removalsCancelled);
+    QCOMPARE(dm.m_hashTable->getExistingTileForPreparedUpdate(-1, 0), unchanged);
+    QCOMPARE(dm.extent(), QRect(-64, 0, 128, 64));
+    QVERIFY(backend->removePages({{beyondIndex, 0}}));
+    dm.setExtent(QRect(0, 0, 64, 64));
+    QCOMPARE(dm.extent(), QRect(0, 0, 64, 64));
+}
+
 void KisTiledDataManagerTest::testPageStoreRegionWriteFailure_data()
 {
     QTest::addColumn<bool>("history"); QTest::addColumn<bool>("planar");
@@ -3977,7 +4057,7 @@ void KisTiledDataManagerTest::testPageStoreRegionWriteFailure()
     const auto otherTx = store->beginCurrentTransaction();
     auto other = store->beginMutation(otherTx); QVERIFY(other.isActive());
     auto held = other.beginWrite({{1}, {mixed ? 2 : 1, 0}}); QVERIFY(held.isValid());
-    // Planar still exercises partial-work rollback on page one. Trim rebuilds
+    // Planar still exercises partial-work rollback on page one. Trim reconciles
     // the complete compatibility index and must reject the foreign claim
     // before touching any page, including a mixed removal/partial trim.
     const auto before = store->mutationStatistics();
