@@ -225,8 +225,8 @@ private:
     // until this session is destroyed after adapter delivery. No writable
     // access survives seal, and the transaction activity still ends normally.
     bool sealForAdapterDelivery(QString *error = nullptr);
-    bool sealImpl(QString *error, bool legacyFinalUnlock, KisCapturedReadView *checkpoint = nullptr,
-                  bool retainAdmission = false);
+    enum class SealMode { Final, LegacyFinal, AdapterDelivery, Checkpoint };
+    bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr);
     // Adapter reservations claim their targets before capture or pixel
     // exposure; adopting them does not create pending generations.
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,

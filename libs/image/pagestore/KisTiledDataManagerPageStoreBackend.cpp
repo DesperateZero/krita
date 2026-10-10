@@ -413,6 +413,7 @@ public:
     bool finishClient(bool succeeded, QString *error = nullptr, bool retainAdmission = false);
     bool finish(QString *error = nullptr, bool retainAdmission = false);
     bool cancelForBarrier(QString *error);
+    void detachFromBackend();
     void unlinkLease(KisTiledDataManagerPageStoreLease *lease)
     {
         if (lease->m_previous) lease->m_previous->m_next = lease->m_next;
@@ -490,12 +491,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::cancelForBarrier(QString *
         return false;
     }
     sources.clear();
-    QMutexLocker lock(&backend->d->mutex);
-    const auto slot = backend->d->cpuMutationBatches.find(thread);
-    if (slot != backend->d->cpuMutationBatches.end() && slot->second.lock().get() == this)
-        backend->d->cpuMutationBatches.erase(slot);
-    backend = nullptr;
-    clients = 0;
+    detachFromBackend();
     // A successful clear supersedes these clients. Their late finish is a
     // successful no-op, and cannot remove or publish a newer thread batch.
     failed = false;
@@ -614,7 +610,6 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     if (!transaction.isValid()) return false;
     const bool mutationActive = mutation.isActive();
     if (!mutationActive && !failed) return false;
-    bool privateCancelled = false;
     if (failed) KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore private mutation batch cancelled"));
     const bool sealed = mutationActive && !failed && (iteratorScope
         ? mutation.sealForLegacyUnlock(error)
@@ -622,24 +617,30 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     if (!sealed) {
         failed = true;
         if (!mutation.cancel()) return false;
-        privateCancelled = true;
     }
     // A confirmed private cancellation contributed no sealed delta. Return
     // this anonymous client normally instead of poisoning siblings/legacy
-    // writers that share the transaction. Generic/partly published failures
-    // still use the transaction-wide abort path.
-    const bool terminal = !owned || (failed && !privateCancelled
-        ? backend->abortOwnedTransaction(transaction)
-        : backend->finishOwnedTransaction(transaction, privateCancelled ? nullptr : error));
+    // writers that share the transaction. Every unsuccessful seal reaching
+    // here has confirmed cancellation; there is no partly-published branch.
+    const bool terminal = !owned || backend->finishOwnedTransaction(transaction, sealed ? error : nullptr);
     failed = failed || !terminal;
+    detachFromBackend();
+    return !failed;
+}
+
+void KisTiledDataManagerPageStoreWriteBatch::Private::detachFromBackend()
+{
     // Keep the slot occupied even after its weak pointer expires, until the
     // anonymous client has finished/aborted. Otherwise the originating thread
     // can join that transaction while its last foreign guard is still
     // cancelling it, poisoning the next operation.
     QMutexLocker lock(&backend->d->mutex);
-    backend->d->cpuMutationBatches.erase(thread);
+    const auto slot = backend->d->cpuMutationBatches.find(thread);
+    if (slot != backend->d->cpuMutationBatches.end()
+        && (slot->second.expired() || slot->second.lock().get() == this))
+        backend->d->cpuMutationBatches.erase(slot);
     backend = nullptr;
-    return !failed;
+    clients = 0;
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::replaceFullTile(
@@ -2047,17 +2048,25 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
         }
     }
     before = {};
-    const auto publish = [&](QString *failure) {
-        return delivery ? batch->finishForAdapterDelivery(failure) : batch->finish(failure);
-    };
-    success = completeAdapter ? completeAdapter(publish, error) : publish(error);
-    if (success && delivery) delivery->m_batch = std::move(batch);
+    success = finishOperationBatch(batch, delivery, completeAdapter, error);
     return success;
 }
 catch (const std::bad_alloc &) {
     if (changed) changed->clear();
     KisPageStoreDetail::setError(error, QStringLiteral("fill storage preparation was refused"));
     return false;
+}
+
+bool KisTiledDataManagerPageStoreBackend::finishOperationBatch(
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> &batch,
+    OperationDelivery *delivery, const AdapterCompletion &completeAdapter, QString *error)
+{
+    const auto publish = [&](QString *failure) {
+        return delivery ? batch->finishForAdapterDelivery(failure) : batch->finish(failure);
+    };
+    const bool success = completeAdapter ? completeAdapter(publish, error) : publish(error);
+    if (success && delivery) delivery->m_batch = std::move(batch);
+    return success;
 }
 
 template<typename Operation>
@@ -2071,6 +2080,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
 {
     using Result = KisPageStoreWriteOperationResult;
     if (changed) changed->clear();
+    bool succeeded = false;
+    const auto discardOutput = qScopeGuard([&] { if (changed && !succeeded) changed->clear(); });
     if (delivery && !delivery->isEmpty()) {
         KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
         return Result::Failed;
@@ -2187,34 +2198,13 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     // The manager's short completion owns the existing adapter gate. For a
     // standalone operation it surrounds publication and prepared installation;
     // history installs its pending working adapter before returning the borrow.
-    const auto complete = [&](const std::function<bool(QString *)> &publish) {
-        return completeAdapter ? completeAdapter(publish, error) : publish(error);
-    };
-    if (historyOwner) {
-        if (completeAdapter && !complete([](QString *) { return true; })) {
-            if (changed) changed->clear();
-            return Result::Failed;
-        }
-        if (!execution.finish(error)) {
-            if (changed) changed->clear();
-            return Result::Failed;
-        }
-    } else {
-        if (!execution.finish(error)) {
-            if (changed) changed->clear();
-            return Result::Failed;
-        }
-        if (batch && !complete([&](QString *failure) {
-                return delivery ? batch->finishForAdapterDelivery(failure)
-                                : batch->finish(failure);
-            })) {
-            if (changed) changed->clear();
-            return Result::Failed;
-        }
-    }
+    if (historyOwner && completeAdapter && !completeAdapter([](QString *) { return true; }, error))
+        return Result::Failed;
+    if (!execution.finish(error)) return Result::Failed;
+    if (batch && !finishOperationBatch(batch, delivery, completeAdapter, error)) return Result::Failed;
     phase.next(Phase::PixelOperationChangedDeliver, quint64(touched));
-    if (delivery && batch) delivery->m_batch = std::move(batch);
     phase.next(Phase::PixelOperationCleanup, quint64(touched));
+    succeeded = true;
     return Result::Succeeded;
 }
 

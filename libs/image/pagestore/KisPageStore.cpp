@@ -2451,17 +2451,17 @@ bool KisPageMutationSession::cancel()
 
 bool KisPageMutationSession::seal(QString *error)
 {
-    return sealImpl(error, false);
+    return sealImpl(SealMode::Final, error);
 }
 
 bool KisPageMutationSession::sealForLegacyUnlock(QString *error)
 {
-    return sealImpl(error, true);
+    return sealImpl(SealMode::LegacyFinal, error);
 }
 
 bool KisPageMutationSession::sealForAdapterDelivery(QString *error)
 {
-    return sealImpl(error, false, nullptr, true);
+    return sealImpl(SealMode::AdapterDelivery, error);
 }
 
 KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
@@ -2469,19 +2469,19 @@ KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
     KisCapturedReadView result;
     // Like borrowExecution, a quiescent checkpoint is not tied to the worker
     // that originally created the business-owned session.
-    sealImpl(error, true, &result);
+    sealImpl(SealMode::Checkpoint, error, &result);
     return result;
 }
 
-bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, KisCapturedReadView *checkpoint,
-                                    bool retainAdmission)
+bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint)
 {
+    Q_ASSERT((mode == SealMode::Checkpoint) == bool(checkpoint));
     if (!d) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is absent"));
         return false;
     }
     std::unique_lock<QMutex> scopeLock(d->mutex, std::defer_lock);
-    if (checkpoint) {
+    if (mode == SealMode::Checkpoint) {
         if (!scopeLock.try_lock()) {
             KisPageStoreDetail::setError(error, QStringLiteral("checkpoint requires a quiescent mutation"));
             return false;
@@ -2495,7 +2495,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
                                            KisPageStoreDiagnosticPhase::WritePublishHost,
                                            quint64(d->writes.size()));
     if (d->state == Private::State::Detached || d->executions ||
-        (!legacyFinalUnlock && d->thread != QThread::currentThreadId())) {
+        ((mode == SealMode::Final || mode == SealMode::AdapterDelivery)
+            && d->thread != QThread::currentThreadId())) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation cannot seal"));
         return false;
     }
@@ -2753,8 +2754,8 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
-    d->finishSegmentLocked(lock, !checkpoint, retainAdmission);
-    if (checkpoint) {
+    d->finishSegmentLocked(lock, mode != SealMode::Checkpoint, mode == SealMode::AdapterDelivery);
+    if (mode == SealMode::Checkpoint) {
         // scopeLock excludes the next borrow through capture. The original
         // activity still excludes transaction commit/abort during this gap;
         // capture itself fixes the whole sealed overlay under the owner gate.

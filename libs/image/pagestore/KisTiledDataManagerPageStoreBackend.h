@@ -261,6 +261,9 @@ private:
     bool abortOwnedTransaction(const KisPageTransaction &transaction);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
     void unregisterAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
+    bool finishOperationBatch(std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> &batch,
+                              OperationDelivery *delivery, const AdapterCompletion &completeAdapter,
+                              QString *error);
     template<typename Operation>
     KisPageStoreWriteOperationResult runCpuMutationOperation(
         const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,
