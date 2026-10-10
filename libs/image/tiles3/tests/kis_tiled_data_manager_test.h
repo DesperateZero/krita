@@ -48,6 +48,7 @@ private Q_SLOTS:
     void testUndoSetDefaultPixel();
     void testDefaultBudgetFailure_data();
     void testDefaultBudgetFailure();
+    void testLegacyClearFailure();
     void testConstructorBudgetFailure();
     void testPageStoreCloneActiveWriteRefusal_data();
     void testPageStoreCloneActiveWriteRefusal();

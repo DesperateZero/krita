@@ -1077,8 +1077,11 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
         return;
     }
 
-    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
-
+    // The fallback still reports failure on an early return or exception,
+    // without carrying an always-empty PageStore batch to do so.
+    auto reportFailure = qScopeGuard([] {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Legacy clear failed"));
+    });
     qint32 firstColumn = xToCol(clearRect.left());
     qint32 lastColumn = xToCol(clearRect.right());
 
@@ -1155,12 +1158,6 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                          if (alreadyCleared) continue;
                      }
                  }
-                 if (!pageStoreBatch.replaceFullTile(
-                         column, row, td, pixelBytesAreDefault)) {
-                     if (td) td->release();
-                     delete[] clearPixelData;
-                     return;
-                 }
                  const bool wasDeleted =
                      m_hashTable->deleteTile(column, row);
 
@@ -1171,9 +1168,6 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
                  if (!pixelBytesAreDefault) {
                      KisTileSP clearedTile = KisTileSP(new KisTile(column, row, td, m_mementoManager));
-                     clearedTile->setPageStoreBridge(
-                         m_pageStoreBackend, false);
-                     clearedTile->setPageStoreNativeReadReady();
                      m_hashTable->addTile(clearedTile);
                      m_extentManager.notifyTileAdded(column, row);
                  }
@@ -1211,7 +1205,7 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 
     if (td) td->release();
     delete[] clearPixelData;
-    pageStoreBatch.finish();
+    reportFailure.dismiss();
 }
 
 void KisTiledDataManager::clear(QRect clearRect, quint8 clearValue)

@@ -763,6 +763,31 @@ void KisTiledDataManagerTest::testDefaultBudgetFailure_data()
     for (int bpp : {1, 4, 8, 16}) QTest::newRow(qPrintable(QString::number(bpp))) << bpp;
 }
 
+void KisTiledDataManagerTest::testLegacyClearFailure()
+{
+    DefaultBudgetScope budget;
+    const QByteArray blank(4, char(0x13)), color(4, char(0x57));
+    auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager dm(4, bytes(blank));
+    dm.m_mementoManager->setPageStoreBridge(nullptr);
+    delete dm.m_pageStoreBackend; dm.m_pageStoreBackend = nullptr;
+    kisDrainPageStoreReclamation();
+    budget.saturate(4, bytes(blank));
+    {
+        KisStrokeJobFailureContext failure(true);
+        dm.clear(QRect(0, 0, 64, 64), bytes(color));
+        QVERIFY(failure.failed()); QVERIFY(dm.extent().isEmpty());
+    }
+    budget.release();
+    {
+        KisStrokeJobFailureContext failure(true);
+        dm.clear(QRect(0, 0, 64, 64), bytes(color));
+        QVERIFY(!failure.failed());
+    }
+    QByteArray actual(4, 0); dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, color); QCOMPARE(dm.extent(), QRect(0, 0, 64, 64));
+}
+
 void KisTiledDataManagerTest::testPageStoreAbortUnderBudgetPressure_data()
 {
     QTest::addColumn<int>("bpp");

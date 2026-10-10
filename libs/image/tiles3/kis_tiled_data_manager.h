@@ -335,10 +335,9 @@ private:
     KisTileData *m_historyDefaultTileData = nullptr;
     KisMementoManager *m_mementoManager;
     KisTiledDataManagerPageStoreBackend *m_pageStoreBackend;
-    // One immutable, manager-owned uniform backing lets repeated whole-tile
-    // fills recognize a physical no-op without walking PageStore or advancing
-    // the logical generation. Writers still COW because this reference keeps
-    // the backing shared.
+    // The legacy fallback shares one immutable uniform backing and recognizes
+    // repeated whole-tile fills by identity. Writers still COW because this
+    // reference keeps the backing shared; native PageStore has its own source.
     KisTileData *m_uniformClearTileData = nullptr;
     QByteArray m_uniformClearPixel;
     QMutex m_uniformClearMutex;
