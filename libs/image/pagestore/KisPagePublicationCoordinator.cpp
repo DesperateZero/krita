@@ -180,7 +180,6 @@ public:
     bool surfacePrepared = false;
     bool prepared = false;
     bool installed = false;
-    bool collected = false;
 
     const Change *findChange(const KisPageKey &key) const
     {
@@ -373,7 +372,7 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepareSurfaceLock
 }
 
 bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
-    tryInstallLocked(
+    tryAcceptLocked(
         KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
         QString *error)
 {
@@ -448,30 +447,42 @@ bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
     return true;
 }
 
-void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::collectRetirementsLocked()
+void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::finishUnlocked(
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup,
+    QMutexLocker<QMutex> &ownerLock)
 {
-    if (!data || !data->installed || data->collected) return;
-    // The old identities no longer select the overlay. Their ledger records
-    // and historical metadata are disposal work, not part of publication.
-    for (const auto &change : std::as_const(data->changes)) {
-        if (!change.superseded.isValid()) continue;
-        const bool revoked = data->owner->m_owner.revokePreparedPage(change.superseded);
-        Q_ASSERT(revoked);
-        Q_UNUSED(revoked);
-        data->owner->m_history.requestKeyLocked(change.replacement.key);
+    Q_ASSERT(!ownerLock.isLocked());
+    if (!data) {
+        Q_ASSERT(cleanup.isEmpty());
+        return;
     }
-    if (!data->detachments.empty())
-        data->owner->m_history.collectUnreachableLocked(nullptr, 0);
-    data->collected = true;
+    auto &owner = *data->owner;
+    // Candidate activities can otherwise keep detached metadata alive during
+    // collection. Release or hand off that storage before requesting history.
+    owner.m_disposeMetadataCleanup(owner.m_ownerContext, std::move(cleanup));
+    if (data->installed) {
+        ownerLock.relock();
+        // Only accepted replacements transfer the superseded proofs. Rejected
+        // preparation still borrows its producer's proofs and must not revoke.
+        for (const auto &change : std::as_const(data->changes)) {
+            if (!change.superseded.isValid()) continue;
+            const bool revoked = owner.m_owner.revokePreparedPage(change.superseded);
+            Q_ASSERT(revoked);
+            Q_UNUSED(revoked);
+            owner.m_history.requestKeyLocked(change.replacement.key);
+        }
+        if (!data->detachments.empty())
+            owner.m_history.collectUnreachableLocked(nullptr, 0);
+        ownerLock.unlock();
+    }
+    // Consume the allocator retention as well as its payload. An empty
+    // unique_ptr can still keep the charged controller alive in its deleter.
+    data = decltype(data){};
 }
 
 void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::cancel() noexcept
 {
-    if (!data || data->installed || !data->owner) {
-        Q_ASSERT(!data || !data->installed || data->collected);
-        data.reset();
-        return;
-    }
+    Q_ASSERT(!data || !data->installed);
     // Replacements belong to their original page/lease until install accepts
     // them. Discarding preparation releases capacity, never those proofs.
     data.reset();
@@ -830,10 +841,9 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
     const OverlayChange removal{key, {}, true};
     auto update = prepareOverlayUpdateLocked(transaction, &removal, 1, error);
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
-    const auto dispose = qScopeGuard([&] {
+    auto dispose = qScopeGuard([&] {
         ownerLock.unlock();
-        m_disposeMetadataCleanup(m_ownerContext, std::move(metadataCleanup));
-        update = {};
+        update.finishUnlocked(std::move(metadataCleanup), ownerLock);
         ownerLock.relock();
     });
     if (!update.isValid()) return false;
@@ -846,8 +856,11 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
         KisPageStoreDetail::setError(error, QStringLiteral("conditional page removal changed during preparation"));
         return false;
     }
-    if (!update.prepareSurfaceLocked(error) || !update.tryInstallLocked(&metadataCleanup, error)) return false;
-    update.collectRetirementsLocked();
+    if (!update.prepareSurfaceLocked(error) || !update.tryAcceptLocked(&metadataCleanup, error)) return false;
+    ownerLock.unlock();
+    update.finishUnlocked(std::move(metadataCleanup), ownerLock);
+    ownerLock.relock();
+    dispose.dismiss();
     processRetirementsUnlocked(ownerLock);
     KisPageStoreDetail::setError(error, {});
     return true;

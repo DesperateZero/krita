@@ -72,7 +72,7 @@ class KisPagePublicationCoordinator final
 public:
     struct OverlayChange {
         KisPageKey key;
-        // Borrowed from the original page/lease until tryInstall accepts.
+        // Borrowed from the original page/lease until tryAcceptLocked accepts.
         // The caller revokes it on terminal rejection, or retains it to retry.
         KisPreparedPageProof proof;
         bool removal = false;
@@ -91,13 +91,17 @@ public:
         bool isValid() const;
         qsizetype metadataChangeCount() const;
         bool prepare(QString *error, bool *storageRefused = nullptr);
-        // Caller keeps the owner gate from this last preparation through
-        // tryInstallLocked, so sibling page/extent changes cannot be lost.
+        // Keep the owner gate from the latest surface preparation through
+        // acceptance. Surface storage is prepared before allocation-free install.
         bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);
-        bool tryInstallLocked(
+        bool tryAcceptLocked(
             KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
             QString *error);
-        void collectRetirementsLocked();
+        // Caller first relinquishes any accepted producer proofs. Keep its
+        // admission across cleanup. Enter/return unlocked; the gate is acquired
+        // only for history collection. Consumes accepted or rejected preparation.
+        void finishUnlocked(KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup,
+                            QMutexLocker<QMutex> &ownerLock);
 
     private:
         class Data;

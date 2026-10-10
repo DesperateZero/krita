@@ -2709,7 +2709,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure, &storageRefused)) success = false;
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims(owner->operational && owner->writeCoordinator.transactionHasSession(d->transaction.id));
-    if (success && hasOverlay && !overlay.tryInstallLocked(
+    if (success && hasOverlay && !overlay.tryAcceptLocked(
             &metadataCleanup, &failure)) {
         success = false;
         if (failure.isEmpty())
@@ -2726,8 +2726,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
         if (!storageRefused) d->state = Private::State::Failed;
         lock.unlock();
         phase.next(Phase::MutationSealCleanup, pageWork);
-        metadataCleanup.dispose(owner->metadataCleanupStatistics);
-        overlay = {};
+        overlay.finishUnlocked(std::move(metadataCleanup), lock);
         lock.relock();
         retire();
         if (!storageRefused) d->cancelLocked(&lock);
@@ -2748,11 +2747,7 @@ bool KisPageMutationSession::sealImpl(QString *error, bool legacyFinalUnlock, Ki
     // owner gate while doing that work.
     lock.unlock();
     phase.next(Phase::MutationSealCleanup, pageWork);
-    metadataCleanup.dispose(owner->metadataCleanupStatistics);
-    lock.relock();
-    overlay.collectRetirementsLocked();
-    lock.unlock();
-    overlay = {};
+    overlay.finishUnlocked(std::move(metadataCleanup), lock);
     sealedPages = Private::ColdPageSet{};
     d->clearSources();
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
@@ -4814,19 +4809,12 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         lock.relock();
     }
     if (success) {
-        success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryInstallLocked(
-            &metadataCleanup, nullptr);
-        if (success) {
-            proof = {};
-            overlay.collectRetirementsLocked();
-        }
+        success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryAcceptLocked(&metadataCleanup, nullptr);
+        if (success) proof = {};
     }
-    const auto disposeCleanup = qScopeGuard([&] {
-        lock.unlock();
-        metadataCleanup.dispose(d->metadataCleanupStatistics);
-        overlay = {};
-        lock.relock();
-    });
+    lock.unlock();
+    overlay.finishUnlocked(std::move(metadataCleanup), lock);
+    lock.relock();
     if (!success) {
         if (proof.isValid()) d->owner.revokePreparedPage(proof);
         const auto cancelled = d->cancelWriteLocked(request);

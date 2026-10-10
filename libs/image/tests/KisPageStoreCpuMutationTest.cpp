@@ -5641,13 +5641,28 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
             for (qsizetype i = 0; i < count; ++i) fixture.retirement.acceptEffect(effects[i]);
         }, +[](void *p, quint64 cookie) noexcept { static_cast<ReadTerminalFixture *>(p)->owner.cancelRetirementDebt(cookie); });
     QVERIFY2(f.init(), qPrintable(f.error));
+    struct CleanupContext {
+        QMutex *mutex;
+        KisPageMetadataCoordinator::DeferredPublicationCleanup deferred;
+        bool unlocked = true;
+        int calls = 0;
+    } cleanupContext{&f.mutex, {}};
     auto publication = std::make_unique<KisPagePublicationCoordinator>(f.epochs, f.metadata, f.owner,
-        f.budget, f.retirement, f.history, f.ready, f.activeCalls, f.operational, f.background, &f,
+        f.budget, f.retirement, f.history, f.ready, f.activeCalls, f.operational, f.background, &cleanupContext,
         +[](void *, KisPageTransactionId) { return false; },
         +[](void *, const KisPageKey &) { return false; },
         +[](void *, KisPageTransactionId, QMutexLocker<QMutex> &, QString *) { return true; },
         +[](void *, KisPageTransactionId) {},
-        +[](void *, KisPageMetadataCoordinator::DeferredPublicationCleanup) {},
+        +[](void *p, KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup) {
+            auto &context = *static_cast<CleanupContext *>(p);
+            const bool unlocked = context.mutex->tryLock();
+            if (unlocked) context.mutex->unlock();
+            context.unlocked = context.unlocked && unlocked;
+            ++context.calls;
+            // Simulate an accepted deferred candidate whose paid capacity and
+            // metadata activities remain live until the worker destroys it.
+            context.deferred = std::move(cleanup);
+        },
         +[](void *) { return true; },
         +[](void *, KisPageTransactionId, KisPageReadCleanup &) { return true; });
     f.operational = false;
@@ -5720,15 +5735,16 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     const auto cleanupFiller = qScopeGuard([&] { if (filler) freeFiller(); });
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     fill();
-    QVERIFY2(a.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
-    a.collectRetirementsLocked();
+    QVERIFY2(a.tryAcceptLocked(&cleanup, &f.error), qPrintable(f.error));
+    lock.unlock(); a.finishUnlocked(std::move(cleanup), lock); lock.relock();
+    QVERIFY(!a.isValid());
     QVERIFY(b.prepare(&f.error)); QVERIFY(b.prepareSurfaceLocked(&f.error));
-    QVERIFY2(b.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
-    b.collectRetirementsLocked();
+    QVERIFY2(b.tryAcceptLocked(&cleanup, &f.error), qPrintable(f.error));
+    lock.unlock(); b.finishUnlocked(std::move(cleanup), lock); lock.relock();
+    QVERIFY(!b.isValid());
     QCOMPARE(state->proofs.size(), size_t(2));
     QCOMPARE(state->proofInsertions.load(), size_t(0));
     freeFiller();
-    lock.unlock(); a = {}; b = {}; lock.relock();
 
     const std::array<Change, 3> removals{{{key(2), {}, true}, {key(1), {}, true}, {key(), {}, true}}};
     Overlay removal;
@@ -5759,11 +5775,18 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
         }
         freeFiller(); // The same candidate may retry before its acceptance.
     }
+    // A rejected candidate can outlive its facade: it borrows proofs but owns
+    // real storage. Accepted preparation is now consumed by common finish.
+    auto tail = publication->prepareOverlayUpdateLocked(tx, removals.data(), removals.size(), &f.error);
+    QVERIFY(tail.isValid());
     QVERIFY2(removal.prepareSurfaceLocked(&f.error), qPrintable(f.error));
     fill();
-    QVERIFY2(removal.tryInstallLocked(&cleanup, &f.error), qPrintable(f.error));
+    QVERIFY2(removal.tryAcceptLocked(&cleanup, &f.error), qPrintable(f.error));
     const auto beforeCollection = f.budget.usage().backpressureCount;
-    removal.collectRetirementsLocked(); // Original History retains refused keys at hard capacity.
+    lock.unlock(); removal.finishUnlocked(std::move(cleanup), lock); lock.relock();
+    QVERIFY(!removal.isValid());
+    QVERIFY(cleanupContext.unlocked);
+    QCOMPARE(cleanupContext.calls, 3);
     QVERIFY(f.budget.usage().backpressureCount > beforeCollection);
     QCOMPARE(f.history.snapshotLocked().pendingPages, qsizetype(0)); // No key node could be allocated.
     QVERIFY(state->proofs.empty());
@@ -5778,7 +5801,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     }
     QCOMPARE(f.physical.provider->retireCalls.load(), 0);
     freeFiller();
-    lock.unlock(); cleanup = {}; lock.relock();
+    lock.unlock(); cleanupContext.deferred = {}; lock.relock();
     f.history.collectUnreachableLocked(nullptr, 0); // Resume the original scan without replaying installation.
     lock.unlock();
     f.retirement.process(std::numeric_limits<qsizetype>::max());
@@ -5787,7 +5810,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QCOMPARE(f.physical.provider->retireCalls.load(), 2);
     QVERIFY(f.retirement.isDrained());
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
-    // Installed candidate/state tails contain only storage; destroying the
+    // Rejected candidate/state tails contain only storage; destroying the
     // publication facade first cannot release their actual capacity early.
     const auto withFacade = f.live();
     publication.reset();
@@ -5798,7 +5821,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
         return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     };
     QVERIFY(parentLive() > parentBaseline); // Controller is gone; the candidate still owns actual storage.
-    removal = {};
+    tail = {};
     QCOMPARE(parentLive(), parentBaseline);
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
 }
