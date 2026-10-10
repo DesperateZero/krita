@@ -1008,11 +1008,13 @@ private Q_SLOTS:
         QTest::newRow("duplicate-delta") << true;
     }
     void restorationUsesOriginalTargets();
+    void commitPreparationClaimsAndLateCapture_data();
     void commitPreparationClaimsAndLateCapture();
     void publicationCleanupUsesBoundedBackgroundPasses();
     void hostLogicalCompletionIsPreparedOnce();
     void commitRevalidatesReadLeaseRevision();
     void publicationWhileCapturedReadersChange();
+    void commitRebasesAfterDisjointPublication_data();
     void commitRebasesAfterDisjointPublication();
     void commitRejectsConflictingPublicationAtomically();
     void genericWriteLifetimeBlocksCommit();
@@ -1047,7 +1049,9 @@ private Q_SLOTS:
     void pinFootprintTracksGuards();
     void mutablePreparationDoesNotAliasSource_data();
     void mutablePreparationDoesNotAliasSource();
+    void failedCommitPreparationReleasesClaim_data();
     void failedCommitPreparationReleasesClaim();
+    void ownedEmptyCommitPreservesActivityAndIdentity();
     void commitProviderValidationStorageFailureIsRecoverable();
     void restoreProtectsSourceAndRevalidatesLease();
     void restoreRejectsNewTransaction();
@@ -2997,8 +3001,16 @@ void KisPageStoreCpuMutationTest::restorationUsesOriginalTargets()
     QVERIFY(f.store->releaseSnapshot(retained.token)); QVERIFY(f.store->closeSession());
 }
 
+void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture_data()
+{
+    QTest::addColumn<bool>("internal");
+    QTest::newRow("external-input") << false;
+    QTest::newRow("owned-delta") << true;
+}
+
 void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture()
 {
+    QFETCH(bool, internal);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     const auto tx = f.store->beginCurrentTransaction();
     auto segment = f.begin(tx);
@@ -3049,9 +3061,9 @@ void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture()
         otherWrite = {};
         otherTransactionWorks = otherTransactionWorks && mutation.cancel() && f.store->abort(other);
     });
-    const auto committed = f.store->commit(tx, prepared);
+    const bool committed = internal ? f.store->commitPreparedTransaction(tx) : f.store->commit(tx, prepared).isValid();
     f.provider->beforeValidate = {};
-    QVERIFY(committed.isValid()); QVERIFY(claimsHeld); QVERIFY(otherTransactionWorks); QVERIFY(prepareUnlocked);
+    QVERIFY(committed); QVERIFY(claimsHeld); QVERIFY(otherTransactionWorks); QVERIFY(prepareUnlocked);
     QVERIFY(cleanupUnlocked);
     QVERIFY(providerValidationUnlocked);
     QVERIFY(attempts >= 1);
@@ -3222,8 +3234,16 @@ void KisPageStoreCpuMutationTest::publicationWhileCapturedReadersChange()
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
 }
 
+void KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication_data()
+{
+    QTest::addColumn<bool>("internal");
+    QTest::newRow("external-input") << false;
+    QTest::newRow("owned-delta-retained-output") << true;
+}
+
 void KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication()
 {
+    QFETCH(bool, internal);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     const auto first = f.store->beginCurrentTransaction();
     const auto second = f.store->beginCurrentTransaction();
@@ -3240,11 +3260,20 @@ void KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication()
         if (phase == KisPageStoreDiagnosticPhase::CommitPublishOwnerWait && ++attempts == 1)
             secondCommit = f.store->commit(second, f.store->preparedPages(second));
     });
-    const auto firstCommit = f.store->commit(first, f.store->preparedPages(first));
-    QVERIFY(secondCommit.isValid()); QVERIFY(firstCommit.isValid()); QCOMPARE(attempts, 2);
+    KisRetainedImageEpochSnapshot retained;
+    KisPageKeyStorage changed;
+    bool fullRestore = true;
+    const bool firstCommit = internal
+        ? f.store->commitPreparedTransaction(first, &retained, &changed, &fullRestore)
+        : f.store->commit(first, f.store->preparedPages(first), &retained).isValid();
+    QVERIFY(secondCommit.isValid()); QVERIFY(firstCommit); QCOMPARE(attempts, 2);
     QCOMPARE(f.store->publicationStatistics().rootRebases, quint64(1));
-    QVERIFY(firstCommit.epoch.value > secondCommit.epoch.value);
+    QVERIFY(retained.isValid()); QVERIFY(retained.snapshot.epoch.value > secondCommit.epoch.value);
+    if (internal) {
+        QCOMPARE(changed.size(), size_t(1)); QCOMPARE(changed.front(), key(0)); QVERIFY(!fullRestore);
+    }
     QCOMPARE(quint8(f.pixel({}, 0)[0]), quint8(0x51)); QCOMPARE(quint8(f.pixel({}, 1)[0]), quint8(0x52));
+    QVERIFY(f.store->releaseSnapshot(retained.token));
     QVERIFY(f.store->closeSession());
 }
 
@@ -4115,17 +4144,49 @@ void KisPageStoreCpuMutationTest::mutablePreparationDoesNotAliasSource()
     QVERIFY(f.store->closeSession());
 }
 
+void KisPageStoreCpuMutationTest::failedCommitPreparationReleasesClaim_data()
+{
+    QTest::addColumn<bool>("internal");
+    QTest::newRow("external-input") << false;
+    QTest::newRow("owned-delta") << true;
+}
+
 void KisPageStoreCpuMutationTest::failedCommitPreparationReleasesClaim()
 {
+    QFETCH(bool, internal);
     Fixture f; QVERIFY(f.init());
     const auto tx = f.store->beginCurrentTransaction();
     auto mutation = f.begin(tx); auto write = mutation.beginWrite(key());
     QVERIFY(write.isValid()); write = {}; QVERIFY(mutation.seal());
     f.provider->validationsUntilFailure = 0;
-    QVERIFY(!f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    QVERIFY(!(internal ? f.store->commitPreparedTransaction(tx)
+                       : f.store->commit(tx, f.store->preparedPages(tx)).isValid()));
     f.provider->validationsUntilFailure = -1;
     auto retryMutation = f.begin(tx); QVERIFY(retryMutation.isActive()); QVERIFY(retryMutation.cancel());
     QVERIFY(f.store->abort(tx)); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::ownedEmptyCommitPreservesActivityAndIdentity()
+{
+    Fixture f; QVERIFY(f.init());
+    const auto before = f.store->captureCommittedEpoch();
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx); QVERIFY(mutation.isActive());
+    KisRetainedImageEpochSnapshot retained;
+    KisPageKeyStorage changed;
+    changed.push_back(key(9));
+    bool fullRestore = true;
+    QVERIFY(!f.store->commitPreparedTransaction(tx, &retained, &changed, &fullRestore));
+    QVERIFY(mutation.isActive()); QVERIFY(changed.empty()); QVERIFY(!fullRestore); QVERIFY(!retained.isValid());
+    QVERIFY(mutation.cancel());
+    QVERIFY(f.store->commitPreparedTransaction(tx, &retained, &changed, &fullRestore));
+    QVERIFY(changed.empty()); QVERIFY(!fullRestore); QVERIFY(!retained.isValid());
+    QCOMPARE(f.store->captureCommittedEpoch().epoch, before.epoch);
+    QCOMPARE(f.store->sessionStats().committedTransactions, quint64(0));
+    QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(0));
+    QVERIFY(!f.store->commitPreparedTransaction(tx)); // An already-ended identity is not a new no-op.
+    QVERIFY(!f.store->commitPreparedTransaction({}));
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::commitProviderValidationStorageFailureIsRecoverable()

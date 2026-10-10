@@ -7,6 +7,7 @@
 #include "KisImageEpochReferenceModel.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPagePublicationCoordinator_p.h"
 
 #include <QMutex>
 #include <QMutexLocker>
@@ -621,6 +622,12 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
     return true;
 }
 
+static const KisPreparedPageProof &epochPreparedProof(const KisPreparedPageProof &proof) { return proof; }
+static const KisPreparedPageProof &epochPreparedProof(const std::pair<const KisPageKey, KisPreparedPageProof> &entry)
+{
+    return entry.second;
+}
+
 struct EpochTransactionChanges {
     explicit EpochTransactionChanges(const KisMutationStorageAllocator<EpochTransactionChanges> &storage)
         : changes(storage), surfaceChanges(storage), removedPages(storage) {}
@@ -628,19 +635,21 @@ struct EpochTransactionChanges {
     EpochArray<KisSurfaceEpochChange> surfaceChanges;
     EpochArray<KisPageKey> removedPages;
     bool empty() const { return changes.empty() && surfaceChanges.empty() && removedPages.empty(); }
-    bool matches(const KisPreparedPageSet &input) const
+    template<class Proofs, class Surfaces, class Removals>
+    bool matches(const Proofs &proofs, const Surfaces &surfaces, const Removals &removals) const
     {
-        if (changes.size() != size_t(input.proofs.size()) || surfaceChanges.size() != size_t(input.surfaceChanges.size())
-            || removedPages.size() != size_t(input.removedPages.size())) return false;
-        for (const auto &proof : input.proofs) {
+        if (changes.size() != size_t(proofs.size()) || surfaceChanges.size() != size_t(surfaces.size())
+            || removedPages.size() != size_t(removals.size())) return false;
+        for (const auto &entry : proofs) {
+            const auto &proof = epochPreparedProof(entry);
             const auto &version = proof.authority.version;
             const auto found = std::lower_bound(changes.begin(), changes.end(), version.key,
                 [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
             if (found == changes.end() || !(*found == version)) return false;
         }
-        for (const auto &surface : input.surfaceChanges)
+        for (const auto &surface : surfaces)
             if (std::find(surfaceChanges.begin(), surfaceChanges.end(), surface) == surfaceChanges.end()) return false;
-        return std::all_of(input.removedPages.begin(), input.removedPages.end(),
+        return std::all_of(removals.begin(), removals.end(),
             [&](const auto &key) { return std::binary_search(removedPages.begin(), removedPages.end(), key, pageKeyLess); });
     }
 };
@@ -986,22 +995,27 @@ catch (const std::bad_alloc &) {
 
 bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPages, QString *error)
 {
-    return prepareImpl(preparedPages, false, error);
-}
-
-bool KisImageEpochReferenceModel::preparePublication(const KisPreparedPageSet &preparedPages, QString *error)
-{
-    return prepareImpl(preparedPages, true, error);
-}
-
-bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error) try
-{
-    const auto d = std::atomic_load(&m_core);
-    if (!d) { KisPageStoreDetail::setError(error, QStringLiteral("image epoch model is not initialized")); return false; }
     if (!preparedPages.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page set is invalid"));
         return false;
     }
+    return prepareImpl(preparedPages.transaction, preparedPages.proofs, preparedPages.surfaceChanges,
+                       preparedPages.removedPages, false, error);
+}
+
+bool KisImageEpochReferenceModel::preparePublication(
+    KisPageTransactionId transaction, const KisPagePublicationDelta &delta, QString *error)
+{
+    return prepareImpl(transaction, delta.proofs, delta.surfaceChanges, delta.removals, true, error);
+}
+
+template<class Proofs, class Surfaces, class Removals>
+bool KisImageEpochReferenceModel::prepareImpl(
+    KisPageTransactionId transaction, const Proofs &proofs, const Surfaces &surfaces,
+    const Removals &removals, bool complete, QString *error) try
+{
+    const auto d = std::atomic_load(&m_core);
+    if (!d) { KisPageStoreDetail::setError(error, QStringLiteral("image epoch model is not initialized")); return false; }
 
     // Working and superseded storage outlive the locker, so actual deallocation
     // and budget observers run outside the epoch gate on every exit.
@@ -1009,7 +1023,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
     std::shared_ptr<EpochTransactionChanges> next;
     KisImageEpochRootSnapshot base;
     QMutexLocker locker(&d->mutex);
-    auto transactionIt = d->transactions.find(preparedPages.transaction.value);
+    auto transactionIt = d->transactions.find(transaction.value);
     if (!d->operational() || transactionIt == d->transactions.end()
         || !transactionIt->second.isActive()) {
         KisPageStoreDetail::setError(error, QStringLiteral("transaction is not open for preparation"));
@@ -1017,7 +1031,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
     }
     // A complete retry with identical facts reuses the accepted immutable
     // value and revision; it cannot invalidate an already prepared root.
-    if (complete && transactionIt->second.delta && transactionIt->second.delta->matches(preparedPages)) {
+    if (complete && transactionIt->second.delta && transactionIt->second.delta->matches(proofs, surfaces, removals)) {
         KisPageStoreDetail::setError(error, {});
         return true;
     }
@@ -1033,17 +1047,18 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
     const auto storage = KisMutationStorageAllocator<EpochTransactionChanges>::retained(d->budget);
     next = std::allocate_shared<EpochTransactionChanges>(storage, storage);
     const size_t previousChanges = previous ? previous->changes.size() : 0;
-    next->changes.reserve(previousChanges + size_t(preparedPages.proofs.size()));
+    next->changes.reserve(previousChanges + size_t(proofs.size()));
     next->surfaceChanges.reserve((previous ? previous->surfaceChanges.size() : 0)
-                                 + size_t(preparedPages.surfaceChanges.size()));
+                                 + size_t(surfaces.size()));
     next->removedPages.reserve((previous ? previous->removedPages.size() : 0)
-                               + size_t(preparedPages.removedPages.size()));
+                               + size_t(removals.size()));
     if (previous) {
         next->changes.insert(next->changes.end(), previous->changes.begin(), previous->changes.end());
         next->surfaceChanges.insert(next->surfaceChanges.end(), previous->surfaceChanges.begin(), previous->surfaceChanges.end());
         next->removedPages.insert(next->removedPages.end(), previous->removedPages.begin(), previous->removedPages.end());
     }
-    for (const KisPreparedPageProof &proof : preparedPages.proofs) {
+    for (const auto &entry : proofs) {
+        const KisPreparedPageProof &proof = epochPreparedProof(entry);
         const KisPageVersion &after = proof.authority.version;
         KisPageVersion before;
         const bool hadBefore = base.resolve(after.key, &before);
@@ -1071,7 +1086,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
     std::sort(next->changes.begin(), next->changes.end(), [](const KisPageVersion &lhs, const KisPageVersion &rhs) {
         return pageKeyLess(lhs.key, rhs.key);
     });
-    for (const KisSurfaceEpochChange &change : preparedPages.surfaceChanges) {
+    for (const KisSurfaceEpochChange &change : surfaces) {
         KisSurfaceEpochState baseState;
         if (!base.surfaceState(change.before.surface, &baseState)
             || !(baseState == change.before)) {
@@ -1089,7 +1104,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
             next->surfaceChanges.push_back(change);
         }
     }
-    for (const KisPageKey &key : preparedPages.removedPages) {
+    for (const KisPageKey &key : removals) {
         if (!base.containsPage(key)) {
             KisPageStoreDetail::setError(error, QStringLiteral("removed page is absent from the transaction base or also written"));
             return false;
@@ -1107,7 +1122,7 @@ bool KisImageEpochReferenceModel::prepareImpl(const KisPreparedPageSet &prepared
         }
     }
     locker.relock();
-    transactionIt = d->transactions.find(preparedPages.transaction.value);
+    transactionIt = d->transactions.find(transaction.value);
     if (transactionIt == d->transactions.end() || !transactionIt->second.isActive() || transactionIt->second.revision != revision) {
         KisPageStoreDetail::setError(error, QStringLiteral("transaction changed during write set preparation"));
         return false;

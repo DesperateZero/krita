@@ -35,6 +35,38 @@ struct KisPagePublicationCoordinatorSnapshot {
 class KisPageReadCleanup;
 struct KisPageCapturedRelease;
 
+// The publication owner's original mutable delta. Epoch preparation borrows
+// these containers only while the owner's CommitPreparation excludes edits;
+// it still creates its own necessary immutable version projection.
+struct KisPagePublicationDelta {
+    struct PageHash {
+        size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
+        size_t seed = QHashSeed::globalSeed();
+    };
+    using ProofMap = std::unordered_map<KisPageKey, KisPreparedPageProof, PageHash,
+        std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, KisPreparedPageProof>>>;
+    using RemovalSet = std::unordered_set<KisPageKey, PageHash,
+        std::equal_to<KisPageKey>, KisMutationStorageAllocator<KisPageKey>>;
+    explicit KisPagePublicationDelta(const KisMutationStorageAllocator<char> &storage)
+        : proofs(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+        , surfaceChanges(storage)
+        , removals(0, PageHash{}, std::equal_to<KisPageKey>{}, storage) {}
+    ProofMap proofs;
+    std::vector<KisSurfaceEpochChange, KisMutationStorageAllocator<KisSurfaceEpochChange>> surfaceChanges;
+    RemovalSet removals;
+    // Capacity only. Cancellation may release it without the owner gate.
+    std::atomic<size_t> proofInsertions{0};
+    std::atomic<size_t> removalInsertions{0};
+    bool hasChanges() const
+    {
+        return !proofs.empty() || !surfaceChanges.empty() || !removals.empty();
+    }
+    bool isEmpty() const
+    {
+        return !hasChanges() && !proofInsertions.load() && !removalInsertions.load();
+    }
+};
+
 /**
  * Owner-gated transaction publication state.
  *
@@ -46,14 +78,9 @@ class KisPagePublicationCoordinator final
 {
     friend class KisPageWriteCoordinator;
     friend class KisPageStoreCpuMutationTest;
-    struct PageHash {
-        size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
-        size_t seed = QHashSeed::globalSeed();
-    };
-    using ProofMap = std::unordered_map<KisPageKey, KisPreparedPageProof, PageHash,
-        std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, KisPreparedPageProof>>>;
-    using RemovalSet = std::unordered_set<KisPageKey, PageHash,
-        std::equal_to<KisPageKey>, KisMutationStorageAllocator<KisPageKey>>;
+    using PageHash = KisPagePublicationDelta::PageHash;
+    using ProofMap = KisPagePublicationDelta::ProofMap;
+    using RemovalSet = KisPagePublicationDelta::RemovalSet;
     struct VersionLess {
         bool operator()(const KisPageVersion &a, const KisPageVersion &b) const noexcept {
             if (a.key.surface.value != b.key.surface.value) return a.key.surface.value < b.key.surface.value;
@@ -173,8 +200,15 @@ public:
                                            const KisPreparedPageSet &preparedPages,
                                            KisRetainedImageEpochSnapshot *retainedAfter,
                                            const KisPageStore *diagnosticOwner,
-                                           QMutexLocker<QMutex> &ownerLock,
-                                           QWriteLocker *publicationLock = nullptr);
+                                           QMutexLocker<QMutex> &ownerLock);
+    bool hasPreparedDeltaLocked(KisPageTransactionId transaction) const;
+    KisImageEpochCommitTicket commitOwnedLocked(const KisPageTransaction &transaction,
+                                                KisRetainedImageEpochSnapshot *retainedAfter,
+                                                const KisPageStore *diagnosticOwner,
+                                                QMutexLocker<QMutex> &ownerLock,
+                                                QWriteLocker *publicationLock = nullptr,
+                                                KisPageKeyStorage *changedPages = nullptr,
+                                                bool *requiresFullPageRestore = nullptr);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                          const KisPageKeyStorage *changedPages,
                                                          const KisPageStore *diagnosticOwner,
@@ -226,27 +260,7 @@ private:
         const KisPageTransaction &transaction, const void *input, size_t count,
         OverlayChange (*readChange)(const void *, size_t), QString *error, bool *storageRefused);
     void revokePreparedProofLocked(const KisPreparedPageProof &proof) noexcept;
-    struct PreparedTransactionState {
-        explicit PreparedTransactionState(const KisMutationStorageAllocator<char> &storage)
-            : proofs(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
-            , surfaceChanges(storage)
-            , removals(0, PageHash{}, std::equal_to<KisPageKey>{}, storage) {}
-        ProofMap proofs;
-        std::vector<KisSurfaceEpochChange, KisMutationStorageAllocator<KisSurfaceEpochChange>> surfaceChanges;
-        RemovalSet removals;
-        // Storage only: overlapping candidates must reserve enough buckets
-        // for every constructed node. Cancellation may run outside the owner
-        // gate; it only gives capacity back, never edits the visible delta.
-        std::atomic<size_t> proofInsertions{0};
-        std::atomic<size_t> removalInsertions{0};
-
-        bool isEmpty() const
-        {
-            return proofs.empty() && surfaceChanges.empty() && removals.empty()
-                && !proofInsertions.load() && !removalInsertions.load();
-        }
-    };
-    std::shared_ptr<PreparedTransactionState> preparedStateLocked(KisPageTransactionId transaction);
+    std::shared_ptr<KisPagePublicationDelta> preparedStateLocked(KisPageTransactionId transaction);
     const ProofMap *findProofsLocked(KisPageTransactionId transaction) const;
 
     /**
@@ -304,8 +318,8 @@ private:
     // The synchronous call owns the claim record through every owner unlock.
     // Publication/abort admission never allocates a container node.
     boost::intrusive::list<CommitPreparation> m_preparingCommits;
-    using TransactionMap = std::map<quint64, std::shared_ptr<PreparedTransactionState>,
-        std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, std::shared_ptr<PreparedTransactionState>>>>;
+    using TransactionMap = std::map<quint64, std::shared_ptr<KisPagePublicationDelta>,
+        std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, std::shared_ptr<KisPagePublicationDelta>>>>;
     TransactionMap m_preparedTransactions;
     // Immutable Tiles3 surface policy, not a second extent or page registry.
     KisSurfaceId m_derivedExtentSurface;

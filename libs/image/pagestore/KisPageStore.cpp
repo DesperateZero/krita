@@ -4915,15 +4915,25 @@ KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transac
     QMutexLocker locker(&d->mutex);
     return d->publicationCoordinator.commitLocked(transaction, preparedPages, retainedAfter, this, locker);
 }
-KisImageEpochCommitTicket KisPageStore::commitAndReleasePublicationLock(
-    const KisPageTransaction &transaction, const KisPreparedPageSet &preparedPages,
-    QWriteLocker &publicationLock)
+bool KisPageStore::commitPreparedTransaction(
+    const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter,
+    KisPageKeyStorage *changedPages, bool *requiresFullPageRestore, QWriteLocker *publicationLock)
 {
+    if (retainedAfter) *retainedAfter = {};
+    if (changedPages) changedPages->clear();
+    if (requiresFullPageRestore) *requiresFullPageRestore = false;
     if (transaction.id.isValid())
         KisPageMutationSession::Private::retryOrphans(d.data(), transaction.id);
+    // Only empty commits need abort cleanup; its storage still dies after
+    // the owner locker on every exit, including refusal.
+    std::optional<KisPageReadCleanup> cleanup;
     QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.commitLocked(transaction, preparedPages, nullptr, this, locker,
-                                                  &publicationLock);
+    if (!d->publicationCoordinator.hasPreparedDeltaLocked(transaction.id)) {
+        cleanup.emplace(d->readCoordinator);
+        return d->publicationCoordinator.abortLocked(transaction, locker, *cleanup);
+    }
+    return d->publicationCoordinator.commitOwnedLocked(transaction, retainedAfter, this, locker,
+        publicationLock, changedPages, requiresFullPageRestore).isValid();
 }
 
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained)

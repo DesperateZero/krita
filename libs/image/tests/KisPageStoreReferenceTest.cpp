@@ -37,6 +37,7 @@
 #include "KisPageMetadataCoordinator_p.h"
 #include "KisPageStateMachine_p.h"
 #include "KisPageOwnerLedger.h"
+#include "KisPagePublicationCoordinator_p.h"
 #include "KisPageReplicaProvider.h"
 #include "KisPageStore.h"
 #include "KisPageStoreCheckpoint.h"
@@ -101,6 +102,14 @@ template<typename Callback>
 bool invokeEpochCallback(void *context, KisImageEpochId epoch)
 {
     return (*static_cast<Callback *>(context))(epoch);
+}
+
+void setPublicationDelta(KisPagePublicationDelta &delta, const KisPreparedPageSet &input)
+{
+    delta.proofs.clear(); delta.surfaceChanges.clear(); delta.removals.clear();
+    for (const auto &proof : input.proofs) delta.proofs.emplace(proof.authority.version.key, proof);
+    delta.surfaceChanges.assign(input.surfaceChanges.begin(), input.surfaceChanges.end());
+    delta.removals.insert(input.removedPages.begin(), input.removedPages.end());
 }
 
 KisPageKey pageKey(qint32 column, qint32 row = 0)
@@ -2477,6 +2486,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     original.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
     original.surfaceChanges = {{initial.surfaces.first(), surfaceEpochState({1}, 2, 0x19)}};
     original.removedPages = {pageKey(1)};
+    KisPagePublicationDelta ownedOriginal{KisMutationStorageAllocator<char>(&budget)};
+    setPublicationDelta(ownedOriginal, original);
     const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto before = live();
     QVERIFY(model.prepare(original));
@@ -2492,6 +2503,8 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
             changed.surfaceChanges.append({initial.surfaces[i], surfaceEpochState({quint64(i + 1)}, 2, 0x19)});
     if (refusal == 3)
         for (int i = 3; i < 512; ++i) changed.removedPages.append(pageKey(i));
+    KisPagePublicationDelta ownedChanged{KisMutationStorageAllocator<char>(&budget)};
+    setPublicationDelta(ownedChanged, changed);
     const auto acceptedBytes = live();
     // For array cases the original shared value is admitted first; only the
     // selected large real capacity refuses. All partial charges must unwind.
@@ -2501,9 +2514,9 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     const auto freeFiller = qScopeGuard([&] { if (filler) freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
     QCOMPARE(model.activeTransaction(tx.id), tx); // Native queries export no arrays.
-    QVERIFY(model.preparePublication(original)); // Identical full facts reuse the original storage.
+    QVERIFY(model.preparePublication(tx.id, ownedOriginal)); // Identical full facts reuse the original storage.
     QString error;
-    QVERIFY(!(complete ? model.preparePublication(changed, &error) : model.prepare(changed, &error)));
+    QVERIFY(!(complete ? model.preparePublication(tx.id, ownedChanged, &error) : model.prepare(changed, &error)));
     QVERIFY(error.contains(QStringLiteral("storage admission")));
     QCOMPARE(model.activeTransaction(tx.id), tx);
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
@@ -2513,14 +2526,14 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QCOMPARE(refused.changes, accepted.changes);
     QCOMPARE(refused.surfaceChanges, accepted.surfaceChanges);
     QCOMPARE(refused.removedPages, accepted.removedPages);
-    QVERIFY(complete ? model.preparePublication(changed) : model.prepare(changed));
+    QVERIFY(complete ? model.preparePublication(tx.id, ownedChanged) : model.prepare(changed));
     auto candidate = model.prepareCommit(tx, nullptr);
     QVERIFY(candidate.isValid());
     const auto preparedBytes = live();
     const size_t installFillerBytes = size_t(limits.metadataArenaBytes - live());
     void *installFiller = allocateTestStoragePressure(parent.get(), installFillerBytes, 1);
     const auto freeInstallFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), installFiller, installFillerBytes, 1); });
-    if (complete) QVERIFY(model.preparePublication(changed)); // Preserve the prepared root's revision.
+    if (complete) QVERIFY(model.preparePublication(tx.id, ownedChanged)); // Preserve the prepared root's revision.
     QVERIFY(model.installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
     QCOMPARE(live(), limits.metadataArenaBytes);
     // The original committed record remains charged until collection.
@@ -2620,7 +2633,9 @@ void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChange
     KisPreparedPageSet removed; removed.transaction = tx.id; removed.removedPages = {pageKey(0)};
     QVERIFY(model.prepare(firstRemoval ? removed : written));
     const auto &next = firstRemoval ? written : removed;
-    QCOMPARE(complete ? model.preparePublication(next) : model.prepare(next), complete);
+    KisPagePublicationDelta owned{KisMutationStorageAllocator<char>{}};
+    setPublicationDelta(owned, next);
+    QCOMPARE(complete ? model.preparePublication(tx.id, owned) : model.prepare(next), complete);
     const auto saved = model.transaction(tx.id);
     const bool endsRemoved = complete ? !firstRemoval : firstRemoval;
     QCOMPARE(saved.changes.isEmpty(), endsRemoved);
@@ -8013,7 +8028,7 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     const auto slot = writes.handleAt(0);
     KisPageTransition prepared;
     prepared.version = pageVersion(0, 2);
-    coordinator.recordPrepared(entry, intent, prepared);
+    coordinator.recordTarget(entry, intent, prepared, KisMutationPageEntryState::MutableReady);
     coordinator.recordExposure(entry, true);
     QVERIFY(!writes.erase(slot));
     coordinator.recordExposure(entry, false);
@@ -8642,7 +8657,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     prepared.operation = {71};
     prepared.writer = {81};
     prepared.writeMode = intent.mode;
-    coordinator.recordPrepared(pendingEntry, intent, prepared);
+    coordinator.recordTarget(pendingEntry, intent, prepared, KisMutationPageEntryState::MutableReady);
     intent.inputKind = KisPageWriteInputKind::Semantic;
     QCOMPARE(coordinator.select(intent), KisPageWritePlanKind::SemanticOnly);
     QCOMPARE(coordinator.select(intent, &pendingEntry), KisPageWritePlanKind::ReusePending);

@@ -1080,18 +1080,11 @@ bool KisTiledDataManagerPageStoreBackend::finishOwnedTransaction(
         d->anonymousTransaction = {};
         d->anonymousFailed = false;
     }
-    const KisPreparedPageSet prepared = pageStore->preparedPages(transaction);
-    if (!prepared.isValid()) {
-        pageStore->abort(transaction);
-        KisPageStoreDetail::setError(error, {});
-        return true;
-    }
-    const KisImageEpochCommitTicket committed =
-        pageStore->commitAndReleasePublicationLock(transaction, prepared, publicationLocker);
-    if (!committed.isValid()) pageStore->abort(transaction);
-    KisPageStoreDetail::setError(error, committed.isValid()
+    const bool committed = pageStore->commitPreparedTransaction(transaction, nullptr, nullptr, nullptr, &publicationLocker);
+    if (!committed) pageStore->abort(transaction);
+    KisPageStoreDetail::setError(error, committed
         ? QString() : QStringLiteral("tiles3 PageStore commit failed"));
-    return committed.isValid();
+    return committed;
 }
 
 bool KisTiledDataManagerPageStoreBackend::pruneDefaultPreparedPages(

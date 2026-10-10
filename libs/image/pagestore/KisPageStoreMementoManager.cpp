@@ -286,41 +286,10 @@ KisPageStoreMemento KisPageStoreMementoManager::commit(
     if (it == d->active.end()) return {};
     const quint64 capability = allocateHistoryCapability(error, QStringLiteral("PageStore memento capability allocation failed"));
     if (!capability) return {};
-    const KisPreparedPageSet prepared =
-        d->store->preparedPages(it->second.transaction);
-    if (!prepared.isValid()) {
-        if (!d->store->abort(it->second.transaction)) {
-            KisPageStoreDetail::setError(error, QStringLiteral(
-                "PageStore no-op history transaction abort failed"));
-            return {};
-        }
-        it->second.transaction = {};
-        it->second.after = it->second.before;
-        auto record = d->active.extract(it);
-        record.key() = capability;
-        d->mementos.insert(std::move(record));
-        KisPageStoreDetail::setError(error, {});
-        return {capability};
-    }
     auto &record = it->second;
-    try {
-        record.changedPages.clear();
-        record.changedPages.reserve(size_t(prepared.proofs.size()) + size_t(prepared.removedPages.size()));
-        for (const auto &proof : prepared.proofs) record.changedPages.push_back(proof.authority.version.key);
-        record.changedPages.insert(record.changedPages.end(), prepared.removedPages.begin(), prepared.removedPages.end());
-    } catch (const std::bad_alloc &) {
-        KisPageStoreDetail::setError(error, QStringLiteral("PageStore history delta storage is unavailable"));
-        return {};
-    }
-    record.requiresFullPageRestore = std::any_of(
-        prepared.surfaceChanges.constBegin(), prepared.surfaceChanges.constEnd(),
-        [](const KisSurfaceEpochChange &change) {
-            return change.before.format.defaultPixel != change.after.format.defaultPixel;
-        });
     KisRetainedImageEpochSnapshot after;
-    const KisImageEpochCommitTicket committed =
-        d->store->commit(it->second.transaction, prepared, &after);
-    if (!committed.isValid()) {
+    if (!d->store->commitPreparedTransaction(record.transaction, &after, &record.changedPages,
+                                             &record.requiresFullPageRestore)) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore history transaction commit failed"));
         return {};
@@ -328,9 +297,8 @@ KisPageStoreMemento KisPageStoreMementoManager::commit(
     it->second.transaction = {};
     // A commit requesting retention admits the complete output before root
     // installation. Acceptance cannot leave this history capability orphaned.
-    Q_ASSERT(after.isValid() && after.snapshot.epoch == committed.epoch);
-
-    record.after = after;
+    // A successful empty transaction was aborted and shares the before token.
+    record.after = after.isValid() ? after : record.before;
     auto accepted = d->active.extract(it);
     accepted.key() = capability;
     d->mementos.insert(std::move(accepted));

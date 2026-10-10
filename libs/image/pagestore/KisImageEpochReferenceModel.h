@@ -20,6 +20,7 @@
 class KisImageEpochPageRoot;
 class KisImageEpochSurfaces;
 class KisBackingBudgetController;
+struct KisPagePublicationDelta;
 
 enum class KisPageTransactionState : quint8 {
     Invalid,
@@ -264,8 +265,11 @@ private:
 
     // Publication supplies the complete owner-validated write set. A refused
     // candidate may be retried or replaced without replaying an incremental delta.
-    bool preparePublication(const KisPreparedPageSet &preparedPages, QString *error = nullptr);
-    bool prepareImpl(const KisPreparedPageSet &preparedPages, bool complete, QString *error);
+    bool preparePublication(KisPageTransactionId transaction, const KisPagePublicationDelta &delta,
+                            QString *error = nullptr);
+    template<class Proofs, class Surfaces, class Removals>
+    bool prepareImpl(KisPageTransactionId transaction, const Proofs &proofs,
+                     const Surfaces &surfaces, const Removals &removals, bool complete, QString *error);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
                                  bool retainAfter = false);
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);

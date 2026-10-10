@@ -579,11 +579,16 @@ private:
     bool configureSharedNonPayloadBudget(
         const std::shared_ptr<KisBackingBudgetController> &budget,
         QString *error);
-    // The backend has already hidden its anonymous selector under this lock.
-    // Release it after successful root installation, before deferred cleanup.
-    KisImageEpochCommitTicket commitAndReleasePublicationLock(
-        const KisPageTransaction &transaction, const KisPreparedPageSet &preparedPages,
-        QWriteLocker &publicationLock);
+    // Internal producers consume the original claimed delta. Empty work uses
+    // the original abort path. Optional history outputs are prepared before
+    // acceptance; retainedAfter remains empty for a successful no-op.
+    // A backend-supplied lock already hides its anonymous selector and is
+    // released after root installation, before deferred cleanup.
+    bool commitPreparedTransaction(const KisPageTransaction &transaction,
+                                   KisRetainedImageEpochSnapshot *retainedAfter = nullptr,
+                                   KisPageKeyStorage *changedPages = nullptr,
+                                   bool *requiresFullPageRestore = nullptr,
+                                   QWriteLocker *publicationLock = nullptr);
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
     // Adapter-only scratch prepared before pixels. On failure scratch may
     // contain a partial classification and must not be consumed. This grants
