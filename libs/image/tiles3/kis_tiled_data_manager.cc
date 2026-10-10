@@ -329,8 +329,8 @@ public:
         } else {
             m_succeeded = !m_backend || (m_batch && m_batch->finish(&m_error));
         }
-        // Successful rollback is not successful drawing. In particular, the
-        // compatibility cache still needs invalidating after finish(false).
+        // Successful cancellation is not successful drawing. The original
+        // batch delivers its working adapters before releasing its claims.
         if (!m_succeeded) reportFailure();
         return m_succeeded;
     }
@@ -1841,11 +1841,7 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
         const bool written = writeBytesBody(
             data, x, y, width, height, dataRowStride);
         diagnostic.next(Phase::WriteBytesBatchFinish, 1);
-        if (!pageStoreBatch.finish(written)) {
-            // Unpublished COW was cancelled; do not leave compatibility tiles
-            // marked ready with bytes that canonical PageStore never exposed.
-            refreshPageStoreIndex(QRect(x, y, width, height));
-        }
+        pageStoreBatch.finish(written);
     }
 }
 
@@ -2049,10 +2045,8 @@ void KisTiledDataManager::writePlanarBytes(QVector<quint8*> planes,
     const bool written = allChannelsPresent
         ? writePlanarBytesBody<true>(planes, channelSizes, x, y, width, height)
         : writePlanarBytesBody<false>(planes, channelSizes, x, y, width, height);
-    if (!pageStoreBatch.finish(written)) {
-        refreshPageStoreIndex(QRect(x, y, width, height));
+    if (!pageStoreBatch.finish(written))
         qWarning() << "PageStore planar write failed";
-    }
 }
 
 qint32 KisTiledDataManager::numContiguousColumns(qint32 x, qint32 minY, qint32 maxY) const

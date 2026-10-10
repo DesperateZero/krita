@@ -238,6 +238,8 @@ private Q_SLOTS:
     void testPageStorePackedWritePreclaimExcludesLateWriter_data();
     void testPageStorePackedWritePreclaimExcludesLateWriter();
     void testPageStorePackedWriteBorrowedAndInvalid();
+    void testPageStoreCompatibilityWriteFailure_data();
+    void testPageStoreCompatibilityWriteFailure();
     void testPageStorePackedWriteBodyAllowsReader();
     void testPageStoreWholeTileFillUsesSynchronousAdoption();
     void testPageStoreBulkNoOpAndBitBltBatching();

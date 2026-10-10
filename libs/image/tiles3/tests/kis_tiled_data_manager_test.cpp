@@ -6115,6 +6115,78 @@ void KisTiledDataManagerTest::testPageStorePackedWriteBorrowedAndInvalid()
     QCOMPARE(tile->data(), pointer); QCOMPARE(*pointer, next);
 }
 
+void KisTiledDataManagerTest::testPageStoreCompatibilityWriteFailure_data()
+{
+    QTest::addColumn<bool>("planar");
+    QTest::addColumn<bool>("history");
+    QTest::addColumn<int>("failurePoint");
+    for (bool planar : {false, true}) for (bool history : {false, true})
+        for (auto point : {KisSwapInFailurePoint::Mapping, KisSwapInFailurePoint::Allocation,
+                           KisSwapInFailurePoint::Decompression})
+            QTest::newRow(qPrintable(QStringLiteral("planar%1-history%2-failure%3")
+                .arg(planar).arg(history).arg(int(point)))) << planar << history << int(point);
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityWriteFailure()
+{
+    QFETCH(bool, planar);
+    QFETCH(bool, history);
+    QFETCH(int, failurePoint);
+    const quint8 blank = 0, initial = 0x31, warm = 0x32, last = 0x33;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(0, 0, 64, 64, &initial);
+    dm.clear(64, 0, 64, 64, &warm);
+    dm.clear(192, 0, 64, 64, &last);
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    auto borrowed = dm.getTile(0, 0, true);
+    QVERIFY(borrowed && borrowed->lockForWrite());
+    bool locked = true;
+    const auto unlock = qScopeGuard([&] { if (locked) borrowed->unlockForWrite(); });
+    auto *pointer = borrowed->data(); QVERIFY(pointer); pointer[0] = 0x41;
+    bool exists = false;
+    const auto swapped = dm.getReadOnlyTileLazy(3, 0, exists); QVERIFY(exists);
+    auto *backing = swapped->tileData(); QVERIFY(backing->ref());
+    const auto unref = qScopeGuard([&] { backing->deref(); });
+    auto *tileStore = KisTileDataStore::instance();
+    QVERIFY(tileStore->trySwapTileData(backing)); QVERIFY(!backing->isResident());
+    QByteArray input(256, char(0x71));
+    const auto write = [&] {
+        auto *bytes = reinterpret_cast<quint8 *>(input.data());
+        if (planar) dm.writePlanarBytes({bytes}, {1}, 0, 0, 256, 1);
+        else dm.writeBytes(bytes, 0, 0, 256, 1);
+    };
+    const auto committed = dm.m_pageStoreBackend->store()->sessionStats().committedTransactions;
+    tileStore->testingFailNextSwapIn(KisSwapInFailurePoint(failurePoint));
+    {
+        KisStrokeJobFailureContext failure(true);
+        write(); QVERIFY(failure.failed());
+    }
+    QCOMPARE(dm.m_pageStoreBackend->store()->sessionStats().committedTransactions, committed);
+    // The earlier raw capability remains its own owner. This call cancels
+    // its warm/cold private writes without revoking that live pointer.
+    QCOMPARE(borrowed->data(), pointer); QCOMPARE(pointer[0], quint8(0x71));
+    QVERIFY(!dm.m_hashTable->getExistingTile(2, 0));
+    auto cached = dm.m_hashTable->getExistingTile(1, 0); QVERIFY(cached);
+    QVERIFY(cached->lockForRead());
+    QCOMPARE(cached->data()[0], warm); cached->unlockForRead();
+    QByteArray actual(256, Qt::Uninitialized);
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+    QCOMPARE(actual, QByteArray(64, char(initial)) + QByteArray(64, char(warm)) +
+                     QByteArray(64, char(blank)) + QByteArray(64, char(last)));
+    borrowed->unlockForWrite(); locked = false;
+    // A fresh operation can reuse all cancelled claims, including the hole.
+    write(); dm.commit();
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+    QCOMPARE(actual, input);
+    if (history) {
+        dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+        QCOMPARE(actual, QByteArray(64, char(initial)) + QByteArray(64, char(warm)) +
+                         QByteArray(64, char(blank)) + QByteArray(64, char(last)));
+        dm.purgeHistory(memento);
+    }
+}
+
 void KisTiledDataManagerTest::testPageStorePackedWriteBodyAllowsReader()
 {
     quint8 blank = 0x13, initial = 0x31, input = 0x71, observed = 0;
