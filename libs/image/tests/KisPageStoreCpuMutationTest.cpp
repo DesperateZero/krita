@@ -760,6 +760,20 @@ private Q_SLOTS:
     void abandonedCompatibilityBatch();
     void concurrentBatchAbandonment();
     void nestedCpuBatchDoesNotAbortOuter();
+    void allocatedPagesMergesOverlay_data()
+    {
+        QTest::addColumn<int>("pages");
+        QTest::addColumn<int>("changes");
+        for (int pages : {1, 17, 257}) {
+            QVector<int> counts{0, 1};
+            if (pages > 1) counts.append(pages);
+            for (int changes : counts) {
+                QTest::newRow(qPrintable(QStringLiteral("N%1-D%2").arg(pages).arg(changes))) << pages << changes;
+            }
+        }
+    }
+    void allocatedPagesMergesOverlay();
+    void allocatedPagesUsesSelectedTransactionBase();
     void failedProductionBatchCancelsUnpublished_data()
     {
         QTest::addColumn<bool>("history");
@@ -9117,6 +9131,95 @@ void KisPageStoreCpuMutationTest::abandonedCompatibilityBatch()
     read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(0x6a)); QVERIFY(read->finish()); read.reset();
     QVERIFY(backend.store()->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::allocatedPagesMergesOverlay()
+{
+    QFETCH(int, pages); QFETCH(int, changes);
+    KisTiledDataManagerPageStoreBackend backend;
+    const quint8 blank = 0x2a;
+    QVERIFY(backend.configure(1, &blank));
+    const auto pageAt = [](int i) { return KisLogicalPageId{-2 * i, i % 3 - 1}; };
+    const auto write = [&](KisLogicalPageId page, quint8 value) {
+        auto lease = backend.acquireTile(page.column, page.row, KisTilePageStoreBridge::Access::Write);
+        if (!lease || !lease->writable()) return false;
+        lease->tileData()->data()[0] = value; lease->markDirty();
+        return lease->finish();
+    };
+    QSet<KisLogicalPageId> expected;
+    auto batch = backend.beginMutationBatch(); QVERIFY(batch);
+    for (int i = pages - 1; i >= 0; --i) { QVERIFY(write(pageAt(i), 0x51)); expected.insert(pageAt(i)); }
+    QVERIFY(batch->finish()); batch.reset();
+    const auto ordered = [](const QSet<KisLogicalPageId> &keys) {
+        auto result = keys.values();
+        std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+            return std::tie(a.row, a.column) < std::tie(b.row, b.column);
+        });
+        return result;
+    };
+    const auto initial = ordered(expected);
+    {
+        KisPageStoreDiagnosticRecorder enumeration(true, backend.store());
+        QCOMPARE(backend.allocatedPages(), initial);
+        QCOMPARE(enumeration.metrics()[size_t(KisPageStoreDiagnosticPhase::ManifestExport)].intervals, quint64(0));
+    }
+    const auto memento = backend.beginHistory(&blank, 1); QVERIFY(memento);
+    batch = backend.beginMutationBatch(); QVERIFY(batch);
+    for (int i = 0; i < changes; ++i) {
+        const auto page = pageAt(i);
+        if (i % 3 == 0) {
+            QVERIFY(batch->replaceFullTile(page.column, page.row, nullptr, true));
+            expected.remove(page);
+        } else if (i % 3 == 1) {
+            QVERIFY(write(page, 0x71));
+        } else {
+            const KisLogicalPageId added{page.column + 1, page.row};
+            QVERIFY(write(added, 0x72)); expected.insert(added);
+        }
+    }
+    QVERIFY(batch->finish()); batch.reset();
+    QCOMPARE(backend.allocatedPages(), ordered(expected));
+    if (changes) {
+        // A subsequent overlay replacement supersedes the removal; a cold
+        // add/remove pair disappears without disturbing the base ordering.
+        QVERIFY(write(pageAt(0), 0x73)); expected.insert(pageAt(0));
+        const KisLogicalPageId transient{7, -4};
+        QVERIFY(write(transient, 0x74));
+        QVERIFY(backend.removePages({transient}));
+        QCOMPARE(backend.allocatedPages(), ordered(expected));
+    }
+    QVERIFY(backend.commitHistory(&blank, 1));
+    QCOMPARE(backend.allocatedPages(), ordered(expected));
+    QVERIFY(backend.rollback(memento)); QCOMPARE(backend.allocatedPages(), initial);
+    QVERIFY(backend.rollforward(memento)); QCOMPARE(backend.allocatedPages(), ordered(expected));
+    QVERIFY(backend.purgeHistory(memento, &blank, 1));
+    QVERIFY(backend.store()->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::allocatedPagesUsesSelectedTransactionBase()
+{
+    KisTiledDataManagerPageStoreBackend backend;
+    const quint8 blank = 0x2a;
+    QVERIFY(backend.configure(1, &blank));
+    QVERIFY(backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x51))));
+    // Both later edits stay inside these bounds, so their surface metadata
+    // does not conflict and the original disjoint rebase contract applies.
+    QVERIFY(backend.fillRect(QRect(10 * 64, 0, 64, 64), QByteArray(1, char(0x51))));
+    const auto history = backend.beginHistory(&blank, 1); QVERIFY(history);
+    QVERIFY(backend.fillRect(QRect(64, 0, 64, 64), QByteArray(1, char(0x61))));
+    auto *store = backend.store();
+    const auto external = store->beginCurrentTransaction(); QVERIFY(external.isValid());
+    QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(store, backend.surface(), external,
+        QRect(9 * 64, 0, 64, 64), QByteArray(1, char(0x71))));
+    QVERIFY(store->commit(external, store->preparedPages(external)).isValid());
+    QVERIFY(!backend.pageAllocated(9, 0, false));
+    const QVector<KisLogicalPageId> overlay{{0, 0}, {1, 0}, {10, 0}};
+    QCOMPARE(backend.allocatedPages(), overlay);
+    QVERIFY(backend.commitHistory(&blank, 1));
+    const QVector<KisLogicalPageId> rebased{{0, 0}, {1, 0}, {9, 0}, {10, 0}};
+    QCOMPARE(backend.allocatedPages(), rebased);
+    QVERIFY(backend.purgeHistory(history, &blank, 1));
+    QVERIFY(store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter()

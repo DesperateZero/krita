@@ -876,6 +876,32 @@ KisPreparedPageSet KisPagePublicationCoordinator::preparedPagesLocked(const KisP
     return result.isValid() ? result : KisPreparedPageSet();
 }
 
+bool KisPagePublicationCoordinator::captureAllocatedPageInputsLocked(
+    KisSurfaceId surface, const KisPageTransaction &transaction, KisImageEpochRootSnapshot *root,
+    KisPageKeyStorage *additions, KisPageKeyStorage *removals) const
+{
+    if (!m_operational || !surface.isValid()) return false;
+    if (!transaction.isValid()) {
+        *root = m_epochs.captureCommittedRoot();
+        return root->isValid();
+    }
+    if (!hasActiveTransactionLocked(transaction)) return false;
+    *root = m_epochs.root(transaction.baseEpoch);
+    const auto found = m_preparedTransactions.find(transaction.id.value);
+    if (found != m_preparedTransactions.cend()) {
+        // One owner cut; export only keys needed by this full enumeration.
+        // No proof/provider/surface facts or pixel retention are required.
+        const auto &delta = *found->second;
+        additions->reserve(delta.proofs.size());
+        removals->reserve(delta.removals.size());
+        for (const auto &entry : delta.proofs)
+            if (entry.first.surface == surface) additions->push_back(entry.first);
+        for (const auto &key : delta.removals)
+            if (key.surface == surface) removals->push_back(key);
+    }
+    return root->isValid();
+}
+
 KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisPageTransaction &transaction,
                                                                       const KisPreparedPageSet &preparedPages,
                                                                       KisRetainedImageEpochSnapshot *retainedAfter,

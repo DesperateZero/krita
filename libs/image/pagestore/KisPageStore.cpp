@@ -4900,6 +4900,21 @@ bool KisPageStore::stagePageRemovalIfUnchanged(const KisPageTransaction &transac
     return d->publicationCoordinator.stagePageRemovalLocked(transaction, observed, error, locker);
 }
 
+QVector<KisLogicalPageId> KisPageStore::allocatedPages(
+    KisSurfaceId surface, const KisPageTransaction &transaction) const
+{
+    // Structural metadata only: the immutable root keeps its nodes alive;
+    // enumerating keys does not pin pixels or issue a retained epoch token.
+    KisImageEpochRootSnapshot root;
+    const auto storage = KisMutationStorageAllocator<KisPageKey>::retained(&d->backingBudget);
+    KisPageKeyStorage additions(storage), removals(storage);
+    QMutexLocker locker(&d->mutex);
+    if (!d->publicationCoordinator.captureAllocatedPageInputsLocked(surface, transaction, &root, &additions, &removals))
+        return {};
+    locker.unlock();
+    return root.allocatedPages(surface, additions, removals);
+}
+
 KisPreparedPageSet KisPageStore::preparedPages(const KisPageTransaction &transaction) const
 {
     QMutexLocker locker(&d->mutex);

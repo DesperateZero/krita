@@ -2767,43 +2767,7 @@ KisTiledDataManagerPageStoreBackend::allocatedPages() const
                 ? d->anonymousTransaction : KisPageTransaction());
     }
 
-    KisPageKeyStorage visiblePages;
-    const KisImageEpochSnapshot snapshot = pageStore->captureCommittedEpoch();
-    for (const KisPageVersion &version : snapshot.manifest) {
-        if (version.key.surface == d->surface) {
-            visiblePages.push_back(version.key);
-        }
-    }
-    if (overlayTransaction.isValid()) {
-        const KisPreparedPageSet prepared =
-            pageStore->preparedPages(overlayTransaction);
-        if (prepared.isValid()) {
-            for (const KisPageKey &key : prepared.removedPages) {
-                if (key.surface == d->surface) {
-                    const auto found = std::find(visiblePages.begin(), visiblePages.end(), key);
-                    if (found != visiblePages.end()) visiblePages.erase(found);
-                }
-            }
-            for (const KisPreparedPageProof &proof : prepared.proofs) {
-                if (proof.authority.version.key.surface == d->surface) {
-                    const auto &key = proof.authority.version.key;
-                    if (std::find(visiblePages.cbegin(), visiblePages.cend(), key) == visiblePages.cend())
-                        visiblePages.push_back(key);
-                }
-            }
-        }
-    }
-    QVector<KisLogicalPageId> pages;
-    pages.reserve(visiblePages.size());
-    for (const KisPageKey &key : std::as_const(visiblePages)) {
-        pages.append(key.page);
-    }
-    std::sort(pages.begin(), pages.end(),
-              [](const KisLogicalPageId &lhs, const KisLogicalPageId &rhs) {
-                  return lhs.row != rhs.row ? lhs.row < rhs.row
-                                            : lhs.column < rhs.column;
-              });
-    return pages;
+    return pageStore->allocatedPages(d->surface, overlayTransaction);
 }
 
 bool KisTiledDataManagerPageStoreBackend::pageAllocated(

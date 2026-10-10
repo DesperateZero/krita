@@ -569,6 +569,7 @@ public:
     bool releaseSnapshot(KisImageEpochSnapshotToken token);
 
 private:
+    QVector<KisLogicalPageId> allocatedPages(KisSurfaceId surface, const KisPageTransaction &transaction) const;
     // Resolve a raw-read selection without capturing/freezing the overlay.
     // Default bytes and their version are selected under the same owner gate.
     bool resolveTileReadIdentity(const KisPageKey &, const KisPageReadView &,

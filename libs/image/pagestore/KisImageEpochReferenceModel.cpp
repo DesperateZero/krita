@@ -533,6 +533,30 @@ bool KisImageEpochRootSnapshot::appendRestoreTargets(
     return true;
 }
 
+QVector<KisLogicalPageId> KisImageEpochRootSnapshot::allocatedPages(
+    KisSurfaceId surface, KisPageKeyStorage &additions, KisPageKeyStorage &removals) const
+{
+    if (!isValid()) return {};
+    // Inputs are the selected publication owner's unique, disjoint keys for
+    // this surface. Only D keys need sorting; visit the ordered root directly
+    // into the caller's full output, without exporting N versions or keys.
+    std::sort(additions.begin(), additions.end(), pageKeyLess);
+    std::sort(removals.begin(), removals.end(), pageKeyLess);
+    QVector<KisLogicalPageId> pages;
+    pages.reserve(pageCount() + qsizetype(additions.size()));
+    auto added = additions.cbegin(), removed = removals.cbegin();
+    appendPageRoot(m_pageRoot, [&](const KisPageVersion &version) {
+        if (!(version.key.surface == surface)) return;
+        while (added != additions.cend() && pageKeyLess(*added, version.key)) pages.append((added++)->page);
+        while (removed != removals.cend() && pageKeyLess(*removed, version.key)) ++removed;
+        if (removed != removals.cend() && *removed == version.key) return;
+        pages.append(version.key.page);
+        if (added != additions.cend() && *added == version.key) ++added;
+    });
+    while (added != additions.cend()) pages.append((added++)->page);
+    return pages;
+}
+
 qsizetype KisImageEpochRootSnapshot::pageCount() const
 {
     return pageRootCount(m_pageRoot);

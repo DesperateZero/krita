@@ -70,6 +70,8 @@ private:
     // publication candidate. Shared immutable subtrees need no page visits.
     bool appendRestoreTargets(const KisImageEpochRootSnapshot &current,
         std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> *output) const;
+    QVector<KisLogicalPageId> allocatedPages(KisSurfaceId surface,
+        KisPageKeyStorage &additions, KisPageKeyStorage &removals) const;
     // Original publication owner supplies sorted removal keys and prepared
     // addition keys. No storage allocation occurs in this bounds query.
     bool contentExtentAfterPages(KisSurfaceId surface, QSize pageExtent,
@@ -90,6 +92,7 @@ private:
 
     friend class KisImageEpochReferenceModel;
     friend class KisPagePublicationCoordinator;
+    friend class KisPageStore;
 };
 
 struct KRITAIMAGE_EXPORT KisPageTransactionSnapshot {
