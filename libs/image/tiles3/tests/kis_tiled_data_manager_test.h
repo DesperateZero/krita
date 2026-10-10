@@ -40,6 +40,10 @@ private Q_SLOTS:
     void testPageStoreWritablePresenceRefusal();
     void testPageStoreCancelledIteratorAdapters_data();
     void testPageStoreCancelledIteratorAdapters();
+    void testPageStoreOwnedCancellationUnderPressure_data();
+    void testPageStoreOwnedCancellationUnderPressure();
+    void testPageStoreSurfaceOnlyOwnerRefusal();
+    void testPageStoreFinishedFacadeWithNativeLease();
     void testPageStoreFinalRawUnlockAllowsAdapter_data();
     void testPageStoreFinalRawUnlockAllowsAdapter();
     void testPageStoreUnscopedLeaseCompletion_data();

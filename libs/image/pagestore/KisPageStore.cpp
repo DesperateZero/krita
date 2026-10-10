@@ -763,7 +763,7 @@ public:
     }
     static void releaseOrRetain(Private *scope)
     {
-        if (!scope->cancelLocked()) {
+        if (!scope->cancelAndAbort()) {
             QMutexLocker lock(&scope->owner->mutex);
             if (!scope->owner->facadeGone) {
                 retainOrphanLocked(scope);
@@ -799,7 +799,7 @@ public:
             Private *scope = pending;
             pending = std::exchange(scope->nextOrphan, nullptr);
             QMutexLocker scopeLock(&scope->mutex);
-            const bool released = scope->cancelLocked(nullptr, terminalWithoutFacade);
+            const bool released = scope->cancelAndAbort(terminalWithoutFacade);
             scopeLock.unlock();
             if (released) {
                 destroy(scope);
@@ -815,6 +815,39 @@ public:
                 }
             }
         }
+    }
+    bool finishOwnedTransaction(bool publish)
+    {
+        if (!ownsTransaction) return true;
+        if (state != State::Detached) return false;
+        std::optional<KisPageReadCleanup> cleanup;
+        QMutexLocker lock(&owner->mutex);
+        if (owner->facadeGone) {
+            ownsTransaction = false;
+            return !publish;
+        }
+        const auto abort = [&] {
+            cleanup.emplace(owner->readCoordinator);
+            const bool accepted = owner->publicationCoordinator.abortLocked(transaction, lock, *cleanup)
+                // An explicit Store abort may already have ended this record.
+                // Recheck only a refusal; successful publication/cancellation
+                // does not pay a second transaction identity lookup.
+                || !owner->publicationCoordinator.hasActiveTransactionLocked(transaction);
+            if (accepted) ownsTransaction = false;
+            return accepted;
+        };
+        if (!publish || !owner->publicationCoordinator.hasPreparedDeltaLocked(transaction.id))
+            return abort();
+        const bool accepted = owner->publicationCoordinator.commitOwnedLocked(
+            transaction, nullptr, diagnosticOwner, lock).isValid();
+        if (accepted) ownsTransaction = false;
+        else abort(); // Refusal retains responsibility on this original scope.
+        return accepted;
+    }
+    bool cancelAndAbort(bool terminalWithoutFacade = false)
+    {
+        if (!cancelLocked(nullptr, terminalWithoutFacade)) return false;
+        return terminalWithoutFacade || finishOwnedTransaction(false);
     }
     void detachLocked(QMutexLocker<QMutex> &lock)
     {
@@ -963,6 +996,7 @@ public:
     KisPageStore::Private *owner = nullptr;
     const KisPageStore *diagnosticOwner = nullptr; // identity only, never dereferenced
     KisPageTransaction transaction;
+    bool ownsTransaction = false;
     std::shared_ptr<KisPageReplicaProvider> provider;
     KisMutationWriteSet writes;
     ColdPageSet coldPages;
@@ -1899,6 +1933,22 @@ bool KisPageMutationExecution::overwriteFinalPage(
 }
 
 KisPageMutationSession::~KisPageMutationSession() = default;
+
+void KisPageMutationSession::takeTransactionOwnership()
+{
+    Q_ASSERT(d && d->transaction.isValid() && !d->ownsTransaction);
+    d->ownsTransaction = true;
+}
+
+bool KisPageMutationSession::ownsTransaction() const
+{
+    return d && d->ownsTransaction;
+}
+
+bool KisPageMutationSession::finishOwnedTransaction(bool publish)
+{
+    return d && d->finishOwnedTransaction(publish);
+}
 bool KisPageMutationSession::isActive() const
 {
     if (!d)

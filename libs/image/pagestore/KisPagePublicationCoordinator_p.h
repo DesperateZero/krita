@@ -204,6 +204,7 @@ public:
                                            const KisPageStore *diagnosticOwner,
                                            QMutexLocker<QMutex> &ownerLock);
     bool hasPreparedDeltaLocked(KisPageTransactionId transaction) const;
+    bool hasActiveTransactionLocked(const KisPageTransaction &transaction) const;
     KisImageEpochCommitTicket commitOwnedLocked(const KisPageTransaction &transaction,
                                                 KisRetainedImageEpochSnapshot *retainedAfter,
                                                 const KisPageStore *diagnosticOwner,
@@ -331,7 +332,6 @@ private:
     KisPageStorePublicationStatistics m_statistics;
     quint64 m_committedTransactions = 0;
 
-    bool hasActiveTransactionLocked(const KisPageTransaction &transaction) const;
     quint64 currentDefaultRevisionLocked(KisSurfaceId surface) const;
     bool reserveDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);
     void processRetirementsUnlocked(QMutexLocker<QMutex> &ownerLock);

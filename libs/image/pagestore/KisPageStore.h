@@ -218,6 +218,12 @@ public:
     bool cancel();
 
 private:
+    // The bridge transfers its private transaction to this existing scope.
+    // Failed physical cancellation and abort remain on the same orphan link;
+    // borrowed history transactions never acquire this responsibility.
+    void takeTransactionOwnership();
+    bool ownsTransaction() const;
+    bool finishOwnedTransaction(bool publish);
     // A shared legacy tile may perform its final unlock on a reader thread.
     // Only the bridge can hand off terminal sealing; no active guard or new
     // write access is permitted at this boundary.

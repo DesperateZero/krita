@@ -349,6 +349,9 @@ public:
             QString error;
             if (!finish(&error) && rawLease())
                 KisStrokeJobFailureContext::reportFailure(error);
+            // No client or guard survives this final control block. The
+            // original mutation now owns any refused cancel/abort tail.
+            if (backend) detachFromBackend();
         }
     }
     bool finishClient(bool succeeded, QString *error = nullptr, bool retainAdmission = false);
@@ -369,7 +372,6 @@ public:
     KisTiledDataManagerPageStoreLease *leases = nullptr;
     KisTiledDataManagerPageStoreBackend *backend = nullptr;
     KisPageTransaction transaction;
-    bool owned = false;
     bool failed = false;
     Kind kind = Kind::Managed;
     bool hasWorkingAdapters = false;
@@ -395,7 +397,7 @@ KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
 {
     QMutexLocker lock(&m_batch->leaseMutex);
     if (m_batch->rawLease()) {
-        if (m_batch->owned) m_backend->registerAnonymousLease(this);
+        if (m_batch->mutation.ownsTransaction()) m_backend->registerAnonymousLease(this);
     } else {
         m_next = m_batch->leases;
         if (m_next) m_next->m_previous = this;
@@ -421,7 +423,7 @@ bool KisTiledDataManagerPageStoreLease::finish(std::shared_ptr<void> *afterUnloc
         m_native = {};
         releaseBarrierPin();
         if (raw) {
-            if (m_backend && batch->owned) m_backend->unregisterAnonymousLease(this);
+            if (m_backend && batch->mutation.ownsTransaction()) m_backend->unregisterAnonymousLease(this);
             batch->clients = 0;
             if (batch->kind == KisTiledDataManagerPageStoreWriteBatch::Private::Kind::RawUnused)
                 m_readCache.reset();
@@ -444,13 +446,13 @@ bool KisTiledDataManagerPageStoreLease::finish(std::shared_ptr<void> *afterUnloc
 
 bool KisTiledDataManagerPageStoreLease::cancelForBarrier()
 {
-    if (!m_backend || !m_batch || !m_batch->rawLease() || !m_batch->owned) return false;
+    if (!m_backend || !m_batch || !m_batch->rawLease() || !m_batch->mutation.ownsTransaction()) return false;
     QMutexLocker lock(&m_batch->leaseMutex);
     if (!retainBarrierPin()) return false;
     m_native = {};
     if (!m_backend->completeAdapters(*m_batch, false)) return false;
     if (!m_batch->mutation.cancel()) return false;
-    if (!m_backend->abortOwnedTransaction(m_batch->transaction)) return false;
+    if (!m_backend->finishOwnedTransaction(m_batch->mutation, false)) return false;
     m_readCache.reset();
     m_backend->unregisterAnonymousLease(this);
     m_backend = nullptr;
@@ -477,7 +479,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::cancelForBarrier(QString *
         KisPageStoreDetail::setError(error, QStringLiteral("clear cannot cancel the iterator mutation"));
         return false;
     }
-    if (owned && !backend->abortOwnedTransaction(transaction)) {
+    if (!backend->finishOwnedTransaction(mutation, false, error)) {
         failed = true;
         return false;
     }
@@ -518,7 +520,7 @@ bool KisTiledDataManagerIteratorWriteScope::finish()
 
 bool KisTiledDataManagerIteratorWriteScope::isActive() const
 {
-    if (!d || !d->batch) return false;
+    if (!d || !d->batch || !d->batch->d) return false;
     const auto &batch = d->batch->d;
     QMutexLocker lock(&batch->leaseMutex);
     return batch->backend && !batch->failed && batch->clients != 0;
@@ -540,7 +542,8 @@ bool KisTiledDataManagerPageStoreWriteBatch::finish(QString *error)
 {
     if (m_clientFinished || !d) return false;
     m_clientFinished = true;
-    return d->finishClient(true, error);
+    auto completing = std::move(d);
+    return completing->finishClient(true, error);
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::finishForAdapterDelivery(QString *error)
@@ -554,7 +557,8 @@ bool KisTiledDataManagerPageStoreWriteBatch::cancel()
 {
     if (m_clientFinished || !d) return false;
     m_clientFinished = true;
-    return d->finishClient(false);
+    auto completing = std::move(d);
+    return completing->finishClient(false);
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
@@ -599,11 +603,27 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     if (!sealed) {
         failed = failed || !unused;
         if (!backend->completeAdapters(*this, false)) return false;
-        if (!mutation.cancel()) return false;
+        if (!mutation.cancel()) {
+            {
+                QMutexLocker leaseLock(&leaseMutex);
+                // A real borrowed lease still owns this batch and its thread
+                // slot. Its final lock-free release will finish cancellation.
+                if (leases) return false;
+            }
+            // Adapter responsibility is complete. Transfer the original
+            // scope now, even if the finished facade remains alive. A live
+            // native guard retains that same scope until its own last use.
+            failed = true;
+            sources.clear();
+            mutation = {};
+            detachFromBackend();
+            return false;
+        }
     }
     // An owned batch publishes only its own delta. A confirmed cancellation
     // leaves it empty; explicit history keeps its previously sealed segments.
-    const bool terminal = !owned || backend->finishOwnedTransaction(transaction, (sealed || !failed) ? error : nullptr);
+    const bool terminal = backend->finishOwnedTransaction(mutation, sealed || !failed,
+                                                        (sealed || !failed) ? error : nullptr);
     failed = failed || !terminal;
     if (sealed && !backend->completeAdapters(*this, terminal)) return false;
     if (releaseWorkingAdmission) {
@@ -654,9 +674,9 @@ bool KisTiledDataManagerPageStoreBackend::completeAdapters(
 
 void KisTiledDataManagerPageStoreWriteBatch::Private::detachFromBackend()
 {
-    // Keep the slot occupied even after its weak pointer expires, until the
-    // original transaction has finished/aborted. The originating thread must
-    // not start another batch while its last foreign guard is cancelling it.
+    // Keep this slot until completion or the final control block. An orphan
+    // tail then retains its original Store claims/transaction, not an expired
+    // backend slot that could never be removed after physical cancellation.
     QMutexLocker lock(&backend->d->mutex);
     if (!rawLease()) {
         const auto slot = backend->d->cpuMutationBatches.find(thread);
@@ -671,7 +691,7 @@ void KisTiledDataManagerPageStoreWriteBatch::Private::detachFromBackend()
 bool KisTiledDataManagerPageStoreWriteBatch::replaceFullTile(
     qint32 column, qint32 row, KisTileData *tileData, bool sparseDefault, QString *error)
 {
-    return d->replaceFullTile(column, row, tileData, sparseDefault, error);
+    return d && d->replaceFullTile(column, row, tileData, sparseDefault, error);
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::Private::replaceFullTile(
@@ -1017,17 +1037,18 @@ KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error)
     using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
     auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
     bool owned = false;
-    const KisPageTransaction transaction = writableTransaction(&owned, error);
-    if (!transaction.isValid()) return {};
-    const auto returnTransaction = qScopeGuard([&] {
-        if (owned) abortOwnedTransaction(transaction);
-    });
-    auto mutation = d->store->beginMutation(transaction, error);
-    if (!mutation.isActive()) return {};
+    batch->transaction = writableTransaction(&owned, error);
+    if (!batch->transaction.isValid()) return {};
+    batch->mutation = d->store->beginMutation(batch->transaction, error);
+    if (!batch->mutation.isActive()) {
+        // A new private transaction has no accepted work or external reader.
+        // Failed scope preparation already released its session activity.
+        if (owned && !d->store->abort(batch->transaction))
+            qFatal("Empty owned transaction could not be released");
+        return {};
+    }
+    if (owned) batch->mutation.takeTransactionOwnership();
     batch->backend = this;
-    batch->transaction = transaction;
-    batch->owned = std::exchange(owned, false);
-    batch->mutation = std::move(mutation);
     return batch;
 }
 
@@ -1133,27 +1154,15 @@ KisPageTransaction KisTiledDataManagerPageStoreBackend::writableTransaction(
 }
 
 bool KisTiledDataManagerPageStoreBackend::finishOwnedTransaction(
-    const KisPageTransaction &transaction,
+    KisPageMutationSession &mutation, bool publish,
     QString *error)
 {
+    if (!mutation.ownsTransaction()) return true;
     QMutexLocker transactionLocker(&d->transactionMutex);
-    if (!d->operational || !transaction.isValid()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore commit is invalid"));
-        return false;
-    }
-    KisPageStore *pageStore = d->store.get();
-    const bool committed = pageStore->commitPreparedTransaction(transaction);
-    if (!committed) pageStore->abort(transaction);
+    const bool committed = mutation.finishOwnedTransaction(publish);
     KisPageStoreDetail::setError(error, committed
         ? QString() : QStringLiteral("tiles3 PageStore commit failed"));
     return committed;
-}
-
-bool KisTiledDataManagerPageStoreBackend::abortOwnedTransaction(
-    const KisPageTransaction &transaction)
-{
-    QMutexLocker transactionLocker(&d->transactionMutex);
-    return d->operational && transaction.isValid() && d->store->abort(transaction);
 }
 
 void KisTiledDataManagerPageStoreBackend::registerAnonymousLease(
@@ -2593,26 +2602,37 @@ bool KisTiledDataManagerPageStoreBackend::setDefaultPixel(
     QString *error)
 {
     bool owned = false;
-    const KisPageTransaction transaction = writableTransaction(&owned, error);
+    const auto transaction = writableTransaction(&owned, error);
     KisPageStore *pageStore = store();
     if (!transaction.isValid() || !pageStore) return false;
+    auto release = qScopeGuard([&] {
+        // This private surface-only transaction exposes no page proof,
+        // session, write lease or prepared reader. Abort has no physical
+        // cancellation tail, unlike a real pixel mutation.
+        if (owned && !pageStore->abort(transaction))
+            qFatal("Surface-only owned transaction could not be released");
+    });
 
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
     KisSurfaceEpochState state;
     if (!pageStore->resolveSurfaceState(d->surface, overlay, &state) ||
         pixel.size() != qsizetype(state.format.pixelStride)) {
-        if (owned) abortOwnedTransaction(transaction);
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore default pixel is invalid"));
         return false;
     }
-    if (state.format.defaultPixel == pixel) {
-        return !owned || finishOwnedTransaction(transaction, error);
-    }
-    if (!pageStore->stageSurfaceDefaultPixel(transaction, d->surface, pixel, error)) {
-        if (owned) abortOwnedTransaction(transaction);
+    if (state.format.defaultPixel != pixel &&
+        !pageStore->stageSurfaceDefaultPixel(transaction, d->surface, pixel, error)) {
         return false;
     }
-    return !owned || finishOwnedTransaction(transaction, error);
+    if (owned) {
+        QMutexLocker transactionLocker(&d->transactionMutex);
+        if (!pageStore->commitPreparedTransaction(transaction)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore default commit failed"));
+            return false;
+        }
+    }
+    release.dismiss();
+    return true;
 }
 
 bool KisTiledDataManagerPageStoreBackend::clearAll(QString *error)

@@ -280,9 +280,8 @@ private:
                                            QString *error = nullptr);
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
     prepareMutationBatch(QString *error);
-    bool finishOwnedTransaction(const KisPageTransaction &transaction,
+    bool finishOwnedTransaction(KisPageMutationSession &mutation, bool publish,
                                 QString *error = nullptr);
-    bool abortOwnedTransaction(const KisPageTransaction &transaction);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
     void unregisterAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
     bool finishOperationBatch(std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> &batch,
