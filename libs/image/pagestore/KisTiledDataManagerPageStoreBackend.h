@@ -35,7 +35,8 @@ class KisTiledDataManagerIteratorWriteScope;
 
 /**
  * Opaque RAII anchor for one legacy multi-tile write operation. Keeping the
- * token alive coalesces all anonymous tile leases into one PageStore commit.
+ * token alive groups its borrowed tile leases into one PageStore commit.
+ * Other operations and unscoped leases own independent transactions.
  */
 class KRITAIMAGE_EXPORT KisTiledDataManagerPageStoreWriteBatch : public KisPageProcessStorageObject
 {
@@ -64,10 +65,6 @@ private:
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerIteratorWriteScope;
-    KisTiledDataManagerPageStoreWriteBatch(
-        KisTiledDataManagerPageStoreBackend *backend,
-        const KisPageTransaction &transaction,
-        bool owned);
     explicit KisTiledDataManagerPageStoreWriteBatch(
         std::shared_ptr<Private> shared);
     // Backend's managed operation only: retain the sealed session's original
@@ -282,6 +279,8 @@ private:
                                         quint8 *scratch, qsizetype capacity, QString *error = nullptr) const;
     KisPageTransaction writableTransaction(bool *owned,
                                            QString *error = nullptr);
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
+    prepareMutationBatch(QString *error);
     bool finishOwnedTransaction(const KisPageTransaction &transaction,
                                 QString *error = nullptr);
     bool abortOwnedTransaction(const KisPageTransaction &transaction);

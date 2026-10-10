@@ -160,7 +160,7 @@ public:
     bool readPinned() const override { return m_pinned; }
     bool matchesVersion(const KisPageVersion &version) const
     { return m_binding && m_binding->matchesReadIdentity(m_expected, version); }
-    bool finish() override
+    bool finish(std::shared_ptr<void> * = nullptr) override
     {
         if (std::exchange(m_pinned, false)) m_binding->releaseRead();
         return true;

@@ -279,7 +279,7 @@ private:
     bool prepareImpl(KisPageTransactionId transaction, const Proofs &proofs,
                      const Surfaces &surfaces, const Removals &removals, bool complete, QString *error);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
-                                 bool retainAfter = false);
+                                 bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);
     bool installReservedRoot(PreparedRootReservation &candidate, void *context,
                              InstallMetadataFunction installMetadata,

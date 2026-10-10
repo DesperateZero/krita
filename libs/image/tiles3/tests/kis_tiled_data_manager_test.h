@@ -38,6 +38,18 @@ private Q_SLOTS:
     void testPageStoreWritablePresence_data();
     void testPageStoreWritablePresence();
     void testPageStoreWritablePresenceRefusal();
+    void testPageStoreCancelledIteratorAdapters_data();
+    void testPageStoreCancelledIteratorAdapters();
+    void testPageStoreFinalRawUnlockAllowsAdapter_data();
+    void testPageStoreFinalRawUnlockAllowsAdapter();
+    void testPageStoreUnscopedLeaseCompletion_data();
+    void testPageStoreUnscopedLeaseCompletion();
+    void testPageStoreDisjointOwnerPublication_data();
+    void testPageStoreDisjointOwnerPublication();
+    void testPageStoreDerivedExtentRebase_data();
+    void testPageStoreDerivedExtentRebase();
+    void testPageStoreUnpublishedReadRefusal_data();
+    void testPageStoreUnpublishedReadRefusal();
     void testPurgedAndEmptyTransactions();
     void testUnversionedBitBlt();
     void testVersionedBitBlt();

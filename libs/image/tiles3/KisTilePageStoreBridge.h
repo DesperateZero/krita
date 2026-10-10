@@ -23,7 +23,10 @@ public:
     virtual bool writable() const = 0;
     virtual void markDirty() = 0;
     // Idempotent: a barrier-cancelled lease is already successfully finished.
-    virtual bool finish() = 0;
+    // A Tile supplies an empty local to release the original batch's last
+    // reference after its swap barrier, while returning the real pin now.
+    // Other callers finish synchronously; no new lifetime owner is created.
+    virtual bool finish(std::shared_ptr<void> *afterUnlock = nullptr) = 0;
     // A dormant cache is only an expected-identity candidate. Each outer
     // read must acquire a fresh physical pin before returning tileData().
     virtual bool reusableReadCache() const { return false; }

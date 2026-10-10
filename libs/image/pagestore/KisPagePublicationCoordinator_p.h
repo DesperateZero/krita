@@ -207,8 +207,7 @@ public:
     KisImageEpochCommitTicket commitOwnedLocked(const KisPageTransaction &transaction,
                                                 KisRetainedImageEpochSnapshot *retainedAfter,
                                                 const KisPageStore *diagnosticOwner,
-                                                QMutexLocker<QMutex> &ownerLock,
-                                                QWriteLocker *publicationLock = nullptr);
+                                                QMutexLocker<QMutex> &ownerLock);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                          const KisPageStore *diagnosticOwner,
                                                          QMutexLocker<QMutex> &ownerLock,

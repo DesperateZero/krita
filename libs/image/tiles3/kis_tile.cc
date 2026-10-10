@@ -129,7 +129,7 @@ void KisTile::replacePageStoreReadCacheLocked(KisTileData *replacement) const
     previous->release();
 }
 
-bool KisTile::releasePageStoreLeasesLocked() const
+bool KisTile::releasePageStoreLeasesLocked(std::shared_ptr<void> &afterUnlock) const
 {
     if (!hasPageStoreLeases()) return false;
     Q_ASSERT(m_lockCounter > 0);
@@ -137,12 +137,12 @@ bool KisTile::releasePageStoreLeasesLocked() const
     if (m_lockCounter != 0) return true;
     auto &read = m_pageStoreLeases[ReadLease];
     if (read) {
-        KIS_SAFE_ASSERT_RECOVER_NOOP(read->finish());
+        KIS_SAFE_ASSERT_RECOVER_NOOP(read->finish(&afterUnlock));
         if (!read->reusableReadCache()) read = read->takeReadCache();
     }
     auto &write = m_pageStoreLeases[WriteLease];
     if (write) {
-        KIS_SAFE_ASSERT_RECOVER_NOOP(write->finish());
+        KIS_SAFE_ASSERT_RECOVER_NOOP(write->finish(&afterUnlock));
         read = write->takeReadCache();
         write.reset();
     }
@@ -565,6 +565,9 @@ bool KisTile::lockForWrite()
 
 void KisTile::unlockForWrite()
 {
+    // Only one borrowed mutable guard can exist for this Tile. A batch read
+    // is moved into WriteLease before writable exposure, never duplicated.
+    std::shared_ptr<void> afterUnlock;
 #ifdef DEAD_TILES_SANITY_CHECK
     m_sanityLockedForWrite.deref();
     KIS_ASSERT(m_sanityLockedForWrite.loadAcquire() >= 0);
@@ -574,7 +577,7 @@ void KisTile::unlockForWrite()
         if (m_pageStoreWriteLockCount > 0) {
             --m_pageStoreWriteLockCount;
         }
-        if (releasePageStoreLeasesLocked()) {
+        if (releasePageStoreLeasesLocked(afterUnlock)) {
             DEBUG_LOG_ACTION("unlock [W/PageStore]");
             return;
         }
@@ -586,13 +589,14 @@ void KisTile::unlockForWrite()
 
 void KisTile::unlockForRead() const
 {
+    std::shared_ptr<void> afterUnlock;
 #ifdef DEAD_TILES_SANITY_CHECK
     m_sanityLockedForRead.deref();
     KIS_ASSERT(m_sanityLockedForRead.loadAcquire() >= 0);
 #endif
     {
         QMutexLocker locker(&m_swapBarrierLock);
-        if (releasePageStoreLeasesLocked()) {
+        if (releasePageStoreLeasesLocked(afterUnlock)) {
             DEBUG_LOG_ACTION("unlock [R/PageStore]");
             return;
         }

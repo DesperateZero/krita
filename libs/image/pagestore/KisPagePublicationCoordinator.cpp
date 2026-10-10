@@ -10,7 +10,6 @@
 #include "KisPageReadCoordinator_p.h"
 
 #include <QScopeGuard>
-#include <QReadWriteLock>
 
 #include <algorithm>
 #include <limits>
@@ -941,8 +940,7 @@ bool KisPagePublicationCoordinator::hasPreparedDeltaLocked(KisPageTransactionId 
 
 KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
     const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter,
-    const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock,
-    QWriteLocker *publicationLock)
+    const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock)
 {
     using Phase = KisPageStoreDiagnosticPhase;
     if (retainedAfter)
@@ -1128,7 +1126,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
         diagnostic.next(Phase::CommitEpochPrepare, pageWork);
         KisImageEpochCommitResult candidateFailure;
         auto &rootCandidate = preparedCommit.data->epoch;
-        rootCandidate = m_epochs.prepareCommit(transaction, &candidateFailure, bool(retainedAfter));
+        rootCandidate = m_epochs.prepareCommit(transaction, &candidateFailure, bool(retainedAfter), m_derivedExtentSurface);
         diagnostic.next(Phase::CommitPublishOwnerWait, pageWork);
         ownerLock.relock();
         diagnostic.next(Phase::CommitPublicationRevalidate, pageWork);
@@ -1193,10 +1191,6 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
         if (installed)
             diagnostic.next(Phase::CommitRootPublication, pageWork);
         ownerLock.unlock();
-        // The backend's original selector was hidden before commit. Once
-        // root/metadata installation succeeds, readers can select that root
-        // while disposal proceeds. Failed attempts retain the original gate.
-        if (installed && publicationLock) publicationLock->unlock();
         diagnostic.next(Phase::CommitCleanup, pageWork);
         m_disposeMetadataCleanup(m_ownerContext, std::move(metadataCleanup));
         if (!installed)

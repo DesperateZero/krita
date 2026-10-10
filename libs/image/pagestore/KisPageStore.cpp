@@ -4947,8 +4947,7 @@ KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transac
     return d->publicationCoordinator.commitLocked(transaction, preparedPages, retainedAfter, this, locker);
 }
 bool KisPageStore::commitPreparedTransaction(
-    const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter,
-    QWriteLocker *publicationLock)
+    const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter)
 {
     if (retainedAfter) *retainedAfter = {};
     if (transaction.id.isValid())
@@ -4961,8 +4960,7 @@ bool KisPageStore::commitPreparedTransaction(
         cleanup.emplace(d->readCoordinator);
         return d->publicationCoordinator.abortLocked(transaction, locker, *cleanup);
     }
-    return d->publicationCoordinator.commitOwnedLocked(transaction, retainedAfter, this, locker,
-        publicationLock).isValid();
+    return d->publicationCoordinator.commitOwnedLocked(transaction, retainedAfter, this, locker).isValid();
 }
 
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained)

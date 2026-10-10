@@ -180,7 +180,7 @@ private:
     KisTilePageStoreBridge *resolvePageStoreBridge(KisMementoManager *manager) const;
     TileLease acquirePageStoreLease(bool writable, bool resolveSelection = true) const;
     void replacePageStoreReadCacheLocked(KisTileData *replacement) const;
-    bool releasePageStoreLeasesLocked() const;
+    bool releasePageStoreLeasesLocked(std::shared_ptr<void> &afterUnlock) const;
 
     KisTileData *m_tileData;
     mutable QStack<KisTileData*> m_oldTileData;

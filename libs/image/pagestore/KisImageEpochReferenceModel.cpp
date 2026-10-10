@@ -1243,7 +1243,7 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::commit(const KisPageTrans
 
 KisImageEpochReferenceModel::PreparedCommit
 KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
-                                          bool retainAfter) try
+                                          bool retainAfter, KisSurfaceId derivedExtentSurface) try
 {
     KisImageEpochCommitResult localFailure;
     KisImageEpochCommitResult &result = failure ? *failure : localFailure;
@@ -1291,7 +1291,14 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     }
     for (const KisSurfaceEpochChange &change : prepared->surfaceChanges) {
         KisSurfaceEpochState currentState;
-        if (!current.surfaceState(change.before.surface, &currentState) || !(currentState == change.before)) {
+        const bool found = current.surfaceState(change.before.surface, &currentState);
+        if (found && change.before.surface == derivedExtentSurface) {
+            // Derived bounds are an output of the combined page tree. They
+            // cannot make otherwise disjoint page transactions conflict.
+            currentState.contentExtent = change.before.contentExtent;
+            currentState.extentRevision = change.before.extentRevision;
+        }
+        if (!found || !(currentState == change.before)) {
             result.status = KisImageEpochCommitStatus::Conflict;
             result.error = QStringLiteral("surface metadata changed after the transaction base epoch");
             return {};
@@ -1346,12 +1353,14 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
             prepared->removedPages.cbegin(), prepared->removedPages.cend(), d->treeStorage);
     }
     std::shared_ptr<KisImageEpochSurfaces> surfaces;
-    if (!prepared->surfaceChanges.empty()) {
+    const auto prepareSurfaces = [&] {
+        if (surfaces) return;
         const auto storage = current.m_surfaces->get_allocator();
         surfaces = std::allocate_shared<KisImageEpochSurfaces>(storage,
             current.m_surfaces->begin(), current.m_surfaces->end(), storage);
         root.m_surfaces = surfaces;
-    }
+    };
+    if (!prepared->surfaceChanges.empty()) prepareSurfaces();
     for (const KisSurfaceEpochChange &change : prepared->surfaceChanges) {
         const auto surface = std::find_if(surfaces->begin(), surfaces->end(), [&](const auto &value) {
             return value.surface == change.after.surface;
@@ -1359,7 +1368,37 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
         Q_ASSERT(surface != surfaces->end());
         *surface = change.after;
         root.m_defaultPixelRevision = qMax(root.m_defaultPixelRevision, change.after.defaultPixelRevision);
-        root.m_extentRevision = qMax(root.m_extentRevision, change.after.extentRevision);
+        root.m_extentRevision = qMax(root.m_extentRevision, surface->extentRevision);
+    }
+    if (derivedExtentSurface.isValid()) {
+        KisSurfaceEpochState state, currentState;
+        QRect extent;
+        if (!current.surfaceState(derivedExtentSurface, &currentState) ||
+            !root.surfaceState(derivedExtentSurface, &state) ||
+            !root.contentExtentAfterPages(derivedExtentSurface, state.logicalPageExtent,
+                                         nullptr, 0, nullptr, 0, &extent)) {
+            result.error = QStringLiteral("derived committed extent exceeds QRect range");
+            return {};
+        }
+        auto derived = state;
+        derived.contentExtent = extent;
+        derived.extentRevision = qMax(state.extentRevision, currentState.extentRevision);
+        if (extent != currentState.contentExtent) {
+            if (currentState.extentRevision == std::numeric_limits<quint64>::max()) {
+                result.error = QStringLiteral("derived committed extent revision exhausted");
+                return {};
+            }
+            derived.extentRevision = qMax(derived.extentRevision, currentState.extentRevision + 1);
+        }
+        if (!(derived == state)) {
+            prepareSurfaces();
+            auto surface = std::find_if(surfaces->begin(), surfaces->end(), [&](const auto &value) {
+                return value.surface == derivedExtentSurface;
+            });
+            Q_ASSERT(surface != surfaces->end());
+            *surface = derived;
+            root.m_extentRevision = qMax(root.m_extentRevision, derived.extentRevision);
+        }
     }
     // The original root and complete input were validated; replacement keeps
     // each existing surface identity, and publication identities were guarded.

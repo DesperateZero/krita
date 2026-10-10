@@ -1346,7 +1346,7 @@ private Q_SLOTS:
     void tiles3BackendMapsIdentityDefaultExtentAndCow();
     void tiles3BackendPublishesDefaultExtentAndHistoryAtomically();
     void tiles3GenericPublicationDerivesOverlayExtent();
-    void tiles3BackendCoalescesOverlappingAnonymousLeases();
+    void tiles3BackendPublishesIndependentLeases();
     void tiles3BackendReclaimsPurgedHistoryVersions();
     void tiles3BackendCoalescesConcurrentProductWrites();
     void tiles3BackendsShareProcessResidentLimit();
@@ -12607,7 +12607,7 @@ void KisPageStoreReferenceTest::tiles3BackendPublishesDefaultExtentAndHistoryAto
     QVERIFY2(backend.purgeHistory(memento, &newDefault, 1, &error), qPrintable(error));
 }
 
-void KisPageStoreReferenceTest::tiles3BackendCoalescesOverlappingAnonymousLeases()
+void KisPageStoreReferenceTest::tiles3BackendPublishesIndependentLeases()
 {
     quint8 initialDefault = 0;
     KisTiledDataManagerPageStoreBackend backend;
@@ -12624,7 +12624,7 @@ void KisPageStoreReferenceTest::tiles3BackendCoalescesOverlappingAnonymousLeases
     second->tileData()->data()[0] = 0x42;
 
     QVERIFY(first->finish());
-    QCOMPARE(backend.store()->captureCommittedEpoch().manifest.size(), 0);
+    QCOMPARE(backend.store()->captureCommittedEpoch().manifest.size(), 1);
     QVERIFY(second->finish());
     QCOMPARE(backend.store()->captureCommittedEpoch().manifest.size(), 2);
 

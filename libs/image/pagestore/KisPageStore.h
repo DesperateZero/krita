@@ -32,7 +32,6 @@ class KisTiles3PageReplicaProvider;
 class KisTiledDataManagerPageStoreBackend;
 class KisTiledDataManagerPageStoreWriteBatch;
 class KisPageStoreWriteReservation;
-class QWriteLocker;
 struct KisPageMetadataMetrics;
 struct KisPageBackingLimits;
 struct KisPageBackingUsage;
@@ -585,11 +584,8 @@ private:
     // Internal producers consume the original claimed delta. Empty work uses
     // the original abort path. Optional history outputs are prepared before
     // acceptance; retainedAfter remains empty for a successful no-op.
-    // A backend-supplied lock already hides its anonymous selector and is
-    // released after root installation, before deferred cleanup.
     bool commitPreparedTransaction(const KisPageTransaction &transaction,
-                                   KisRetainedImageEpochSnapshot *retainedAfter = nullptr,
-                                   QWriteLocker *publicationLock = nullptr);
+                                   KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
     // Adapter-only scratch prepared before pixels. On failure scratch may
     // contain a partial classification and must not be consumed. This grants
