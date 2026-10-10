@@ -57,15 +57,14 @@ bool KisTiledDataManager::writeBytesBody(const quint8 *data,
                     dataX * pixelSize + dataY * dataRowStride;
             const qint32 lineSize = columnsToWork * pixelSize;
 
-            // PageStore generations are semantic changes, not write-call
-            // counters.  Avoid allocating/publishing a new generation when
-            // the caller writes bytes already present in the tile.  The data
-            // manager write lock protects this compare-and-write decision;
-            // the tile read lock also preserves the normal swap lifetime.
-            bool unchanged = true;
+            // Equal bytes are a no-op only in an already-present tile. An
+            // explicit write to a hole establishes its extent and preserves
+            // those bytes through later default-pixel changes and undo/redo.
+            // Reuse the read selection's presence fact, without a second lookup.
+            bool unchanged = false;
             {
                 KisTileDataWrapper readWrapper(
-                    this, imageX, imageY, KisTileDataWrapper::READ);
+                    this, imageX, imageY, KisTileDataWrapper::READ, &unchanged);
                 if (!readWrapper.isValid()) return false;
                 // A nested legacy write intent still needs canonical access.
                 // Reject acquisition failure before comparing stale cached
@@ -74,7 +73,7 @@ bool KisTiledDataManager::writeBytesBody(const quint8 *data,
                 if (!tileIt) return false;
                 tileIt += readWrapper.offset();
                 const quint8 *compareIt = dataIt;
-                for (qint32 row = 0; row < rowsToWork; ++row) {
+                for (qint32 row = 0; unchanged && row < rowsToWork; ++row) {
                     if (memcmp(tileIt, compareIt, lineSize) != 0) {
                         unchanged = false;
                         break;

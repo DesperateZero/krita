@@ -27,7 +27,8 @@ public:
      */
     inline KisTileDataWrapper(KisTiledDataManager *dm,
                               qint32 x, qint32 y,
-                              enum KisTileDataWrapper::accessType type)
+                              enum KisTileDataWrapper::accessType type,
+                              bool *readOnlyTileExists = nullptr)
     {
         const qint32 col = dm->xToCol(x);
         const qint32 row = dm->yToRow(y);
@@ -38,7 +39,9 @@ public:
 
         const qint32 pixelIndex = xInTile + yInTile * KisTileData::WIDTH;
 
-        KisTileSP tile = dm->getTile(col, row, type == WRITE);
+        KisTileSP tile = type == READ && readOnlyTileExists
+            ? dm->getReadOnlyTileLazy(col, row, *readOnlyTileExists)
+            : dm->getTile(col, row, type == WRITE);
 
         m_tile = tile;
         m_offset = pixelIndex * dm->pixelSize();

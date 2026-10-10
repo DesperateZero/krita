@@ -2451,11 +2451,13 @@ void KisTiledDataManagerTest::testPageStorePresenceStorage()
         KisPageStoreReadPage before(store, old, {backend->surface(), page}); QVERIFY(before.data());
         QCOMPARE(QByteArray(reinterpret_cast<const char *>(before.data()), expected.size()),
                  QByteArray(expected.size(), char(operation >= 2 && operation <= 4 ? 0x31 : 0x13)));
-        const bool present = expected != QByteArray(expected.size(), char(0x13));
+        // Packed writes establish every addressed page, including default
+        // bytes. Cursor declarations alone still do not create untouched pages.
+        const bool present = operation == 1 || expected != QByteArray(expected.size(), char(0x13));
         QCOMPARE(bool(dm.m_hashTable->getExistingTile(page.column, page.row)), present);
     }
     const QRect expectedExtent = operation == 2 ? QRect{} :
-        operation == 3 ? area : QRect(area.x(), area.y(), 64 * (pages % 2 ? pages : pages - 1), 64);
+        operation == 1 || operation == 3 ? area : QRect(area.x(), area.y(), 64 * (pages % 2 ? pages : pages - 1), 64);
     QCOMPARE(dm.extent(), expectedExtent);
     current = {}; old = {};
     dm.rollback(owner);
@@ -2840,8 +2842,10 @@ void KisTiledDataManagerTest::testPageStorePackedChangedStorage()
     const int width = pages * 64, height = partial ? 1 : 64, stride = width * bpp + 17;
     QByteArray input(stride * height, char(0x13));
     QSet<KisLogicalPageId> expectedChanged;
+    // The first explicit write establishes even the all-default pages.
+    // Repeating those now-present values below remains a true no-op.
+    for (int page = 0; page < pages; ++page) expectedChanged.insert({page - 1, -1});
     for (int page = 0; page < pages; page += 3) {
-        expectedChanged.insert({page - 1, -1});
         for (int row = 0; row < height; ++row) std::memset(input.data() + row * stride + page * 64 * bpp, 0x71, size_t(64 * bpp));
     }
     QVector<KisLogicalPageId> changed{{999, 999}}; QString error;
@@ -3362,8 +3366,9 @@ void KisTiledDataManagerTest::testPageStoreAdapterDelivery()
         else { QVERIFY(dm.checkpointStrokeMutation(history, &error)); QVERIFY(dm.tryCommit(&error)); }
     }
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
-    QCOMPARE(dm.m_hashTable->numTiles(), outcome == 0 ? 2 : 0);
-    QCOMPARE(dm.extent(), outcome == 0 ? QRect(0, 0, 128, 64) : QRect());
+    const bool establishesPages = outcome == 0 || (mode == 1 && outcome == 1);
+    QCOMPARE(dm.m_hashTable->numTiles(), establishesPages ? 2 : 0);
+    QCOMPARE(dm.extent(), establishesPages ? QRect(0, 0, 128, 64) : QRect());
     QByteArray pixel(bpp, Qt::Uninitialized);
     for (int x : {0, 64}) {
         dm.readBytes(reinterpret_cast<quint8 *>(pixel.data()), x, 0, 1, 1);
@@ -5257,6 +5262,78 @@ void KisTiledDataManagerTest::testPageStoreNativeIteratorEntryPoints_data()
     QTest::newRow("hline") << 0;
     QTest::newRow("vline") << 1;
     QTest::newRow("random-accessor") << 2;
+}
+
+void KisTiledDataManagerTest::testPageStoreExplicitDefaultHistory_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("mode"); QTest::addColumn<bool>("persistent");
+    for (int bpp : {1, 4, 8, 16}) for (int mode = 0; mode < 4; ++mode)
+        for (bool persistent : {false, true}) {
+            if (persistent && mode == 3) continue; // Semantic clear has no persistent owner API.
+            QTest::newRow(qPrintable(QString("%1-mode%2-persistent%3").arg(bpp).arg(mode).arg(persistent)))
+                << bpp << mode << persistent;
+        }
+}
+
+void KisTiledDataManagerTest::testPageStoreExplicitDefaultHistory()
+{
+    QFETCH(int, bpp); QFETCH(int, mode); QFETCH(bool, persistent);
+    const QByteArray blank(bpp, char(0x13)), color(bpp, char(0x57)), other(bpp, char(0x29));
+    auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    const auto exercise = [&](bool native, QStringList &observations) {
+        KisTiledDataManager dm(bpp, bytes(blank));
+        if (!native) {
+            dm.m_mementoManager->setPageStoreBridge(nullptr);
+            delete dm.m_pageStoreBackend; dm.m_pageStoreBackend = nullptr;
+        }
+        if (mode >= 2) dm.clear(QRect(0, 0, 64, 64), bytes(color));
+        const auto memento = dm.getMemento(); QVERIFY(memento);
+        const auto report = [&] {
+            QByteArray actual(2 * bpp, 0);
+            dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+            dm.readBytes(reinterpret_cast<quint8 *>(actual.data()) + bpp, 128, 0, 1, 1);
+            const auto rect = dm.extent();
+            observations.append(QString("%1,%2,%3,%4:%5").arg(rect.x()).arg(rect.y())
+                .arg(rect.width()).arg(rect.height()).arg(QString::fromLatin1(actual.toHex())));
+        };
+        const int side = mode == 0 ? 1 : 64;
+        if (mode == 3) dm.clear(QRect(0, 0, 64, 64), bytes(blank));
+        else if (native && persistent) {
+            QVERIFY(dm.beginStrokeMutation(memento));
+            QVERIFY(dm.applyStrokePixelOperation(memento, {QRect(0, 0, side, side)}, [&](KisPixelWriteCursor *cursor) {
+                for (int y = 0; y < side; ++y) {
+                    cursor->moveTo(0, y); if (!cursor->rawData()) return false;
+                    std::memset(cursor->rawData(), 0x13, size_t(side * bpp));
+                }
+                return true;
+            }));
+            QVERIFY(dm.checkpointStrokeMutation(memento));
+        } else {
+            const QByteArray input(side * side * bpp, char(0x13));
+            dm.writeBytes(bytes(input), 0, 0, side, side);
+        }
+        report();
+        const auto captures = native ? dm.m_pageStoreBackend->store()->readScopeStatistics().capturedReadViewsCreated : 0;
+        QVERIFY(dm.tryCommit());
+        if (native) QCOMPARE(dm.m_pageStoreBackend->store()->readScopeStatistics().capturedReadViewsCreated, captures);
+        report(); dm.rollback(memento); report(); dm.rollforward(memento); report();
+        dm.setDefaultPixel(bytes(other)); report();
+        dm.purgeHistory(memento);
+    };
+    QStringList legacy, native;
+    exercise(false, legacy); exercise(true, native);
+    // These public results also have an independent, identically compiled
+    // upstream probe. The modified legacy fallback alone is not its oracle.
+    QStringList expected;
+    for (int stage = 0; stage < 5; ++stage) {
+        const bool present = stage == 2 ? mode >= 2 : mode != 3;
+        const QByteArray inside = stage == 2 && mode >= 2 ? color :
+            stage == 4 && mode == 3 ? other : blank;
+        const QByteArray outside = stage == 4 ? other : blank;
+        expected.append(QString("0,0,%1,%1:%2").arg(present ? 64 : 0)
+            .arg(QString::fromLatin1(QByteArray(inside + outside).toHex())));
+    }
+    QCOMPARE(legacy, expected); QCOMPARE(native, expected);
 }
 
 void KisTiledDataManagerTest::testPageStorePackedWriteNative_data()

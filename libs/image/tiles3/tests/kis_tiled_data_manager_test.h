@@ -213,6 +213,8 @@ private Q_SLOTS:
     void testPageStoreWriteBytesPinWorkingSet();
     void testPageStorePackedWriteNative_data();
     void testPageStorePackedWriteNative();
+    void testPageStoreExplicitDefaultHistory_data();
+    void testPageStoreExplicitDefaultHistory();
     void testPageStorePackedWritePreclaimExcludesLateWriter_data();
     void testPageStorePackedWritePreclaimExcludesLateWriter();
     void testPageStorePackedWriteBorrowedAndInvalid();

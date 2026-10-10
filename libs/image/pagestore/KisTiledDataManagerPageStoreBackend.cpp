@@ -1087,67 +1087,6 @@ bool KisTiledDataManagerPageStoreBackend::finishOwnedTransaction(
     return committed;
 }
 
-bool KisTiledDataManagerPageStoreBackend::pruneDefaultPreparedPages(
-    const KisPageTransaction &transaction,
-    QString *error)
-{
-    KisPageStore *pageStore = store();
-    if (!pageStore || !transaction.isValid()) {
-        KisPageStoreDetail::setError(error, QStringLiteral(
-            "tiles3 default-page pruning transaction is invalid"));
-        return false;
-    }
-    const KisPreparedPageSet prepared = pageStore->preparedPages(transaction);
-    if (!prepared.isValid() || prepared.proofs.isEmpty()) {
-        KisPageStoreDetail::setError(error, {});
-        return true;
-    }
-
-    const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
-    KisSurfaceEpochState state;
-    auto view = pageStore->captureReadView(overlay, error);
-    if (!view.isValid() || !view.resolveSurfaceState(d->surface, &state)) {
-        KisPageStoreDetail::setError(error, QStringLiteral(
-            "tiles3 default-page pruning surface is unavailable"));
-        return false;
-    }
-    const quint32 pixelStride = state.format.pixelStride;
-    const auto &defaultPixel = state.format.defaultPixel;
-    for (const KisPreparedPageProof &proof : prepared.proofs) {
-        if (!(proof.authority.version.key.surface == d->surface)) continue;
-        KisPageAllocationDescriptor descriptor;
-        if (!pageStore->pageDescriptor(proof.authority.version, &descriptor)) {
-            KisPageStoreDetail::setError(error, QStringLiteral(
-                "tiles3 default-page descriptor is unavailable"));
-            return false;
-        }
-        KisPageStoreReadPage read(pageStore, view, proof.authority.version.key, error);
-        const quint8 *bytes = read.data();
-        if (!bytes) return false;
-        bool isDefault = pixelStride == quint32(defaultPixel.size());
-        for (int y = descriptor.validRect.top();
-             isDefault && y <= descriptor.validRect.bottom(); ++y) {
-            const quint8 *row = bytes + quint64(y) * read.rowStride();
-            for (int x = descriptor.validRect.left();
-                 x <= descriptor.validRect.right(); ++x) {
-                if (std::memcmp(row + quint64(x) * pixelStride,
-                                defaultPixel.constData(), pixelStride) != 0) {
-                    isDefault = false;
-                    break;
-                }
-            }
-        }
-        read.reset();
-        if (isDefault &&
-            !pageStore->stagePageRemovalIfUnchanged(
-                transaction, proof.authority.version, error)) {
-            return false;
-        }
-    }
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
-
 bool KisTiledDataManagerPageStoreBackend::abortOwnedTransaction(
     const KisPageTransaction &transaction)
 {
@@ -1793,9 +1732,6 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     // not continue advertising the pre-checkpoint bytes.
     const auto pages = historyChangedPages(transaction);
     if (persistent && changed) *changed = pages;
-    if (!pruneDefaultPreparedPages(transaction, error)) {
-        return false;
-    }
     locker.relock();
     const KisPageStoreMemento committed =
         d->history->commit(d->activeHistory, error);
@@ -2386,7 +2322,11 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
             {
                 KisPageStoreReadPage read(store(), before, key, error);
                 if (!read.data()) return false;
-                for (int row = 0; row < affected.height(); ++row) {
+                // Writing even identical bytes to a previously absent page
+                // creates explicit content. Its extent and future default-
+                // pixel behavior differ from an implicit default page.
+                unchanged = !read.version().isDefaultPixel();
+                for (int row = 0; unchanged && row < affected.height(); ++row) {
                     if (std::memcmp(read.data() + (localY + row) * read.rowStride() + localX * pixelStride,
                                     input + row * sourceStride, lineBytes)) {
                         unchanged = false;

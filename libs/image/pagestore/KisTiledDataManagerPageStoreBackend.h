@@ -298,8 +298,6 @@ private:
     std::shared_ptr<const KisPageReplicaSource> uniformSourceFor(
         const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error);
     bool cancelAnonymousLeasesForBarrier(QString *error = nullptr);
-    bool pruneDefaultPreparedPages(const KisPageTransaction &transaction,
-                                   QString *error = nullptr);
     // Cold compatibility-index preparation for cancellation, not a pixel lease.
     bool prepareHistoryAbort(const KisMementoSP &memento,
                              QVector<KisLogicalPageId> *pages, QString *error);
