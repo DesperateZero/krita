@@ -486,19 +486,22 @@ void KisTiledDataManagerTest::testPageStoreCancelledIteratorAdapters()
 
 void KisTiledDataManagerTest::testPageStoreFinalRawUnlockAllowsAdapter_data()
 {
-    QTest::addColumn<bool>("readLast"); QTest::addColumn<bool>("foreignUnlock");
+    QTest::addColumn<bool>("readLast"); QTest::addColumn<bool>("foreignUnlock"); QTest::addColumn<bool>("abandonScope");
     for (bool readLast : {false, true}) for (bool foreignUnlock : {false, true})
-        QTest::newRow(qPrintable(QString("read%1-foreign%2").arg(readLast).arg(foreignUnlock)))
-            << readLast << foreignUnlock;
+        for (bool abandonScope : {false, true})
+            QTest::newRow(qPrintable(QString("read%1-foreign%2-cancel%3").arg(readLast).arg(foreignUnlock).arg(abandonScope)))
+                << readLast << foreignUnlock << abandonScope;
 }
 
 void KisTiledDataManagerTest::testPageStoreFinalRawUnlockAllowsAdapter()
 {
-    QFETCH(bool, readLast); QFETCH(bool, foreignUnlock);
+    QFETCH(bool, readLast); QFETCH(bool, foreignUnlock); QFETCH(bool, abandonScope);
     const quint8 blank = 0x13, initial = 0x31, color = 0x57;
     KisTiledDataManager dm(1, &blank);
     dm.writeBytes(&initial, 0, 0, 1, 1);
     auto *store = dm.m_pageStoreBackend->store();
+    auto scope = abandonScope ? dm.beginIteratorWriteScope() : nullptr;
+    QVERIFY(!abandonScope || scope);
     auto tile = dm.getTile(0, 0, true); QVERIFY(tile && tile->lockForWrite());
     tile->data()[0] = 0x71;
     bool secondSucceeded = false;
@@ -513,13 +516,16 @@ void KisTiledDataManagerTest::testPageStoreFinalRawUnlockAllowsAdapter()
     second.join();
     if (readLast) QVERIFY(tile->lockForRead());
     if (readLast) tile->unlockForWrite();
+    scope.reset(); // The original last raw holder must deliver cancellation.
     bool observed = false, adapterEntered = false;
     QSemaphore entered;
     std::thread adapter;
     const auto unlock = [&] {
         KisPageStoreDiagnosticRecorder recorder(true, store);
         recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
-            if (phase != KisPageStoreDiagnosticPhase::CommitEpochPrepare || observed) return;
+            const auto boundary = abandonScope ? KisPageStoreDiagnosticPhase::MutationAdapterInstall
+                                               : KisPageStoreDiagnosticPhase::CommitEpochPrepare;
+            if (phase != boundary || observed) return;
             observed = true;
             adapter = std::thread([&] { tile->invalidatePageStoreReadCache(); entered.release(); });
             adapterEntered = entered.tryAcquire(1, 1000);
@@ -532,7 +538,9 @@ void KisTiledDataManagerTest::testPageStoreFinalRawUnlockAllowsAdapter()
     QVERIFY(secondSucceeded); QVERIFY(observed); QVERIFY(adapterEntered);
     quint8 actual[65] = {};
     dm.readBytes(actual, 0, 0, 65, 1);
-    QCOMPARE(actual[0], quint8(0x71)); QCOMPARE(actual[64], color);
+    QCOMPARE(actual[0], abandonScope ? initial : quint8(0x71)); QCOMPARE(actual[64], color);
+    auto retry = dm.getTile(0, 0, true); QVERIFY(retry && retry->lockForRead());
+    QCOMPARE(retry->data()[0], abandonScope ? initial : quint8(0x71)); retry->unlockForRead();
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
     QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
     dm.writeBytes(&color, 128, 0, 1, 1);
@@ -631,6 +639,14 @@ void KisTiledDataManagerTest::testPageStoreDisjointOwnerPublication()
         });
         finished = scope->finish();
         recorder.setPhaseObserver({});
+    }
+    if (ending != 1) {
+        // The finished facade can remain alive without retaining the original
+        // page admission or blocking the next operation on that page.
+        QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+        auto next = dm.beginIteratorWriteScope(); QVERIFY(next);
+        auto again = dm.getTile(0, 0, true); QVERIFY(again && again->lockForWrite());
+        again->unlockForWrite(); next.reset();
     }
     scope.reset();
     QByteArray a(bpp, 0), b(bpp, 0);

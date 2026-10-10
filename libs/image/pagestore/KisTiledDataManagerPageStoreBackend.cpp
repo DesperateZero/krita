@@ -303,6 +303,8 @@ public:
     }
 
     mutable QMutex mutex;
+    // Composition only; never transferred into Store's orphan/retry records.
+    KisTiledDataManager *manager = nullptr;
     QMutex transactionMutex;
     QReadWriteLock publicationLock;
     std::shared_ptr<KisTiles3PageReplicaProvider> provider;
@@ -370,10 +372,16 @@ public:
     bool owned = false;
     bool failed = false;
     Kind kind = Kind::Managed;
+    bool hasWorkingAdapters = false;
     quint64 clients = 1;
     Qt::HANDLE thread = QThread::currentThreadId();
     KisPageMutationSession mutation;
     StorageMap<KisTileData *, std::shared_ptr<const KisPageReplicaSource>> sources;
+    // Only actual provisional cold insertions. The original forward key and
+    // candidate are retained, with their preallocated inverse GC capability;
+    // warm-page identity continues to live solely in mutation's write set.
+    std::vector<KisTileHashTable::PreparedTile,
+        KisMutationStorageAllocator<KisTileHashTable::PreparedTile>> adapterInsertions;
 };
 
 KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
@@ -440,6 +448,7 @@ bool KisTiledDataManagerPageStoreLease::cancelForBarrier()
     QMutexLocker lock(&m_batch->leaseMutex);
     if (!retainBarrierPin()) return false;
     m_native = {};
+    if (!m_backend->completeAdapters(*m_batch, false)) return false;
     if (!m_batch->mutation.cancel()) return false;
     if (!m_backend->abortOwnedTransaction(m_batch->transaction)) return false;
     m_readCache.reset();
@@ -462,6 +471,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::cancelForBarrier(QString *
         }
     }
     for (auto *lease = leases; lease; lease = lease->m_next) lease->m_native = {};
+    if (!backend->completeAdapters(*this, false)) return false;
     if (!mutation.cancel()) {
         failed = true;
         KisPageStoreDetail::setError(error, QStringLiteral("clear cannot cancel the iterator mutation"));
@@ -581,19 +591,65 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     if (!mutationActive && !failed) return false;
     if (failed) KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore private mutation batch cancelled"));
     const bool unused = kind == Kind::RawUnused;
+    const bool releaseWorkingAdmission = hasWorkingAdapters && !retainAdmission;
+    retainAdmission = retainAdmission || hasWorkingAdapters;
     const bool sealed = mutationActive && !failed && !unused && (kind != Kind::Managed
-        ? mutation.sealForLegacyUnlock(error)
+        ? retainAdmission ? mutation.sealForLegacyAdapterDelivery(error) : mutation.sealForLegacyUnlock(error)
         : retainAdmission ? mutation.sealForAdapterDelivery(error) : mutation.seal(error));
     if (!sealed) {
         failed = failed || !unused;
+        if (!backend->completeAdapters(*this, false)) return false;
         if (!mutation.cancel()) return false;
     }
     // An owned batch publishes only its own delta. A confirmed cancellation
     // leaves it empty; explicit history keeps its previously sealed segments.
     const bool terminal = !owned || backend->finishOwnedTransaction(transaction, (sealed || !failed) ? error : nullptr);
     failed = failed || !terminal;
+    if (sealed && !backend->completeAdapters(*this, terminal)) return false;
+    if (releaseWorkingAdmission) {
+        sources.clear();
+        mutation = {}; // finish(), not facade destruction, ends this claim.
+    }
     detachFromBackend();
     return !failed;
+}
+
+bool KisTiledDataManagerPageStoreBackend::completeAdapters(
+    KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published)
+{
+    if (!batch.hasWorkingAdapters) return true;
+    auto *manager = d->manager;
+    Q_ASSERT(manager);
+    // Callers may already own the manager gate. Original page claims and the
+    // index/extent's own locks protect this sparse getTile lifecycle; never
+    // acquire a second manager gate, or call adapters inside a Store gate.
+    KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::MutationIndexRefresh, 1);
+    phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, 1);
+    if (!batch.mutation.visitAdapterPages([&](const KisPageVersion &version) {
+        if (auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(version.key.page.column, version.key.page.row)) {
+            QMutexLocker lock(&tile->m_swapBarrierLock);
+            // A successfully published raw cache already has this exact
+            // identity. Keep it ready instead of forcing a new resolve/pin
+            // on every following warm getTile. A reader may have selected the
+            // old current during root preparation, so compare the actual cache.
+            if (published && !version.isDefaultPixel() &&
+                d->provider->readCacheMatchesVersion(tile->m_pageStoreLeases[KisTile::ReadLease].get(), version)) return;
+            tile->m_pageStoreNativeReadReady.storeRelease(0);
+        }
+    })) return false;
+    if (!published) {
+        for (auto &prepared : batch.adapterInsertions)
+            if (manager->m_hashTable->undoPreparedTileInsertion(prepared))
+                manager->m_extentManager.notifyTileRemoved(prepared.col(), prepared.row());
+    }
+    // Dispose original prepared keys/candidates while their claim still
+    // protects delivery, even when a finished public scope stays alive.
+    batch.adapterInsertions = decltype(batch.adapterInsertions){};
+    // Physical cancellation can still refuse. No manager capability follows
+    // the original mutation into orphan retirement after this delivery.
+    batch.hasWorkingAdapters = false;
+    phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, 1);
+    return true;
 }
 
 void KisTiledDataManagerPageStoreWriteBatch::Private::detachFromBackend()
@@ -654,9 +710,10 @@ catch (const std::bad_alloc &) {
     return false;
 }
 
-KisTiledDataManagerPageStoreBackend::KisTiledDataManagerPageStoreBackend()
+KisTiledDataManagerPageStoreBackend::KisTiledDataManagerPageStoreBackend(KisTiledDataManager *manager)
     : d(new Private)
 {
+    d->manager = manager;
 }
 
 KisTiledDataManagerPageStoreBackend::~KisTiledDataManagerPageStoreBackend()
@@ -871,11 +928,11 @@ bool KisTiledDataManagerPageStoreBackend::isOperational() const
     return d->operational.load(std::memory_order_acquire);
 }
 
-bool KisTiledDataManagerPageStoreBackend::ensureWritablePage(
-    qint32 column, qint32 row, OperationDelivery &delivery,
-    const std::function<KisTileData *(QString *)> &prepareAdapter,
-    const std::function<void(bool)> &completeAdapter, QString *error) try
+KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
+    qint32 column, qint32 row, QString *error) try
 {
+    auto *manager = d->manager;
+    if (!manager) return {};
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> shared;
     {
         QMutexLocker lock(&d->mutex);
@@ -884,39 +941,52 @@ bool KisTiledDataManagerPageStoreBackend::ensureWritablePage(
             shared = slot->second.lock();
             if (!shared || shared->failed || shared->clients == 0) {
                 KisPageStoreDetail::setError(error, QStringLiteral("writable tile cannot revive a finished batch"));
-                return false;
+                return {};
             }
         }
     }
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
     if (!shared) {
         batch = beginMutationBatch(error);
-        if (!batch) return false;
+        if (!batch) return {};
         shared = batch->d;
     }
     // Admission precedes the presence decision and all adapter preparation.
     // Reuse private aliases/writes as well as the transaction's sealed pages.
     bool present = false;
-    if (!shared->mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return false;
-    KisTileData *defaultData = prepareAdapter(error);
-    if (!defaultData) return false;
-    if (!present && !shared->replaceFullTile(column, row, defaultData, false, error)) return false;
-    if (!batch) {
-        // The caller's existing legacy scope owns seal/cancel and this claim.
-        // Install only its working adapter; do not fabricate publication.
-        completeAdapter(!present);
-        return true;
+    if (!shared->mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return {};
+    const bool provisional = !batch && !present;
+    auto prepared = manager->m_hashTable->prepareTileUpdate(column, row,
+        provisional ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present);
+    if (!manager->m_extentManager.prepareTileRange(QRect(column, row, 1, 1))) {
+        KisPageStoreDetail::setError(error, QStringLiteral("Extent storage preparation was rejected"));
+        return {};
     }
-    return finishOperationBatch(batch, &delivery,
-        [&](const auto &publish, QString *failure) {
-            if (!publish(failure)) return false;
-            completeAdapter(!present);
-            return true;
-        }, error);
+    auto *installation = &prepared;
+    if (provisional && prepared) {
+        // Capacity and inverse capability exist before the alias or working
+        // wrapper is accepted. Reuse this same token after failure.
+        shared->adapterInsertions.push_back(std::move(prepared));
+        installation = &shared->adapterInsertions.back();
+    }
+    KisTileData *defaultData = manager->m_hashTable->refAndFetchDefaultTileData();
+    const auto releaseDefault = qScopeGuard([&] { if (defaultData) defaultData->deref(); });
+    if (!defaultData || (!present && !shared->replaceFullTile(column, row, defaultData, false, error))) return {};
+    if (batch && !batch->finishForAdapterDelivery(error)) return {};
+    bool created = false;
+    auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(column, row);
+    if (!tile) tile = manager->m_hashTable->installPreparedTile(*installation, created);
+    Q_ASSERT(tile);
+    if (!batch) shared->hasWorkingAdapters = true;
+    tile->setPageStoreBridge(this, false);
+    tile->invalidatePageStoreReadCache();
+    if (created) manager->m_extentManager.notifyTileAdded(column, row);
+    if (!present) tile->setPageStoreNativeReadReady();
+    return tile;
 }
 catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("writable tile preparation was refused"));
-    return false;
+    return {};
 }
 
 KisPageStore *KisTiledDataManagerPageStoreBackend::store() const
@@ -1569,6 +1639,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     }
     auto lease = std::make_unique<KisTiledDataManagerPageStoreLease>(
         this, tile, std::move(guard), batch, std::move(futureRead));
+    if (readCache && d->manager) batch->hasWorkingAdapters = true;
     accepted = true;
     return lease;
 }

@@ -88,6 +88,8 @@ public:
     PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
     bool removePreparedTile(PreparedTile &prepared);
+    // Original page admission must still exclude replacement/removal.
+    bool undoPreparedTileInsertion(PreparedTile &prepared);
     // Delivery must not run the collector or participate in map growth.
     TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row);
 
@@ -156,13 +158,14 @@ public:
         PreparedTile &operator=(PreparedTile &&) = default;
         PreparedTile(const PreparedTile &) = delete;
         PreparedTile &operator=(const PreparedTile &) = delete;
-        explicit operator bool() const { return bool(m_key) && !m_consumed; }
+        explicit operator bool() const { return bool(m_key) && m_state == State::Prepared; }
         qint32 col() const { return m_col; }
         qint32 row() const { return m_row; }
         bool removesTile() const { return m_update == Update::Absent; }
     private:
         friend class KisTileHashTableTraits2<T>;
-        bool m_consumed = false;
+        enum class State : quint8 { Prepared, Inserted, Consumed };
+        State m_state = State::Prepared;
         qint32 m_col = 0, m_row = 0;
         Update m_update = Update::Present;
         TileTypeSP m_tile;
@@ -500,8 +503,9 @@ KisTileHashTableTraits2<T>::installPreparedTile(PreparedTile &prepared, bool &ne
     QSBR::RawPointerAccess access(m_map.getGC());
     const auto result = prepared.m_key.insertIfAbsentValue(prepared.m_tile.data());
     if (!result.accepted) return {};
-    prepared.m_consumed = true;
+    prepared.m_state = PreparedTile::State::Consumed;
     if (result.previous) return TileTypeSP(result.previous);
+    prepared.m_state = PreparedTile::State::Inserted;
     prepared.m_reference.release();
     m_numTiles.fetchAndAddRelaxed(1);
     prepared.m_tile->notifyAttachedToDataManager(m_mementoManager);
@@ -519,7 +523,7 @@ bool KisTileHashTableTraits2<T>::removePreparedTile(PreparedTile &prepared)
     QSBR::RawPointerAccess access(m_map.getGC());
     const auto result = prepared.m_key.exchangeValue(nullptr);
     if (!result.accepted) return false;
-    prepared.m_consumed = true;
+    prepared.m_state = PreparedTile::State::Consumed;
     if (!result.previous) return false;
     m_numTiles.fetchAndSubRelaxed(1);
     retire(result.previous, std::move(prepared.m_removal));
@@ -527,6 +531,15 @@ bool KisTileHashTableTraits2<T>::removePreparedTile(PreparedTile &prepared)
     // The original queue owns the removed map reference. Do not run its
     // collector under the caller's manager/publication installation gates.
     return true;
+}
+
+template <class T>
+bool KisTileHashTableTraits2<T>::undoPreparedTileInsertion(PreparedTile &prepared)
+{
+    if (!prepared.m_key || prepared.m_state != PreparedTile::State::Inserted ||
+        prepared.m_update != Update::MayRemove) return false;
+    prepared.m_state = PreparedTile::State::Prepared;
+    return removePreparedTile(prepared);
 }
 
 template <class T>

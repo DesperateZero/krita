@@ -750,7 +750,7 @@ template<class Table>
 void checkPreparedTileCandidates()
 {
     QCOMPARE(hashTilesAlive.load(), 0);
-    typename Table::PreparedTile late;
+    typename Table::PreparedTile late, lateInserted;
     KisSharedPtr<HashTestTile> survivor;
     // Reuse exactly the same address, so a pointer-only identity cannot pass.
     alignas(Table) unsigned char memory[sizeof(Table)];
@@ -782,9 +782,21 @@ void checkPreparedTileCandidates()
         QVERIFY(!table->getExistingTileForPreparedUpdate(1, 1));
         QVERIFY(!table->getExistingTileForPreparedUpdate(1100, 1));
         QCOMPARE(table->numTiles(), 1098);
+        auto provisional = table->prepareTileUpdate(1110, 1, Table::Update::MayRemove);
+        auto competing = table->prepareTileUpdate(1110, 1, Table::Update::MayRemove);
+        QVERIFY(!table->undoPreparedTileInsertion(provisional)); // preparation is not insertion
+        auto working = table->installPreparedTile(provisional, added); QVERIFY(working && added);
+        QCOMPARE(table->installPreparedTile(competing, added), working); QVERIFY(!added);
+        QVERIFY(!table->undoPreparedTileInsertion(competing)); // must not remove the winner
+        QCOMPARE(table->getExistingTileForPreparedUpdate(1110, 1), working);
+        QVERIFY(table->undoPreparedTileInsertion(provisional));
+        QVERIFY(!table->undoPreparedTileInsertion(provisional));
+        QCOMPARE(working->detached, 1); QCOMPARE(table->numTiles(), 1098);
         auto cancelled = table->prepareTileUpdate(1101, 1);
         QVERIFY(cancelled); QCOMPARE(table->numTiles(), 1098);
         late = table->prepareTileUpdate(1102, 1, Table::Update::MayRemove);
+        lateInserted = table->prepareTileUpdate(1112, 1, Table::Update::MayRemove);
+        QVERIFY(table->installPreparedTile(lateInserted, added)); QVERIFY(added);
     }
     table->~Table();
     QCOMPARE(survivor->detached, 1);
@@ -793,10 +805,11 @@ void checkPreparedTileCandidates()
     bool added = true;
     QVERIFY(!table->installPreparedTile(late, added)); QVERIFY(!added);
     QVERIFY(!table->removePreparedTile(late));
+    QVERIFY(!table->undoPreparedTileInsertion(lateInserted)); // same address, different table
     auto installed = table->installPreparedTile(newCandidate, added);
     QVERIFY(installed); QVERIFY(added);
     table->~Table();
-    installed.clear(); newCandidate = {}; late = {}; survivor.clear();
+    installed.clear(); newCandidate = {}; late = {}; lateInserted = {}; survivor.clear();
     QCOMPARE(hashTilesAlive.load(), 0);
 }
 }

@@ -261,8 +261,9 @@ KisTileHashTableTraits<T>::installPreparedTile(PreparedTile &prepared, bool &new
     if (prepared.m_identity != m_preparationIdentity) return {};
     const auto col = prepared.col(), row = prepared.row();
     const auto idx = calculateHash(col, row);
-    prepared.m_consumed = true;
+    prepared.m_state = PreparedTile::State::Consumed;
     if (auto winner = getTile(col, row, idx)) return winner;
+    prepared.m_state = PreparedTile::State::Inserted;
     linkTile(prepared.m_tile, idx);
     prepared.m_tile->notifyAttachedToDataManager(m_mementoManager);
     newTile = true;
@@ -275,8 +276,17 @@ bool KisTileHashTableTraits<T>::removePreparedTile(PreparedTile &prepared)
     if (!prepared || prepared.m_update == Update::Present) return false;
     QWriteLocker locker(&m_lock);
     if (prepared.m_identity != m_preparationIdentity) return false;
-    prepared.m_consumed = true;
+    prepared.m_state = PreparedTile::State::Consumed;
     return unlinkTile(prepared.col(), prepared.row(), calculateHash(prepared.col(), prepared.row()));
+}
+
+template<class T>
+bool KisTileHashTableTraits<T>::undoPreparedTileInsertion(PreparedTile &prepared)
+{
+    if (!prepared.m_identity || prepared.m_state != PreparedTile::State::Inserted ||
+        prepared.m_update != Update::MayRemove) return false;
+    prepared.m_state = PreparedTile::State::Prepared;
+    return removePreparedTile(prepared);
 }
 
 template<class T>

@@ -83,7 +83,7 @@ class KRITAIMAGE_EXPORT KisTiledDataManagerPageStoreBackend final
     : public KisTilePageStoreBridge, public KisPageProcessStorageObject
 {
 public:
-    KisTiledDataManagerPageStoreBackend();
+    explicit KisTiledDataManagerPageStoreBackend(KisTiledDataManager *manager = nullptr);
     ~KisTiledDataManagerPageStoreBackend() override;
 
     // A completed standalone operation's original batch. It carries no write
@@ -254,9 +254,8 @@ private:
     friend class KisTiledDataManager;
     // A public writable miss establishes explicit default content even if no
     // pixel guard follows. Reuse the original legacy batch when present.
-    bool ensureWritablePage(qint32 column, qint32 row, OperationDelivery &delivery,
-        const std::function<KisTileData *(QString *)> &prepareAdapter,
-        const std::function<void(bool)> &completeAdapter, QString *error);
+    KisSharedPtr<KisTile> ensureWritablePage(qint32 column, qint32 row, QString *error);
+    bool completeAdapters(KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published);
     struct TrimPage {
         KisLogicalPageId page;
         QRect extent;

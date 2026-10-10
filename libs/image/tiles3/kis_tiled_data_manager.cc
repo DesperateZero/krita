@@ -42,9 +42,9 @@ using PixelOperationResult = KisPageStoreWriteOperationResult;
 using OperationDelivery = KisTiledDataManagerPageStoreBackend::OperationDelivery;
 
 namespace {
-std::unique_ptr<KisTiledDataManagerPageStoreBackend> preparePageStoreBackend() noexcept
+std::unique_ptr<KisTiledDataManagerPageStoreBackend> preparePageStoreBackend(KisTiledDataManager *manager) noexcept
 {
-    try { return std::make_unique<KisTiledDataManagerPageStoreBackend>(); }
+    try { return std::make_unique<KisTiledDataManagerPageStoreBackend>(manager); }
     catch (const std::bad_alloc &) { return {}; }
 }
 }
@@ -137,12 +137,6 @@ public:
         // Cursor/packed report writes; semantic producers supply final presence.
         for (qsizetype i = 0; i < changed.size(); ++i)
             installPage(table, extent, bridge, changed[i], !present || present[i]);
-    }
-
-    KisTileSP installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
-                           KisTiledDataManagerPageStoreBackend *bridge, const KisLogicalPageId &page)
-    {
-        return installPage(table, extent, bridge, page, true);
     }
 
     void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
@@ -391,7 +385,7 @@ KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
     hashTable->setDefaultTileData(defaultTile.get());
     mementoManager->setDefaultTileData(defaultTile.get());
 
-    auto backend = preparePageStoreBackend();
+    auto backend = preparePageStoreBackend(this);
     QString pageStoreError;
     try {
         if (!backend || !backend->configure(pixelSize, defaultPixel, &pageStoreError)
@@ -417,7 +411,7 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
     memcpy(pixel.get(), dm.m_defaultPixel, dm.m_pixelSize);
 
     const bool canonicalSource = dm.m_pageStoreBackend && dm.m_pageStoreBackend->isOperational();
-    auto backend = canonicalSource ? preparePageStoreBackend() : nullptr;
+    auto backend = canonicalSource ? preparePageStoreBackend(this) : nullptr;
     if (canonicalSource) {
         QString pageStoreError;
         if (!backend || !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)
@@ -470,25 +464,9 @@ KisTileSP KisTiledDataManager::getTile(qint32 col, qint32 row, bool writable)
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         auto tile = m_hashTable->getExistingTileForPreparedUpdate(col, row);
         if (!tile) {
-            // Cold compatibility storage is prepared under the original page
-            // admission before explicit presence can be accepted. These local
-            // candidates die before the completed batch releases that claim.
-            OperationDelivery delivery;
-            PreparedDefaultTile defaultData;
-            PreparedTileUpdates prepared;
             QString error;
-            const QRect page(col, row, 1, 1);
-            if (!m_pageStoreBackend->ensureWritablePage(col, row, delivery,
-                [&](QString *failure) -> KisTileData * {
-                    if (!prepared.prepare(*m_hashTable, std::array<QRect, 1>{page}, failure) ||
-                        !prepareExtent(m_extentManager, page, failure)) return nullptr;
-                    defaultData.reset(m_hashTable->refAndFetchDefaultTileData());
-                    return defaultData.get();
-                }, [&](bool createdDefault) {
-                    tile = prepared.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend,
-                                                  KisLogicalPageId{col, row});
-                    if (createdDefault) tile->setPageStoreNativeReadReady();
-                }, &error)) {
+            tile = m_pageStoreBackend->ensureWritablePage(col, row, &error);
+            if (!tile) {
                 KisStrokeJobFailureContext::reportFailure(error);
                 return {};
             }

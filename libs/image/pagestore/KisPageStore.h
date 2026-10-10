@@ -222,12 +222,17 @@ private:
     // Only the bridge can hand off terminal sealing; no active guard or new
     // write access is permitted at this boundary.
     bool sealForLegacyUnlock(QString *error = nullptr);
+    bool sealForLegacyAdapterDelivery(QString *error = nullptr);
     // Seal the original segment but retain its original admission/write set
     // until this session is destroyed after adapter delivery. No writable
     // access survives seal, and the transaction activity still ends normally.
     bool sealForAdapterDelivery(QString *error = nullptr);
-    enum class SealMode { Final, LegacyFinal, AdapterDelivery, Checkpoint };
+    enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
     bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr);
+    // The original final batch owns this quiescent segment exclusively.
+    // Freeze failed input before invoking adapters outside every session/
+    // Store gate. The original entries/claims remain until cancel or release.
+    bool visitAdapterPages(const std::function<void(const KisPageVersion &)> &visit);
     // Adapter reservations claim their targets before capture or pixel
     // exposure; adopting them does not create pending generations.
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,

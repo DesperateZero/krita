@@ -2475,6 +2475,31 @@ bool KisPageMutationSession::sealForLegacyUnlock(QString *error)
     return sealImpl(SealMode::LegacyFinal, error);
 }
 
+bool KisPageMutationSession::sealForLegacyAdapterDelivery(QString *error)
+{
+    return sealImpl(SealMode::LegacyAdapterDelivery, error);
+}
+
+bool KisPageMutationSession::visitAdapterPages(const std::function<void(const KisPageVersion &)> &visit)
+{
+    if (!d) return true;
+    QMutexLocker lock(&d->mutex);
+    if (d->executions) return false;
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
+        if (d->writes.at(slot)->isExposed()) return false;
+    // A successful seal is already Detached. Otherwise this is the original
+    // batch's irreversible cancellation, not a new mutable/readable phase.
+    if (d->state != Private::State::Detached) d->state = Private::State::Failed;
+    lock.unlock();
+    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+        const auto *entry = d->writes.at(slot);
+        auto version = entry->preparedTargetVersion();
+        version.key = entry->key(); // Intent-only entries still have a real key.
+        visit(version);
+    }
+    return true;
+}
+
 bool KisPageMutationSession::sealForAdapterDelivery(QString *error)
 {
     return sealImpl(SealMode::AdapterDelivery, error);
@@ -2492,6 +2517,7 @@ KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
 bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint)
 {
     Q_ASSERT((mode == SealMode::Checkpoint) == bool(checkpoint));
+    const bool retainAdmission = mode == SealMode::AdapterDelivery || mode == SealMode::LegacyAdapterDelivery;
     if (!d) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is absent"));
         return false;
@@ -2523,7 +2549,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         }
     }
     if (d->state == Private::State::Failed) {
-        d->cancelLocked();
+        if (!retainAdmission) d->cancelLocked();
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation was cancelled after a failed write"));
         return false;
     }
@@ -2746,7 +2772,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         overlay.finishUnlocked(std::move(metadataCleanup), lock);
         lock.relock();
         retire();
-        if (!storageRefused) d->cancelLocked(&lock);
+        if (!storageRefused && !retainAdmission) d->cancelLocked(&lock);
         KisPageStoreDetail::setError(error, failure.isEmpty() ? QStringLiteral("CPU mutation seal failed") : failure);
         return false;
     }
@@ -2770,7 +2796,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
-    d->finishSegmentLocked(lock, mode != SealMode::Checkpoint, mode == SealMode::AdapterDelivery);
+    d->finishSegmentLocked(lock, mode != SealMode::Checkpoint, retainAdmission);
     if (mode == SealMode::Checkpoint) {
         // scopeLock excludes the next borrow through capture. The original
         // activity still excludes transaction commit/abort during this gap;

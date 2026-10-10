@@ -71,13 +71,14 @@ public:
         PreparedTile &operator=(PreparedTile &&) = default;
         PreparedTile(const PreparedTile &) = delete;
         PreparedTile &operator=(const PreparedTile &) = delete;
-        explicit operator bool() const { return bool(m_identity) && !m_consumed; }
+        explicit operator bool() const { return bool(m_identity) && m_state == State::Prepared; }
         qint32 col() const { return m_col; }
         qint32 row() const { return m_row; }
         bool removesTile() const { return m_update == Update::Absent; }
     private:
         friend class KisTileHashTableTraits<T>;
-        bool m_consumed = false;
+        enum class State : quint8 { Prepared, Inserted, Consumed };
+        State m_state = State::Prepared;
         qint32 m_col = 0, m_row = 0;
         Update m_update = Update::Present;
         TileTypeSP m_tile;
@@ -88,6 +89,8 @@ public:
     PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
     bool removePreparedTile(PreparedTile &prepared);
+    // Original page admission must still exclude replacement/removal.
+    bool undoPreparedTileInsertion(PreparedTile &prepared);
     TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row)
     {
         return getExistingTile(col, row);
