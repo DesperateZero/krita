@@ -117,6 +117,10 @@ public:
 
         bool isValid() const;
         qsizetype metadataChangeCount() const;
+        // The candidate owns these facts through acceptance and delivery;
+        // finishUnlocked is their last consumer. Order is surface/row/column;
+        // keys are unique. This does not export storage.
+        bool forEachAdapterChange(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
         bool prepare(QString *error, bool *storageRefused = nullptr);
         // Keep the owner gate from the latest surface preparation through
         // acceptance. Surface storage is prepared before allocation-free install.
@@ -196,6 +200,7 @@ public:
                                 QString *error,
                                 QMutexLocker<QMutex> &ownerLock);
     KisPreparedPageSet preparedPagesLocked(const KisPageTransaction &transaction) const;
+    bool transactionDirtyExtentLocked(const KisPageTransaction &, KisSurfaceId, QRect *extent) const;
     bool captureAllocatedPageInputsLocked(KisSurfaceId surface, const KisPageTransaction &transaction,
         KisImageEpochRootSnapshot *root, KisPageKeyStorage *additions, KisPageKeyStorage *removals) const;
     KisImageEpochCommitTicket commitLocked(const KisPageTransaction &transaction,

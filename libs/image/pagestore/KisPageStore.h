@@ -169,6 +169,28 @@ private:
 class KRITAIMAGE_EXPORT KisPageMutationSession
 {
 public:
+    // Borrowed only during the synchronous seal hooks below. The original
+    // overlay candidate supplies its actual changes; no key projection is
+    // exported and untouched write intents are not revisited. Changes are
+    // unique and ordered by surface, row, then column.
+    class KRITAIMAGE_EXPORT AdapterChanges {
+    public:
+        AdapterChanges(const AdapterChanges &) = delete;
+        template<class Visit>
+        bool forEach(const Visit &visit) const
+        {
+            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present) {
+                return (*static_cast<const Visit *>(visitor))(key, present);
+            });
+        }
+    private:
+        friend class KisPageMutationSession;
+        explicit AdapterChanges(const void *overlay) : m_overlay(overlay) {}
+        bool forEachImpl(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
+        const void *m_overlay; // Opaque only to keep the publication owner private.
+    };
+    using AdapterPreparation = std::function<bool(const AdapterChanges &, QString *)>;
+    using AdapterInstallation = std::function<void(const AdapterChanges &)>;
     KisPageMutationSession() = default;
     ~KisPageMutationSession();
     KisPageMutationSession(KisPageMutationSession &&) noexcept = default;
@@ -227,14 +249,18 @@ private:
     // A shared legacy tile may perform its final unlock on a reader thread.
     // Only the bridge can hand off terminal sealing; no active guard or new
     // write access is permitted at this boundary.
-    bool sealForLegacyUnlock(QString *error = nullptr);
+    bool sealForLegacyUnlock(QString *error = nullptr,
+        const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
+    bool checkpointForAdapterDelivery(QString *error,
+        const AdapterPreparation &prepareAdapter, const AdapterInstallation &installAdapter);
     bool sealForLegacyAdapterDelivery(QString *error = nullptr);
     // Seal the original segment but retain its original admission/write set
     // until this session is destroyed after adapter delivery. No writable
     // access survives seal, and the transaction activity still ends normally.
     bool sealForAdapterDelivery(QString *error = nullptr);
     enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
-    bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr);
+    bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
+        const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
     // The original final batch owns this quiescent segment exclusively.
     // Freeze failed input before invoking adapters outside every session/
     // Store gate. The original entries/claims remain until cancel or release.
@@ -597,6 +623,7 @@ private:
     // acceptance; retainedAfter remains empty for a successful no-op.
     bool commitPreparedTransaction(const KisPageTransaction &transaction,
                                    KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
+    bool transactionDirtyExtent(const KisPageTransaction &, KisSurfaceId, QRect *extent) const;
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
     // Adapter-only scratch prepared before pixels. On failure scratch may
     // contain a partial classification and must not be consumed. This grants

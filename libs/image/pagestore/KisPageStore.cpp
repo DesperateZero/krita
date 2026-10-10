@@ -2520,9 +2520,17 @@ bool KisPageMutationSession::seal(QString *error)
     return sealImpl(SealMode::Final, error);
 }
 
-bool KisPageMutationSession::sealForLegacyUnlock(QString *error)
+bool KisPageMutationSession::AdapterChanges::forEachImpl(
+    const void *visitor, bool (*visit)(const void *, const KisPageKey &, bool)) const
 {
-    return sealImpl(SealMode::LegacyFinal, error);
+    return static_cast<const KisPagePublicationCoordinator::KisPreparedOverlayUpdate *>(m_overlay)
+        ->forEachAdapterChange(visitor, visit);
+}
+
+bool KisPageMutationSession::sealForLegacyUnlock(QString *error,
+    const AdapterPreparation &prepareAdapter, const AdapterInstallation &installAdapter)
+{
+    return sealImpl(SealMode::LegacyFinal, error, nullptr, prepareAdapter, installAdapter);
 }
 
 bool KisPageMutationSession::sealForLegacyAdapterDelivery(QString *error)
@@ -2558,15 +2566,23 @@ bool KisPageMutationSession::sealForAdapterDelivery(QString *error)
 KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
 {
     KisCapturedReadView result;
-    // Like borrowExecution, a quiescent checkpoint is not tied to the worker
-    // that originally created the business-owned session.
     sealImpl(SealMode::Checkpoint, error, &result);
     return result;
 }
 
-bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint)
+bool KisPageMutationSession::checkpointForAdapterDelivery(QString *error,
+    const AdapterPreparation &prepareAdapter, const AdapterInstallation &installAdapter)
 {
-    Q_ASSERT((mode == SealMode::Checkpoint) == bool(checkpoint));
+    // Like borrowExecution, a quiescent checkpoint is not tied to the worker
+    // that originally created the business-owned session. This consumer needs
+    // only the completed cut, so do not allocate an unused captured read.
+    return sealImpl(SealMode::Checkpoint, error, nullptr, prepareAdapter, installAdapter);
+}
+
+bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint,
+    const AdapterPreparation &prepareAdapter, const AdapterInstallation &installAdapter)
+{
+    Q_ASSERT(!checkpoint || mode == SealMode::Checkpoint);
     const bool retainAdmission = mode == SealMode::AdapterDelivery || mode == SealMode::LegacyAdapterDelivery;
     if (!d) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is absent"));
@@ -2795,6 +2811,17 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         if (failure.isEmpty())
             failure = QStringLiteral("overlay metadata preparation was rejected");
     }
+    const AdapterChanges adapterChanges(&overlay);
+    if (success && hasOverlay && prepareAdapter) {
+        phase.next(Phase::MutationAdapterPrepare, quint64(overlayChangeCount));
+        try { success = prepareAdapter(adapterChanges, &failure); }
+        catch (const std::bad_alloc &) { success = false; }
+        if (!success) {
+            storageRefused = true; // Keep the frozen original segment retryable.
+            if (failure.isEmpty()) failure = QStringLiteral("segment adapter preparation was refused");
+        }
+        phase.next(Phase::MutationAdapterPrepared, quint64(overlayChangeCount));
+    }
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
@@ -2833,12 +2860,19 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     owner->mutationStats.pagesSealed += sealedCpuWrites;
     owner->synchronousHostWrites += sealedSources;
     owner->mutationStats.removalsSealed += sealedRemovals;
+    // The complete overlay is installed. Its candidate still supplies the
+    // exact accepted changes until finishUnlocked. Adapter callbacks and
+    // retirement must not hold the owner gate.
+    lock.unlock();
+    if (hasOverlay && installAdapter) {
+        // The overlay is accepted and its candidate/claims are still live.
+        // Install cannot refuse; all adapter storage was prepared above.
+        phase.next(Phase::MutationAdapterInstall, quint64(overlayChangeCount));
+        installAdapter(adapterChanges);
+        phase.next(Phase::MutationAdapterInstalled, quint64(overlayChangeCount));
+    }
     KisPageMutationSession::Private::ColdPageSet sealedPages;
     std::swap(d->coldPages, sealedPages);
-    // The complete overlay is installed. Destruction and physical retirement
-    // may call providers or queue large releases; keep the claims but not the
-    // owner gate while doing that work.
-    lock.unlock();
     phase.next(Phase::MutationSealCleanup, pageWork);
     overlay.finishUnlocked(std::move(metadataCleanup), lock);
     sealedPages = Private::ColdPageSet{};
@@ -2847,7 +2881,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
     d->finishSegmentLocked(lock, mode != SealMode::Checkpoint, retainAdmission);
-    if (mode == SealMode::Checkpoint) {
+    if (checkpoint) {
         // scopeLock excludes the next borrow through capture. The original
         // activity still excludes transaction commit/abort during this gap;
         // capture itself fixes the whole sealed overlay under the owner gate.
@@ -5011,6 +5045,12 @@ KisPreparedPageSet KisPageStore::preparedPages(const KisPageTransaction &transac
 {
     QMutexLocker locker(&d->mutex);
     return d->publicationCoordinator.preparedPagesLocked(transaction);
+}
+
+bool KisPageStore::transactionDirtyExtent(const KisPageTransaction &transaction, KisSurfaceId surface, QRect *extent) const
+{
+    QMutexLocker lock(&d->mutex);
+    return d->publicationCoordinator.transactionDirtyExtentLocked(transaction, surface, extent);
 }
 
 KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transaction,

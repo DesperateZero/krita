@@ -73,8 +73,9 @@ QRect completelyCoveredPages(const QRect &pixels, QRect pages)
 // Operation-local storage for missing wrappers and possible removals. Ordinary
 // warm writes need no record. Semantic producers reserve removal GC actions
 // here so successful publication cannot be followed by a late allocation.
-// The caller owns the original page admission through delivery and destroys
-// this storage outside the manager/install gates, before releasing admission.
+// Original admission covers preparation through installation. Candidates are
+// destroyed outside the manager/install gates. A checkpoint ends admission
+// after installation; standalone deliveries may retain it through destruction.
 class PreparedTileUpdates
 {
 public:
@@ -148,6 +149,36 @@ public:
             if (error) *error = QStringLiteral("Clear compatibility preparation was refused");
             return false;
         }
+    }
+
+    bool prepare(KisTileHashTable &table, KisTiledExtentManager &extent, KisSurfaceId surface,
+                 const KisPageMutationSession::AdapterChanges &changes, QString *error)
+    {
+        try {
+            QRect coverage;
+            const bool valid = changes.forEach([&](const KisPageKey &key, bool present) {
+                if (!(key.surface == surface)) return true;
+                const auto page = key.page;
+                if (!KisTileHashTable::supportsCoordinates(page.column, page.row)) return false;
+                preparePage(table, page, present ? KisTileHashTable::Update::Present : KisTileHashTable::Update::Absent);
+                if (present) coverage |= QRect(page.column, page.row, 1, 1);
+                return true;
+            });
+            // Filtering the original ordered changes preserves candidate order.
+            if (valid && (coverage.isEmpty() || prepareExtent(extent, coverage, error))) return true;
+        } catch (const std::bad_alloc &) {}
+        if (error) *error = QStringLiteral("History adapter preparation was refused");
+        return false;
+    }
+
+    void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
+                       KisTiledDataManagerPageStoreBackend *bridge,
+                       const KisPageMutationSession::AdapterChanges &changes)
+    {
+        changes.forEach([&](const KisPageKey &key, bool present) {
+            if (key.surface == bridge->surface()) installPage(table, extent, bridge, key.page, present);
+            return true;
+        });
     }
 
     bool prepareRemovals(KisTileHashTable &table, const QVector<KisLogicalPageId> &pages, QString *error)
@@ -593,13 +624,15 @@ void KisTiledDataManager::commit()
 
 bool KisTiledDataManager::tryCommit(QString *error)
 {
+    PreparedTileUpdates prepared;
     QWriteLocker locker(&m_lock);
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        QVector<KisLogicalPageId> changed;
-        const bool committed = m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize, error, &changed);
-        // A persistent session may already have sealed before root preparation
-        // rejects. Invalidate the original history delta in either case.
-        refreshPageStorePages(changed);
+        const bool committed = m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize, error,
+            [&](const auto &changes, QString *failure) {
+                return prepared.prepare(*m_hashTable, m_extentManager, m_pageStoreBackend->surface(), changes, failure);
+            }, [&](const auto &changes) {
+                prepared.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changes);
+            });
         if (!committed) return false;
         releaseHistoryDefaultTile();
         return true;
@@ -1280,32 +1313,6 @@ void KisTiledDataManager::clear()
     m_extentManager.clear();
 }
 
-void KisTiledDataManager::refreshPageStorePages(const QVector<KisLogicalPageId> &pages)
-{
-    if (pages.isEmpty()) return;
-    PagePresenceScratch present;
-    KIS_SAFE_ASSERT_RECOVER_RETURN(m_pageStoreBackend->preparePagePresence(pages.size(), &present, nullptr));
-    KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
-        KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(pages.size()));
-    KIS_SAFE_ASSERT_RECOVER_RETURN(m_pageStoreBackend->resolveCurrentPagePresenceInto(pages, present.data(), present.size()));
-    for (qsizetype i = 0; i < pages.size(); ++i)
-        refreshPageStorePage(pages[i], present[i]);
-}
-
-void KisTiledDataManager::refreshPageStorePage(const KisLogicalPageId &page, bool present)
-{
-    if (!present) {
-        if (m_hashTable->deleteTile(page.column, page.row))
-            m_extentManager.notifyTileRemoved(page.column, page.row);
-        return;
-    }
-    bool created = false;
-    auto tile = m_hashTable->getTileLazy(page.column, page.row, created);
-    tile->setPageStoreBridge(m_pageStoreBackend, false);
-    tile->invalidatePageStoreReadCache();
-    if (created) m_extentManager.notifyTileAdded(page.column, page.row);
-}
-
 bool KisTiledDataManager::refreshPageStorePage(
     const KisCapturedReadView &view, const KisLogicalPageId &page)
 {
@@ -1973,24 +1980,18 @@ bool KisTiledDataManager::applyStrokePixelOperation(
 bool KisTiledDataManager::checkpointStrokeMutation(
     const KisMementoSP &historyOwner, QString *error)
 {
+    PreparedTileUpdates prepared;
     QWriteLocker lock(&m_lock);
     if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational()) {
         if (error) *error = QStringLiteral("Stroke checkpoint requires PageStore");
         return false;
     }
-    QVector<KisLogicalPageId> changed;
-    auto view = m_pageStoreBackend->checkpointHistoryMutation(historyOwner, &changed, error);
-    if (view.isValid()) {
-        for (const auto &page : changed) {
-            KisPageVersion version;
-            if (!view.resolvePageVersion({m_pageStoreBackend->surface(), page}, &version)) {
-                if (error) *error = QStringLiteral("Stroke checkpoint page cannot be resolved");
-                return false;
-            }
-            refreshPageStorePage(page, !version.isDefaultPixel());
-        }
-    }
-    return view.isValid();
+    return m_pageStoreBackend->checkpointHistoryMutation(historyOwner, error,
+        [&](const auto &changes, QString *failure) {
+            return prepared.prepare(*m_hashTable, m_extentManager, m_pageStoreBackend->surface(), changes, failure);
+        }, [&](const auto &changes) {
+            prepared.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changes);
+        });
 }
 
 KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(

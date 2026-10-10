@@ -372,8 +372,6 @@ private:
     void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
     void refreshPageStoreIndex(const QRect &rect);
-    void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
-    void refreshPageStorePage(const KisLogicalPageId &page, bool present);
     bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
     bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
     KisPageStoreWriteOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,

@@ -192,12 +192,17 @@ public:
     // Unscoped writes are rejected until this history finishes/aborts. Current
     // external reads observe the last checkpoint, never mutable pending data.
     bool beginHistoryMutation(const KisMementoSP &owner, QString *error = nullptr);
-    KisCapturedReadView checkpointHistoryMutation(const KisMementoSP &owner,
-        QVector<KisLogicalPageId> *changed, QString *error = nullptr);
+    // Hooks borrow only the current frozen segment. Installation follows
+    // overlay acceptance even if the later root commit refuses. Checkpoint
+    // consumers need the completed cut, not a newly retained read snapshot.
+    bool checkpointHistoryMutation(const KisMementoSP &owner, QString *error = nullptr,
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     bool commitHistory(const quint8 *defaultPixel,
                        quint32 pixelSize,
                        QString *error = nullptr,
-                       QVector<KisLogicalPageId> *changed = nullptr);
+                       const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+                       const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     bool abortHistory(QString *error = nullptr);
     bool abortHistory(const KisMementoSP &memento, QString *error = nullptr);
     bool rollback(const KisMementoSP &memento, QString *error = nullptr);
@@ -300,7 +305,6 @@ private:
         OperationDelivery *delivery = nullptr,
         const std::function<bool(QString *)> &prepareAdapter = {},
         const AdapterCompletion &completeAdapter = {});
-    KisPageSnapshotArray<KisLogicalPageId> historyChangedPages(const KisPageTransaction &transaction) const;
     std::shared_ptr<const KisPageReplicaSource> uniformSourceFor(
         const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error);
     bool cancelAnonymousLeasesForBarrier(QString *error = nullptr);

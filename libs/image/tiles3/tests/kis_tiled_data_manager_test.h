@@ -111,6 +111,10 @@ private Q_SLOTS:
     void testPageStorePlanarWriteMutation();
     void testPageStoreHistoryMutation_data();
     void testPageStoreHistoryMutation();
+    void testPageStoreHistorySegmentDelivery_data();
+    void testPageStoreHistorySegmentDelivery();
+    void testPageStoreHistorySegmentRefusal_data();
+    void testPageStoreHistorySegmentRefusal();
     void testPageStoreHistoryMutationFailure_data();
     void testPageStoreHistoryMutationFailure();
     void testPageStoreHistoryMutationClosing_data();

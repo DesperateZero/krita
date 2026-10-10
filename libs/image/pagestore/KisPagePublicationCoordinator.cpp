@@ -244,6 +244,15 @@ qsizetype KisPagePublicationCoordinator::KisPreparedOverlayUpdate::
     return isValid() ? data->detachments.size() : 0;
 }
 
+bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::forEachAdapterChange(
+    const void *visitor, bool (*visit)(const void *, const KisPageKey &, bool)) const
+{
+    Q_ASSERT(data);
+    for (const auto &change : data->changes)
+        if (!visit(visitor, change.replacement.key, !change.replacement.removal)) return false;
+    return true;
+}
+
 bool KisPagePublicationCoordinator::KisPreparedOverlayUpdate::prepare(
     QString *error, bool *storageRefused)
 {
@@ -873,6 +882,36 @@ KisPreparedPageSet KisPagePublicationCoordinator::preparedPagesLocked(const KisP
     }
     result = transactionDeltaLocked(transaction.id);
     return result.isValid() ? result : KisPreparedPageSet();
+}
+
+bool KisPagePublicationCoordinator::transactionDirtyExtentLocked(
+    const KisPageTransaction &transaction, KisSurfaceId surface, QRect *extent) const
+{
+    if (!extent || !hasActiveTransactionLocked(transaction)) return false;
+    KisSurfaceEpochState state;
+    if (!resolveSurfaceLocked(surface, KisPageReadView::transactionOverlay(transaction.id), &state)) return false;
+    qint64 left = std::numeric_limits<qint32>::max(), top = left;
+    qint64 right = std::numeric_limits<qint32>::min(), bottom = right;
+    bool changed = false;
+    const auto include = [&](const KisPageKey &key) {
+        if (!(key.surface == surface)) return;
+        changed = true;
+        left = qMin(left, qint64(key.page.column)); right = qMax(right, qint64(key.page.column));
+        top = qMin(top, qint64(key.page.row)); bottom = qMax(bottom, qint64(key.page.row));
+    };
+    const auto found = m_preparedTransactions.find(transaction.id.value);
+    if (found != m_preparedTransactions.cend()) {
+        for (const auto &entry : found->second->proofs) include(entry.first);
+        for (const auto &key : found->second->removals) include(key);
+    }
+    if (!changed) { *extent = {}; return true; }
+    left *= state.logicalPageExtent.width(); right = (right + 1) * state.logicalPageExtent.width() - 1;
+    top *= state.logicalPageExtent.height(); bottom = (bottom + 1) * state.logicalPageExtent.height() - 1;
+    if (left < std::numeric_limits<qint32>::min() || top < std::numeric_limits<qint32>::min() ||
+        right > std::numeric_limits<qint32>::max() || bottom > std::numeric_limits<qint32>::max() ||
+        right - left >= std::numeric_limits<qint32>::max() || bottom - top >= std::numeric_limits<qint32>::max()) return false;
+    *extent = QRect(QPoint(qint32(left), qint32(top)), QPoint(qint32(right), qint32(bottom)));
+    return true;
 }
 
 bool KisPagePublicationCoordinator::captureAllocatedPageInputsLocked(

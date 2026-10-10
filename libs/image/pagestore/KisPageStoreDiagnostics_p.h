@@ -83,9 +83,10 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     MutationPresencePrepared,
     MutationPresenceResolve,
     MutationPresenceResolved,
-    // Original execution/claims held, no PageStore or manager gate at entry.
-    // Preparation may allocate missing compatibility resources. Installation
-    // holds the manager gate; observers may record/signal only, never re-enter.
+    // Original execution/claims held; no PageStore owner gate at entry.
+    // History seal also holds its mutation mutex and the caller's manager
+    // gate. Never re-enter that mutation/backend/manager from an observer.
+    // Preparation may allocate; installation consumes prepared resources.
     MutationAdapterPrepare,
     MutationAdapterPrepared,
     MutationAdapterInstall,

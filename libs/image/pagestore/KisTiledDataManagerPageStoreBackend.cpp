@@ -1711,26 +1711,11 @@ bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
     return true;
 }
 
-KisPageSnapshotArray<KisLogicalPageId> KisTiledDataManagerPageStoreBackend::historyChangedPages(
-    const KisPageTransaction &transaction) const
+bool KisTiledDataManagerPageStoreBackend::checkpointHistoryMutation(
+    const KisMementoSP &owner, QString *error,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &installAdapter) try
 {
-    // Original canonical history delta, not a second touched-page authority.
-    // Called only at a checkpoint/terminal boundary, never per dab.
-    const auto prepared = d->store->preparedPages(transaction);
-    KisPageSnapshotArray<KisLogicalPageId> pages;
-    pages.reserve(prepared.proofs.size() + prepared.removedPages.size());
-    for (const auto &proof : prepared.proofs)
-        if (proof.authority.version.key.surface == d->surface)
-            pages.append(proof.authority.version.key.page);
-    for (const auto &key : prepared.removedPages)
-        if (key.surface == d->surface) pages.append(key.page);
-    return pages;
-}
-
-KisCapturedReadView KisTiledDataManagerPageStoreBackend::checkpointHistoryMutation(
-    const KisMementoSP &owner, QVector<KisLogicalPageId> *changed, QString *error) try
-{
-    if (changed) changed->clear();
     QMutexLocker transactionLocker(&d->transactionMutex);
     QWriteLocker publicationLocker(&d->publicationLock);
     QMutexLocker locker(&d->mutex);
@@ -1739,23 +1724,21 @@ KisCapturedReadView KisTiledDataManagerPageStoreBackend::checkpointHistoryMutati
         KisPageStoreDetail::setError(error, QStringLiteral("checkpoint history owner is unavailable"));
         return {};
     }
-    const auto transaction = d->activeHistory.transaction;
     locker.unlock();
-    auto view = d->historyMutation.checkpointForRead(error);
-    if (view.isValid() && changed) *changed = historyChangedPages(transaction);
-    return view;
+    return d->historyMutation.checkpointForAdapterDelivery(error, prepareAdapter, installAdapter);
 }
 catch (const std::bad_alloc &) {
-    KisPageStoreDetail::setError(error, QStringLiteral("checkpoint output storage was refused"));
+    KisPageStoreDetail::setError(error, QStringLiteral("checkpoint adapter storage was refused"));
     return {};
 }
 
 bool KisTiledDataManagerPageStoreBackend::commitHistory(
     const quint8 *defaultPixel,
     quint32 pixelSize,
-    QString *error, QVector<KisLogicalPageId> *changed) try
+    QString *error,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &installAdapter) try
 {
-    if (changed) changed->clear();
     QMutexLocker transactionLocker(&d->transactionMutex);
     QWriteLocker publicationLocker(&d->publicationLock);
     QMutexLocker locker(&d->mutex);
@@ -1770,7 +1753,7 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     if (persistent && d->historyMutationPhase != Phase::Sealed) {
         d->historyMutationPhase = Phase::Closing;
         locker.unlock();
-        if (!d->historyMutation.sealForLegacyUnlock(error)) return false;
+        if (!d->historyMutation.sealForLegacyUnlock(error, prepareAdapter, installAdapter)) return false;
         locker.relock();
         d->historyMutationPhase = Phase::Sealed;
     }
@@ -1779,11 +1762,13 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
         KisPageStoreDetail::setError(error, QStringLiteral("history commit requires adapter delivery to finish"));
         return false;
     }
-    // Refresh these original delta keys even if a later root commit rejects:
-    // the session may already have sealed, so an old compatibility cache must
-    // not continue advertising the pre-checkpoint bytes.
-    const auto pages = historyChangedPages(transaction);
-    if (persistent && changed) *changed = pages;
+    // Dirty bounds consume the complete history delta, including removals.
+    // Adapter delivery already consumed only the just-sealed segment above.
+    QRect dirtyExtent;
+    if (!d->store->transactionDirtyExtent(transaction, d->surface, &dirtyExtent)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("history dirty bounds are unavailable"));
+        return false;
+    }
     locker.relock();
     const KisPageStoreMemento committed =
         d->history->commit(d->activeHistory, error);
@@ -1791,16 +1776,6 @@ bool KisTiledDataManagerPageStoreBackend::commitHistory(
     // Preserve the original transaction's undo/redo projection invalidation.
     // The canonical delta includes removed pages; current extent alone would
     // lose the dirty region when an undo removes the last painted pixels.
-    QRect dirtyExtent;
-    for (const auto &page : pages) {
-        const qint64 x = qint64(page.column) * KisTileData::WIDTH;
-        const qint64 y = qint64(page.row) * KisTileData::HEIGHT;
-        KIS_ASSERT(x >= std::numeric_limits<qint32>::min() &&
-                   y >= std::numeric_limits<qint32>::min() &&
-                   x + KisTileData::WIDTH - 1 <= std::numeric_limits<qint32>::max() &&
-                   y + KisTileData::HEIGHT - 1 <= std::numeric_limits<qint32>::max());
-        dirtyExtent |= QRect(int(x), int(y), KisTileData::WIDTH, KisTileData::HEIGHT);
-    }
     d->currentMemento->setExtent(dirtyExtent);
     const auto stored = d->mementos.find(d->currentMemento.data());
     KIS_ASSERT(stored != d->mementos.end());
