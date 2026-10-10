@@ -916,7 +916,7 @@ bool KisPagePublicationCoordinator::hasPreparedDeltaLocked(KisPageTransactionId 
 KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
     const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter,
     const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock,
-    QWriteLocker *publicationLock, KisPageKeyStorage *changedPages, bool *requiresFullPageRestore)
+    QWriteLocker *publicationLock)
 {
     using Phase = KisPageStoreDiagnosticPhase;
     if (retainedAfter)
@@ -972,21 +972,6 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
         [](const auto &change) { return change.before.defaultPixelRevision != change.after.defaultPixelRevision; });
 
     ownerLock.unlock();
-    // These are the original history record's necessary output fields, not
-    // a second commit-input export. Storage is prepared before acceptance and
-    // outside the Store gate while the original delta remains claimed.
-    try {
-        if (changedPages) {
-            changedPages->clear();
-            changedPages->reserve(owned.proofs.size() + owned.removals.size());
-            for (const auto &entry : owned.proofs) changedPages->push_back(entry.first);
-            changedPages->insert(changedPages->end(), owned.removals.begin(), owned.removals.end());
-        }
-        if (requiresFullPageRestore) {
-            *requiresFullPageRestore = std::any_of(owned.surfaceChanges.cbegin(), owned.surfaceChanges.cend(),
-                [](const auto &change) { return change.before.format.defaultPixel != change.after.format.defaultPixel; });
-        }
-    } catch (const std::bad_alloc &) { return {}; }
     diagnostic.next(Phase::CommitProviderValidation, quint64(proofDescriptors.size()));
     bool proofsValid = true;
     size_t proofIndex = 0;
@@ -1228,7 +1213,6 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
 
 KisImageEpochCommitTicket
 KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
-                                                          const KisPageKeyStorage *changedPages,
                                                           const KisPageStore *diagnosticOwner,
                                                           QMutexLocker<QMutex> &ownerLock)
 {
@@ -1286,28 +1270,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         auto &registeredPages = preparedCommit.data->directoryHeads;
         auto &restoredDefaultVersions = preparedCommit.data->descriptorChanges;
         try {
-            if (changedPages) {
-                restoreTargets.reserve(size_t(changedPages->size()));
-                for (const KisPageKey &key : *changedPages) {
-                    if (!key.isValid())
-                        continue;
-                    KisPageVersion target;
-                    if (!m_epochs.resolve(key, retainedView, &target))
-                        return {};
-                    restoreTargets.push_back(target);
-                }
-                std::sort(restoreTargets.begin(), restoreTargets.end(), [](const auto &a, const auto &b) {
-                    return overlayKeyLess(a.key, b.key);
-                });
-                restoreTargets.erase(std::unique(restoreTargets.begin(), restoreTargets.end(),
-                    [](const auto &a, const auto &b) { return a.key == b.key; }), restoreTargets.end());
-            } else {
-                if (!retainedRoot.isValid())
-                    return {};
-                restoreTargets.resize(size_t(retainedRoot.pageCount()));
-                retainedRoot.copyPageVersions(restoreTargets.data());
-            }
-            if (!changedPages || changesDefaults) {
+            if (!retainedRoot.appendRestoreTargets(currentRoot, &restoreTargets)) return {};
+            if (changesDefaults) {
                 // The original target prefix is sorted and unique. Directory keys
                 // are unique by shard ownership; suffix insertions need no second
                 // membership authority or quadratic prefix scan.
@@ -1319,8 +1283,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                         [](const auto &version, const auto &key) { return overlayKeyLess(version.key, key); });
                     if (found != end && found->key == page.key)
                         continue;
-                    if (changedPages
-                        && (!defaultChanged(page.key.surface) || !page.isDefaultPixel())) {
+                    if (!defaultChanged(page.key.surface) || !page.isDefaultPixel()) {
                         continue;
                     }
                     KisPageVersion target;
@@ -1372,7 +1335,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             || !m_restoreIsIdle(m_ownerContext)) {
             return {};
         }
-        const bool directoryChanged = (!changedPages || changesDefaults)
+        const bool directoryChanged = changesDefaults
             && m_metadata.pageRegistrationCount() != directoryRevision;
         const bool descriptorChanged = descriptorAdditions != 0 && m_descriptorRevision != descriptorRevision;
         if (publication.needsReprepare() || directoryChanged || descriptorChanged) {

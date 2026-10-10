@@ -1080,7 +1080,7 @@ bool KisTiledDataManagerPageStoreBackend::finishOwnedTransaction(
         d->anonymousTransaction = {};
         d->anonymousFailed = false;
     }
-    const bool committed = pageStore->commitPreparedTransaction(transaction, nullptr, nullptr, nullptr, &publicationLocker);
+    const bool committed = pageStore->commitPreparedTransaction(transaction, nullptr, &publicationLocker);
     if (!committed) pageStore->abort(transaction);
     KisPageStoreDetail::setError(error, committed
         ? QString() : QStringLiteral("tiles3 PageStore commit failed"));

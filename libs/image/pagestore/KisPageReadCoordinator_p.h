@@ -172,8 +172,7 @@ public:
         KisPageCapturedReleasePointer pending,
         QMutexLocker<QMutex> *heldOwnerLock = nullptr);
     KRITAIMAGE_EXPORT void retryCapturedReleasesLocked(QMutexLocker<QMutex> &ownerLock, bool drain = false);
-    bool releaseSnapshot(KisImageEpochSnapshotToken token,
-                         const KisPageKeyStorage *changedPages);
+    bool releaseSnapshot(KisImageEpochSnapshotToken token);
 
     KRITAIMAGE_EXPORT KisPageReadCoordinatorSnapshot snapshotLocked() const;
 
@@ -219,9 +218,6 @@ private:
     bool releaseReadLocked(const KisReplicaHandle &replica,
                            KisPageLeaseId lease, KisPageReadCleanup &cleanup,
                            const KisCompletionTicket &completion = {});
-    bool releaseSnapshotLocked(KisImageEpochSnapshotToken token,
-                               const KisPageKeyStorage *changedPages,
-                               QMutexLocker<QMutex> &ownerLock);
     bool belongsToPreparedTransactionLocked(
         const KisPageVersion &version,
         KisPageTransactionId transaction) const;

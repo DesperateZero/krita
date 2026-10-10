@@ -470,9 +470,67 @@ KisPageSnapshotArray<KisPageVersion> KisImageEpochRootSnapshot::manifest() const
     return result;
 }
 
-void KisImageEpochRootSnapshot::copyPageVersions(KisPageVersion *output) const
+bool KisImageEpochRootSnapshot::appendRestoreTargets(
+    const KisImageEpochRootSnapshot &current, EpochArray<KisPageVersion> *output) const
 {
-    appendPageRoot(m_pageRoot, [&](const auto &version) { *output++ = version; });
+    if (!isValid() || !current.isValid() || !output) return false;
+    // Each cursor is an ordered frontier of whole subtrees and single values.
+    // Expanding the taller frontier first preserves shared-subtree skips even
+    // when an insertion/removal rotated one root. No manifest or second delta
+    // is allocated. The AVL height is below twice the bit width of its count.
+    struct Cursor {
+        struct Frame { const KisImageEpochPageRoot *node; bool value; };
+        std::array<Frame, 2 * std::numeric_limits<qsizetype>::digits> frames;
+        size_t count = 0;
+        explicit Cursor(const PageRoot &root) { push(root.get()); }
+        void push(const KisImageEpochPageRoot *node) {
+            if (!node) return;
+            Q_ASSERT(count < frames.size());
+            frames[count++] = {node, false};
+        }
+        bool empty() const { return count == 0; }
+        const Frame &front() const { return frames[count - 1]; }
+        int height() const { return empty() || front().value ? 0 : front().node->height; }
+        void expand() {
+            auto &item = frames[count - 1];
+            item.value = true;
+            push(item.node->left.get());
+        }
+        void consume() {
+            const auto *node = front().node;
+            --count;
+            push(node->right.get());
+        }
+    };
+    Cursor from(current.m_pageRoot), to(m_pageRoot);
+    while (!from.empty() || !to.empty()) {
+        if (from.height() && to.height() && from.front().node == to.front().node) {
+            --from.count;
+            --to.count;
+            continue;
+        }
+        if (from.height() || to.height()) {
+            if (from.height() >= to.height()) from.expand();
+            else to.expand();
+            continue;
+        }
+        const auto *before = from.empty() ? nullptr : &from.front().node->version;
+        const auto *after = to.empty() ? nullptr : &to.front().node->version;
+        if (before && (!after || pageKeyLess(before->key, after->key))) {
+            KisPageVersion target;
+            if (!resolve(before->key, &target)) return false;
+            output->push_back(target);
+            from.consume();
+        } else if (after && (!before || pageKeyLess(after->key, before->key))) {
+            output->push_back(*after);
+            to.consume();
+        } else {
+            if (!(*before == *after)) output->push_back(*after);
+            from.consume();
+            to.consume();
+        }
+    }
+    return true;
 }
 
 qsizetype KisImageEpochRootSnapshot::pageCount() const

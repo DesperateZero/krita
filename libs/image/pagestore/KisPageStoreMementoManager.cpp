@@ -52,12 +52,9 @@ std::atomic<quint64> s_nextHistoryCapability{1};
 
 struct HistoryRecord
 {
-    explicit HistoryRecord(KisMutationStorageAllocator<KisPageKey> storage) : changedPages(storage) {}
     KisPageTransaction transaction;
     KisRetainedImageEpochSnapshot before;
     KisRetainedImageEpochSnapshot after;
-    KisPageKeyStorage changedPages;
-    bool requiresFullPageRestore = false;
 };
 
 quint64 allocateHistoryCapability(QString *error, const QString &failure)
@@ -82,19 +79,18 @@ bool releaseActiveHistory(KisPageStore *store, HistoryRecord &record)
 }
 
 
-template<typename ReleaseSnapshot>
-bool releaseHistoryRecord(HistoryRecord &record, ReleaseSnapshot releaseSnapshot)
+bool releaseHistoryRecord(KisPageStore *store, HistoryRecord &record)
 {
     const bool shared = record.before.token.isValid() && record.before.token == record.after.token;
     if (record.before.token.isValid()) {
-        if (!releaseSnapshot(record.before.token, record))
+        if (!store->releaseSnapshot(record.before.token))
             return false;
         record.before.token = {};
         if (shared)
             record.after.token = {};
     }
     if (record.after.token.isValid()) {
-        if (!releaseSnapshot(record.after.token, record))
+        if (!store->releaseSnapshot(record.after.token))
             return false;
         record.after.token = {};
     }
@@ -249,7 +245,7 @@ KisPageStoreHistoryTransaction KisPageStoreMementoManager::begin(
     const quint64 capability = allocateHistoryCapability(error, QStringLiteral("PageStore history capability allocation failed"));
     if (!capability) return {};
     Private::Records prepared(d->active.get_allocator());
-    try { prepared.try_emplace(capability, d->active.get_allocator()); }
+    try { prepared.try_emplace(capability); }
     catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore history record storage is unavailable"));
         return {};
@@ -288,8 +284,7 @@ KisPageStoreMemento KisPageStoreMementoManager::commit(
     if (!capability) return {};
     auto &record = it->second;
     KisRetainedImageEpochSnapshot after;
-    if (!d->store->commitPreparedTransaction(record.transaction, &after, &record.changedPages,
-                                             &record.requiresFullPageRestore)) {
+    if (!d->store->commitPreparedTransaction(record.transaction, &after)) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore history transaction commit failed"));
         return {};
@@ -351,9 +346,7 @@ KisImageEpochCommitTicket KisPageStoreMementoManager::restore(
     }
     const KisRetainedImageEpochSnapshot &target =
         before ? it->second.before : it->second.after;
-    const KisImageEpochCommitTicket restored = it->second.requiresFullPageRestore
-        ? d->store->restoreRetainedEpoch(target)
-        : d->store->restoreRetainedEpochDelta(target, it->second.changedPages);
+    const KisImageEpochCommitTicket restored = d->store->restoreRetainedEpoch(target);
     if (!restored.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("PageStore memento restore failed"));
         return {};
@@ -368,13 +361,7 @@ bool KisPageStoreMementoManager::purge(const KisPageStoreMemento &memento,
     QMutexLocker locker(&d->mutex);
     auto it = d->find(memento, error);
     if (it == d->mementos.end()) return false;
-    const auto releaseSnapshot = [store = d->store](KisImageEpochSnapshotToken token,
-                                                     const HistoryRecord &record) {
-        return record.requiresFullPageRestore
-            ? store->releaseSnapshot(token)
-            : store->releaseSnapshotDelta(token, record.changedPages);
-    };
-    if (!releaseHistoryRecord(it->second, releaseSnapshot)) {
+    if (!releaseHistoryRecord(d->store, it->second)) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "PageStore memento retention release failed"));
         return false;
@@ -399,14 +386,8 @@ bool KisPageStoreMementoManager::close(QString *error)
         }
         it = d->active.erase(it);
     }
-    const auto releaseSnapshot = [store = d->store](KisImageEpochSnapshotToken token,
-                                                     const HistoryRecord &record) {
-        return record.requiresFullPageRestore
-            ? store->releaseSnapshot(token)
-            : store->releaseSnapshotDelta(token, record.changedPages);
-    };
     for (auto it = d->mementos.begin(); it != d->mementos.end();) {
-        if (!releaseHistoryRecord(it->second, releaseSnapshot)) {
+        if (!releaseHistoryRecord(d->store, it->second)) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "PageStore memento manager retention drain failed"));
             return false;

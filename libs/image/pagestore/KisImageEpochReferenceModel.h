@@ -66,9 +66,10 @@ public:
 private:
     size_t surfaceCount() const;
     const KisSurfaceEpochState &surfaceAt(size_t index) const;
-    // The original publication candidate admits pageCount() elements first.
-    // Copy this immutable tree directly into that paid capacity.
-    void copyPageVersions(KisPageVersion *output) const;
+    // Append the actual current->target version difference into the original
+    // publication candidate. Shared immutable subtrees need no page visits.
+    bool appendRestoreTargets(const KisImageEpochRootSnapshot &current,
+        std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> *output) const;
     // Original publication owner supplies sorted removal keys and prepared
     // addition keys. No storage allocation occurs in this bounds query.
     bool contentExtentAfterPages(KisSurfaceId surface, QSize pageExtent,

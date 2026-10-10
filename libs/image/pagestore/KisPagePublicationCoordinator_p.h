@@ -206,11 +206,8 @@ public:
                                                 KisRetainedImageEpochSnapshot *retainedAfter,
                                                 const KisPageStore *diagnosticOwner,
                                                 QMutexLocker<QMutex> &ownerLock,
-                                                QWriteLocker *publicationLock = nullptr,
-                                                KisPageKeyStorage *changedPages = nullptr,
-                                                bool *requiresFullPageRestore = nullptr);
+                                                QWriteLocker *publicationLock = nullptr);
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
-                                                         const KisPageKeyStorage *changedPages,
                                                          const KisPageStore *diagnosticOwner,
                                                          QMutexLocker<QMutex> &ownerLock);
     bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,

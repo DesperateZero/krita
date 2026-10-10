@@ -586,8 +586,6 @@ private:
     // released after root installation, before deferred cleanup.
     bool commitPreparedTransaction(const KisPageTransaction &transaction,
                                    KisRetainedImageEpochSnapshot *retainedAfter = nullptr,
-                                   KisPageKeyStorage *changedPages = nullptr,
-                                   bool *requiresFullPageRestore = nullptr,
                                    QWriteLocker *publicationLock = nullptr);
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
     // Adapter-only scratch prepared before pixels. On failure scratch may
@@ -621,16 +619,9 @@ private:
     friend class KisPageMutationSession;
     friend KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store);
 
-    /**
-     * Memento-only optimized restore/release. The history owner derives the
-     * complete delta from a sealed PreparedPageSet; arbitrary callers cannot
-     * assert completeness. Surface-default changes use the public full-scan
-     * operations instead.
-     */
-    KisImageEpochCommitTicket restoreRetainedEpochDelta(const KisRetainedImageEpochSnapshot &retained,
-                                                        const KisPageKeyStorage &changedPages);
+    // Memento retention uses the original immutable root without exporting
+    // its manifest. Restore/release never infer scope from a memento delta.
     KisRetainedImageEpochSnapshot captureRetainedEpochRoot();
-    bool releaseSnapshotDelta(KisImageEpochSnapshotToken token, const KisPageKeyStorage &changedPages);
     class Private;
     static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {

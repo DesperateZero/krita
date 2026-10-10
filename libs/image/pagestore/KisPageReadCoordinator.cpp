@@ -1086,37 +1086,26 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
     return true;
 }
 
-bool KisPageReadCoordinator::releaseSnapshot(
-    KisImageEpochSnapshotToken token,
-    const KisPageKeyStorage *changedPages)
+bool KisPageReadCoordinator::releaseSnapshot(KisImageEpochSnapshotToken token)
 {
     QMutexLocker lock(&m_ownerMutex);
-    const bool released = releaseSnapshotLocked(token, changedPages, lock);
-    if (released)
-        retryCapturedReleasesLocked(lock);
-    return released;
-}
-
-bool KisPageReadCoordinator::releaseSnapshotLocked(
-    KisImageEpochSnapshotToken token,
-    const KisPageKeyStorage *changedPages,
-    QMutexLocker<QMutex> &lock)
-{
     bool becameUnretained = false;
     if (!m_operational ||
         !m_epochs.releaseSnapshot(token, nullptr, &becameUnretained)) {
         return false;
     }
     if (m_backgroundReclamation) {
-        if (!becameUnretained) return true;
-        m_history.collectUnreachableLocked(
-            changedPages ? changedPages->data() : nullptr, changedPages ? changedPages->size() : 0, true);
-        return true;
+        if (becameUnretained) m_history.collectUnreachableLocked(nullptr, 0, true);
+    } else {
+        m_epochs.collectUnretainedRoots();
+        // A root may be the last owner of versions outside the transaction
+        // that originally created its memento. Revisit the existing history
+        // work index, as the background path does; never infer a complete
+        // release set from that transaction's write delta.
+        m_history.collectUnreachableLocked(nullptr, 0, true);
+        processRetirementsUnlocked(lock);
     }
-    m_epochs.collectUnretainedRoots();
-    m_history.collectUnreachableLocked(changedPages ? changedPages->data() : nullptr,
-        changedPages ? changedPages->size() : 0, !changedPages);
-    processRetirementsUnlocked(lock);
+    retryCapturedReleasesLocked(lock);
     return true;
 }
 

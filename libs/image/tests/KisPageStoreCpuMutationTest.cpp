@@ -1001,13 +1001,15 @@ private Q_SLOTS:
         QTest::newRow("continue-after-refusal") << true << true;
     }
     void publicationInputRefusalKeepsOriginalTransaction();
-    void restorationUsesOriginalTargets_data()
-    {
-        QTest::addColumn<bool>("delta");
-        QTest::newRow("full-root") << false;
-        QTest::newRow("duplicate-delta") << true;
-    }
     void restorationUsesOriginalTargets();
+    void restorationUsesActualRootDifference_data()
+    {
+        QTest::addColumn<int>("bpp");
+        QTest::addColumn<int>("pages");
+        for (int bpp : {1, 4, 8, 16}) for (int pages : {1, 17, 65})
+            QTest::newRow(qPrintable(QStringLiteral("b%1-pages%2").arg(bpp).arg(pages))) << bpp << pages;
+    }
+    void restorationUsesActualRootDifference();
     void commitPreparationClaimsAndLateCapture_data();
     void commitPreparationClaimsAndLateCapture();
     void publicationCleanupUsesBoundedBackgroundPasses();
@@ -1056,6 +1058,14 @@ private Q_SLOTS:
     void restoreProtectsSourceAndRevalidatesLease();
     void restoreRejectsNewTransaction();
     void restoreRejectsChangedHead();
+    void historyRestoreAcrossDisjointMementos();
+    void historyPurgeReclaimsOutsideItsOwnDelta_data()
+    {
+        QTest::addColumn<bool>("background");
+        QTest::newRow("foreground") << false;
+        QTest::newRow("background") << true;
+    }
+    void historyPurgeReclaimsOutsideItsOwnDelta();
     void restoreIgnoresDetachedRetirement_data();
     void restoreIgnoresDetachedRetirement();
     void concurrentDisjointCommitsKeepEveryPage();
@@ -2978,7 +2988,6 @@ void KisPageStoreCpuMutationTest::publicationInputRefusalKeepsOriginalTransactio
 
 void KisPageStoreCpuMutationTest::restorationUsesOriginalTargets()
 {
-    QFETCH(bool, delta);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     const auto retained = f.store->captureRetainedEpoch(); QVERIFY(retained.isValid());
     QVERIFY(f.fill(0x72)); QVERIFY(f.setDefault(0x55));
@@ -2990,15 +2999,66 @@ void KisPageStoreCpuMutationTest::restorationUsesOriginalTargets()
         if (phase == KisPageStoreDiagnosticPhase::RestorePublishOwnerWait && ++attempts == 1)
             QCOMPARE(f.pixel({}, 4), QByteArray(f.bpp, char(0x55))); // New directory key, outside the original prefix.
     });
-    const KisPageKeyStorage changed{key(1), {}, key(0), key(1), key(0)};
-    const auto restored = delta ? f.store->restoreRetainedEpochDelta(retained, changed)
-                               : f.store->restoreRetainedEpoch(retained);
+    const auto restored = f.store->restoreRetainedEpoch(retained);
     QVERIFY(restored.isValid()); QCOMPARE(attempts, 2);
     QCOMPARE(f.store->publicationStatistics().restoreDirectoryRepreparations,
              before.restoreDirectoryRepreparations + 1);
     for (int x : {0, 1}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x31)));
     for (int x : {2, 3, 4}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x2a)));
     QVERIFY(f.store->releaseSnapshot(retained.token)); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::restorationUsesActualRootDifference()
+{
+    QFETCH(int, bpp); QFETCH(int, pages);
+    Fixture f; QVERIFY(f.init(bpp));
+    const auto writePages = [&](const KisPageTransaction &tx, const QVector<int> &keys, quint8 value) {
+        auto mutation = f.begin(tx);
+        for (int x : keys) {
+            auto write = mutation.beginWrite(key(x));
+            if (!write.isValid()) return false;
+            std::memset(write.data(), value, size_t(64 * 64 * bpp));
+        }
+        return mutation.seal();
+    };
+    QVector<int> original, changed, added;
+    for (int i = 0; i < pages; ++i) {
+        original.append(2 * i);
+        if (i % 4 != 0 && i % 5 == 0) changed.append(2 * i);
+        if (i % 3 == 0) added.append(2 * i + 1);
+    }
+    auto tx = f.store->beginCurrentTransaction();
+    QVERIFY(writePages(tx, original, 0x31));
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    const auto before = f.store->captureRetainedEpoch(); QVERIFY(before.isValid());
+    tx = f.store->beginCurrentTransaction();
+    QVERIFY(writePages(tx, changed + added, 0x71));
+    quint64 difference = quint64(changed.size() + added.size());
+    for (int i = 0; i < pages; i += 4) { QVERIFY(f.remove(tx, key(2 * i))); ++difference; }
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    const auto after = f.store->captureRetainedEpoch(); QVERIFY(after.isValid());
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    const auto transitions = [&] {
+        return recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::RestoreTransitionPreflight)].workItems;
+    };
+    quint64 prior = 0;
+    auto previousContent = after.snapshot.epoch;
+    for (bool restoreBefore : {true, false, false, true}) {
+        const auto target = restoreBefore ? before : after;
+        QVERIFY(f.store->restoreRetainedEpoch(target).isValid());
+        // The repeated after restore has identical content under a new epoch.
+        const bool repeated = previousContent == target.snapshot.epoch;
+        QCOMPARE(transitions() - prior, repeated ? quint64(0) : difference);
+        prior = transitions();
+        previousContent = target.snapshot.epoch;
+        for (int i = 0; i < pages; ++i) {
+            const quint8 value = restoreBefore ? 0x31 : i % 4 == 0 ? 0x2a : i % 5 == 0 ? 0x71 : 0x31;
+            QCOMPARE(f.pixel({}, 2 * i), QByteArray(bpp, char(value)));
+            QCOMPARE(f.pixel({}, 2 * i + 1), QByteArray(bpp, char(!restoreBefore && i % 3 == 0 ? 0x71 : 0x2a)));
+        }
+    }
+    QVERIFY(f.store->releaseSnapshot(before.token)); QVERIFY(f.store->releaseSnapshot(after.token));
+    QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture_data()
@@ -3261,17 +3321,12 @@ void KisPageStoreCpuMutationTest::commitRebasesAfterDisjointPublication()
             secondCommit = f.store->commit(second, f.store->preparedPages(second));
     });
     KisRetainedImageEpochSnapshot retained;
-    KisPageKeyStorage changed;
-    bool fullRestore = true;
     const bool firstCommit = internal
-        ? f.store->commitPreparedTransaction(first, &retained, &changed, &fullRestore)
+        ? f.store->commitPreparedTransaction(first, &retained)
         : f.store->commit(first, f.store->preparedPages(first), &retained).isValid();
     QVERIFY(secondCommit.isValid()); QVERIFY(firstCommit); QCOMPARE(attempts, 2);
     QCOMPARE(f.store->publicationStatistics().rootRebases, quint64(1));
     QVERIFY(retained.isValid()); QVERIFY(retained.snapshot.epoch.value > secondCommit.epoch.value);
-    if (internal) {
-        QCOMPARE(changed.size(), size_t(1)); QCOMPARE(changed.front(), key(0)); QVERIFY(!fullRestore);
-    }
     QCOMPARE(quint8(f.pixel({}, 0)[0]), quint8(0x51)); QCOMPARE(quint8(f.pixel({}, 1)[0]), quint8(0x52));
     QVERIFY(f.store->releaseSnapshot(retained.token));
     QVERIFY(f.store->closeSession());
@@ -4173,14 +4228,11 @@ void KisPageStoreCpuMutationTest::ownedEmptyCommitPreservesActivityAndIdentity()
     const auto tx = f.store->beginCurrentTransaction();
     auto mutation = f.begin(tx); QVERIFY(mutation.isActive());
     KisRetainedImageEpochSnapshot retained;
-    KisPageKeyStorage changed;
-    changed.push_back(key(9));
-    bool fullRestore = true;
-    QVERIFY(!f.store->commitPreparedTransaction(tx, &retained, &changed, &fullRestore));
-    QVERIFY(mutation.isActive()); QVERIFY(changed.empty()); QVERIFY(!fullRestore); QVERIFY(!retained.isValid());
+    QVERIFY(!f.store->commitPreparedTransaction(tx, &retained));
+    QVERIFY(mutation.isActive()); QVERIFY(!retained.isValid());
     QVERIFY(mutation.cancel());
-    QVERIFY(f.store->commitPreparedTransaction(tx, &retained, &changed, &fullRestore));
-    QVERIFY(changed.empty()); QVERIFY(!fullRestore); QVERIFY(!retained.isValid());
+    QVERIFY(f.store->commitPreparedTransaction(tx, &retained));
+    QVERIFY(!retained.isValid());
     QCOMPARE(f.store->captureCommittedEpoch().epoch, before.epoch);
     QCOMPARE(f.store->sessionStats().committedTransactions, quint64(0));
     QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(0));
@@ -4280,6 +4332,59 @@ void KisPageStoreCpuMutationTest::restoreRejectsChangedHead()
     QCOMPARE(quint8(f.pixel()[0]), quint8(0x52));
     QVERIFY(f.store->releaseSnapshot(first.token)); QVERIFY(f.store->releaseSnapshot(second.token));
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::historyRestoreAcrossDisjointMementos()
+{
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    KisPageStoreMementoManager history; QVERIFY(history.configure(f.store.get()));
+    const auto first = history.begin(); QVERIFY(first.isValid());
+    QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, first.transaction,
+        QRect(0, 0, 64, 64), QByteArray(f.bpp, char(0x51)), &f.error));
+    const auto firstMemento = history.commit(first); QVERIFY(firstMemento.isValid());
+    const auto second = history.begin(); QVERIFY(second.isValid());
+    QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, second.transaction,
+        QRect(64, 0, 64, 64), QByteArray(f.bpp, char(0x71)), &f.error));
+    const auto secondMemento = history.commit(second); QVERIFY(secondMemento.isValid());
+    QVERIFY2(history.rollback(firstMemento, &f.error).isValid(), qPrintable(f.error));
+    for (int x : {0, 1}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x31)));
+    // Root reads alone can conceal a stale metadata current pointer. A new
+    // writer must use the restored before image on the page outside M1's delta.
+    const auto next = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(next);
+    auto write = mutation.beginWrite(key(1)); QVERIFY2(write.isValid(), qPrintable(f.error));
+    QCOMPARE(static_cast<const quint8 *>(write.data())[0], quint8(0x31));
+    static_cast<quint8 *>(write.data())[0] = 0x91;
+    write = {}; QVERIFY(mutation.seal()); mutation = {};
+    QVERIFY(f.store->commit(next, f.store->preparedPages(next)).isValid());
+    QCOMPARE(quint8(f.pixel({}, 1)[0]), quint8(0x91));
+    QVERIFY(history.rollforward(secondMemento).isValid());
+    QCOMPARE(f.pixel({}, 0), QByteArray(f.bpp, char(0x51)));
+    QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x71)));
+    QVERIFY(history.close()); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::historyPurgeReclaimsOutsideItsOwnDelta()
+{
+    QFETCH(bool, background);
+    Fixture f; f.provider->disableBackgroundRetirement = !background;
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    KisPageStoreMementoManager history; QVERIFY(history.configure(f.store.get()));
+    QVector<KisPageStoreMemento> mementos;
+    for (int x : {0, 1}) {
+        const auto edit = history.begin(); QVERIFY(edit.isValid());
+        QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, edit.transaction,
+            QRect(x * 64, 0, 64, 64), QByteArray(f.bpp, char(0x51 + x)), &f.error));
+        mementos.append(history.commit(edit)); QVERIFY(mementos.last().isValid());
+    }
+    // M1 still protects old page 1 even though only M2 changed that key.
+    QVERIFY(history.purge(mementos[1]));
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(4 * 64 * 64 * f.bpp));
+    QVERIFY(history.purge(mementos[0]));
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(2 * 64 * 64 * f.bpp));
+    QVERIFY(history.close()); QVERIFY(f.store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::restoreIgnoresDetachedRetirement_data()
@@ -7693,14 +7798,16 @@ void KisPageStoreCpuMutationTest::publicationMetadataWorkIgnoresRetainedHistory(
     auto current = f.store->captureReadView({}); QVERIFY(current.isValid());
     QVERIFY(f.store->restoreRetainedEpoch(initial).isValid());
     const auto restored = kisPageStoreMetadataMetrics(*f.store);
-    QCOMPARE(restored.publicationVersionInputs - committed.publicationVersionInputs, quint64(3));
+    // Only page 0 differs; page 1's unchanged version is not an input.
+    QCOMPARE(restored.publicationVersionInputs - committed.publicationVersionInputs, quint64(2));
     QCOMPARE(restored.publicationVersionInstalls - committed.publicationVersionInstalls, quint64(2));
     QCOMPARE(restored.publicationHistoryNodesPrepared - committed.publicationHistoryNodesPrepared, quint64(1));
     QCOMPARE(restored.publicationHistoryNodesTransferred - committed.publicationHistoryNodesTransferred, quint64(1));
     QCOMPARE(restored.publicationAdditionRecordsPrepared, committed.publicationAdditionRecordsPrepared);
     QCOMPARE(restored.publicationAdditionRecordsTransferred, committed.publicationAdditionRecordsTransferred);
-    QCOMPARE(restored.publicationLookupVersionInputs - committed.publicationLookupVersionInputs, quint64(3));
-    QCOMPARE(restored.publicationDirectoryHeaders - committed.publicationDirectoryHeaders, quint64(2));
+    QCOMPARE(restored.publicationLookupVersionInputs - committed.publicationLookupVersionInputs, quint64(2));
+    // Default revisions agree, so no directory enumeration is needed.
+    QCOMPARE(restored.publicationDirectoryHeaders - committed.publicationDirectoryHeaders, quint64(0));
     QCOMPARE(restored.fullSnapshotExports - restored.backgroundSnapshotExports,
              committed.fullSnapshotExports - committed.backgroundSnapshotExports);
     qInfo() << "publication metadata history" << history << "commit inputs/installs"

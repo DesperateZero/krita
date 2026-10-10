@@ -4917,11 +4917,9 @@ KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transac
 }
 bool KisPageStore::commitPreparedTransaction(
     const KisPageTransaction &transaction, KisRetainedImageEpochSnapshot *retainedAfter,
-    KisPageKeyStorage *changedPages, bool *requiresFullPageRestore, QWriteLocker *publicationLock)
+    QWriteLocker *publicationLock)
 {
     if (retainedAfter) *retainedAfter = {};
-    if (changedPages) changedPages->clear();
-    if (requiresFullPageRestore) *requiresFullPageRestore = false;
     if (transaction.id.isValid())
         KisPageMutationSession::Private::retryOrphans(d.data(), transaction.id);
     // Only empty commits need abort cleanup; its storage still dies after
@@ -4933,20 +4931,13 @@ bool KisPageStore::commitPreparedTransaction(
         return d->publicationCoordinator.abortLocked(transaction, locker, *cleanup);
     }
     return d->publicationCoordinator.commitOwnedLocked(transaction, retainedAfter, this, locker,
-        publicationLock, changedPages, requiresFullPageRestore).isValid();
+        publicationLock).isValid();
 }
 
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained)
 {
     QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.restoreRetainedEpochLocked(retained, nullptr, this, locker);
-}
-
-KisImageEpochCommitTicket KisPageStore::restoreRetainedEpochDelta(const KisRetainedImageEpochSnapshot &retained,
-                                                                  const KisPageKeyStorage &changedPages)
-{
-    QMutexLocker locker(&d->mutex);
-    return d->publicationCoordinator.restoreRetainedEpochLocked(retained, &changedPages, this, locker);
+    return d->publicationCoordinator.restoreRetainedEpochLocked(retained, this, locker);
 }
 bool KisPageStore::abort(const KisPageTransaction &transaction)
 {
@@ -4988,12 +4979,7 @@ bool KisPageStore::validateRetainedEpoch(const KisRetainedImageEpochSnapshot &re
 
 bool KisPageStore::releaseSnapshot(KisImageEpochSnapshotToken token)
 {
-    return d->readCoordinator.releaseSnapshot(token, nullptr);
-}
-
-bool KisPageStore::releaseSnapshotDelta(KisImageEpochSnapshotToken token, const KisPageKeyStorage &changedPages)
-{
-    return d->readCoordinator.releaseSnapshot(token, &changedPages);
+    return d->readCoordinator.releaseSnapshot(token);
 }
 KisMutationStorageAllocator<char> KisPageStore::storageAllocator() const
 {
