@@ -1041,6 +1041,81 @@ void KisTiledDataManagerTest::testUndoSetDefaultPixel()
     QVERIFY(memoryIsFilled(oddPixel2, tile10->data(), TILESIZE));
 }
 
+void KisTiledDataManagerTest::testPageStoreImportFailure_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<int>("failure");
+    for (int bpp : {1, 4, 8, 16})
+        for (int failure = 0; failure < 5; ++failure)
+            QTest::newRow(qPrintable(QString("%1-%2").arg(bpp).arg(failure))) << bpp << failure;
+}
+
+void KisTiledDataManagerTest::testPageStoreImportFailure()
+{
+    QFETCH(int, bpp); QFETCH(int, failure);
+    const QByteArray blank(bpp, char(0x19)), painted(bpp, char(0x57));
+    auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager source(bpp, bytes(blank));
+    source.clear(QRect(0, 0, 64, 64), bytes(painted));
+    KoStoreFake output; KisFakePaintDeviceWriter writer(&output);
+    QVERIFY(source.write(writer)); output.startReading();
+    QByteArray data = output.device()->readAll();
+    QVERIFY(data.contains("DATA 1\n"));
+    data.replace("DATA 1\n", "DATA 2\n");
+    const auto badHeader = data.size();
+    data += "invalid\n"; // The first real compressed tile still decodes fully.
+    if (failure == 1) data.clear();
+    if (failure == 2) data = "VERSION 2\nTILEWIDTH 32\n";
+    class ImportStream : public QBuffer {
+    public:
+        std::function<void()> beforeBadHeader;
+        qint64 badHeader = -1;
+    protected:
+        qint64 readLineData(char *data, qint64 length) override
+        {
+            if (pos() == badHeader && beforeBadHeader) {
+                auto callback = std::exchange(beforeBadHeader, {});
+                callback();
+            }
+            return QBuffer::readLineData(data, length);
+        }
+    } stream;
+    stream.setData(data); QVERIFY(stream.open(QIODevice::ReadOnly));
+    KisTiledDataManager dm(bpp, bytes(blank));
+    dm.clear(QRect(9 * 64, 0, 64, 64), bytes(painted));
+    KisTileSP held;
+    KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+    bool admitted = false;
+    if (failure == 4) {
+        stream.badHeader = badHeader;
+        stream.beforeBadHeader = [&] {
+            held = dm.getTile(0, 0, true);
+            QVector<KisLogicalPageId> changed;
+            admitted = dm.m_pageStoreBackend->writeOperation({{0, 0}}, false,
+                [](KisPixelWriteCursor *) { return true; }, &changed, nullptr, {}, &delivery)
+                == KisPageStoreWriteOperationResult::Succeeded;
+        };
+    }
+    QVERIFY(!dm.read(failure == 0 ? nullptr : &stream));
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(dm.defaultPixel()), bpp), blank);
+    if (failure == 4) {
+        QVERIFY(admitted); QVERIFY(!delivery.isEmpty());
+        QVERIFY(dm.hasCurrentMemento());
+        QVERIFY(dm.m_historyDefaultTileData);
+        QCOMPARE(dm.m_hashTable->getExistingTileForPreparedUpdate(0, 0), held);
+        delivery = {};
+        QVERIFY(dm.tryCommit()); // The original history remains resumable.
+    } else {
+        QVERIFY(!dm.hasCurrentMemento());
+        QVERIFY(dm.m_pageStoreBackend->allocatedPages().isEmpty());
+        QCOMPARE(dm.m_hashTable->numTiles(), 0);
+        QVERIFY(dm.extent().isEmpty());
+        const auto next = dm.getMemento(); QVERIFY(next);
+        QVERIFY(dm.tryAbort(next));
+    }
+    QVERIFY(!dm.m_historyDefaultTileData);
+}
+
 void KisTiledDataManagerTest::testPageStoreSaveReopenRoundTrip()
 {
     quint8 defaultPixel = 0x19;

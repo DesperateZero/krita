@@ -474,6 +474,11 @@ KisTileSP KisTiledDataManager::getOldTile(
 KisMementoSP KisTiledDataManager::getMemento()
 {
     QWriteLocker locker(&m_lock);
+    return getMementoLocked();
+}
+
+KisMementoSP KisTiledDataManager::getMementoLocked()
+{
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         auto memento = m_pageStoreBackend->beginHistory(m_defaultPixel, m_pixelSize);
         if (memento) {
@@ -520,6 +525,50 @@ void KisTiledDataManager::releaseHistoryDefaultTile()
     if (auto *tile = std::exchange(m_historyDefaultTileData, nullptr)) tile->deref();
 }
 
+// These are the original abort candidates, kept by the caller until after its
+// manager gate is released. They never become another persistent history owner.
+struct KisTiledDataManager::PreparedHistoryAbort
+{
+    std::unique_ptr<KisTileHashTable> table;
+    std::unique_ptr<KisTiledExtentManager> extent;
+};
+
+bool KisTiledDataManager::abortPageStoreHistoryLocked(
+    const KisMementoSP &memento, PreparedHistoryAbort &prepared, QString *error)
+{
+    if (!m_historyDefaultTileData) {
+        if (error) *error = QStringLiteral("Abort has no retained default backing");
+        return false;
+    }
+    try {
+        QVector<KisLogicalPageId> pages;
+        if (!m_pageStoreBackend->prepareHistoryAbort(memento, &pages, error)) return false;
+        prepared.table = std::make_unique<KisTileHashTable>(m_mementoManager);
+        prepared.table->setDefaultTileData(m_historyDefaultTileData);
+        prepared.extent = std::make_unique<KisTiledExtentManager>();
+        if (!prepared.extent->configureStorage(m_pageStoreBackend->extentStorage())) return false;
+        for (const auto &page : pages) {
+            bool added = false;
+            auto tile = prepared.table->getTileLazy(page.column, page.row, added);
+            tile->setPageStoreBridge(m_pageStoreBackend, false);
+            if (added) prepared.extent->notifyTileAdded(page.column, page.row);
+        }
+    } catch (const std::bad_alloc &) {
+        if (error) *error = QStringLiteral("Abort compatibility preparation ran out of memory");
+        return false;
+    }
+    if (!m_pageStoreBackend->abortHistory(memento, error)) return false;
+
+    // All adapter storage and the default backing exist before abort.
+    auto *oldTable = m_hashTable;
+    m_hashTable = prepared.table.release();
+    prepared.table.reset(oldTable);
+    m_extentManager.takePrepared(*prepared.extent);
+    installDefaultPixel(memento->oldDefaultPixel(), m_historyDefaultTileData);
+    releaseHistoryDefaultTile();
+    return true;
+}
+
 bool KisTiledDataManager::tryAbort(KisMementoSP memento, QString *error)
 {
     if (error) error->clear();
@@ -530,41 +579,10 @@ bool KisTiledDataManager::tryAbort(KisMementoSP memento, QString *error)
 
     // Declare candidates before the lock so rejected/old tables are destroyed
     // after unlocking. No canonical state changes during compatibility preparation.
-    std::unique_ptr<KisTileHashTable> preparedTable;
-    std::unique_ptr<KisTiledExtentManager> preparedExtent;
+    PreparedHistoryAbort prepared;
     QWriteLocker locker(&m_lock);
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        if (!m_historyDefaultTileData) {
-            if (error) *error = QStringLiteral("Abort has no retained default backing");
-            return false;
-        }
-        try {
-            QVector<KisLogicalPageId> pages;
-            if (!m_pageStoreBackend->prepareHistoryAbort(memento, &pages, error)) return false;
-            preparedTable = std::make_unique<KisTileHashTable>(m_mementoManager);
-            preparedTable->setDefaultTileData(m_historyDefaultTileData);
-            preparedExtent = std::make_unique<KisTiledExtentManager>();
-            if (!preparedExtent->configureStorage(m_pageStoreBackend->extentStorage())) return false;
-            for (const auto &page : pages) {
-                bool added = false;
-                auto tile = preparedTable->getTileLazy(page.column, page.row, added);
-                tile->setPageStoreBridge(m_pageStoreBackend, false);
-                if (added) preparedExtent->notifyTileAdded(page.column, page.row);
-            }
-        } catch (const std::bad_alloc &) {
-            if (error) *error = QStringLiteral("Abort compatibility preparation ran out of memory");
-            return false;
-        }
-        if (!m_pageStoreBackend->abortHistory(memento, error)) return false;
-
-        // All adapter storage and the default backing exist before abort.
-        auto *oldTable = m_hashTable;
-        m_hashTable = preparedTable.release();
-        preparedTable.reset(oldTable);
-        m_extentManager.takePrepared(*preparedExtent);
-        installDefaultPixel(memento->oldDefaultPixel(), m_historyDefaultTileData);
-        releaseHistoryDefaultTile();
-        return true;
+        return abortPageStoreHistoryLocked(memento, prepared, error);
     }
 
     // The legacy-only manager has no canonical abort primitive. Retain its
@@ -715,28 +733,13 @@ bool KisTiledDataManager::read(QIODevice *stream)
 {
     clear();
 
+    PreparedHistoryAbort prepared;
     QWriteLocker locker(&m_lock);
-    const bool pageStoreHistory =
-        m_pageStoreBackend && m_pageStoreBackend->isOperational();
-    KisMementoSP nothing = pageStoreHistory
-        ? m_pageStoreBackend->beginHistory(m_defaultPixel, m_pixelSize)
-        : m_mementoManager->getMemento();
-    if (!nothing) return false;
-
-    if (!stream) {
-        if (pageStoreHistory) m_pageStoreBackend->abortHistory();
-        else m_mementoManager->commit();
-        return false;
-    }
+    if (!stream) return false;
 
     const qint32 maxLineLength = 79; // Legacy magic
-    QByteArray line = stream->readLine(maxLineLength);
-    line = line.trimmed();
-    if (line.isEmpty()) {
-        if (pageStoreHistory) m_pageStoreBackend->abortHistory();
-        else m_mementoManager->commit();
-        return false;
-    }
+    const QByteArray line = stream->readLine(maxLineLength).trimmed();
+    if (line.isEmpty()) return false;
 
     quint32 numTiles;
     qint32 tilesVersion = LEGACY_VERSION;
@@ -749,35 +752,34 @@ bool KisTiledDataManager::read(QIODevice *stream)
 
         tilesVersion = lineItems.takeFirst().toInt();
 
-        if(!processTilesHeader(stream, numTiles)) {
-            if (pageStoreHistory) m_pageStoreBackend->abortHistory();
-            else m_mementoManager->commit();
-            return false;
-        }
-    }
-    else {
+        if (!processTilesHeader(stream, numTiles)) return false;
+    } else {
         numTiles = line.toUInt();
     }
 
     KisAbstractTileCompressorSP compressor =
         KisTileCompressorFactory::create(tilesVersion);
 
+    // Header rejection has no writes to cancel. Retain history/default backing
+    // only once decoding can actually create a tile or expose mutable pixels.
+    const bool pageStoreHistory =
+        m_pageStoreBackend && m_pageStoreBackend->isOperational();
+    const KisMementoSP nothing = getMementoLocked();
+    if (!nothing) return false;
     bool readSuccess = true;
     for (quint32 i = 0; i < numTiles; i++) {
-        if (!compressor->readTile(stream, this)) {
-            readSuccess = false;
-        }
+        if (!compressor->readTile(stream, this)) readSuccess = false;
     }
 
     if (pageStoreHistory) {
-        if (!readSuccess ||
-            !m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize)) {
-            if (m_pageStoreBackend->hasCurrentHistory()) {
-                m_pageStoreBackend->abortHistory();
-            }
-            rebuildPageStoreIndex();
-            return false;
+        if (readSuccess && m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize)) {
+            releaseHistoryDefaultTile();
+            return true;
         }
+        QString error;
+        if (!abortPageStoreHistoryLocked(nothing, prepared, &error))
+            warnFile << "Failed to cancel tile import:" << error;
+        return false;
     } else {
         m_mementoManager->commit();
     }

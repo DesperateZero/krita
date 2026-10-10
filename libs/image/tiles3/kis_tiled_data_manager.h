@@ -363,6 +363,10 @@ private:
     }
 
 private:
+    struct PreparedHistoryAbort;
+    KisMementoSP getMementoLocked();
+    bool abortPageStoreHistoryLocked(const KisMementoSP &memento,
+                                    PreparedHistoryAbort &prepared, QString *error);
     void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
     void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
