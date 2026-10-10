@@ -132,53 +132,6 @@ std::shared_ptr<KisBackingBudgetController> acquireProductNonPayloadBudget(
     return kisAcquirePageStoreProcessBudget(policy.limits.metadataArenaBytes, error);
 }
 
-bool updateSnapshotDerivedExtent(KisImageEpochSnapshot *snapshot,
-                                 KisSurfaceId surfaceId,
-                                 QString *error)
-{
-    if (!snapshot) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 clone snapshot is absent"));
-        return false;
-    }
-    auto surfaceIt = std::find_if(
-        snapshot->surfaces.begin(), snapshot->surfaces.end(),
-        [surfaceId](const KisSurfaceEpochState &surface) {
-            return surface.surface == surfaceId;
-        });
-    if (surfaceIt == snapshot->surfaces.end()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 clone surface is absent"));
-        return false;
-    }
-
-    QRect extent;
-    const qint64 width = surfaceIt->logicalPageExtent.width();
-    const qint64 height = surfaceIt->logicalPageExtent.height();
-    for (const KisPageVersion &version : std::as_const(snapshot->manifest)) {
-        if (!(version.key.surface == surfaceId)) continue;
-        const qint64 x = qint64(version.key.page.column) * width;
-        const qint64 y = qint64(version.key.page.row) * height;
-        if (x < std::numeric_limits<int>::min() ||
-            y < std::numeric_limits<int>::min() ||
-            x + width - 1 > std::numeric_limits<int>::max() ||
-            y + height - 1 > std::numeric_limits<int>::max()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("tiles3 clone extent exceeds QRect range"));
-            return false;
-        }
-        const QRect pageRect{int(x), int(y), int(width), int(height)};
-        extent = extent.isNull() ? pageRect : extent.united(pageRect);
-    }
-    if (surfaceIt->contentExtent != extent) {
-        surfaceIt->contentExtent = extent;
-        ++surfaceIt->extentRevision;
-    }
-    snapshot->defaultPixelRevision = qMax(
-        snapshot->defaultPixelRevision, surfaceIt->defaultPixelRevision);
-    snapshot->extentRevision = qMax(
-        snapshot->extentRevision, surfaceIt->extentRevision);
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
-
 }
 
 class KisTiledDataManagerPageStoreLease final : public KisTilePageStoreLease, public KisPageProcessStorageObject
@@ -819,8 +772,9 @@ catch (const std::bad_alloc &) {
 
 bool KisTiledDataManagerPageStoreBackend::configureClone(
     const KisTiledDataManagerPageStoreBackend &source,
-    QString *error) try
+    QString *error, KisPageSnapshotArray<KisPageVersion> *adapterPages) try
 {
+    if (adapterPages) adapterPages->clear();
     QMutexLocker sourceTransactionLocker(&source.d->transactionMutex);
     KisPageStore *sourceStore = nullptr;
     KisPageStoreHistoryTransaction sourceHistory;
@@ -839,47 +793,14 @@ bool KisTiledDataManagerPageStoreBackend::configureClone(
         sourceHistory = source.d->activeHistory;
     }
 
-    KisImageEpochSnapshot snapshot = sourceStore->captureCommittedEpoch();
-    if (!snapshot.isValid()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("tiles3 clone snapshot is invalid"));
-        return false;
-    }
-    if (sourceHistory.isValid()) {
-        const KisPreparedPageSet prepared =
-            sourceStore->preparedPages(sourceHistory.transaction);
-        if (prepared.isValid()) {
-            for (const KisPageKey &removed : prepared.removedPages) {
-                for (qsizetype i = snapshot.manifest.size(); i-- > 0;) {
-                    if (snapshot.manifest.at(i).key == removed) {
-                        snapshot.manifest.removeAt(i);
-                    }
-                }
-            }
-            for (const KisPreparedPageProof &proof : prepared.proofs) {
-                bool replaced = false;
-                for (KisPageVersion &version : snapshot.manifest) {
-                    if (version.key == proof.authority.version.key) {
-                        version = proof.authority.version;
-                        replaced = true;
-                        break;
-                    }
-                }
-                if (!replaced) snapshot.manifest.append(proof.authority.version);
-            }
-            for (const KisSurfaceEpochChange &change :
-                 prepared.surfaceChanges) {
-                for (KisSurfaceEpochState &surface : snapshot.surfaces) {
-                    if (surface.surface == change.after.surface) {
-                        surface = change.after;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if (!updateSnapshotDerivedExtent(&snapshot, source.d->surface, error)) {
-        return false;
-    }
+    const auto selector = sourceHistory.isValid()
+        ? KisPageReadView::transactionOverlay(sourceHistory.transaction.id) : KisPageReadView{};
+    auto capturedSource = sourceStore->captureReadView(selector, error);
+    if (!capturedSource.isValid()) return false;
+    // The source already maintains derived bounds at publication. Export and
+    // replica adoption consume one cut, including a history's retained base.
+    auto snapshot = sourceStore->snapshotForClone(capturedSource, error);
+    if (!snapshot.epoch.isValid()) return false;
 
     QMutexLocker locker(&d->mutex);
     if (d->operational || d->store || d->provider || d->history) {
@@ -892,17 +813,7 @@ bool KisTiledDataManagerPageStoreBackend::configureClone(
             ? QStringLiteral("tiles3 clone initialization failed") : failure);
         return false;
     }
-    KisPageReadView sourceView;
-    if (sourceHistory.isValid()) {
-        sourceView = KisPageReadView::transactionOverlay(sourceHistory.transaction.id);
-    }
-    auto capturedSource = sourceStore->captureReadView(sourceView, &failure);
-    if (!capturedSource.isValid()) {
-        KisPageStoreDetail::setError(error, failure.isEmpty()
-            ? QStringLiteral("tiles3 clone source view is unavailable") : failure);
-        return false;
-    }
-    for (const KisPageVersion &version : snapshot.manifest) {
+    for (const KisPageVersion &version : std::as_const(snapshot.manifest)) {
         KisPageAllocationDescriptor descriptor;
         if (!sourceStore->pageDescriptor(version, &descriptor)) {
             KisPageStoreDetail::setError(error, QStringLiteral(
@@ -934,6 +845,9 @@ bool KisTiledDataManagerPageStoreBackend::configureClone(
         return false;
     }
     d->operational = true;
+    // Transfer the original initialization output to its remaining consumer.
+    // Standalone backends have no compatibility index to construct.
+    if (adapterPages) *adapterPages = std::move(snapshot.manifest);
     KisPageStoreDetail::setError(error, {});
     return true;
 }

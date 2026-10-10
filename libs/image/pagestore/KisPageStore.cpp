@@ -3058,6 +3058,27 @@ KisImageEpochId KisCapturedReadView::epoch() const
     return d ? d->root.epoch() : KisImageEpochId{};
 }
 
+KisImageEpochSnapshot KisPageStore::snapshotForClone(const KisCapturedReadView &view, QString *error) const
+try
+{
+    KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::CopyPrepare);
+    if (!view.d || view.d->owner.get() != d.data() || view.d->exactVersion.isValid()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("clone requires this store's complete captured view"));
+        return {};
+    }
+    phase.next(KisPageStoreDiagnosticPhase::ManifestExport, quint64(view.d->root.pageCount()));
+    const auto &delta = *view.d->release;
+    auto result = view.d->root.snapshotWithChanges(delta.versions.data(), delta.versions.size(),
+        delta.removedPages.data(), delta.removedPages.size(), delta.stagedSurfaces.data(), delta.stagedSurfaces.size());
+    KisPageStoreDetail::setError(error, {});
+    return result;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("clone snapshot storage is unavailable"));
+    return {};
+}
+
 bool KisCapturedReadView::resolvePageVersion(const KisPageKey &key, KisPageVersion *version) const
 {
     if (version)

@@ -1464,6 +1464,157 @@ void KisTiledDataManagerTest::testPageStoreCloneActiveWriteRefusal()
     QCOMPARE(QByteArray(static_cast<const char *>(exact.data()), bpp), initial);
 }
 
+void KisTiledDataManagerTest::testPageStoreCloneHistoryBase_data()
+{
+    QTest::addColumn<int>("bpp");
+    for (int bpp : {1, 4, 8, 16}) QTest::newRow(qPrintable(QString::number(bpp))) << bpp;
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneHistoryBase()
+{
+    QFETCH(int, bpp);
+    const QByteArray initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(initial.constData()));
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    auto *backend = source.m_pageStoreBackend; auto *store = backend->store();
+    const auto history = source.getMemento(); QVERIFY(history);
+    // A separate native producer advances current while the history's base
+    // remains retained. Backend reads still select that history's exact cut.
+    const auto tx = store->beginCurrentTransaction(); QVERIFY(tx.isValid());
+    auto mutation = store->beginMutation(tx); QVERIFY(mutation.isActive());
+    auto write = mutation.beginWrite({backend->surface(), {0, 0}}); QVERIFY(write.isValid());
+    std::memset(write.data(), 0x71, size_t(bpp)); write = {};
+    QVERIFY(mutation.seal()); QVERIFY(store->commit(tx, store->preparedPages(tx)).isValid());
+    const auto selected = backend->captureReadView(); QVERIFY(selected.isValid());
+    auto read = selected.readResidentPage({backend->surface(), {0, 0}}); QVERIFY(read.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(read.data()), bpp), initial);
+    std::unique_ptr<KisTiledDataManager> clone;
+    try { clone = std::make_unique<KisTiledDataManager>(source); }
+    catch (const std::bad_alloc &) {}
+    QVERIFY2(clone, "Clone must use the same fixed cut for its manifest and adopted replicas");
+    QByteArray actual(bpp, Qt::Uninitialized);
+    clone->readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, initial);
+    // Independent publication deliberately invalidates the manager's abort
+    // base. Preserve that refusal; backend teardown can abandon the history.
+    QVERIFY(!source.tryAbort(history));
+    QVERIFY(backend->abortHistory());
+    clone->readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+    QCOMPARE(actual, initial);
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneFixedView_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("count"); QTest::addColumn<int>("changes");
+    for (int bpp : {1, 4, 8, 16}) for (int count : {0, 1, 17, 257}) {
+        QVector<int> deltas{0}; if (count) deltas.append(1); if (count > 1) deltas.append(count);
+        for (int changes : deltas)
+            QTest::newRow(qPrintable(QString("B%1-N%2-D%3").arg(bpp).arg(count).arg(changes))) << bpp << count << changes;
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneFixedView()
+{
+    QFETCH(int, bpp); QFETCH(int, count); QFETCH(int, changes);
+    const QByteArray blank(bpp, char(0x13)), paint(bpp, char(0x51)), laterDefault(bpp, char(0x29));
+    const auto bytes = [](const QByteArray &value) { return reinterpret_cast<const quint8 *>(value.constData()); };
+    KisTiledDataManager source(bpp, bytes(blank));
+    if (count) { const QByteArray initial(count * 64 * bpp, char(0x31)); source.writeBytes(bytes(initial), 0, 64, count * 64, 1); }
+    const auto history = source.getMemento(); QVERIFY(history);
+    for (int i = 0; i < changes; ++i) {
+        const int column = i % 3 == 0 ? -1 - i : i;
+        source.clear(QRect(column * 64, 64, 64, 64), bytes(i % 3 == 1 ? blank : paint));
+    }
+    source.setDefaultPixel(bytes(laterDefault));
+    auto *backend = source.m_pageStoreBackend; auto *store = backend->store();
+    const auto selected = backend->captureReadView(); QVERIFY(selected.isValid());
+    KisSurfaceEpochState state; QVERIFY(selected.resolveSurfaceState(backend->surface(), &state));
+    const auto pages = backend->allocatedPages();
+    const auto captures = store->readScopeStatistics().capturedReadViewsCreated;
+    KisTiledDataManager clone(source);
+    QCOMPARE(store->readScopeStatistics().capturedReadViewsCreated - captures, quint64(1));
+    QCOMPARE(clone.m_pageStoreBackend->allocatedPages(), pages);
+    QCOMPARE(clone.extent(), state.contentExtent);
+    QCOMPARE(clone.m_hashTable->numTiles(), pages.size());
+    QCOMPARE(QByteArray(reinterpret_cast<const char *>(clone.defaultPixel()), bpp), laterDefault);
+    const auto cloned = clone.m_pageStoreBackend->captureReadView(); QVERIFY(cloned.isValid());
+    for (int column = -count - 1; column <= count; ++column) {
+        const KisPageKey key{backend->surface(), {column, 1}};
+        auto from = selected.readResidentPage(key), to = cloned.readResidentPage(key);
+        QVERIFY(from.isValid() && to.isValid());
+        QCOMPARE(QByteArray(static_cast<const char *>(to.data()), bpp), QByteArray(static_cast<const char *>(from.data()), bpp));
+    }
+    QVERIFY(source.tryAbort(history)); source.clear();
+    QCOMPARE(clone.m_pageStoreBackend->allocatedPages(), pages);
+    const auto implicit = cloned.readResidentPage({backend->surface(), {count + 1, 1}}); QVERIFY(implicit.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(implicit.data()), bpp), laterDefault);
+}
+
+void KisTiledDataManagerTest::testPageStoreClonePendingPresence_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("cold");
+    for (int bpp : {1, 4, 8, 16}) for (bool cold : {false, true})
+        QTest::newRow(qPrintable(QString("B%1-cold%2").arg(bpp).arg(cold))) << bpp << cold;
+}
+
+void KisTiledDataManagerTest::testPageStoreClonePendingPresence()
+{
+    QFETCH(int, bpp); QFETCH(bool, cold);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    const auto owner = source.getMemento(); QVERIFY(source.beginStrokeMutation(owner));
+    const int x = cold ? 64 : 0;
+    QCOMPARE(source.writePageStoreOperation({QRect(x, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+        cursor->moveTo(x, 0); if (!cursor->rawData()) return false;
+        std::memset(cursor->rawData(), 0x71, size_t(bpp)); return true;
+    }, nullptr, owner), KisPageStoreWriteOperationResult::Succeeded);
+    KisTiledDataManager clone(source);
+    QCOMPARE(clone.m_pageStoreBackend->allocatedPages().size(), 1);
+    QCOMPARE(clone.m_hashTable->numTiles(), 1);
+    QCOMPARE(clone.extent(), QRect(0, 0, 64, 64));
+    QVERIFY(source.tryAbort(owner));
+    QByteArray pixel(bpp, Qt::Uninitialized);
+    clone.readBytes(reinterpret_cast<quint8 *>(pixel.data()), 0, 0, 1, 1); QCOMPARE(pixel, initial);
+    clone.readBytes(reinterpret_cast<quint8 *>(pixel.data()), 64, 0, 1, 1); QCOMPARE(pixel, blank);
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneSnapshotRefusal_data()
+{
+    testPageStoreCloneHistoryBase_data();
+}
+
+void KisTiledDataManagerTest::testPageStoreCloneSnapshotRefusal()
+{
+    QFETCH(int, bpp);
+    const QByteArray initial(bpp, char(0x31));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(initial.constData()));
+    source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), 0, 0, 1, 1);
+    auto *store = source.m_pageStoreBackend->store(); kisDrainPageStoreReclamation();
+    const auto retained = store->sessionStats().retainedSnapshots;
+    auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
+    size_t count = 0; void *filler = nullptr; bool injected = false;
+    const auto cleanup = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, count, 1); });
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::ManifestExport || injected) return;
+        injected = true;
+        const auto usage = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        count = size_t(kisPageProcessStorageLimit() - usage.live.cpuRam - usage.reserved.cpuRam);
+        filler = allocateTestProcessStoragePressure(count, 1);
+    });
+    bool refused = false;
+    try { KisTiledDataManager clone(source); } catch (const std::bad_alloc &) { refused = true; }
+    recorder.setPhaseObserver({});
+    QVERIFY(injected && filler);
+    freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
+    QVERIFY(refused);
+    QTRY_COMPARE_WITH_TIMEOUT(store->sessionStats().retainedSnapshots, retained, 3000);
+    KisTiledDataManager retry(source);
+    QByteArray pixel(bpp, Qt::Uninitialized);
+    retry.readBytes(reinterpret_cast<quint8 *>(pixel.data()), 0, 0, 1, 1); QCOMPARE(pixel, initial);
+}
+
 void KisTiledDataManagerTest::testTileCloneRejectedWrite_data()
 {
     QTest::addColumn<int>("bpp");
@@ -1508,7 +1659,21 @@ void KisTiledDataManagerTest::testTileCloneRejectedWrite()
         if (entry == 0) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile, 2, 3, nullptr));
         if (entry == 1) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile, nullptr));
         if (entry == 2) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTile copy(*tile));
-        if (entry == 3) QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTiledDataManager clone(source));
+        if (entry == 3) {
+            if (pressure && !batch) {
+                // Canonical clone does not turn this unexposed intent into
+                // a write merely to copy the source's working tile cache.
+                KisTiledDataManager clone(source);
+                QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+                QByteArray actual(bpp, Qt::Uninitialized);
+                clone.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
+                QCOMPARE(actual, initial);
+                // Positive control: a real payload request still refuses.
+                QVERIFY(!tile->tryWriteData());
+            } else {
+                QVERIFY_THROWS_EXCEPTION(std::bad_alloc, KisTiledDataManager clone(source));
+            }
+        }
     }
     scope.reset();
     budget.release();

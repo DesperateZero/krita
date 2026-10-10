@@ -589,14 +589,53 @@ bool KisImageEpochRootSnapshot::containsPage(const KisPageKey &key, KisPageVersi
 
 KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshot() const
 {
+    return snapshotWithChanges(nullptr, 0, nullptr, 0, nullptr, 0);
+}
+
+KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshotWithChanges(
+    const KisPageVersion *versions, size_t versionCount,
+    const KisPageKey *removals, size_t removalCount,
+    const KisSurfaceEpochState *changedSurfaces, size_t changedSurfaceCount) const
+{
     KisImageEpochSnapshot result;
     result.epoch = m_epoch;
     result.graphRevision = m_graphRevision;
     result.defaultPixelRevision = m_defaultPixelRevision;
     result.extentRevision = m_extentRevision;
     result.propertyRevision = m_propertyRevision;
-    result.manifest = manifest();
+    if (!versionCount && !removalCount) {
+        result.manifest = manifest();
+    } else {
+        // Count and emit from the same immutable inputs. This pays two linear
+        // tree walks instead of an N+D capacity bound, repeated searches, or
+        // another N-entry directory. Each version is copied only on emission.
+        const auto merge = [&](const auto &append) {
+            size_t added = 0, removed = 0;
+            appendPageRoot(m_pageRoot, [&](const KisPageVersion &base) {
+                while (added < versionCount && pageKeyLess(versions[added].key, base.key)) append(versions[added++]);
+                while (removed < removalCount && pageKeyLess(removals[removed], base.key)) ++removed;
+                if (added < versionCount && versions[added].key == base.key) append(versions[added++]);
+                else if (removed == removalCount || !(removals[removed] == base.key)) append(base);
+            });
+            while (added < versionCount) append(versions[added++]);
+        };
+        qsizetype count = 0;
+        merge([&](const KisPageVersion &) {
+            if (count == std::numeric_limits<qsizetype>::max()) throw std::bad_alloc();
+            ++count;
+        });
+        result.manifest.reserve(count);
+        if (count) merge([&](const KisPageVersion &version) { result.manifest.append(version); });
+    }
     result.surfaces = surfaces();
+    size_t changed = 0;
+    if (changedSurfaceCount) for (auto &surface : result.surfaces) {
+        if (changed == changedSurfaceCount || !(changedSurfaces[changed].surface == surface.surface)) continue;
+        surface = changedSurfaces[changed++];
+        result.defaultPixelRevision = qMax(result.defaultPixelRevision, surface.defaultPixelRevision);
+        result.extentRevision = qMax(result.extentRevision, surface.extentRevision);
+    }
+    Q_ASSERT(changed == changedSurfaceCount); // Staging only replaces existing surfaces.
     return result;
 }
 
@@ -1015,11 +1054,19 @@ KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &
     root.m_defaultPixelRevision = initial.defaultPixelRevision;
     root.m_extentRevision = initial.extentRevision;
     root.m_propertyRevision = initial.propertyRevision;
-    EpochArray<KisPageVersion> manifest(initial.manifest.begin(), initial.manifest.end(), storage);
     root.m_surfaces = std::allocate_shared<KisImageEpochSurfaces>(storage,
         initial.surfaces.begin(), initial.surfaces.end(), storage);
-    std::sort(manifest.begin(), manifest.end(), [](const auto &a, const auto &b) { return pageKeyLess(a.key, b.key); });
-    root.m_pageRoot = buildPageRoot(manifest, 0, manifest.size(), d->treeStorage);
+    const auto less = [](const auto &a, const auto &b) { return pageKeyLess(a.key, b.key); };
+    if (std::is_sorted(initial.manifest.begin(), initial.manifest.end(), less)) {
+        // Canonical exports already have tree order. Construct owned nodes
+        // directly from this input; no second directory or redundant sort.
+        root.m_pageRoot = buildPageRoot(initial.manifest, 0, initial.manifest.size(), d->treeStorage);
+    } else {
+        // Public initialization also accepts unordered external snapshots.
+        EpochArray<KisPageVersion> manifest(initial.manifest.begin(), initial.manifest.end(), storage);
+        std::sort(manifest.begin(), manifest.end(), less);
+        root.m_pageRoot = buildPageRoot(manifest, 0, manifest.size(), d->treeStorage);
+    }
     // isValid() checked the complete external input before any admission.
     root.m_validated = true;
 

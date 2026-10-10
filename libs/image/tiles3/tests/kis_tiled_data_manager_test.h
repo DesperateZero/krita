@@ -68,6 +68,14 @@ private Q_SLOTS:
     void testConstructorBudgetFailure();
     void testPageStoreCloneActiveWriteRefusal_data();
     void testPageStoreCloneActiveWriteRefusal();
+    void testPageStoreCloneHistoryBase_data();
+    void testPageStoreCloneHistoryBase();
+    void testPageStoreCloneFixedView_data();
+    void testPageStoreCloneFixedView();
+    void testPageStoreClonePendingPresence_data();
+    void testPageStoreClonePendingPresence();
+    void testPageStoreCloneSnapshotRefusal_data();
+    void testPageStoreCloneSnapshotRefusal();
     void testTileCloneRejectedWrite_data();
     void testTileCloneRejectedWrite();
     void testHashCloneFailureCleanup();

@@ -9347,10 +9347,14 @@ void KisPageStoreReferenceTest::imageEpochSparseBatchMatchesFlatOracle()
         for (const auto &item : oracle) result.append(item.second);
         return result;
     };
+    // External snapshots need not be in canonical order. Keep an independent
+    // ordered oracle while exercising initialization from reversed input.
+    if (pattern == 1) std::reverse(initial.manifest.begin(), initial.manifest.end());
     KisImageEpochReferenceModel model;
     QVERIFY(model.initialize(initial));
     const auto original = model.captureCommittedRoot();
     const auto originalManifest = manifest();
+    QCOMPARE(original.manifest(), originalManifest);
     KisCompletionRegistry completions;
     const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));

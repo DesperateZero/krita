@@ -68,6 +68,11 @@ public:
                                  QRect *extent) const;
 
 private:
+    // Only a retained capture supplies these sorted immutable inputs. Export
+    // directly into one exact-sized manifest; no intermediate root/delta copy.
+    KisImageEpochSnapshot snapshotWithChanges(const KisPageVersion *versions, size_t versionCount,
+        const KisPageKey *removals, size_t removalCount,
+        const KisSurfaceEpochState *surfaces, size_t surfaceCount) const;
     size_t surfaceCount() const;
     const KisSurfaceEpochState &surfaceAt(size_t index) const;
     // Append the actual current->target version difference into the original

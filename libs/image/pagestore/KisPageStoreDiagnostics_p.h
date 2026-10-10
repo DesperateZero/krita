@@ -41,6 +41,9 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     TransactionBeginOwnerWait,
     TransactionBegin,
     ManifestExportOwnerWait,
+    // Committed export holds the Store owner gate. Clone export instead
+    // holds source transaction/manager gates around an immutable capture;
+    // observers must not re-enter either source or manager.
     ManifestExport,
     WriteBytesOwnerWait,
     WriteBytesBatchBegin,

@@ -624,6 +624,9 @@ private:
     bool commitPreparedTransaction(const KisPageTransaction &transaction,
                                    KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
     bool transactionDirtyExtent(const KisPageTransaction &, KisSurfaceId, QRect *extent) const;
+    // The clone's necessary initialization export and replica reads share this
+    // original retained cut. No new selection or owner gate is needed here.
+    KisImageEpochSnapshot snapshotForClone(const KisCapturedReadView &, QString *error) const;
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
     // Adapter-only scratch prepared before pixels. On failure scratch may
     // contain a partial classification and must not be consumed. This grants

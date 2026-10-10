@@ -115,9 +115,12 @@ public:
     bool configure(quint32 pixelSize,
                    const quint8 *defaultPixel,
                    QString *error = nullptr);
+    // When requested, move the initialization manifest to the compatibility
+    // index consumer after success. No second capture or page export.
     bool configureClone(
         const KisTiledDataManagerPageStoreBackend &source,
-        QString *error = nullptr);
+        QString *error = nullptr,
+        KisPageSnapshotArray<KisPageVersion> *adapterPages = nullptr);
     bool isOperational() const;
     KisPageStore *store() const;
     KisTiles3PayloadWork payloadWork() const;

@@ -471,15 +471,31 @@ KisTiledDataManager::KisTiledDataManager(const KisTiledDataManager &dm)
 
     const bool canonicalSource = dm.m_pageStoreBackend && dm.m_pageStoreBackend->isOperational();
     auto backend = canonicalSource ? preparePageStoreBackend(this) : nullptr;
+    KisPageSnapshotArray<KisPageVersion> clonePages;
     if (canonicalSource) {
         QString pageStoreError;
-        if (!backend || !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError)
+        if (!backend || !backend->configureClone(*dm.m_pageStoreBackend, &pageStoreError, &clonePages)
             || !m_extentManager.configureStorage(backend->extentStorage())) {
             throw std::bad_alloc();
         }
     }
     mementoManager->setPageStoreBridge(backend.get());
-    auto hashTable = std::make_unique<KisTileHashTable>(*dm.m_hashTable, mementoManager.get());
+    auto hashTable = canonicalSource
+        ? std::make_unique<KisTileHashTable>(mementoManager.get())
+        : std::make_unique<KisTileHashTable>(*dm.m_hashTable, mementoManager.get());
+    if (canonicalSource) {
+        hashTable->setDefaultTileData(defaultTile.get());
+        // The working source index may contain unsealed pages. Build from
+        // the same cut used for canonical initialization and replica adoption;
+        // lazy wrappers need no read/cache copy from the source.
+        for (const auto &version : std::as_const(clonePages)) {
+            const auto &page = version.key.page;
+            if (!KisTileHashTable::supportsCoordinates(page.column, page.row)) throw std::bad_alloc();
+            bool added = false;
+            auto tile = hashTable->getTileLazy(page.column, page.row, added);
+            tile->setPageStoreBridge(backend.get(), false);
+        }
+    }
     // Keep every constructor resource owned until extent preparation succeeds.
     m_hashTable = hashTable.get();
     recalculateExtent();
