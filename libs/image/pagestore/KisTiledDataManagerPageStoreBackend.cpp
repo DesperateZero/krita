@@ -1331,6 +1331,21 @@ KisCapturedReadView KisTiledDataManagerPageStoreBackend::captureReadView(
     return pageStore->captureReadView(selector, error);
 }
 
+bool KisTiledDataManagerPageStoreBackend::resolveCurrentSurfaceState(
+    KisSurfaceEpochState *state, QString *error) const
+{
+    QReadLocker publicationLocker(&d->publicationLock);
+    KisPageReadView selector;
+    {
+        QMutexLocker locker(&d->mutex);
+        if (!d->operational) return false;
+        selector = d->selectReadViewLocked(false);
+    }
+    const bool resolved = d->store->resolveSurfaceState(d->surface, selector, state);
+    KisPageStoreDetail::setError(error, resolved ? QString{} : QStringLiteral("tiles3 surface state is unavailable"));
+    return resolved;
+}
+
 bool KisTiledDataManagerPageStoreBackend::preparePagePresence(
     qsizetype count, QVarLengthArray<quint8, 64> *scratch, QString *error) const
 {
@@ -2434,23 +2449,65 @@ catch (const std::bad_alloc &) {
 
 bool KisTiledDataManagerPageStoreBackend::copyFrom(
     const KisTiledDataManagerPageStoreBackend &source,
-    const KisCapturedReadView &sourceView, const KisCapturedReadView &targetView,
-    const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed) try
+    const KisCapturedReadView &sourceView, const QRect &requestedRect,
+    const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed,
+    OperationDelivery *delivery,
+    const std::function<bool(QString *)> &prepareAdapter,
+    const AdapterCompletion &completeAdapter,
+    QVarLengthArray<quint8, 64> *changedPresence) try
 {
     if (changed) changed->clear();
+    if (changedPresence) changedPresence->clear();
+    if (changedPresence && !changed) {
+        KisPageStoreDetail::setError(error, QStringLiteral("copy presence requires changed-page output"));
+        return false;
+    }
+    if (delivery && !delivery->isEmpty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
+        return false;
+    }
     if (!isOperational() || !source.isOperational() || rect.isEmpty()) return false;
     prepareChangedPageOutput(changed, rect);
     bool success = false;
-    auto discardOutput = qScopeGuard([&] { if (changed && !success) changed->clear(); });
+    auto discardOutput = qScopeGuard([&] {
+        if (!success) {
+            if (changed) changed->clear();
+            if (changedPresence) changedPresence->clear();
+        }
+    });
     KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::CopyPrepare, 1);
-    // The caller already selected both views for bounds and adapter capacity.
-    // Keep those original capabilities for every source and destination page.
+    // The immutable source selects both geometry and all copied pixels.
+    // Destination geometry alone cannot authorize a post-wait no-op.
     KisSurfaceEpochState sourceState, targetState;
-    if (!sourceView.resolveSurfaceState(source.surface(), &sourceState) ||
-        !targetView.resolveSurfaceState(surface(), &targetState) ||
+    if (!sourceView.resolveSurfaceState(source.surface(), &sourceState)) return false;
+    KisPageSnapshotArray<KisLogicalPageId> targets;
+    for (qint64 row = pageCoordinate(rect.top(), KisTileData::HEIGHT);
+         row <= pageCoordinate(rect.bottom(), KisTileData::HEIGHT); ++row)
+        for (qint64 column = pageCoordinate(rect.left(), KisTileData::WIDTH);
+             column <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++column)
+            targets.append({qint32(column), qint32(row)});
+    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
+    if (!range) return false;
+    auto targetView = captureReadView(false, error);
+    if (!targetView.resolveSurfaceState(surface(), &targetState) ||
         sourceState.format.pixelStride != targetState.format.pixelStride) return false;
+    const QRect selected = sourceState.format.defaultPixel == targetState.format.defaultPixel
+        ? requestedRect.intersected(sourceState.contentExtent.united(targetState.contentExtent)) : requestedRect;
+    if (selected != rect) {
+        // A changed clip must not silently omit newly required pages.
+        // Reject before pixels; do not replay or grow an already admitted range.
+        KisPageStoreDetail::setError(error, QStringLiteral("copy target bounds changed before admission"));
+        return false;
+    }
     auto batch = beginMutationBatch(error);
-    if (!batch) return false;
+    if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
+    if (prepareAdapter && !prepareAdapter(error)) return false;
+    if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
+    const auto recordChange = [&](const KisLogicalPageId &page, bool present) {
+        if (!changed) return;
+        if (changedPresence) (*changedPresence)[changed->size()] = quint8(present);
+        changed->append(page);
+    };
     const auto pixelSize = qsizetype(targetState.format.pixelStride);
     const qsizetype rowStride = KisTileData::WIDTH * pixelSize;
     for (qint64 row = pageCoordinate(rect.top(), KisTileData::HEIGHT);
@@ -2480,7 +2537,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                     if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
                         !batch->d->mutation.aliasPage(to, backing, error)) return false;
                 }
-                if (changed) changed->append(to.page);
+                recordChange(to.page, sourceState.format.defaultPixel != targetState.format.defaultPixel);
                 continue;
             }
             KisPageStoreReadPage input(source.store(), sourceView, from, error);
@@ -2501,7 +2558,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 if (backing && d->provider->sourceMatchesReadGuard(backing, previous)) continue;
                 if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
                     !batch->d->mutation.aliasPage(to, backing, error)) return false;
-                if (changed) changed->append(to.page);
+                recordChange(to.page, true);
                 continue;
             }
             auto lease = acquireTile(to.page.column, to.page.row, Access::Write);
@@ -2513,15 +2570,18 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 memcpy(bytes + offset + y * rowStride, input.data() + offset + y * rowStride,
                        size_t(affected.width() * pixelSize));
             lease->markDirty(); if (!lease->finish()) return false;
-            if (changed) changed->append(to.page);
+            recordChange(to.page, true);
         }
     }
     phase.next(KisPageStoreDiagnosticPhase::CopyFinish, 1);
-    success = batch->finish(error);
+    targetView = {};
+    if (changedPresence) changedPresence->resize(changed->size());
+    success = finishOperationBatch(batch, delivery, completeAdapter, error);
     return success;
 }
 catch (const std::bad_alloc &) {
     if (changed) changed->clear();
+    if (changedPresence) changedPresence->clear();
     KisPageStoreDetail::setError(error, QStringLiteral("copy storage preparation was refused"));
     return false;
 }

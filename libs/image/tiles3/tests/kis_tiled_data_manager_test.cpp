@@ -2350,9 +2350,8 @@ void KisTiledDataManagerTest::testPageStorePresenceStorage()
     const auto metrics = recorder.metrics();
     QCOMPARE(metrics[size_t(Phase::MutationPresencePrepare)].intervals, quint64(needsPresence ? 1 : 0));
     QCOMPARE(metrics[size_t(Phase::MutationPresencePrepare)].workItems, quint64(needsPresence ? pages : 0));
-    // Clear supplies final presence in its original delta. Copy still uses
-    // the legacy post-publication resolver until its admission is migrated.
-    QCOMPARE(metrics[size_t(Phase::MutationPresenceResolve)].intervals, quint64(operation == 3 || operation == 4 ? 1 : 0));
+    // All semantic producers deliver final presence with the original delta.
+    QCOMPARE(metrics[size_t(Phase::MutationPresenceResolve)].intervals, quint64(0));
     QVERIFY(resolvedWithoutCapture);
     QVERIFY(dm.tryCommit());
     auto current = backend->captureReadView(); QVERIFY(current.isValid());
@@ -2879,14 +2878,15 @@ void KisTiledDataManagerTest::testPageStoreCancelledPrivateClient()
 void KisTiledDataManagerTest::testPageStoreAdapterPreparationRefusal_data()
 {
     QTest::addColumn<bool>("persistent"); QTest::addColumn<bool>("throws");
-    for (bool persistent : {false, true}) for (bool throws : {false, true})
-        QTest::newRow(qPrintable(QStringLiteral("persistent%1-throws%2").arg(persistent).arg(throws)))
-            << persistent << throws;
+    QTest::addColumn<bool>("copy");
+    for (bool persistent : {false, true}) for (bool throws : {false, true}) for (bool copy : {false, true})
+        QTest::newRow(qPrintable(QStringLiteral("persistent%1-throws%2-copy%3").arg(persistent).arg(throws).arg(copy)))
+            << persistent << throws << copy;
 }
 
 void KisTiledDataManagerTest::testPageStoreAdapterPreparationRefusal()
 {
-    QFETCH(bool, persistent); QFETCH(bool, throws);
+    QFETCH(bool, persistent); QFETCH(bool, throws); QFETCH(bool, copy);
     const quint8 blank = 0; KisDataManager dm(1, &blank);
     auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
     auto history = persistent ? dm.getMemento() : KisMementoSP{};
@@ -2900,14 +2900,35 @@ void KisTiledDataManagerTest::testPageStoreAdapterPreparationRefusal()
              KisPageStoreWriteOperationResult::Succeeded);
     bool prepared = false, pixels = false;
     QVector<KisLogicalPageId> changed;
-    QCOMPARE(backend->writeOperation({{1, 0}}, false,
-        [&](KisPixelWriteCursor *) { pixels = true; return true; }, &changed, &error, history,
-        nullptr, [&](QString *failure) {
-            prepared = store->sessionStats().activeCpuWritePages == (persistent ? 2 : 1);
-            if (throws) throw std::bad_alloc();
-            *failure = QStringLiteral("test preparation refusal"); return false;
-        }), KisPageStoreWriteOperationResult::Failed);
-    QVERIFY(prepared); QVERIFY(!pixels); QVERIFY(changed.isEmpty()); QVERIFY(!error.isEmpty());
+    const auto refuse = [&](QString *failure) -> bool {
+        prepared = store->sessionStats().activeCpuWritePages == (persistent ? 2 : 1);
+        if (throws) throw std::bad_alloc();
+        *failure = QStringLiteral("test preparation refusal"); return false;
+    };
+    if (copy) {
+        KisTiledDataManager source(1, &blank);
+        const quint8 value = 0x72;
+        const QRect area(64, 0, 64, 64);
+        source.clear(area, &value);
+        const auto view = source.m_pageStoreBackend->captureReadView();
+        QVarLengthArray<quint8, 64> present;
+        KisPageStoreDiagnosticRecorder recorder(true, store);
+        recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+            if (phase == KisPageStoreDiagnosticPhase::CopySourcePage) pixels = true;
+        });
+        QVERIFY(!backend->copyFrom(*source.m_pageStoreBackend, view, area, area, false,
+                                  &error, &changed, nullptr, refuse, {}, &present));
+        QVERIFY(present.isEmpty());
+    } else {
+        QCOMPARE(backend->writeOperation({{1, 0}}, false,
+            [&](KisPixelWriteCursor *) { pixels = true; return true; }, &changed, &error, history,
+            nullptr, refuse), KisPageStoreWriteOperationResult::Failed);
+    }
+    // Semantic copy has no explicit persistent-stroke owner. That existing
+    // contract rejects it at transaction selection, before adapter preparation.
+    QCOMPARE(prepared, !(persistent && copy));
+    if (persistent && copy) QVERIFY(error.contains(QStringLiteral("requires its explicit owner")));
+    QVERIFY(!pixels); QVERIFY(changed.isEmpty()); QVERIFY(!error.isEmpty());
     // A refused cold preparation must leave the already-painted segment usable.
     QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, paint, &error, history),
              KisPageStoreWriteOperationResult::Succeeded);
@@ -2998,14 +3019,18 @@ void KisTiledDataManagerTest::testPageStoreRestoreLateAdmission()
 void KisTiledDataManagerTest::testPageStoreAdapterBarrier_data()
 {
     QTest::addColumn<int>("barrier");
-    for (int barrier : {0, 1, 2, 3, 4})
-        QTest::newRow(qPrintable(QStringLiteral("barrier%1").arg(barrier))) << barrier;
+    QTest::addColumn<bool>("copy");
+    for (int barrier : {0, 1, 2, 3, 4}) for (bool copy : {false, true})
+        QTest::newRow(qPrintable(QStringLiteral("barrier%1-copy%2").arg(barrier).arg(copy))) << barrier << copy;
 }
 
 void KisTiledDataManagerTest::testPageStoreAdapterBarrier()
 {
-    QFETCH(int, barrier);
+    QFETCH(int, barrier); QFETCH(bool, copy);
     const quint8 blank = 0; KisDataManager dm(1, &blank);
+    KisDataManager source(1, &blank);
+    const quint8 value = 0x59;
+    if (copy) source.clear(0, 0, 64, 64, &value);
     auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
     const auto retained = store->captureRetainedEpoch(); QVERIFY(retained.isValid());
     const auto history = barrier == 2 || barrier == 3 ? dm.getMemento() : KisMementoSP{};
@@ -3022,10 +3047,16 @@ void KisTiledDataManagerTest::testPageStoreAdapterBarrier()
         else if (barrier == 3) rejected = !dm.tryAbort(history, &error);
         else { KisStrokeJobFailureContext failure(true); dm.setExtent(QRect(0, 0, 0, 0)); rejected = failure.failed(); }
     });
-    QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, [](KisPixelWriteCursor *cursor) {
-        cursor->moveTo(0, 0); if (!cursor->rawData()) return false;
-        *cursor->rawData() = 0x59; return true;
-    }, &error), KisPageStoreWriteOperationResult::Succeeded);
+    if (copy) {
+        KisStrokeJobFailureContext failure(true);
+        dm.KisTiledDataManager::bitBlt(&source, QRect(0, 0, 64, 64));
+        QVERIFY2(!failure.failed(), qPrintable(failure.error()));
+    } else {
+        QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, [](KisPixelWriteCursor *cursor) {
+            cursor->moveTo(0, 0); if (!cursor->rawData()) return false;
+            *cursor->rawData() = 0x59; return true;
+        }, &error), KisPageStoreWriteOperationResult::Succeeded);
+    }
     recorder.setPhaseObserver({});
     QVERIFY(observed); QVERIFY(rejected);
     QCOMPARE(dm.m_hashTable->numTiles(), 1);
@@ -3670,11 +3701,11 @@ void KisTiledDataManagerTest::testVoidDrawingFailure()
         dm.setDefaultPixel(&replacement);
         QCOMPARE(*dm.defaultPixel(), blank);
     }
-    if (entry == 1 || entry == 4 || entry == 8)
+    if (entry == 1 || entry == 8)
         QCOMPARE(store->mutationStatistics().pagesCancelled - before.pagesCancelled, quint64(1));
-    if (entry == 2 || entry == 3 || entry == 6) {
-        // Clear's whole range and whole-index barriers reject a foreign claim
-        // before any page work; planar/copy retain their partial rollback test.
+    if (entry == 2 || entry == 3 || entry == 4 || entry == 5 || entry == 6) {
+        // Native copy/clear range and whole-index barriers reject a foreign
+        // claim before page work; planar/legacy copy still test partial rollback.
         QCOMPARE(store->mutationStatistics().generationsReserved, before.generationsReserved);
         QCOMPARE(store->mutationStatistics().pagesCancelled, before.pagesCancelled);
         QCOMPARE(store->mutationStatistics().removalsCancelled, before.removalsCancelled);
@@ -4332,16 +4363,15 @@ void KisTiledDataManagerTest::testPageStoreAliasRegionFailure()
     const QRect area(1, 0, 128, 64); // partial pixel page, semantic page, failing partial page
     QVector<KisLogicalPageId> changes{{99, 99}};
     QString error;
-    if (copy)
-        QTest::ignoreMessage(QtWarningMsg, QRegularExpression("^PageStore CPU mutation acquisition failed:.*legacy mutation cannot reenter its page.*$"));
     QVERIFY(!(copy ? backend->copyFrom(*source.m_pageStoreBackend, source.m_pageStoreBackend->captureReadView(),
-                                     backend->captureReadView(), area, false, &error, &changes)
+                                     area, area, false, &error, &changes)
                   : backend->fillRect(area, changedPixel, &error, &changes)));
     QVERIFY(changes.isEmpty());
     const auto after = store->mutationStatistics();
-    QCOMPARE(after.generationsReserved - before.generationsReserved, quint64(copy ? 1 : 0));
-    QCOMPARE(after.pagesCancelled - before.pagesCancelled, quint64(copy ? 1 : 0));
-    QCOMPARE(after.removalsCancelled - before.removalsCancelled, quint64(copy && removal ? 1 : 0));
+    // Both producers now reject the complete selected range before pixels.
+    QCOMPARE(after.generationsReserved, before.generationsReserved);
+    QCOMPARE(after.pagesCancelled, before.pagesCancelled);
+    QCOMPARE(after.removalsCancelled, before.removalsCancelled);
     QCOMPARE(after.aliasGenerationsReserved, before.aliasGenerationsReserved); // staged only, no adoption
     QCOMPARE(store->sessionStats().committedTransactions, commits);
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(1)); // foreign writer not cancelled
@@ -4427,6 +4457,65 @@ void KisTiledDataManagerTest::testPageStoreCopyFixedView()
     // A later source mutation and history purge cannot mutate a retained alias.
     source.commit(); source.purgeHistory(history); source.clear();
     dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 64); QCOMPARE(actual, expected);
+}
+
+void KisTiledDataManagerTest::testPageStoreCopyAfterRangeWait_data()
+{
+    QTest::addColumn<bool>("cancelFirst");
+    QTest::addColumn<bool>("expands");
+    QTest::addColumn<bool>("outsideRequest");
+    for (bool cancel : {false, true}) for (bool expands : {false, true}) for (bool outside : {false, true}) {
+        if (!expands && outside) continue;
+        QTest::newRow(qPrintable(QStringLiteral("cancel%1-expands%2-outside%3").arg(cancel).arg(expands).arg(outside)))
+            << cancel << expands << outside;
+    }
+}
+
+void KisTiledDataManagerTest::testPageStoreCopyAfterRangeWait()
+{
+    QFETCH(bool, cancelFirst); QFETCH(bool, expands); QFETCH(bool, outsideRequest);
+    const quint8 blank = 0, initial = 0x31;
+    KisTiledDataManager source(1, &blank), target(1, &blank);
+    source.clear(QRect(0, 0, 64, 64), &initial);
+    target.bitBlt(&source, QRect(0, 0, 64, 64)); // The old destination is the same retained alias.
+    auto *store = target.m_pageStoreBackend->store();
+    QSemaphore entered, proceed, waiting;
+    auto firstResult = KisPageStoreWriteOperationResult::Failed;
+    bool copied = false;
+    std::thread first([&] {
+        firstResult = target.writePageStoreOperation({QRect(0, 0, expands ? 65 : 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+            cursor->moveTo(0, 0);
+            if (!cursor->rawData()) return false;
+            *cursor->rawData() = 0x71;
+            if (expands) {
+                cursor->moveTo(64, 0); if (!cursor->rawData()) return false;
+                *cursor->rawData() = 0x72;
+            }
+            entered.release(); proceed.acquire(); return !cancelFirst;
+        });
+    });
+    const bool started = entered.tryAcquire(1, 5000);
+    if (!started) { proceed.release(); first.join(); QVERIFY(started); return; }
+    std::thread second([&] {
+        KisPageStoreDiagnosticRecorder recorder(true, store);
+        recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+            if (phase == KisPageStoreDiagnosticPhase::PixelOperationRangeWait) waiting.release();
+        });
+        KisStrokeJobFailureContext failure(true);
+        target.bitBlt(&source, QRect(0, 0, outsideRequest ? 64 : 128, 64));
+        copied = !failure.failed();
+    });
+    const bool blocked = waiting.tryAcquire(1, 5000);
+    proceed.release(); first.join(); second.join();
+    QVERIFY(blocked); QCOMPARE(copied, cancelFirst || !expands || outsideRequest);
+    QCOMPARE(firstResult, cancelFirst ? KisPageStoreWriteOperationResult::Failed : KisPageStoreWriteOperationResult::Succeeded);
+    quint8 actual = 0; target.readBytes(&actual, 0, 0, 1, 1);
+    // Stale aliases cannot prove a post-wait no-op. Expanded bounds refuse
+    // before pixels, rather than silently omitting the newly required page.
+    QCOMPARE(actual, quint8(copied ? initial : 0x71));
+    target.readBytes(&actual, 64, 0, 1, 1);
+    QCOMPARE(actual, quint8(!cancelFirst && expands ? 0x72 : blank));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
 }
 
 void KisTiledDataManagerTest::testPageStoreCopyLiveWriteCompatibility_data()
@@ -5301,21 +5390,22 @@ void KisTiledDataManagerTest::testPageStoreClonePublishedBounds()
 
 void KisTiledDataManagerTest::testPageStoreFreshReadSelection_data()
 {
-    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("packed");
-    QTest::addColumn<bool>("warm"); QTest::addColumn<bool>("hold"); QTest::addColumn<bool>("clear");
-    for (int bpp : {1, 4, 8, 16}) for (bool packed : {false, true})
-        for (bool warm : {false, true}) for (bool hold : {false, true}) for (bool clear : {false, true}) {
-            if (packed && clear) continue;
-            QTest::newRow(qPrintable(QString("B%1-P%2-W%3-H%4-C%5").arg(bpp).arg(packed).arg(warm).arg(hold).arg(clear)))
-                << bpp << packed << warm << hold << clear;
-        }
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("operation");
+    QTest::addColumn<bool>("warm"); QTest::addColumn<bool>("hold");
+    // Cursor, packed, clear, partial copy and full-page alias copy.
+    for (int bpp : {1, 4, 8, 16}) for (int operation = 0; operation < 5; ++operation)
+        for (bool warm : {false, true}) for (bool hold : {false, true})
+            QTest::newRow(qPrintable(QString("B%1-op%2-W%3-H%4").arg(bpp).arg(operation).arg(warm).arg(hold)))
+                << bpp << operation << warm << hold;
 }
 
 void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
 {
-    QFETCH(int, bpp); QFETCH(bool, packed); QFETCH(bool, warm); QFETCH(bool, hold); QFETCH(bool, clear);
+    QFETCH(int, bpp); QFETCH(int, operation); QFETCH(bool, warm); QFETCH(bool, hold);
     const QByteArray blank(bpp, 0), old(bpp, char(0x31)), value(bpp, char(0x61));
     KisTiledDataManager dm(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
+    if (operation >= 3) source.clear(QRect(0, 0, 64, 64), reinterpret_cast<const quint8 *>(value.constData()));
     if (warm) dm.writeBytes(reinterpret_cast<const quint8 *>(old.constData()), 0, 0, 1, 1);
     auto *backend = dm.m_pageStoreBackend;
     const auto before = backend->captureReadView();
@@ -5367,10 +5457,12 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
             observe();
         }
     });
-    if (packed || clear) {
+    if (operation != 0) {
         KisStrokeJobFailureContext failure(true);
-        if (clear) dm.clear(0, 0, 1, 1, reinterpret_cast<const quint8 *>(value.constData()));
-        else dm.writeBytes(reinterpret_cast<const quint8 *>(value.constData()), 0, 0, 1, 1);
+        if (operation == 1) dm.writeBytes(reinterpret_cast<const quint8 *>(value.constData()), 0, 0, 1, 1);
+        else if (operation == 2) dm.clear(0, 0, 1, 1, reinterpret_cast<const quint8 *>(value.constData()));
+        else if (operation == 3) dm.bitBlt(&source, QRect(0, 0, 1, 1));
+        else dm.bitBltRough(&source, QRect(0, 0, 1, 1));
         QVERIFY(!failure.failed());
     } else {
         QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {

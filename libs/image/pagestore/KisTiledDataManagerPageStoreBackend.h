@@ -144,6 +144,9 @@ public:
     // Freeze the selected current/oldData visibility boundary under the
     // publication gate, then release that gate for the whole pixel traversal.
     KisCapturedReadView captureReadView(bool oldData = false, QString *error = nullptr) const;
+    // Geometry selection only. It neither freezes page versions nor proves
+    // a no-op after waiting for range admission.
+    bool resolveCurrentSurfaceState(KisSurfaceEpochState *state, QString *error = nullptr) const;
     std::shared_ptr<const KisPageStoreIteratorReadScope> captureIteratorReadScope(
         bool writable, QString *error = nullptr,
         std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
@@ -222,12 +225,19 @@ public:
                   const std::function<bool(QString *)> &prepareAdapter = {},
                   const AdapterCompletion &completeAdapter = {},
                   QVarLengthArray<quint8, 64> *changedPresence = nullptr);
-    // Geometry and pixels consume the same caller-selected immutable views.
-    // Neither view is recaptured after compatibility range preparation.
+    // Source pixels use the caller's fixed source selection. Destination
+    // versions are selected once after range admission; stale pre-wait facts
+    // cannot prove a no-op. Re-clipping the original request must select the
+    // same rectangle; unrelated extent/revision changes do not reject it.
+    // Adapter lifetime and final presence follow the fillRect contract.
     bool copyFrom(const KisTiledDataManagerPageStoreBackend &source,
-                  const KisCapturedReadView &sourceView, const KisCapturedReadView &targetView,
+                  const KisCapturedReadView &sourceView, const QRect &requestedRect,
                   const QRect &rect, bool rough, QString *error = nullptr,
-                  QVector<KisLogicalPageId> *changed = nullptr);
+                  QVector<KisLogicalPageId> *changed = nullptr,
+                  OperationDelivery *delivery = nullptr,
+                  const std::function<bool(QString *)> &prepareAdapter = {},
+                  const AdapterCompletion &completeAdapter = {},
+                  QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Borrowed backing: the caller must retain the exact read page throughout
     // cache installation. No implicit head lookup or generic request.
     KisTileData *tileDataForReadPage(const KisPageStoreReadPage &read) const;

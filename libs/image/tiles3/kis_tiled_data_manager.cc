@@ -1065,27 +1065,11 @@ void KisTiledDataManager::refreshPageStorePages(const QVector<KisLogicalPageId> 
     if (pages.isEmpty()) return;
     PagePresenceScratch present;
     KIS_SAFE_ASSERT_RECOVER_RETURN(m_pageStoreBackend->preparePagePresence(pages.size(), &present, nullptr));
-    refreshPageStorePages(pages, present.data(), present.size());
-}
-
-qsizetype KisTiledDataManager::pageStoreRefreshCapacity(const QRect &rect) const
-{
-    if (rect.isEmpty()) return 0;
-    const quint64 columns = quint64(qint64(xToCol(rect.right())) - xToCol(rect.left()) + 1);
-    const quint64 rows = quint64(qint64(yToRow(rect.bottom())) - yToRow(rect.top()) + 1);
-    if (columns > quint64(std::numeric_limits<qsizetype>::max()) / rows) return -1;
-    return qsizetype(columns * rows);
-}
-
-void KisTiledDataManager::refreshPageStorePages(
-    const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity)
-{
-    if (pages.isEmpty()) return;
     KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
         KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(pages.size()));
-    KIS_SAFE_ASSERT_RECOVER_RETURN(m_pageStoreBackend->resolveCurrentPagePresenceInto(pages, scratch, capacity));
+    KIS_SAFE_ASSERT_RECOVER_RETURN(m_pageStoreBackend->resolveCurrentPagePresenceInto(pages, present.data(), present.size()));
     for (qsizetype i = 0; i < pages.size(); ++i)
-        refreshPageStorePage(pages[i], scratch[i]);
+        refreshPageStorePage(pages[i], present[i]);
 }
 
 void KisTiledDataManager::refreshPageStorePage(const KisLogicalPageId &page, bool present)
@@ -1185,20 +1169,20 @@ PixelOperationResult KisTiledDataManager::copyPageStore(
     if (!legacyCandidates.isEmpty() && source->copyNeedsLiveLegacySource(legacyCandidates, oldSource))
         return PixelOperationResult::Unavailable;
 
-    // Select once before computing bounds, preparing capacity or writing.
+    // Freeze the source before computing bounds, preparing capacity or writing.
     // Working extent may lag a sealed page or include unpublished intent;
     // neither is a reason to clip a fixed source through that separate value.
     const auto sourceView = source->m_pageStoreBackend->captureReadView(oldSource, error);
-    const auto targetView = m_pageStoreBackend->captureReadView(false, error);
     KisSurfaceEpochState sourceState, targetState;
     if (!sourceView.resolveSurfaceState(source->m_pageStoreBackend->surface(), &sourceState) ||
-        !targetView.resolveSurfaceState(m_pageStoreBackend->surface(), &targetState)) {
+        !m_pageStoreBackend->resolveCurrentSurfaceState(&targetState, error)) {
         if (error) *error = QStringLiteral("Copy bounds selection is unavailable");
         return PixelOperationResult::Failed;
     }
-    // Equal sparse defaults need work only where either fixed view has content.
+    // Equal sparse defaults need work only where the selected geometry has content.
     // Include the destination: copying default pixels may remove its old pages.
     // Different defaults require the caller's entire requested rectangle.
+    const QRect requestedRect = rect;
     if (sourceState.format.defaultPixel == targetState.format.defaultPixel)
         rect &= sourceState.contentExtent.united(targetState.contentExtent);
     if (rect.isEmpty()) return PixelOperationResult::Succeeded;
@@ -1208,16 +1192,29 @@ PixelOperationResult KisTiledDataManager::copyPageStore(
         return PixelOperationResult::Failed;
     }
     QVector<KisLogicalPageId> changed;
+    OperationDelivery delivery;
+    PreparedTileUpdates preparedTiles;
     PagePresenceScratch present;
-    if (!prepareExtent(m_extentManager,
-            QRect(QPoint(xToCol(rect.left()), yToRow(rect.top())),
-                  QPoint(xToCol(rect.right()), yToRow(rect.bottom()))), error) ||
-        !m_pageStoreBackend->preparePagePresence(pageStoreRefreshCapacity(rect), &present, error))
+    const QRect pages(QPoint(xToCol(rect.left()), yToRow(rect.top())),
+                      QPoint(xToCol(rect.right()), yToRow(rect.bottom())));
+    if (!m_pageStoreBackend->copyFrom(*source->m_pageStoreBackend, sourceView, requestedRect,
+            rect, rough, error, &changed, &delivery,
+            [&](QString *failure) {
+                if (!prepareExtent(m_extentManager, pages, failure)) return false;
+                QReadLocker lock(&m_lock);
+                return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure);
+            }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
+                QWriteLocker lock(&m_lock);
+                if (!publish(failure)) return false;
+                KisPageStoreDiagnosticTimer installed(m_pageStoreBackend->store(),
+                    KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(changed.size()));
+                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(changed.size()));
+                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changed, present.data());
+                lock.unlock();
+                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(changed.size()));
+                return true;
+            }, &present))
         return PixelOperationResult::Failed;
-    if (!m_pageStoreBackend->copyFrom(*source->m_pageStoreBackend, sourceView, targetView,
-                                     rect, rough, error, &changed))
-        return PixelOperationResult::Failed;
-    refreshPageStorePages(changed, present.data(), present.size());
     return PixelOperationResult::Succeeded;
 }
 

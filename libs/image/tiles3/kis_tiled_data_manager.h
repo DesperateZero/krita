@@ -369,8 +369,6 @@ private:
     void rebuildPageStoreIndex();
     void refreshPageStoreIndex(const QRect &rect);
     void refreshPageStorePages(const QVector<KisLogicalPageId> &pages);
-    void refreshPageStorePages(const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity);
-    qsizetype pageStoreRefreshCapacity(const QRect &rect) const;
     void refreshPageStorePage(const KisLogicalPageId &page, bool present);
     bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
     bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;

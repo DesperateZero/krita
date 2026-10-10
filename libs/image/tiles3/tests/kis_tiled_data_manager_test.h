@@ -158,6 +158,8 @@ private Q_SLOTS:
     void testPageStoreAliasRegionFailure();
     void testPageStoreCopyFixedView_data();
     void testPageStoreCopyFixedView();
+    void testPageStoreCopyAfterRangeWait_data();
+    void testPageStoreCopyAfterRangeWait();
     void testPageStoreCopyLiveWriteCompatibility_data();
     void testPageStoreCopyLiveWriteCompatibility();
     void testPageStoreCompatibilityCopyFailure_data();
