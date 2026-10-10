@@ -46,10 +46,12 @@ class KisPageStore;
 class KisCpuWriteBindingReservation;
 class KisPageStoreWriteReservation;
 struct KisPageTransition;
+enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
 
 enum class KisPageWriteInputKind : quint8 {
     MutableGuard,
+    FinalPayload,
     Semantic
 };
 
@@ -71,8 +73,10 @@ enum class KisPageWriteIntentFlag : quint8 {
 
 enum class KisMutationPageEntryState : quint8 {
     IntentOnly,
-    Prepared,
-    Exposed
+    MutableReady,
+    Exposed,
+    PrivatePrepared,
+    AliasAccepted
 };
 
 struct KisPageWriteIntent {
@@ -408,6 +412,10 @@ public:
         return targetGeneration.isValid() ? KisPageVersion{key(), targetGeneration} : KisPageVersion{};
     }
     bool isExposed() const { return state == KisMutationPageEntryState::Exposed; }
+    bool acceptsMutableInput() const { return state < KisMutationPageEntryState::Exposed; }
+    bool hasPrivateResult() const
+    { return state == KisMutationPageEntryState::PrivatePrepared || state == KisMutationPageEntryState::AliasAccepted; }
+    bool hasAcceptedAlias() const { return state == KisMutationPageEntryState::AliasAccepted; }
     bool isCpuWrite() const { return intent.inputKind != KisPageWriteInputKind::Semantic; }
     const std::shared_ptr<const KisPageReplicaSource> &initializationSource() const { return initialization; }
     void setInitializationSource(std::shared_ptr<const KisPageReplicaSource> source)
@@ -621,7 +629,7 @@ public:
                                 KisPageAllocationDescriptor *, QString *error,
                                 const KisPageTransition *pending = nullptr,
                                 KisReplicaHandle *recoverableBefore = nullptr);
-    KisPageMetadataTransitionResult preparePrivateWrite(KisPageTransition &, bool initialized);
+    KisPageMetadataTransitionResult preparePrivateWrite(KisPageTransition &, KisPageTransitionKind preparation);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
     // the retagged physical reservation. Otherwise write is unchanged and the
@@ -655,7 +663,10 @@ public:
     KisPageWritePlanKind select(const KisPageWriteIntent &,
                                 const KisMutationPageEntry *pending = nullptr,
                                 bool recoverablePrepared = false) const;
-    void recordPrepared(KisMutationPageEntry &, const KisPageWriteIntent &, const KisPageTransition &);
+    void recordTarget(KisMutationPageEntry &, const KisPageWriteIntent &, const KisPageTransition &,
+                      KisMutationPageEntryState);
+    void recordPrivateCompletion(KisMutationPageEntry &);
+    void recordAliasAccepted(KisMutationPageEntry &);
     void recordCancelled(KisMutationPageEntry &);
     void recordExposure(KisMutationPageEntry &, bool exposed);
     KisPageTransition writeTransition(const KisMutationPageEntry &, KisPageTransactionId,

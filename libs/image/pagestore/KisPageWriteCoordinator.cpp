@@ -2722,7 +2722,8 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     return true;
 }
 
-KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(KisPageTransition &write, bool initialized)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(
+    KisPageTransition &write, KisPageTransitionKind preparation)
 {
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
@@ -2736,8 +2737,14 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::preparePrivateWrite(Kis
         }
         write.source = current.authority;
     }
-    if (!initialized)
+    if (preparation == KisPageTransitionKind::AcquireWrite)
         return metadata->applyOwner(write.version.key, write);
+    if (preparation == KisPageTransitionKind::AdoptPreparedWrite) {
+        auto adoption = write;
+        adoption.kind = preparation;
+        return metadata->applyOwner(write.version.key, adoption);
+    }
+    Q_ASSERT(preparation == KisPageTransitionKind::PrepareWrite);
     auto prepare = write;
     prepare.kind = KisPageTransitionKind::PrepareWrite;
     const KisPageTransition transitions[] = {write, prepare};
@@ -2760,7 +2767,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     KisPageStoreDiagnosticTimer &diagnostic)
 {
     const auto fallback = select(intent);
-    if (!before.isValid() || intent.inputKind != KisPageWriteInputKind::MutableGuard || !provider
+    if (!before.isValid() || intent.inputKind == KisPageWriteInputKind::Semantic || !provider
         || (intent.flags & quint8(KisPageWriteIntentFlag::SourceInitialization))
         || access.domain != KisPageAccessDomain::CpuRam || access.kind != KisPageAccessKind::CpuPointer
         || write.source.domain != KisPageAccessDomain::CpuRam
@@ -2952,14 +2959,14 @@ KisPageWritePlanKind KisPageWriteCoordinator::select(
     const KisPageWriteIntent &intent,
     const KisMutationPageEntry *pending, bool recoverablePrepared) const
 {
-    if (intent.inputKind == KisPageWriteInputKind::MutableGuard && recoverablePrepared)
+    if (intent.inputKind != KisPageWriteInputKind::Semantic && recoverablePrepared)
         return KisPageWritePlanKind::RecoverableHandoff;
-    if (intent.inputKind == KisPageWriteInputKind::MutableGuard
+    if (intent.inputKind != KisPageWriteInputKind::Semantic
         && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
         && intent.mode == KisPageWriteMode::PreserveContents) {
         return KisPageWritePlanKind::FreshCow;
     }
-    if (intent.inputKind == KisPageWriteInputKind::MutableGuard) {
+    if (intent.inputKind != KisPageWriteInputKind::Semantic) {
         if (intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
             return KisPageWritePlanKind::FreshPayload;
         return intent.mode == KisPageWriteMode::DiscardContents
@@ -2980,7 +2987,7 @@ KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
     bool *synchronousCopy) const
 {
     if (synchronousCopy) *synchronousCopy = false;
-    if (intent.inputKind != KisPageWriteInputKind::MutableGuard)
+    if (intent.inputKind == KisPageWriteInputKind::Semantic)
         return {};
     const auto plan = select(intent);
     if (plan == KisPageWritePlanKind::FreshPayload)
@@ -3076,12 +3083,16 @@ KisCompletionTicket KisPageWriteCoordinator::initializeFreshReplica(
     return completion.succeeded() ? transfer.completion : KisCompletionTicket{};
 }
 
-void KisPageWriteCoordinator::recordPrepared(KisMutationPageEntry &entry,
-                                             const KisPageWriteIntent &intent,
-                                             const KisPageTransition &write)
+void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
+                                           const KisPageWriteIntent &intent,
+                                           const KisPageTransition &write,
+                                           KisMutationPageEntryState state)
 {
     Q_ASSERT(entry.key() == intent.key && entry.state == KisMutationPageEntryState::IntentOnly);
     Q_ASSERT(write.version.key == entry.key() && !write.version.isDefaultPixel());
+    Q_ASSERT(state == KisMutationPageEntryState::MutableReady
+             || state == KisMutationPageEntryState::PrivatePrepared
+             || state == KisMutationPageEntryState::AliasAccepted);
     const quint8 semanticRemoval = entry.intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval);
     entry.intent = intent;
     entry.intent.flags |= semanticRemoval;
@@ -3089,12 +3100,24 @@ void KisPageWriteCoordinator::recordPrepared(KisMutationPageEntry &entry,
     entry.targetGeneration = write.version.generation;
     entry.operation = write.operation;
     entry.writer = write.writer;
-    entry.state = KisMutationPageEntryState::Prepared;
+    entry.state = state;
+}
+
+void KisPageWriteCoordinator::recordPrivateCompletion(KisMutationPageEntry &entry)
+{
+    Q_ASSERT(entry.state == KisMutationPageEntryState::MutableReady);
+    entry.state = KisMutationPageEntryState::PrivatePrepared;
+}
+
+void KisPageWriteCoordinator::recordAliasAccepted(KisMutationPageEntry &entry)
+{
+    Q_ASSERT(entry.state == KisMutationPageEntryState::PrivatePrepared);
+    entry.state = KisMutationPageEntryState::AliasAccepted;
 }
 
 void KisPageWriteCoordinator::recordCancelled(KisMutationPageEntry &entry)
 {
-    Q_ASSERT(entry.state == KisMutationPageEntryState::Prepared);
+    Q_ASSERT(entry.state == KisMutationPageEntryState::MutableReady || entry.hasPrivateResult());
     entry.baseVersion = {};
     entry.targetGeneration = {};
     entry.operation = {};
@@ -3104,8 +3127,8 @@ void KisPageWriteCoordinator::recordCancelled(KisMutationPageEntry &entry)
 
 void KisPageWriteCoordinator::recordExposure(KisMutationPageEntry &entry, bool exposed)
 {
-    Q_ASSERT(entry.state == (exposed ? KisMutationPageEntryState::Prepared : KisMutationPageEntryState::Exposed));
-    entry.state = exposed ? KisMutationPageEntryState::Exposed : KisMutationPageEntryState::Prepared;
+    Q_ASSERT(entry.state == (exposed ? KisMutationPageEntryState::MutableReady : KisMutationPageEntryState::Exposed));
+    entry.state = exposed ? KisMutationPageEntryState::Exposed : KisMutationPageEntryState::MutableReady;
 }
 
 KisPageTransition KisPageWriteCoordinator::writeTransition(const KisMutationPageEntry &entry,

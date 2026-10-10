@@ -2371,11 +2371,11 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
             phase.next(Phase::PackedWritePrepare, 1);
             if (affected == pageRect) {
                 // The input rows initialize fresh backing before it is visible
-                // even to the swapper. No default-fill then overwrite, and no
-                // uninitialized writable capability is handed to the caller.
+                // even to the swapper. This producer visits each final key
+                // once; it needs no subsequent mutable capability.
                 const KisCpuPagePayload payload{input, qsizetype(sourceStride),
                     qsizetype((affected.height() - 1) * sourceStride + lineBytes)};
-                if (!mutation.overwritePage(key, payload, error)) return false;
+                if (!mutation.overwriteFinalPage(key, payload, error)) return false;
                 continue;
             }
             auto write = mutation.beginWrite(key, KisPageWriteMode::PreserveContents, error);

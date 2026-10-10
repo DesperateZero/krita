@@ -4900,8 +4900,11 @@ void KisTiledDataManagerTest::testPageStorePackedWriteNative()
     QCOMPARE(after.sessionsCreated - count.sessionsCreated, quint64(noOp ? 0 : 1));
     QCOMPARE(after.generationsReserved - count.generationsReserved, changed);
     QCOMPARE(after.pagesSealed - count.pagesSealed, changed);
-    QCOMPARE(after.writablePinsAcquired - count.writablePinsAcquired, changed);
-    QCOMPARE(after.writablePinsReleased - count.writablePinsReleased, changed);
+    // Complete final inputs do not expose a mutable capability; partial
+    // input still borrows normally. Logical generations remain unchanged.
+    QCOMPARE(after.writablePinsAcquired - count.writablePinsAcquired, partial ? changed : quint64(0));
+    QCOMPARE(after.writablePinsReleased - count.writablePinsReleased, partial ? changed : quint64(0));
+    QCOMPARE(after.guardsReleased - count.guardsReleased, partial ? changed : quint64(0));
     QCOMPARE(store->sessionStats().readRequestsCreated, requests.readRequestsCreated);
     QCOMPARE(store->sessionStats().writeRequestsCreated, requests.writeRequestsCreated);
     QCOMPARE(store->sessionStats().committedTransactions - requests.committedTransactions, quint64(history || noOp ? 0 : 1));
@@ -5048,9 +5051,10 @@ void KisTiledDataManagerTest::testPageStoreWriteBytesPinWorkingSet()
     const auto after = store->mutationStatistics();
     QCOMPARE(store->sessionStats().writeRequestsCreated, before.writeRequestsCreated);
     QCOMPARE(after.generationsReserved - mutationBefore.generationsReserved, quint64(columns * 2));
-    QCOMPARE(after.writablePinsAcquired - mutationBefore.writablePinsAcquired, quint64(columns * 2));
-    QCOMPARE(after.writablePinsReleased - mutationBefore.writablePinsReleased, quint64(columns * 2));
-    QCOMPARE(after.maximumPinnedPagesPerExecution, quint64(1));
+    QCOMPARE(after.writablePinsAcquired - mutationBefore.writablePinsAcquired, quint64(0));
+    QCOMPARE(after.writablePinsReleased - mutationBefore.writablePinsReleased, quint64(0));
+    QCOMPARE(after.guardsReleased - mutationBefore.guardsReleased, quint64(0));
+    QCOMPARE(after.maximumPinnedPagesPerExecution, quint64(0));
     QByteArray actual(input.size(), Qt::Uninitialized);
     dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), area.x(), area.y(), area.width(), area.height());
     QCOMPARE(actual, input);
