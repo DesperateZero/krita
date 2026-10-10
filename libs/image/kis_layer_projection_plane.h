@@ -24,6 +24,8 @@ public:
 
     QRect recalculate(const QRect& rect, KisNodeSP filthyNode, KisRenderPassFlags flags) override;
     void apply(KisPainter *painter, const QRect &rect) override;
+    // Only the merger's independent first paint layer may omit the cleared cut.
+    void applyWithClear(KisPainter *painter, const QRect &rect, const QRect &clearRect);
     void applyMaxOutAlpha(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode);
 
     QRect needRect(const QRect &rect, KisLayer::PositionToFilthy pos) const override;
@@ -36,7 +38,8 @@ public:
     KisPaintDeviceList getLodCapableDevices() const override;
 
 private:
-    void applyImpl(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode);
+    void applyImpl(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode,
+                   const QRect &clearRect = QRect());
 
 private:
     struct Private;

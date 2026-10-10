@@ -683,23 +683,97 @@ void KisPainter::bitBltWithFixedSelection(qint32 dstX, qint32 dstY,
     bitBltWithFixedSelection(dstX, dstY, srcDev, selection, 0, 0, 0, 0, srcWidth, srcHeight);
 }
 
+void KisPainter::bitBltAfterClear(const QRect &clearRect, const QPoint &pos,
+                                const KisPaintDeviceSP srcDev, const QRect &requestedSourceRect)
+{
+    if (KisStrokeJobFailureContext::currentJobHasFailed() || !d->device) return;
+    const auto separateOperations = [&] {
+        d->device->clear(clearRect);
+        bitBlt(pos, srcDev, requestedSourceRect);
+    };
+    if (clearRect.isEmpty()) {
+        bitBlt(pos, srcDev, requestedSourceRect);
+        return;
+    }
+    if (!srcDev || requestedSourceRect.isEmpty() || d->strokeMutationOwner || d->selection ||
+        d->compositeOpId != COMPOSITE_OVER || srcDev->dataManager() == d->device->dataManager() ||
+        *srcDev->colorSpace() != *d->device->colorSpace() ||
+        d->device->defaultBounds()->wrapAroundMode() || srcDev->defaultBounds()->wrapAroundMode()) {
+        separateOperations();
+        return;
+    }
+    const KoColor defaultPixel = d->device->defaultPixel();
+    for (quint32 i = 0; i < d->device->pixelSize(); ++i) {
+        if (defaultPixel.data()[i]) {
+            separateOperations();
+            return;
+        }
+    }
+    const QRect initializeRect = clearRect.intersected(d->device->extent());
+    if (initializeRect.isEmpty()) {
+        bitBlt(pos, srcDev, requestedSourceRect);
+        return;
+    }
+    QRect sourceRect = requestedSourceRect;
+    qint32 sx = sourceRect.x(), sy = sourceRect.y();
+    qint32 width = sourceRect.width(), height = sourceRect.height();
+    qint32 dx = pos.x(), dy = pos.y();
+    if (d->tryReduceSourceRect(srcDev, &sourceRect, &sx, &sy, &width, &height, &dx, &dy) ||
+        !QRect(dx, dy, width, height).contains(initializeRect)) {
+        // Clear-only pages must keep their sparse/default removal semantics.
+        // Fusion never expands the normal composite's prepared page set.
+        separateOperations();
+        return;
+    }
+
+    bool entered = false;
+    bool painted = false;
+    QString error;
+    {
+        // Capture a source-read failure without poisoning the caller before
+        // its original clear effect has been completed. This owns no pixels.
+        KisStrokeJobFailureContext attempt(true);
+        try {
+            painted = bitBltImpl<false>(dx, dy, srcDev, sx, sy, width, height,
+                                       nullptr, initializeRect, &entered);
+        } catch (const std::bad_alloc &) {
+            // Source-view allocation also precedes the native write callback.
+            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter source view allocation failed"));
+        }
+        error = attempt.error();
+    }
+    if (painted) return;
+    if (!entered) {
+        // Native preparation/borrowing refusal exposed no pixels. Execute the
+        // original sequence once, including its lower peak for full-page clear.
+        separateOperations();
+        return;
+    }
+    // The native mutation has unwound and cancelled. Preserve the clear side
+    // effect, but never replay the failed compositor (or fall back to legacy).
+    d->device->clear(clearRect);
+    KisStrokeJobFailureContext::reportFailure(error.isEmpty()
+        ? QStringLiteral("Painter pixel operation failed") : error);
+}
+
 template <bool useOldSrcData>
-void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
+bool KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
                             const KisPaintDeviceSP srcDev,
                             qint32 srcX, qint32 srcY,
-                            qint32 srcWidth, qint32 srcHeight, KisTransaction *strokeOwner)
+                            qint32 srcWidth, qint32 srcHeight, KisTransaction *strokeOwner,
+                            const QRect &initializeRect, bool *callbackEntered)
 {
-    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+    if (KisStrokeJobFailureContext::currentJobHasFailed()) return false;
     /* This check for nonsense ought to be a Q_ASSERT. However, when paintops are just
     initializing they perform some dummy passes with those parameters, and it must not crash */
-    if (srcWidth == 0 || srcHeight == 0) return;
-    if (srcDev.isNull()) return;
-    if (d->device.isNull()) return;
+    if (srcWidth == 0 || srcHeight == 0) return true;
+    if (srcDev.isNull()) return true;
+    if (d->device.isNull()) return true;
     if (strokeOwner && srcDev->dataManager() == d->device->dataManager()) {
         // An external current reader cannot see uncheckpointed target pending.
         // Self/source-dependent operations need their own explicit read intent.
         KisStrokeJobFailureContext::reportFailure(QStringLiteral("Stroke bitBlt requires an independent source"));
-        return;
+        return false;
     }
 
     QRect srcRect = QRect(srcX, srcY, srcWidth, srcHeight);
@@ -718,10 +792,10 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
             }
 
             if (!KisStrokeJobFailureContext::currentJobHasFailed()) addDirtyRect(srcRect);
-            return;
+            return !KisStrokeJobFailureContext::currentJobHasFailed();
         }
     }
-    else {
+    else if (initializeRect.isEmpty()) {
         /**
          * An optimization, which crops the source rect by the bounds of
          * the source device when it is possible
@@ -729,7 +803,7 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
         if (d->tryReduceSourceRect(srcDev, &srcRect,
                                    &srcX, &srcY,
                                    &srcWidth, &srcHeight,
-                                   &dstX, &dstY)) return;
+                                   &dstX, &dstY)) return true;
     }
 
     qint32 dstY_ = dstY;
@@ -742,8 +816,20 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
     // Read below
     KisRandomConstAccessorSP srcIt = srcDev->createRandomConstAccessorNG();
     KisRandomConstAccessorSP maskIt = d->selection ? d->selection->projection()->createRandomConstAccessorNG() : nullptr;
-    const bool painted = d->device->applyPixelOperation(QRect(dstX, dstY, srcWidth, srcHeight),
-        [&](KisPixelWriteCursor *dstIt) {
+    const auto operation = [&](KisPixelWriteCursor *dstIt) {
+        if (callbackEntered) *callbackEntered = true;
+        for (int row = 0; row < initializeRect.height(); ++row) {
+            for (int column = 0; column < initializeRect.width();) {
+                const int x = initializeRect.left() + column;
+                const int columns = qMin(dstIt->numContiguousColumns(x), initializeRect.width() - column);
+                if (columns <= 0) return false;
+                dstIt->moveTo(x, initializeRect.top() + row);
+                quint8 *bytes = dstIt->rawData();
+                if (!bytes) return false;
+                memset(bytes, 0, size_t(columns) * d->device->pixelSize());
+                column += columns;
+            }
+        }
 
         /* Here be a huge block of verbose code that does roughly the same than
         the other bit blit operations. This one is longer than the rest in an effort to
@@ -854,14 +940,18 @@ void KisPainter::bitBltImpl(qint32 dstX, qint32 dstY,
             }
         }
 
-        return true;
-    }, strokeOwner);
+        return initializeRect.isEmpty() || !KisStrokeJobFailureContext::currentJobHasFailed();
+    };
+    const QRect paintRect(dstX, dstY, srcWidth, srcHeight);
+    const bool painted = initializeRect.isEmpty()
+        ? d->device->applyPixelOperation(paintRect, operation, strokeOwner)
+        : d->device->tryNativePixelOperation(paintRect, operation);
     if (!painted) {
         KisStrokeJobFailureContext::reportFailure(QStringLiteral("Painter pixel operation failed"));
-        return;
+        return false;
     }
     addDirtyRect(QRect(dstX, dstY, srcWidth, srcHeight));
-
+    return true;
 }
 
 void KisPainter::bitBlt(qint32 dstX, qint32 dstY,

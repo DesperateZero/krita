@@ -38,6 +38,8 @@
 #include "tiles_test_utils.h"
 #include "kis_image_config.h"
 #include "kis_paint_device.h"
+#include "kis_painter.h"
+#include <KoCompositeOpRegistry.h>
 #include <KoColorSpaceRegistry.h>
 #include "kis_tile_data_store_test_access.h"
 #include "config-limit-long-tests.h"
@@ -2495,6 +2497,54 @@ void KisTiledDataManagerTest::testPageStorePixelOperationCanonicalRange()
         QCOMPARE(pixel, quint8(0x40 + row + column));
     }
     QCOMPARE(store->mutationStatistics().generationsReserved - prepared, quint64(72));
+}
+
+void KisTiledDataManagerTest::testPageStoreClearCompositePressure()
+{
+    // Match the original sequence under real process payload exhaustion.
+    // Full clear can release old pages before the subsequent allocation;
+    // partial clear cannot. A refused fusion must retain both behaviors.
+    const auto *cs = KoColorSpaceRegistry::instance()->rgb8();
+    for (bool partial : {false, true}) {
+        QByteArray reference; bool referenceFailed = false;
+        for (bool fused : {false, true}) {
+            DefaultBudgetScope budget;
+            KisPaintDeviceSP dst = new KisPaintDevice(cs), src = new KisPaintDevice(cs);
+            const QRect storage(0, 0, 128, 64);
+            const QRect clear = partial ? QRect(7, 9, 91, 37) : storage;
+            const KoColor initial(QColor(73, 91, 117, 255), cs), input(QColor(133, 19, 61, 173), cs);
+            dst->fill(storage, initial); src->fill(storage, input);
+            auto *store = dst->dataManager()->m_pageStoreBackend->store();
+            QVERIFY(store->waitForRetirementIdle());
+            budget.saturate(cs->pixelSize(), initial.data());
+            bool failed;
+            {
+                KisStrokeJobFailureContext failure(true);
+                KisPainter painter(dst); painter.setCompositeOpId(COMPOSITE_OVER);
+                if (fused) painter.bitBltAfterClear(clear, clear.topLeft(), src, clear);
+                else { dst->clear(clear); painter.bitBlt(clear.topLeft(), src, clear); }
+                painter.end(); failed = failure.failed();
+            }
+            QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+            QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+            QVERIFY(store->waitForRetirementIdle());
+            for (const auto &bucket : store->backingUsage().buckets) {
+                QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+            }
+            budget.release();
+            QByteArray actual(storage.width() * storage.height() * cs->pixelSize(), Qt::Uninitialized);
+            dst->readBytes(reinterpret_cast<quint8 *>(actual.data()), storage);
+            qInfo() << "clear-composite pressure" << "partial" << partial << "fused" << fused << "failed" << failed;
+            if (!fused) { reference = actual; referenceFailed = failed; }
+            else { QCOMPARE(failed, referenceFailed); QCOMPARE(actual, reference); }
+            // After the pressure is released the original owner is usable.
+            KisStrokeJobFailureContext retry(true);
+            KisPainter painter(dst); painter.setCompositeOpId(COMPOSITE_OVER);
+            painter.bitBltAfterClear(clear, clear.topLeft(), src, clear); painter.end();
+            QVERIFY2(!retry.failed(), qPrintable(retry.error()));
+        }
+        kisDrainPageStoreReclamation();
+    }
 }
 
 void KisTiledDataManagerTest::testPageStorePixelOperationPreflightBudgetPressure()

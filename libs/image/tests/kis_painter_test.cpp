@@ -1329,6 +1329,172 @@ void KisPainterTest::testPageStoreBitBltWriteOperation()
     QCOMPARE(actual, expected);
 }
 
+void KisPainterTest::testBitBltAfterClear_data()
+{
+    QTest::addColumn<int>("depth");
+    QTest::addColumn<QString>("scenario");
+    for (int depth : {8, 16}) {
+        for (const QString &scenario : {"dense", "partial", "sparse", "small-source", "empty-source",
+                                        "empty-target", "nonzero-default", "selection", "wrap", "alias",
+                                        "copy", "zero-opacity", "channels", "history", "borrow"}) {
+            QTest::newRow(qPrintable(QString::number(depth) + '-' + scenario)) << depth << scenario;
+        }
+    }
+}
+
+void KisPainterTest::testBitBltAfterClear()
+{
+    QFETCH(int, depth); QFETCH(QString, scenario);
+    const auto *cs = depth == 8 ? KoColorSpaceRegistry::instance()->rgb8() : KoColorSpaceRegistry::instance()->rgb16();
+    const QRect storage(-64, -64, 320, 256), source(-11, -9, 151, 99);
+    const QPoint destination(7, 13);
+    const QRect paint(destination, source.size());
+    const QRect clear = scenario == "partial" ? paint.adjusted(9, 7, -8, -5) : paint;
+    KisPaintDeviceSP src = new KisPaintDevice(cs), dst = new KisPaintDevice(cs), expected = new KisPaintDevice(cs);
+    KoColor input(QColor(61, 117, 173, 137), cs), initial(QColor(213, 31, 83, 203), cs);
+    src->fill(source, input);
+    // Include transparent nonzero RGB: initialization cannot be replaced by a
+    // COPY or skip merely because the source alpha is zero.
+    KoColor transparent(QColor(99, 19, 55, 0), cs);
+    src->fill(source.adjusted(23, 17, -31, -19), transparent);
+    if (scenario == "empty-source") src->clear();
+    if (scenario == "small-source") { src->clear(); src->fill(source.adjusted(15, 11, -17, -13), input); }
+    for (auto target : {dst, expected}) {
+        target->moveTo(QPoint(3, -5));
+        if (scenario != "empty-target") target->fill(storage, initial);
+        if (scenario == "sparse") target->clear(QRect(64, 0, 64, 64));
+        if (scenario == "nonzero-default") target->setDefaultPixel(initial);
+        if (scenario == "wrap") { target->setDefaultBounds(new PainterWrapBounds); target->setSupportsWraparoundMode(true); }
+    }
+    auto bytes = [&](KisPaintDeviceSP device) {
+        QByteArray result(storage.width() * storage.height() * cs->pixelSize(), Qt::Uninitialized);
+        device->readBytes(reinterpret_cast<quint8 *>(result.data()), storage);
+        return result;
+    };
+    const QByteArray before = bytes(dst);
+    auto fixed = dst->createRandomConstAccessorNG(); fixed->moveTo(clear.x(), clear.y());
+    const QByteArray oldPixel(reinterpret_cast<const char *>(fixed->rawDataConst()), cs->pixelSize());
+    KisSelectionSP selection;
+    if (scenario == "selection") { selection = new KisSelection(); selection->pixelSelection()->select(paint, 127); }
+    auto configure = [&](KisPainter &painter) {
+        painter.setCompositeOpId(scenario == "copy" ? COMPOSITE_COPY : COMPOSITE_OVER);
+        painter.setOpacityU8(scenario == "zero-opacity" ? 0 : 183);
+        if (selection) painter.setSelection(selection);
+        if (scenario == "channels") { QBitArray flags(cs->channelCount(), true); flags.setBit(0, false); painter.setChannelFlags(flags); }
+    };
+    std::unique_ptr<KisTransaction> history;
+    if (scenario == "history") history.reset(new KisTransaction(dst));
+    KisRandomAccessorSP borrow, oracleBorrow;
+    if (scenario == "borrow") {
+        borrow = dst->createRandomAccessorNG(); borrow->moveTo(paint.x(), paint.y()); QVERIFY(borrow->rawData());
+        oracleBorrow = expected->createRandomAccessorNG(); oracleBorrow->moveTo(paint.x(), paint.y()); QVERIFY(oracleBorrow->rawData());
+    }
+    bool oracleFailed = false;
+    {
+        KisStrokeJobFailureContext failure(true);
+        expected->clear(clear);
+        KisPainter oracle(expected); configure(oracle);
+        oracle.bitBlt(destination, scenario == "alias" ? expected : src, source); oracle.end();
+        oracleFailed = failure.failed();
+    }
+    oracleBorrow.clear();
+    bool bodyObserved = false, finishObserved = false, hidden = true;
+    KisPageStoreDiagnosticRecorder recorder(true);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase == KisPageStoreDiagnosticPhase::PixelOperationBody && !bodyObserved) bodyObserved = true;
+        else if (phase == KisPageStoreDiagnosticPhase::PixelOperationFinish && !finishObserved) finishObserved = true;
+        else return;
+        if (scenario != "dense" && scenario != "partial" && scenario != "history") return;
+        auto current = dst->createRandomConstAccessorNG(); current->moveTo(clear.x(), clear.y());
+        hidden &= QByteArray(reinterpret_cast<const char *>(current->rawDataConst()), cs->pixelSize()) == oldPixel;
+    });
+    {
+        KisStrokeJobFailureContext failure(true);
+        KisPainter painter(dst); configure(painter);
+        painter.bitBltAfterClear(clear, destination, scenario == "alias" ? dst : src, source); painter.end();
+        QCOMPARE(failure.failed(), oracleFailed);
+    }
+    borrow.clear();
+    QCOMPARE(bytes(dst), bytes(expected));
+    QCOMPARE(dst->exactBounds(), expected->exactBounds());
+    QVERIFY(hidden);
+    if (scenario == "dense" || scenario == "partial" || scenario == "history") {
+        QVERIFY(bodyObserved);
+        QVERIFY(finishObserved); // also observe after initialized/painted bytes, before publication
+        QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::MutationSealPrivatePublish)].intervals, quint64(1));
+        fixed->moveTo(clear.x(), clear.y());
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(fixed->rawDataConst()), cs->pixelSize()), oldPixel);
+    }
+    if (history) { QVERIFY(history->tryRevert()); QCOMPARE(bytes(dst), before); }
+}
+
+void KisPainterTest::testBitBltAfterClearFailure_data()
+{
+    QTest::addColumn<int>("failurePoint");
+    QTest::newRow("preparation-refusal") << 0;
+    QTest::newRow("kernel-after-write") << 1;
+    QTest::newRow("finish-before-publish") << 2;
+    QTest::newRow("already-failed") << 3;
+}
+
+void KisPainterTest::testBitBltAfterClearFailure()
+{
+    QFETCH(int, failurePoint);
+    const auto *alpha = static_cast<const KoAlphaColorSpace *>(KoColorSpaceRegistry::instance()->alpha8());
+    std::unique_ptr<KoAlphaColorSpace> colorSpace(static_cast<KoAlphaColorSpace *>(alpha->clone()));
+    const auto *cs = colorSpace.get();
+    class FailingOver final : public KoCompositeOp {
+    public:
+        FailingOver(const KoColorSpace *cs, const KoCompositeOp *base, bool fail)
+            : KoCompositeOp(cs, COMPOSITE_OVER), base(base), fail(fail) {}
+        void composite(const ParameterInfo &params) const override {
+            ++calls; base->composite(params);
+            if (fail) throw std::bad_alloc();
+        }
+        const KoCompositeOp *base;
+        const bool fail;
+        mutable int calls = 0;
+    };
+    auto *operation = new FailingOver(cs, alpha->compositeOp(COMPOSITE_OVER), failurePoint == 1);
+    colorSpace->addCompositeOp(operation);
+    KisPaintDeviceSP dst = new KisPaintDevice(cs), src = new KisPaintDevice(cs);
+    const QRect storage(0, 0, 128, 64), clear(7, 9, 91, 37);
+    const quint8 initial = 31, input = 119;
+    dst->fill(storage, KoColor(&initial, cs)); src->fill(clear, KoColor(&input, cs));
+    bool injected = false;
+    KisPageStoreDiagnosticRecorder recorder(true);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (!injected && ((failurePoint == 0 && phase == KisPageStoreDiagnosticPhase::PixelOperationRangePrepare) ||
+                          (failurePoint == 2 && phase == KisPageStoreDiagnosticPhase::PixelOperationFinish))) {
+            injected = true;
+            throw std::bad_alloc();
+        }
+    });
+    bool failed;
+    {
+        KisStrokeJobFailureContext failure(true);
+        if (failurePoint == 3) KisStrokeJobFailureContext::reportFailure(QStringLiteral("earlier failure"));
+        KisPainter painter(dst); painter.setCompositeOpId(COMPOSITE_OVER);
+        painter.bitBltAfterClear(clear, clear.topLeft(), src, clear); painter.end();
+        failed = failure.failed();
+    }
+    QCOMPARE(failed, failurePoint != 0);
+    if (failurePoint == 0 || failurePoint == 2) QVERIFY(injected);
+    if (failurePoint == 1) QCOMPARE(operation->calls, 1); // no replay after the first changed page
+    if (failurePoint == 3) QCOMPARE(operation->calls, 0);
+    QByteArray expected(storage.width() * storage.height(), char(initial));
+    if (failurePoint != 3) for (int y = clear.top(); y <= clear.bottom(); ++y)
+        for (int x = clear.left(); x <= clear.right(); ++x)
+            expected[y * storage.width() + x] = failurePoint == 0 ? char(input) : 0;
+    QByteArray actual(expected.size(), Qt::Uninitialized);
+    dst->readBytes(reinterpret_cast<quint8 *>(actual.data()), storage);
+    QCOMPARE(actual, expected);
+    // A fresh operation after unwinding proves no failed batch/borrow survives.
+    QVERIFY(dst->applyPixelOperation(QRect(0, 0, 1, 1), [](KisPixelWriteCursor *cursor) {
+        cursor->moveTo(0, 0); if (!cursor->rawData()) return false; *cursor->rawData() = 63; return true;
+    }));
+}
+
 void KisPainterTest::testPageStorePixelOperationCoordinates()
 {
     const int low = std::numeric_limits<int>::min(), high = std::numeric_limits<int>::max();

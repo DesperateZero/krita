@@ -4,6 +4,8 @@
  */
 
 #include "kis_async_merger.h"
+#include "kis_layer_projection_plane.h"
+#include <typeinfo>
 
 
 #include <kis_debug.h>
@@ -209,9 +211,8 @@ void KisAsyncMerger::startMerge(KisBaseRectsWalker &walker, bool notifyClones) {
         }
 
 
-        if (!m_currentProjection) {
-            setupProjection(currentLeaf, applyRect, useTempProjections);
-        }
+        const QRect clearRect = !m_currentProjection
+            ? setupProjection(currentLeaf, applyRect, useTempProjections) : QRect();
 
         KisUpdateOriginalVisitor originalVisitor(applyRect,
                                                  m_currentProjection);
@@ -243,7 +244,7 @@ void KisAsyncMerger::startMerge(KisBaseRectsWalker &walker, bool notifyClones) {
             /* nothing to do */
         }
 
-        compositeWithProjection(currentLeaf, applyRect);
+        compositeWithProjection(currentLeaf, applyRect, clearRect);
 
         if(item.m_position & KisMergeWalker::N_TOPMOST) {
             writeProjection(currentLeaf, useTempProjections, applyRect);
@@ -274,7 +275,8 @@ void KisAsyncMerger::resetProjection() {
     m_finalProjection = 0;
 }
 
-void KisAsyncMerger::setupProjection(KisProjectionLeafSP currentLeaf, const QRect& rect, bool useTempProjection) {
+QRect KisAsyncMerger::setupProjection(KisProjectionLeafSP currentLeaf, const QRect& rect, bool useTempProjection) {
+    QRect clearRect;
     KisPaintDeviceSP parentOriginal = currentLeaf->parent()->lazyDestinationForSubtreeComposition();
 
     if (parentOriginal) {
@@ -286,7 +288,22 @@ void KisAsyncMerger::setupProjection(KisProjectionLeafSP currentLeaf, const QRec
             m_finalProjection = parentOriginal;
         }
         else {
-            parentOriginal->clear(rect);
+            // Only this concrete, independent leaf can update its source
+            // without consuming the parent's cleared intermediate projection.
+            // Keep the intent on this iteration's stack, never across leaves.
+            auto *layer = dynamic_cast<KisPaintLayer *>(currentLeaf->node().data());
+            if (layer && typeid(*layer) == typeid(KisPaintLayer) && currentLeaf->visible() &&
+                !currentLeaf->dependsOnLowerNodes() && !layer->needProjection() &&
+                !layer->hasEffectMasks() && !layer->layerStyle() &&
+                typeid(*currentLeaf->projectionPlane()) == typeid(KisLayerProjectionPlane)) {
+                // An empty source has no composite to fuse (notably undo).
+                // Preserve the original clear timing before visitor/plane work.
+                const auto source = layer->projection();
+                if (source && source->extent().intersects(rect)) clearRect = rect;
+            }
+            if (clearRect.isEmpty()) {
+                parentOriginal->clear(rect);
+            }
             m_finalProjection = m_currentProjection = parentOriginal;
         }
     }
@@ -300,6 +317,7 @@ void KisAsyncMerger::setupProjection(KisProjectionLeafSP currentLeaf, const QRec
          */
         /* NOP */
     }
+    return clearRect;
 }
 
 void KisAsyncMerger::writeProjection(KisProjectionLeafSP topmostLeaf, bool useTempProjection, const QRect &rect) {
@@ -313,13 +331,17 @@ void KisAsyncMerger::writeProjection(KisProjectionLeafSP topmostLeaf, bool useTe
     DEBUG_NODE_ACTION("Writing projection", "", topmostLeaf->parent(), rect);
 }
 
-bool KisAsyncMerger::compositeWithProjection(KisProjectionLeafSP leaf, const QRect &rect) {
+bool KisAsyncMerger::compositeWithProjection(KisProjectionLeafSP leaf, const QRect &rect, const QRect &clearRect) {
 
     if (!m_currentProjection) return true;
-    if (!leaf->visible()) return true;
+    if (!leaf->visible()) {
+        if (!clearRect.isEmpty()) m_currentProjection->clear(clearRect);
+        return true;
+    }
 
     KisPainter gc(m_currentProjection);
-    leaf->projectionPlane()->apply(&gc, rect);
+    if (clearRect.isEmpty()) leaf->projectionPlane()->apply(&gc, rect);
+    else static_cast<KisLayerProjectionPlane *>(leaf->projectionPlane().data())->applyWithClear(&gc, rect, clearRect);
 
     DEBUG_NODE_ACTION("Compositing projection", "", leaf, rect);
     return true;

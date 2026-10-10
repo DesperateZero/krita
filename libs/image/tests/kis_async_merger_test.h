@@ -17,6 +17,7 @@ private Q_SLOTS:
     void init();
 
     void testMerger();
+    void testFirstLayerIntermediateReader();
     void debugObligeChild();
     void testFullRefreshWithClones();
     void testSubgraphingWithoutUpdatingParent();
@@ -32,4 +33,3 @@ private Q_SLOTS:
 };
 
 #endif /* KIS_ASYNC_MERGER_TEST_H */
-

@@ -20,9 +20,9 @@ public:
 
 private:
     inline void resetProjection();
-    inline void setupProjection(KisProjectionLeafSP currentLeaf, const QRect& rect, bool useTempProjection);
+    inline QRect setupProjection(KisProjectionLeafSP currentLeaf, const QRect& rect, bool useTempProjection);
     inline void writeProjection(KisProjectionLeafSP topmostLeaf, bool useTempProjection, const QRect &rect);
-    inline bool compositeWithProjection(KisProjectionLeafSP leaf, const QRect &rect);
+    inline bool compositeWithProjection(KisProjectionLeafSP leaf, const QRect &rect, const QRect &clearRect);
     inline void doNotifyClones(KisBaseRectsWalker &walker);
 
 private:
@@ -54,4 +54,3 @@ private:
 
 
 #endif /* __KIS_ASYNC_MERGER_H */
-

@@ -1899,12 +1899,25 @@ bool KisPaintDevice::applyPixelOperation(
     const QVector<QRect> &rects, const std::function<bool(KisPixelWriteCursor *)> &operation,
     KisTransaction *strokeOwner)
 {
+    return applyPixelOperationImpl(rects, operation, strokeOwner, false);
+}
+
+bool KisPaintDevice::tryNativePixelOperation(
+    const QRect &rect, const std::function<bool(KisPixelWriteCursor *)> &operation)
+{
+    return applyPixelOperationImpl({rect}, operation, nullptr, true);
+}
+
+bool KisPaintDevice::applyPixelOperationImpl(
+    const QVector<QRect> &rects, const std::function<bool(KisPixelWriteCursor *)> &operation,
+    KisTransaction *strokeOwner, bool nativeOnly)
+{
     if (KisStrokeJobFailureContext::currentJobHasFailed()) return false;
     const bool empty = std::all_of(rects.cbegin(), rects.cend(), [](const QRect &r) { return r.isEmpty(); });
     if (empty && !strokeOwner) return true;
     if (!operation) return false;
     m_d->cache()->invalidate();
-    const bool result = m_d->currentStrategy()->applyPixelOperation(rects, operation, strokeOwner);
+    const bool result = m_d->currentStrategy()->applyPixelOperation(rects, operation, strokeOwner, nativeOnly);
     m_d->cache()->invalidate();
     return result;
 }

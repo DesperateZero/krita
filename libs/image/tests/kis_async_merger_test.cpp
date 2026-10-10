@@ -37,6 +37,37 @@ void KisAsyncMergerTest::init()
     KisImageConfig::resetConfig();
 }
 
+void KisAsyncMergerTest::testFirstLayerIntermediateReader()
+{
+    const auto *cs = KoColorSpaceRegistry::instance()->rgb8();
+    const QRect rect(0, 0, 128, 64);
+    KisImageSP image = new KisImage(nullptr, rect.width(), rect.height(), cs, "intermediate reader");
+    class ReadingLayer final : public KisPaintLayer {
+    public:
+        using KisPaintLayer::KisPaintLayer;
+        bool accept(KisNodeVisitor &visitor) override {
+            if (armed) {
+                observed = true;
+                quint8 pixel[4]; parent()->original()->readBytes(pixel, 11, 13, 1, 1);
+                sawClear = QByteArray(reinterpret_cast<char *>(pixel), 4) == QByteArray(4, 0);
+            }
+            return KisPaintLayer::accept(visitor);
+        }
+        bool armed = false, observed = false, sawClear = false;
+    };
+    KisSharedPtr<ReadingLayer> reader = new ReadingLayer(image, "reader", OPACITY_OPAQUE_U8);
+    KisPaintLayerSP upper = new KisPaintLayer(image, "upper", OPACITY_OPAQUE_U8);
+    reader->paintDevice()->fill(rect, KoColor(Qt::red, cs));
+    image->addNode(reader, image->rootLayer()); image->addNode(upper, image->rootLayer());
+    image->waitForDone();
+    image->rootLayer()->original()->fill(rect, KoColor(Qt::blue, cs));
+    KisMergeWalker walker(rect); walker.collectRects(reader, rect);
+    reader->armed = true;
+    KisAsyncMerger merger; merger.startMerge(walker);
+    QVERIFY(reader->observed); QVERIFY(reader->sawClear);
+    QCOMPARE(image->projection()->pixel(QPoint(11, 13)), KoColor(Qt::red, cs));
+}
+
 
     /*
       +-----------+
@@ -498,4 +529,3 @@ void KisAsyncMergerTest::testFilterMaskOnFilterLayer()
 
 
 SIMPLE_TEST_MAIN(KisAsyncMergerTest)
-

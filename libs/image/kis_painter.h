@@ -202,6 +202,14 @@ public:
      */
     void bitBlt(const QPoint & pos, const KisPaintDeviceSP srcDev, const QRect & srcRect);
 
+    /** Clear the target rectangle, then composite the current source.
+     * The projection merger may combine these into one cancellable native
+     * operation when no consumer needs the intermediate cleared projection.
+     * Unsupported routes keep the original clear followed by bitBlt.
+     */
+    void bitBltAfterClear(const QRect &clearRect, const QPoint &pos,
+                          const KisPaintDeviceSP srcDev, const QRect &srcRect);
+
     /**
      * The same as @ref bitBlt() but reads data from oldData() part of the device
      *
@@ -899,11 +907,12 @@ protected:
 
 private:
     template <bool useOldSrcData>
-        void bitBltImpl(qint32 dstX, qint32 dstY,
+        bool bitBltImpl(qint32 dstX, qint32 dstY,
                         const KisPaintDeviceSP srcDev,
                         qint32 srcX, qint32 srcY,
                         qint32 srcWidth, qint32 srcHeight,
-                        KisTransaction *strokeOwner = nullptr);
+                        KisTransaction *strokeOwner = nullptr,
+                        const QRect &initializeRect = QRect(), bool *callbackEntered = nullptr);
 
     void bltFixedImpl(qint32 dstX, qint32 dstY,
                       const KisFixedPaintDeviceSP srcDev,

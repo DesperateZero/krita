@@ -169,8 +169,8 @@ public:
     }
 
     virtual bool applyPixelOperation(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
-                                     KisTransaction *strokeOwner) {
-        return applyPixelOperationImpl(rects, operation, {}, strokeOwner);
+                                     KisTransaction *strokeOwner, bool nativeOnly = false) {
+        return applyPixelOperationImpl(rects, operation, {}, strokeOwner, nativeOnly);
     }
 
     virtual bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,
@@ -278,7 +278,7 @@ protected:
     }
 
     bool applyPixelOperationImpl(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
-                                 const QRect &wrap, KisTransaction *strokeOwner) {
+                                 const QRect &wrap, KisTransaction *strokeOwner, bool nativeOnly) {
         const QPoint offset(m_d->x(), m_d->y());
         QVector<QRect> localRects;
         for (const auto &rect : rects) if (!rect.isEmpty()) {
@@ -304,6 +304,7 @@ protected:
         const auto result = manager->writePageStoreOperation(localRects, mappedOperation, &error);
         using Result = KisPageStoreWriteOperationResult;
         if (result == Result::Succeeded) return true;
+        if (nativeOnly) return false;
         if (result != Result::Unavailable && result != Result::Borrowed) {
             qWarning() << "PageStore pixel operation failed:" << error;
             return false;
@@ -518,12 +519,12 @@ public:
     }
 
     bool applyPixelOperation(const QVector<QRect> &rects, const KisPageStorePixelOperation &operation,
-                             KisTransaction *strokeOwner) override {
+                             KisTransaction *strokeOwner, bool nativeOnly = false) override {
         QVector<QRect> parts;
         for (const QRect &rect : rects) {
             if (!rect.isEmpty()) parts += KisWrappedRect(rect, m_wrapRect, m_device->defaultBounds()->wrapAroundModeAxis());
         }
-        return applyPixelOperationImpl(parts, operation, m_wrapRect, strokeOwner);
+        return applyPixelOperationImpl(parts, operation, m_wrapRect, strokeOwner, nativeOnly);
     }
 
     bool partitionWriteRects(const QVector<QRect> &rects, int patchSize,

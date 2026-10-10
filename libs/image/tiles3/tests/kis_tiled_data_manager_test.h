@@ -105,6 +105,7 @@ private Q_SLOTS:
     void testPageStorePixelOperation();
     void testPageStorePixelOperationCanonicalRange();
     void testPageStorePixelOperationPreflightBudgetPressure();
+    void testPageStoreClearCompositePressure();
     void testPageStoreChangedStorage_data();
     void testPageStoreChangedStorage();
     void testPageStoreChangedStorageBudget();

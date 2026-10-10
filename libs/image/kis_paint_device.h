@@ -1004,6 +1004,14 @@ private:
     // Only KisPainter is allowed to have access to these low-level methods
     friend class KisPainter;
 
+    // No legacy fallback. False may follow callback execution; an entered
+    // callback must not be replayed by the projection initialization caller.
+    bool tryNativePixelOperation(const QRect &rect,
+                                 const std::function<bool(KisPixelWriteCursor *)> &operation);
+    bool applyPixelOperationImpl(const QVector<QRect> &rects,
+                                 const std::function<bool(KisPixelWriteCursor *)> &operation,
+                                 KisTransaction *strokeOwner, bool nativeOnly);
+
     /**
      * Return a vector with in order the size in bytes of the channels
      * in the colorspace of this paint device.

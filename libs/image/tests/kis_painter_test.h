@@ -95,6 +95,10 @@ private Q_SLOTS:
     void testPageStoreBitBltWriteOperation_data();
     void testPageStoreBitBltWriteOperation();
     void testPageStorePixelOperationCoordinates();
+    void testBitBltAfterClear_data();
+    void testBitBltAfterClear();
+    void testBitBltAfterClearFailure_data();
+    void testBitBltAfterClearFailure();
 };
 
 #endif

@@ -38,10 +38,14 @@ QRect KisLayerProjectionPlane::recalculate(const QRect& rect, KisNodeSP filthyNo
     return m_d->layer->updateProjection(rect, filthyNode, flags);
 }
 
-void KisLayerProjectionPlane::applyImpl(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode)
+void KisLayerProjectionPlane::applyImpl(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode,
+                                       const QRect &clearRect)
 {
     KisPaintDeviceSP device = m_d->layer->projection();
-    if (!device) return;
+    if (!device) {
+        if (!clearRect.isEmpty()) painter->device()->clear(clearRect);
+        return;
+    }
 
     QRect needRect = rect;
 
@@ -52,7 +56,10 @@ void KisLayerProjectionPlane::applyImpl(KisPainter *painter, const QRect &rect, 
         needRect &= device->extent();
     }
 
-    if(needRect.isEmpty()) return;
+    if (needRect.isEmpty()) {
+        if (!clearRect.isEmpty()) painter->device()->clear(clearRect);
+        return;
+    }
 
     const QBitArray channelFlags = m_d->layer->projectionLeaf()->channelFlags();
 
@@ -71,12 +78,18 @@ void KisLayerProjectionPlane::applyImpl(KisPainter *painter, const QRect &rect, 
     painter->setChannelFlags(channelFlags);
     painter->setCompositeOpId(m_d->layer->compositeOpId());
     painter->setOpacityU8(m_d->layer->projectionLeaf()->opacity());
-    painter->bitBlt(needRect.topLeft(), device, needRect);
+    if (clearRect.isEmpty()) painter->bitBlt(needRect.topLeft(), device, needRect);
+    else painter->bitBltAfterClear(clearRect, needRect.topLeft(), device, needRect);
 }
 
 void KisLayerProjectionPlane::apply(KisPainter *painter, const QRect &rect)
 {
     applyImpl(painter, rect, KritaUtils::ThresholdNone);
+}
+
+void KisLayerProjectionPlane::applyWithClear(KisPainter *painter, const QRect &rect, const QRect &clearRect)
+{
+    applyImpl(painter, rect, KritaUtils::ThresholdNone, clearRect);
 }
 
 void KisLayerProjectionPlane::applyMaxOutAlpha(KisPainter *painter, const QRect &rect, KritaUtils::ThresholdMode thresholdMode)
@@ -118,4 +131,3 @@ QRect KisLayerProjectionPlane::looseUserVisibleBounds() const
 {
     return m_d->layer->looseUserVisibleBounds();
 }
-
