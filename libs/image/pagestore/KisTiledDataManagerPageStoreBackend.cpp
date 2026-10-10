@@ -411,6 +411,7 @@ public:
         }
     }
     bool finishClient(bool succeeded, QString *error = nullptr, bool retainAdmission = false);
+    bool replaceFullTile(qint32 column, qint32 row, KisTileData *tileData, bool sparseDefault, QString *error);
     bool finish(QString *error = nullptr, bool retainAdmission = false);
     bool cancelForBarrier(QString *error);
     void detachFromBackend();
@@ -644,37 +645,43 @@ void KisTiledDataManagerPageStoreWriteBatch::Private::detachFromBackend()
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::replaceFullTile(
+    qint32 column, qint32 row, KisTileData *tileData, bool sparseDefault, QString *error)
+{
+    return d->replaceFullTile(column, row, tileData, sparseDefault, error);
+}
+
+bool KisTiledDataManagerPageStoreWriteBatch::Private::replaceFullTile(
     qint32 column,
     qint32 row,
     KisTileData *tileData,
     bool sparseDefault,
     QString *error) try
 {
-    if (!d->backend || !d->transaction.isValid() || d->failed) {
+    if (!backend || !transaction.isValid() || failed) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "tiles3 PageStore write batch is unavailable"));
         return false;
     }
-    const KisPageKey key{d->backend->surface(), {column, row}};
-    bool staged = d->mutation.reserveLegacyMutationPage(key, error);
-    if (staged && sparseDefault) staged = d->mutation.removePage(key, error);
+    const KisPageKey key{backend->surface(), {column, row}};
+    bool staged = mutation.reserveLegacyMutationPage(key, error);
+    if (staged && sparseDefault) staged = mutation.removePage(key, error);
     else if (staged) {
-        const auto found = d->sources.find(tileData);
-        auto source = found != d->sources.end() ? found->second : std::shared_ptr<const KisPageReplicaSource>{};
+        const auto found = sources.find(tileData);
+        auto source = found != sources.end() ? found->second : std::shared_ptr<const KisPageReplicaSource>{};
         if (!source) {
-            const auto overlay = KisPageReadView::transactionOverlay(d->transaction.id);
+            const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
             KisSurfaceEpochState state;
-            if (d->backend->store()->resolveSurfaceState(key.surface, overlay, &state))
-                source = d->backend->d->provider->captureCompletedTileSource(state.allocationDescriptor(), tileData, error);
-            if (source) d->sources.emplace(tileData, source);
+            if (backend->store()->resolveSurfaceState(key.surface, overlay, &state))
+                source = backend->d->provider->captureCompletedTileSource(state.allocationDescriptor(), tileData, error);
+            if (source) sources.emplace(tileData, source);
         }
-        staged = source && d->mutation.aliasPage(key, source, error);
+        staged = source && mutation.aliasPage(key, source, error);
     }
-    if (!staged) d->failed = true;
+    if (!staged) failed = true;
     return staged;
 }
 catch (const std::bad_alloc &) {
-    d->failed = true;
+    failed = true;
     KisPageStoreDetail::setError(error, QStringLiteral("tile source directory storage was refused"));
     return false;
 }
@@ -895,6 +902,54 @@ catch (const std::bad_alloc &) {
 bool KisTiledDataManagerPageStoreBackend::isOperational() const
 {
     return d->operational.load(std::memory_order_acquire);
+}
+
+bool KisTiledDataManagerPageStoreBackend::ensureWritablePage(
+    qint32 column, qint32 row, OperationDelivery &delivery,
+    const std::function<KisTileData *(QString *)> &prepareAdapter,
+    const std::function<void(bool)> &completeAdapter, QString *error) try
+{
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> shared;
+    {
+        QMutexLocker lock(&d->mutex);
+        const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
+        if (slot != d->cpuMutationBatches.end()) {
+            shared = slot->second.lock();
+            if (!shared || shared->failed || shared->clients == 0) {
+                KisPageStoreDetail::setError(error, QStringLiteral("writable tile cannot revive a finished batch"));
+                return false;
+            }
+        }
+    }
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+    if (!shared) {
+        batch = beginMutationBatch(error);
+        if (!batch) return false;
+        shared = batch->d;
+    }
+    // Admission precedes the presence decision and all adapter preparation.
+    // Reuse private aliases/writes as well as the transaction's sealed pages.
+    bool present = false;
+    if (!shared->mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return false;
+    KisTileData *defaultData = prepareAdapter(error);
+    if (!defaultData) return false;
+    if (!present && !shared->replaceFullTile(column, row, defaultData, false, error)) return false;
+    if (!batch) {
+        // The caller's existing legacy scope owns seal/cancel and this claim.
+        // Install only its working adapter; do not fabricate publication.
+        completeAdapter(!present);
+        return true;
+    }
+    return finishOperationBatch(batch, &delivery,
+        [&](const auto &publish, QString *failure) {
+            if (!publish(failure)) return false;
+            completeAdapter(!present);
+            return true;
+        }, error);
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("writable tile preparation was refused"));
+    return false;
 }
 
 KisPageStore *KisTiledDataManagerPageStoreBackend::store() const
@@ -2611,7 +2666,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
         return false;
     }
-    // Trim still reconciles the whole index, including intent-only wrappers.
+    // Trim still reconciles the whole index, including adapter-only remnants.
     // Completed native delivery owns its original claims even after leaving
     // the thread/client registry. beginMutationBatch itself rejects nesting.
     if (d->store->sessionStats().activeCpuWritePages != 0) {

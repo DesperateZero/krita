@@ -139,12 +139,18 @@ public:
             installPage(table, extent, bridge, changed[i], !present || present[i]);
     }
 
+    KisTileSP installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
+                           KisTiledDataManagerPageStoreBackend *bridge, const KisLogicalPageId &page)
+    {
+        return installPage(table, extent, bridge, page, true);
+    }
+
     void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
                        KisTiledDataManagerPageStoreBackend *bridge, KisSurfaceId surface,
                        const KisPageVersion *targets, qsizetype count)
     {
-        // All original-index absences include both root removals and legacy
-        // intent-only wrappers. Retry adds virtual defaults, not new wrappers.
+        // Reconcile any adapter-only remnants as well as root removals.
+        // Public writable misses already establish canonical presence.
         installRemovals(table, extent);
         for (qsizetype i = 0; i < count; ++i) {
             const auto &version = targets[i];
@@ -251,7 +257,7 @@ private:
         });
     }
 
-    void installPage(KisTileHashTable &table, KisTiledExtentManager &extent,
+    KisTileSP installPage(KisTileHashTable &table, KisTiledExtentManager &extent,
                      KisTiledDataManagerPageStoreBackend *bridge, const KisLogicalPageId &page, bool present)
     {
         const auto prepared = [&] {
@@ -266,10 +272,10 @@ private:
             const auto it = prepared();
             if (it == m_prepared.end()) {
                 Q_ASSERT(!table.getExistingTileForPreparedUpdate(page.column, page.row));
-                return;
+                return {};
             }
             if (table.removePreparedTile(it->storage)) extent.notifyTileRemoved(page.column, page.row);
-            return;
+            return {};
         }
         auto tile = table.getExistingTileForPreparedUpdate(page.column, page.row);
         bool created = false;
@@ -281,6 +287,7 @@ private:
         tile->setPageStoreBridge(bridge, false);
         tile->invalidatePageStoreReadCache();
         if (created) extent.notifyTileAdded(page.column, page.row);
+        return tile;
     }
 
     struct Candidate {
@@ -460,19 +467,43 @@ KisTileSP KisTiledDataManager::getTile(qint32 col, qint32 row, bool writable)
         bool present = false;
         return getReadOnlyTileLazy(col, row, present);
     }
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        auto tile = m_hashTable->getExistingTileForPreparedUpdate(col, row);
+        if (!tile) {
+            // Cold compatibility storage is prepared under the original page
+            // admission before explicit presence can be accepted. These local
+            // candidates die before the completed batch releases that claim.
+            OperationDelivery delivery;
+            PreparedDefaultTile defaultData;
+            PreparedTileUpdates prepared;
+            QString error;
+            const QRect page(col, row, 1, 1);
+            if (!m_pageStoreBackend->ensureWritablePage(col, row, delivery,
+                [&](QString *failure) -> KisTileData * {
+                    if (!prepared.prepare(*m_hashTable, std::array<QRect, 1>{page}, failure) ||
+                        !prepareExtent(m_extentManager, page, failure)) return nullptr;
+                    defaultData.reset(m_hashTable->refAndFetchDefaultTileData());
+                    return defaultData.get();
+                }, [&](bool createdDefault) {
+                    tile = prepared.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend,
+                                                  KisLogicalPageId{col, row});
+                    if (createdDefault) tile->setPageStoreNativeReadReady();
+                }, &error)) {
+                KisStrokeJobFailureContext::reportFailure(error);
+                return {};
+            }
+        }
+        tile->setPageStoreBridge(m_pageStoreBackend, false);
+        if (!tile->refreshPageStoreData()) {
+            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Cannot select writable tile read"));
+            return {};
+        }
+        return tile;
+    }
     bool newTile = false;
     KisTileSP tile = m_hashTable->getTileLazy(col, row, newTile);
     if (newTile) {
         m_extentManager.notifyTileAdded(col, row);
-    }
-    // A writable miss remains an intent until mutable pixels are exposed.
-    if (tile && m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
-        tile->setPageStoreBridge(m_pageStoreBackend, false);
-        if (newTile) tile->setPageStoreNativeReadReady();
-        else if (!tile->refreshPageStoreData()) {
-            KisStrokeJobFailureContext::reportFailure(QStringLiteral("Cannot select writable tile read"));
-            return {};
-        }
     }
     return tile;
 }

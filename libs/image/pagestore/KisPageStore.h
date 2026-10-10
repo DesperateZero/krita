@@ -233,7 +233,7 @@ private:
     // exposure; adopting them does not create pending generations.
     bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,
                            QString *error, KisPageMutationExecution *execution = nullptr);
-    bool reserveLegacyMutationPage(const KisPageKey &key, QString *error);
+    bool reserveLegacyMutationPage(const KisPageKey &key, QString *error, bool *present = nullptr);
     // Original parked target only; never selects current or prepares a page.
     KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
     KisCpuWriteGuard

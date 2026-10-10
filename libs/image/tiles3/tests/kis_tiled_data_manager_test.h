@@ -35,6 +35,9 @@ private Q_SLOTS:
     void testExtentGrowthReusesNegativeCapacity();
     void testPageStoreHistoryDirtyExtent();
     void testUndoingNewTiles();
+    void testPageStoreWritablePresence_data();
+    void testPageStoreWritablePresence();
+    void testPageStoreWritablePresenceRefusal();
     void testPurgedAndEmptyTransactions();
     void testUnversionedBitBlt();
     void testVersionedBitBlt();
@@ -196,7 +199,7 @@ private Q_SLOTS:
     void testPageStoreFreshReadDefaultRevision();
     void testPageStoreFreshReadFailure();
     void testPageStoreFreshReadDefaultPressure();
-    void testPageStoreWriteIntentDoesNotAllocateUntilDataExposure();
+    void testPageStoreWritablePresencePrecedesDataExposure();
     void testPageStoreNestedTileCapabilityLifetime_data();
     void testPageStoreNestedTileCapabilityLifetime();
     void testPageStoreReadLastReleasesWriteIntentPin();

@@ -255,6 +255,11 @@ private:
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;
+    // A public writable miss establishes explicit default content even if no
+    // pixel guard follows. Reuse the original legacy batch when present.
+    bool ensureWritablePage(qint32 column, qint32 row, OperationDelivery &delivery,
+        const std::function<KisTileData *(QString *)> &prepareAdapter,
+        const std::function<void(bool)> &completeAdapter, QString *error);
     struct TrimPage {
         KisLogicalPageId page;
         QRect extent;

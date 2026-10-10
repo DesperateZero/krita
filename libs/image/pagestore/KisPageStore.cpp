@@ -2180,7 +2180,7 @@ bool KisPageMutationSession::adoptReservation(
 }
 
 bool KisPageMutationSession::reserveLegacyMutationPage(
-    const KisPageKey &key, QString *error)
+    const KisPageKey &key, QString *error, bool *present)
 {
     if (!d || !key.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation page is invalid"));
@@ -2192,10 +2192,26 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
         return false;
     }
     QMutexLocker ownerLock(&d->owner->mutex);
+    const auto resolvePresence = [&] {
+        if (!present) return true;
+        const auto index = d->writes.findIndex(key);
+        const auto *entry = d->writes.at(index);
+        Q_ASSERT(entry);
+        if (entry->isRemoval()) { *present = false; return true; }
+        if (entry->initializationSource() || d->pageAtEntry(index)) { *present = true; return true; }
+        KisPageVersion version;
+        if (!d->owner->publicationCoordinator.resolveVersionLocked(
+                key, KisPageReadView::transactionOverlay(d->transaction.id), &version)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("legacy page presence is unavailable"));
+            return false;
+        }
+        *present = !version.isDefaultPixel();
+        return true;
+    };
     if (d->writes.find(key)) {
         const bool held = d->owner->writeAdmission.ownsClaimLocked(d->admission, key);
         KisPageStoreDetail::setError(error, held ? QString{} : QStringLiteral("legacy mutation lost its page claim"));
-        return held;
+        return held && resolvePresence();
     }
     if (d->owner->operational) {
         const auto conflict = d->owner->writeAdmission.conflictLocked(
@@ -2223,7 +2239,7 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
     intent.inputKind = KisPageWriteInputKind::Semantic;
     const bool claimed = d->claimEntryLocked(
         intent, ownerLock, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, error);
-    return claimed;
+    return claimed && resolvePresence();
 }
 
 KisPageVersion KisPageMutationSession::legacyMutationPageVersion(const KisPageKey &key) const
