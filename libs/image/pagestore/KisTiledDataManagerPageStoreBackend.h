@@ -212,13 +212,16 @@ public:
     // before capture or pixels, outside caller tile/manager gates. The same
     // adapter preparation/completion and retained admission as packed writes
     // surround publication and index installation. Optional changed keys are
-    // empty on failure and contain only successful deltas.
+    // empty on failure and contain only successful deltas. Optional presence
+    // accompanies those same keys (requires changed); the producer records
+    // final remove/replace intent before publication, without reselecting it.
     bool fillRect(const QRect &rect,
                   const QByteArray &pixel,
                   QString *error = nullptr, QVector<KisLogicalPageId> *changed = nullptr,
                   OperationDelivery *delivery = nullptr,
                   const std::function<bool(QString *)> &prepareAdapter = {},
-                  const AdapterCompletion &completeAdapter = {});
+                  const AdapterCompletion &completeAdapter = {},
+                  QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Geometry and pixels consume the same caller-selected immutable views.
     // Neither view is recaptured after compatibility range preparation.
     bool copyFrom(const KisTiledDataManagerPageStoreBackend &source,

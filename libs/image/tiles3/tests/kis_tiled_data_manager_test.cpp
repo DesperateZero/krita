@@ -2350,7 +2350,9 @@ void KisTiledDataManagerTest::testPageStorePresenceStorage()
     const auto metrics = recorder.metrics();
     QCOMPARE(metrics[size_t(Phase::MutationPresencePrepare)].intervals, quint64(needsPresence ? 1 : 0));
     QCOMPARE(metrics[size_t(Phase::MutationPresencePrepare)].workItems, quint64(needsPresence ? pages : 0));
-    QCOMPARE(metrics[size_t(Phase::MutationPresenceResolve)].intervals, quint64(needsPresence ? 1 : 0));
+    // Clear supplies final presence in its original delta. Copy still uses
+    // the legacy post-publication resolver until its admission is migrated.
+    QCOMPARE(metrics[size_t(Phase::MutationPresenceResolve)].intervals, quint64(operation == 3 || operation == 4 ? 1 : 0));
     QVERIFY(resolvedWithoutCapture);
     QVERIFY(dm.tryCommit());
     auto current = backend->captureReadView(); QVERIFY(current.isValid());
@@ -5335,12 +5337,13 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
         coherent &= present && pixel(lazy) == value && pixel(dm.getTile(0, 0, false)) == value;
         if (held) coherent &= QByteArray(reinterpret_cast<const char *>(pointer), bpp) == (warm ? old : blank);
     };
-    int sealed = 0, installed = 0;
+    int sealed = 0, installed = 0, presenceResolutions = 0;
     bool publicationBlocked = false, publicationCoherent = false;
     QSemaphore publicationReady, publicationDone;
     std::thread publicationReader;
     KisPageStoreDiagnosticRecorder recorder(true, backend->store());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase == KisPageStoreDiagnosticPhase::MutationPresenceResolve) ++presenceResolutions;
         if (phase == KisPageStoreDiagnosticPhase::MutationSealCleanup) {
             ++sealed;
             observe();
@@ -5378,6 +5381,7 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
     recorder.setPhaseObserver({});
     if (publicationReader.joinable()) publicationReader.join();
     QCOMPARE(sealed, 1); QCOMPARE(installed, 1);
+    QCOMPARE(presenceResolutions, 0); // The admitted producer delivers its final presence.
     QVERIFY(publicationBlocked); QVERIFY(publicationCoherent);
     std::thread independentReader(observe); independentReader.join();
     QVERIFY(coherent);

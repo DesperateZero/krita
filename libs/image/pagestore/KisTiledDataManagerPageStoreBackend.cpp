@@ -1967,9 +1967,15 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     QString *error, QVector<KisLogicalPageId> *changed,
     OperationDelivery *delivery,
     const std::function<bool(QString *)> &prepareAdapter,
-    const AdapterCompletion &completeAdapter) try
+    const AdapterCompletion &completeAdapter,
+    QVarLengthArray<quint8, 64> *changedPresence) try
 {
     if (changed) changed->clear();
+    if (changedPresence) changedPresence->clear();
+    if (changedPresence && !changed) {
+        KisPageStoreDetail::setError(error, QStringLiteral("fill presence requires changed-page output"));
+        return false;
+    }
     if (delivery && !delivery->isEmpty()) {
         KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
         return false;
@@ -1977,7 +1983,12 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     if (!isOperational() || rect.isEmpty()) return false;
     prepareChangedPageOutput(changed, rect);
     bool success = false;
-    auto discardOutput = qScopeGuard([&] { if (changed && !success) changed->clear(); });
+    auto discardOutput = qScopeGuard([&] {
+        if (!success) {
+            if (changed) changed->clear();
+            if (changedPresence) changedPresence->clear();
+        }
+    });
     const qint32 firstColumn = pageCoordinate(rect.left(), KisTileData::WIDTH);
     const qint32 lastColumn = pageCoordinate(rect.right(), KisTileData::WIDTH);
     const qint32 firstRow = pageCoordinate(rect.top(), KisTileData::HEIGHT);
@@ -1986,6 +1997,11 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     for (qint64 row = firstRow; row <= lastRow; ++row)
         for (qint64 column = firstColumn; column <= lastColumn; ++column)
             targets.append({qint32(column), qint32(row)});
+    const auto recordChange = [&](const KisLogicalPageId &page, bool present) {
+        if (!changed) return;
+        if (changedPresence) (*changedPresence)[changed->size()] = quint8(present);
+        changed->append(page);
+    };
     // Projection clears can overlap a managed write at page granularity.
     // Acquire all claims before any page work, where no adapter gate is held;
     // the original batch then owns both semantic and writable page claims.
@@ -1994,6 +2010,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     auto batch = beginMutationBatch(error);
     if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
     if (prepareAdapter && !prepareAdapter(error)) return false;
+    if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     auto before = captureReadView(false, error);
     KisSurfaceEpochState surfaceState;
     if (!before.resolveSurfaceState(d->surface, &surfaceState) ||
@@ -2033,7 +2050,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                     if (!batch->d->mutation.reserveLegacyMutationPage(key, error) ||
                         !batch->d->mutation.aliasPage(key, uniform, error)) return false;
                 }
-                if (changed) changed->append(key.page);
+                recordChange(key.page, !clearsToDefault);
                 continue;
             }
             auto lease = acquireTile(key.page.column, key.page.row, Access::Write);
@@ -2044,15 +2061,17 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                 memcpy(bytes + (qsizetype(y + row) * KisTileData::WIDTH + x) * pixel.size(),
                        rowBytes.data(), size_t(affected.width() * pixel.size()));
             lease->markDirty(); if (!lease->finish()) return false;
-            if (changed) changed->append(key.page);
+            recordChange(key.page, true);
         }
     }
     before = {};
+    if (changedPresence) changedPresence->resize(changed->size());
     success = finishOperationBatch(batch, delivery, completeAdapter, error);
     return success;
 }
 catch (const std::bad_alloc &) {
     if (changed) changed->clear();
+    if (changedPresence) changedPresence->clear();
     KisPageStoreDetail::setError(error, QStringLiteral("fill storage preparation was refused"));
     return false;
 }
