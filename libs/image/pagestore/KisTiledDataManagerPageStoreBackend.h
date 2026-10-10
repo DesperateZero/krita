@@ -128,9 +128,10 @@ public:
 
     // Thread-confined private operation delta. Pixel capability is selected
     // lazily by the canonical mutation session; semantic-only batches need no
-    // provider. Release tile leases before finish.
+    // provider. Release tile leases before finish. Whole-device import requires
+    // an idle store instead of borrowing an existing history transaction.
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> beginMutationBatch(
-        QString *error = nullptr);
+        QString *error = nullptr, bool requireIdle = false);
     // Writable iterators on one thread share one native mutation. Each call
     // returns a client scope; the final client publishes after all tile guards
     // have ended.
@@ -289,9 +290,9 @@ private:
     bool resolveCurrentPagePresenceInto(const QVector<KisLogicalPageId> &pages,
                                         quint8 *scratch, qsizetype capacity, QString *error = nullptr) const;
     KisPageTransaction writableTransaction(bool *owned,
-                                           QString *error = nullptr);
+                                           QString *error = nullptr, bool requireIdle = false);
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-    prepareMutationBatch(QString *error);
+    prepareMutationBatch(QString *error, bool requireIdle = false);
     bool finishOwnedTransaction(KisPageMutationSession &mutation, bool publish,
                                 QString *error = nullptr);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);

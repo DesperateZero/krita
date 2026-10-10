@@ -869,11 +869,13 @@ bool KisTiledDataManager::write(KisPaintDeviceWriter &store)
 
     return retval;
 }
-bool KisTiledDataManager::read(QIODevice *stream)
+bool KisTiledDataManager::read(QIODevice *stream) try
 {
     clear();
 
-    PreparedHistoryAbort prepared;
+    // The original batch owns decoding and cancellation. Its final resources
+    // outlive the manager gate; no undo result escapes this file import.
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
     QWriteLocker locker(&m_lock);
     if (!stream) return false;
 
@@ -900,30 +902,25 @@ bool KisTiledDataManager::read(QIODevice *stream)
     KisAbstractTileCompressorSP compressor =
         KisTileCompressorFactory::create(tilesVersion);
 
-    // Header rejection has no writes to cancel. Retain history/default backing
-    // only once decoding can actually create a tile or expose mutable pixels.
-    const bool pageStoreHistory =
-        m_pageStoreBackend && m_pageStoreBackend->isOperational();
-    const KisMementoSP nothing = getMementoLocked();
-    if (!nothing) return false;
+    if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
+        batch = m_pageStoreBackend->beginMutationBatch(nullptr, true);
+        if (!batch) return false;
+    } else if (!getMementoLocked()) {
+        return false;
+    }
     bool readSuccess = true;
     for (quint32 i = 0; i < numTiles; i++) {
         if (!compressor->readTile(stream, this)) readSuccess = false;
     }
 
-    if (pageStoreHistory) {
-        if (readSuccess && m_pageStoreBackend->commitHistory(m_defaultPixel, m_pixelSize)) {
-            releaseHistoryDefaultTile();
-            return true;
-        }
-        QString error;
-        if (!abortPageStoreHistoryLocked(nothing, prepared, &error))
-            warnFile << "Failed to cancel tile import:" << error;
-        return false;
-    } else {
-        m_mementoManager->commit();
-    }
+    if (batch) return readSuccess && batch->finish();
+    m_mementoManager->commit();
     return readSuccess;
+}
+catch (const std::bad_alloc &)
+{
+    warnFile << "Tile import storage preparation was refused";
+    return false;
 }
 
 bool KisTiledDataManager::writeTilesHeader(KisPaintDeviceWriter &store, quint32 numTiles)

@@ -160,6 +160,14 @@ private Q_SLOTS:
     void testPageStoreRestoreReconcilesBackendPages();
     void testPageStoreImportFailure_data();
     void testPageStoreImportFailure();
+    void testPageStoreImportRetention_data();
+    void testPageStoreImportRetention();
+    void testPageStoreImportAdmission_data();
+    void testPageStoreImportAdmission();
+    void testPageStoreImportPublicationRefusal_data();
+    void testPageStoreImportPublicationRefusal();
+    void testPageStoreImportStreaming_data();
+    void testPageStoreImportStreaming();
     void testPageStoreAdapterAfterAbort_data();
     void testPageStoreAdapterAfterAbort();
     void testPageStoreAdapterBarrier_data();

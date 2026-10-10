@@ -946,12 +946,12 @@ KisTiles3PayloadWork KisTiledDataManagerPageStoreBackend::payloadWork() const
 }
 
 std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error)
+KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle)
 {
     using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
     auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
     bool owned = false;
-    batch->transaction = writableTransaction(&owned, error);
+    batch->transaction = writableTransaction(&owned, error, requireIdle);
     if (!batch->transaction.isValid()) return {};
     batch->mutation = d->store->beginMutation(batch->transaction, error);
     if (!batch->mutation.isActive()) {
@@ -967,7 +967,7 @@ KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error)
 }
 
 std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
-KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error) try
+KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle) try
 {
     {
         QMutexLocker lock(&d->mutex);
@@ -980,7 +980,7 @@ KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error) try
     preparedIndex.emplace(QThread::currentThreadId(), std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{});
     auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
         new KisTiledDataManagerPageStoreWriteBatch(std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{}));
-    batch->d = prepareMutationBatch(error);
+    batch->d = prepareMutationBatch(error, requireIdle);
     if (!batch->d) return {};
     preparedIndex.begin()->second = batch->d;
     QMutexLocker lock(&d->mutex);
@@ -1039,13 +1039,17 @@ catch (const std::bad_alloc &)
 
 KisPageTransaction KisTiledDataManagerPageStoreBackend::writableTransaction(
     bool *owned,
-    QString *error)
+    QString *error, bool requireIdle)
 {
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
     if (!d->operational || !owned) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "tiles3 PageStore write owner is invalid"));
+        return {};
+    }
+    if (requireIdle && d->store->sessionStats().activeTransactions != 0) {
+        KisPageStoreDetail::setError(error, QStringLiteral("tile import requires an idle store"));
         return {};
     }
     if (d->activeHistory.isValid()) {
