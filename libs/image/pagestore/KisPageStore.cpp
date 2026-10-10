@@ -2523,8 +2523,7 @@ bool KisPageMutationSession::seal(QString *error)
 bool KisPageMutationSession::AdapterChanges::forEachImpl(
     const void *visitor, bool (*visit)(const void *, const KisPageKey &, bool)) const
 {
-    return static_cast<const KisPagePublicationCoordinator::KisPreparedOverlayUpdate *>(m_overlay)
-        ->forEachAdapterChange(visitor, visit);
+    return m_forEach(m_changes, visitor, visit);
 }
 
 bool KisPageMutationSession::sealForLegacyUnlock(QString *error,
@@ -2558,9 +2557,23 @@ bool KisPageMutationSession::visitAdapterPages(const std::function<void(const Ki
     return true;
 }
 
-bool KisPageMutationSession::sealForAdapterDelivery(QString *error)
+KisPageMutationSession::AdapterChanges KisPageMutationSession::sealedAdapterChanges() const
 {
-    return sealImpl(SealMode::AdapterDelivery, error);
+    Q_ASSERT(d && d->state == Private::State::Detached);
+    return AdapterChanges(d.get(), [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
+        const auto *scope = static_cast<const Private *>(changes);
+        for (auto slot = scope->writes.firstEntry(); slot.isValid(); slot = scope->writes.nextEntry(slot)) {
+            const auto *entry = scope->writes.at(slot);
+            if ((entry->isRemoval() || entry->hasPrivateResult()) &&
+                !visit(visitor, entry->key(), !entry->isRemoval())) return false;
+        }
+        return true;
+    });
+}
+
+bool KisPageMutationSession::sealForAdapterDelivery(QString *error, const AdapterPreparation &prepareAdapter)
+{
+    return sealImpl(SealMode::AdapterDelivery, error, nullptr, prepareAdapter);
 }
 
 KisCapturedReadView KisPageMutationSession::checkpointForRead(QString *error)
@@ -2811,7 +2824,11 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         if (failure.isEmpty())
             failure = QStringLiteral("overlay metadata preparation was rejected");
     }
-    const AdapterChanges adapterChanges(&overlay);
+    const AdapterChanges adapterChanges(&overlay,
+        [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
+            return static_cast<const KisPagePublicationCoordinator::KisPreparedOverlayUpdate *>(changes)
+                ->forEachAdapterChange(visitor, visit);
+        });
     if (success && hasOverlay && prepareAdapter) {
         phase.next(Phase::MutationAdapterPrepare, quint64(overlayChangeCount));
         try { success = prepareAdapter(adapterChanges, &failure); }

@@ -307,9 +307,13 @@ public:
             if (backend) detachFromBackend();
         }
     }
-    bool finishClient(bool succeeded, QString *error = nullptr, bool retainAdmission = false);
+    bool finishClient(bool succeeded, QString *error = nullptr, bool retainAdmission = false,
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     bool replaceFullTile(qint32 column, qint32 row, KisTileData *tileData, bool sparseDefault, QString *error);
-    bool finish(QString *error = nullptr, bool retainAdmission = false);
+    bool finish(QString *error = nullptr, bool retainAdmission = false,
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     bool cancelForBarrier(QString *error);
     void detachFromBackend();
     void unlinkLease(KisTiledDataManagerPageStoreLease *lease)
@@ -491,10 +495,14 @@ KisTiledDataManagerPageStoreWriteBatch::
     if (!m_clientFinished) cancel();
 }
 
-bool KisTiledDataManagerPageStoreWriteBatch::finish(QString *error)
+bool KisTiledDataManagerPageStoreWriteBatch::finish(QString *error,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &installAdapter)
 {
     if (m_clientFinished || !d) return false;
     m_clientFinished = true;
+    if (prepareAdapter || installAdapter)
+        return d->finishClient(true, error, true, prepareAdapter, installAdapter);
     auto completing = std::move(d);
     return completing->finishClient(true, error);
 }
@@ -515,7 +523,9 @@ bool KisTiledDataManagerPageStoreWriteBatch::cancel()
 }
 
 bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
-    bool succeeded, QString *error, bool retainAdmission)
+    bool succeeded, QString *error, bool retainAdmission,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &installAdapter)
 {
     QMutexLocker leaseLock(&leaseMutex);
     KisTiledDataManagerPageStoreBackend *owner = backend;
@@ -537,10 +547,12 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
         clientSucceeded = !failed;
     }
     leaseLock.unlock();
-    return finalClient ? finish(error, retainAdmission) : clientSucceeded;
+    return finalClient ? finish(error, retainAdmission, prepareAdapter, installAdapter) : clientSucceeded;
 }
 
-bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, bool retainAdmission)
+bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, bool retainAdmission,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &installAdapter)
 {
     if (!backend) return !failed;
     if (!transaction.isValid()) return false;
@@ -552,7 +564,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     retainAdmission = retainAdmission || hasWorkingAdapters;
     const bool sealed = mutationActive && !failed && !unused && (kind != Kind::Managed
         ? retainAdmission ? mutation.sealForLegacyAdapterDelivery(error) : mutation.sealForLegacyUnlock(error)
-        : retainAdmission ? mutation.sealForAdapterDelivery(error) : mutation.seal(error));
+        : retainAdmission ? mutation.sealForAdapterDelivery(error, prepareAdapter) : mutation.seal(error));
     if (!sealed) {
         failed = failed || !unused;
         if (!backend->completeAdapters(*this, false)) return false;
@@ -578,7 +590,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     const bool terminal = backend->finishOwnedTransaction(mutation, sealed || !failed,
                                                         (sealed || !failed) ? error : nullptr);
     failed = failed || !terminal;
-    if (sealed && !backend->completeAdapters(*this, terminal)) return false;
+    if (sealed && !backend->completeAdapters(*this, terminal, installAdapter)) return false;
     if (releaseWorkingAdmission) {
         sources.clear();
         mutation = {}; // finish(), not facade destruction, ends this claim.
@@ -588,9 +600,10 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
 }
 
 bool KisTiledDataManagerPageStoreBackend::completeAdapters(
-    KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published)
+    KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published,
+    const KisPageMutationSession::AdapterInstallation &installAdapter)
 {
-    if (!batch.hasWorkingAdapters) return true;
+    if (!batch.hasWorkingAdapters && !(published && installAdapter)) return true;
     auto *manager = d->manager;
     Q_ASSERT(manager);
     // Callers may already own the manager gate. Original page claims and the
@@ -598,7 +611,11 @@ bool KisTiledDataManagerPageStoreBackend::completeAdapters(
     // acquire a second manager gate, or call adapters inside a Store gate.
     KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::MutationIndexRefresh, 1);
     phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, 1);
-    if (!batch.mutation.visitAdapterPages([&](const KisPageVersion &version) {
+    if (published && installAdapter) {
+        // The caller prepared all final changes before acceptance. This one
+        // install also invalidates raw partial-write caches; do not visit D twice.
+        installAdapter(batch.mutation.sealedAdapterChanges());
+    } else if (!batch.mutation.visitAdapterPages([&](const KisPageVersion &version) {
         if (auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(version.key.page.column, version.key.page.row)) {
             QMutexLocker lock(&tile->m_swapBarrierLock);
             // A successfully published raw cache already has this exact

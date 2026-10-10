@@ -220,6 +220,10 @@ private Q_SLOTS:
     void testPageStoreCopyLiveWriteCompatibility();
     void testPageStoreCompatibilityCopyFailure_data();
     void testPageStoreCompatibilityCopyFailure();
+    void testPageStoreCompatibilityCopyPublicationFailure_data();
+    void testPageStoreCompatibilityCopyPublicationFailure();
+    void testPageStoreCompatibilityCopySegmentFailure_data();
+    void testPageStoreCompatibilityCopySegmentFailure();
     void testPageStoreDefaultLifecycleDoesNotMaterialize_data();
     void testPageStoreDefaultLifecycleDoesNotMaterialize();
     void testPageStoreAbortUnderBudgetPressure_data();

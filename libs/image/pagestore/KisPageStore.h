@@ -169,10 +169,10 @@ private:
 class KRITAIMAGE_EXPORT KisPageMutationSession
 {
 public:
-    // Borrowed only during the synchronous seal hooks below. The original
-    // overlay candidate supplies its actual changes; no key projection is
-    // exported and untouched write intents are not revisited. Changes are
-    // unique and ordered by surface, row, then column.
+    // Borrowed only during synchronous adapter hooks. Preparation consumes
+    // the original ordered overlay candidate. A private batch's final install
+    // may instead visit its retained sealed entries, in original write order.
+    // Both expose unique actual changes without exporting another key array.
     class KRITAIMAGE_EXPORT AdapterChanges {
     public:
         AdapterChanges(const AdapterChanges &) = delete;
@@ -185,9 +185,12 @@ public:
         }
     private:
         friend class KisPageMutationSession;
-        explicit AdapterChanges(const void *overlay) : m_overlay(overlay) {}
+        using Visitor = bool (*)(const void *, const KisPageKey &, bool);
+        using ForEach = bool (*)(const void *, const void *, Visitor);
+        AdapterChanges(const void *changes, ForEach forEach) : m_changes(changes), m_forEach(forEach) {}
         bool forEachImpl(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
-        const void *m_overlay; // Opaque only to keep the publication owner private.
+        const void *m_changes; // Original owner stays private; this view retains nothing.
+        ForEach m_forEach;
     };
     using AdapterPreparation = std::function<bool(const AdapterChanges &, QString *)>;
     using AdapterInstallation = std::function<void(const AdapterChanges &)>;
@@ -257,7 +260,8 @@ private:
     // Seal the original segment but retain its original admission/write set
     // until this session is destroyed after adapter delivery. No writable
     // access survives seal, and the transaction activity still ends normally.
-    bool sealForAdapterDelivery(QString *error = nullptr);
+    bool sealForAdapterDelivery(QString *error = nullptr, const AdapterPreparation &prepareAdapter = {});
+    AdapterChanges sealedAdapterChanges() const;
     enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
     bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
         const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});

@@ -42,7 +42,6 @@ class KisTiledRandomAccessor;
 class KisPaintDeviceWriter;
 class QIODevice;
 class KisTiledDataManagerPageStoreBackend;
-class KisCapturedReadView;
 class KisPageStoreIteratorReadScope;
 struct KisLogicalPageId;
 
@@ -371,8 +370,6 @@ private:
     void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
     void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
-    void refreshPageStoreIndex(const QRect &rect);
-    bool refreshPageStorePage(const KisCapturedReadView &view, const KisLogicalPageId &page);
     bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
     KisPageStoreWriteOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,
                                       bool oldSource, bool rough, QString *error);
@@ -394,10 +391,8 @@ private:
 
     quint8* duplicatePixel(qint32 num, const quint8 *pixel);
 
-    template<bool useOldSrcData>
+    template<bool useOldSrcData, bool rough>
         void bitBltImpl(KisTiledDataManager *srcDM, const QRect &rect);
-    template<bool useOldSrcData>
-        void bitBltRoughImpl(KisTiledDataManager *srcDM, const QRect &rect);
 
     bool writeBytesBody(const quint8 *data,
                         qint32 x, qint32 y,

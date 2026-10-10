@@ -167,7 +167,7 @@ public:
             // Filtering the original ordered changes preserves candidate order.
             if (valid && (coverage.isEmpty() || prepareExtent(extent, coverage, error))) return true;
         } catch (const std::bad_alloc &) {}
-        if (error) *error = QStringLiteral("History adapter preparation was refused");
+        if (error) *error = QStringLiteral("Compatibility adapter preparation was refused");
         return false;
     }
 
@@ -379,14 +379,16 @@ public:
         if (!m_finished) reportFailure();
     }
     bool isValid() const { return !m_backend || bool(m_batch); }
-    bool finish(bool succeeded = true)
+    bool finish(bool succeeded = true,
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {})
     {
         if (m_finished) return m_succeeded;
         m_finished = true;
         if (!succeeded) {
             if (m_batch) m_batch->cancel();
         } else {
-            m_succeeded = !m_backend || (m_batch && m_batch->finish(&m_error));
+            m_succeeded = !m_backend || (m_batch && m_batch->finish(&m_error, prepareAdapter, installAdapter));
         }
         // Successful cancellation is not successful drawing. The original
         // batch delivers its working adapters before releasing its claims.
@@ -1326,51 +1328,6 @@ void KisTiledDataManager::clear()
     m_extentManager.clear();
 }
 
-bool KisTiledDataManager::refreshPageStorePage(
-    const KisCapturedReadView &view, const KisLogicalPageId &page)
-{
-    const KisPageKey key{m_pageStoreBackend->surface(), page};
-    KisPageVersion version;
-    if (!view.resolvePageVersion(key, &version)) return false;
-    if (version.isDefaultPixel()) {
-        if (m_hashTable->deleteTile(page.column, page.row))
-            m_extentManager.notifyTileRemoved(page.column, page.row);
-        return true;
-    }
-    KisPageStoreReadPage read(m_pageStoreBackend->store(), view, key);
-    auto tile = m_hashTable->getExistingTile(page.column, page.row);
-    auto cache = m_pageStoreBackend->readCacheForPage(read, tile ? tile->takeIdleReadCache() : TileLease{});
-    if (!cache) return false;
-    bool created = false;
-    if (!tile) tile = m_hashTable->getTileLazy(page.column, page.row, created);
-    tile->setPageStoreBridge(m_pageStoreBackend, false);
-    tile->installPageStoreReadCache(std::move(cache));
-    if (created) m_extentManager.notifyTileAdded(page.column, page.row);
-    return true;
-}
-
-void KisTiledDataManager::refreshPageStoreIndex(const QRect &rect)
-{
-    if (!m_pageStoreBackend || !m_pageStoreBackend->isOperational() ||
-        rect.isEmpty()) {
-        return;
-    }
-    const qint32 firstColumn = xToCol(rect.left());
-    const qint32 lastColumn = xToCol(rect.right());
-    const qint32 firstRow = yToRow(rect.top());
-    const qint32 lastRow = yToRow(rect.bottom());
-    auto view = m_pageStoreBackend->captureReadView();
-    KIS_SAFE_ASSERT_RECOVER_RETURN(view.isValid());
-    for (qint64 row = firstRow; row <= lastRow; ++row) {
-        for (qint64 column = firstColumn; column <= lastColumn; ++column) {
-            const KisLogicalPageId page{qint32(column), qint32(row)};
-            // Failure rollback still restores bytes for unmigrated raw consumers.
-            KIS_SAFE_ASSERT_RECOVER_RETURN(refreshPageStorePage(view, page));
-        }
-    }
-}
-
-
 bool KisTiledDataManager::copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const
 {
     // The caller rejects unsupported coordinates before mutation. Do not let
@@ -1459,27 +1416,24 @@ PixelOperationResult KisTiledDataManager::copyPageStore(
     return PixelOperationResult::Succeeded;
 }
 
-template<bool useOldSrcData>
+template<bool useOldSrcData, bool rough>
 void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &requestedRect)
 {
     if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
     if (requestedRect.isEmpty()) return;
     QRect rect = requestedRect;
     QString error;
-    const auto copied = copyPageStore(srcDM, rect, useOldSrcData, false, &error);
+    const auto copied = copyPageStore(srcDM, rect, useOldSrcData, rough, &error);
     if (copied != PixelOperationResult::Unavailable) {
         if (copied == PixelOperationResult::Failed)
             KisStrokeJobFailureContext::reportFailure(error);
         return;
     }
     if (rect.isEmpty()) return;
+    const bool pageStoreTarget = m_pageStoreBackend && m_pageStoreBackend->isOperational();
     ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
-    bool published = false;
-    const auto restoreCompatibilityState = qScopeGuard([&] {
-        if (published) return;
-        pageStoreBatch.finish(false);
-        refreshPageStoreIndex(rect);
-    });
+    PreparedTileUpdates preparedTiles; // Destroy before the batch releases admission.
+    if (!pageStoreBatch.isValid()) return;
 
     const qint32 pixelSize = this->pixelSize();
     const bool defaultPixelsCoincide =
@@ -1498,7 +1452,6 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
 
             bool srcTileExists = false;
 
-            // this is the only variation in the template
             KisTileSP srcTile = useOldSrcData ?
                 srcDM->getOldTile(column, row, srcTileExists) :
                 srcDM->getReadOnlyTileLazy(column, row, srcTileExists);
@@ -1506,7 +1459,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
 
             QRect tileRect(column*KisTileData::WIDTH, row*KisTileData::HEIGHT,
                            KisTileData::WIDTH, KisTileData::HEIGHT);
-            QRect cloneTileRect = rect & tileRect;
+            QRect cloneTileRect = rough ? tileRect : rect & tileRect;
 
             if (cloneTileRect == tileRect) {
                  // Clone whole tile
@@ -1535,6 +1488,9 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
                      pageStoreBatch.replaceFullTile(
                          column, row, td, sparseDefault);
                  if (!pageStoreReplaced) return;
+                 // PageStore keeps the old index until publication accepts.
+                 // The original batch supplies final changes to the installer.
+                 if (pageStoreTarget) continue;
                  const bool wasDeleted =
                      m_hashTable->deleteTile(column, row);
 
@@ -1577,122 +1533,38 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
             }
         }
     }
-    published = pageStoreBatch.finish();
-}
-
-template<bool useOldSrcData>
-void KisTiledDataManager::bitBltRoughImpl(KisTiledDataManager *srcDM, const QRect &requestedRect)
-{
-    if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
-    if (requestedRect.isEmpty()) return;
-    QRect rect = requestedRect;
-    QString error;
-    const auto copied = copyPageStore(srcDM, rect, useOldSrcData, true, &error);
-    if (copied != PixelOperationResult::Unavailable) {
-        if (copied == PixelOperationResult::Failed)
-            KisStrokeJobFailureContext::reportFailure(error);
-        return;
-    }
-    if (rect.isEmpty()) return;
-    ScopedPageStoreWriteBatch pageStoreBatch(m_pageStoreBackend);
-    bool published = false;
-    const auto restoreCompatibilityState = qScopeGuard([&] {
-        if (published) return;
-        pageStoreBatch.finish(false);
-        refreshPageStoreIndex(rect);
-    });
-
-    const qint32 pixelSize = this->pixelSize();
-    const bool defaultPixelsCoincide =
-        !memcmp(srcDM->defaultPixel(), m_defaultPixel, pixelSize);
-
-    qint32 firstColumn = xToCol(rect.left());
-    qint32 lastColumn = xToCol(rect.right());
-
-    qint32 firstRow = yToRow(rect.top());
-    qint32 lastRow = yToRow(rect.bottom());
-
-    for (qint32 row = firstRow; row <= lastRow; ++row) {
-        for (qint32 column = firstColumn; column <= lastColumn; ++column) {
-
-            /**
-             * We are cloning whole tiles here so let's not be so boring
-             * to check any borders :)
-             */
-
-            bool srcTileExists = false;
-
-            // this is the only variation in the template
-            KisTileSP srcTile = useOldSrcData ?
-                srcDM->getOldTile(column, row, srcTileExists) :
-                srcDM->getReadOnlyTileLazy(column, row, srcTileExists);
-            if (!srcTile) return;
-
-            if (!srcTile->lockForRead()) return;
-            const auto unlockSource = qScopeGuard([&] { srcTile->unlockForRead(); });
-            KisTileData *td = srcTile->tileData();
-            if (!td) return;
-            const bool sparseDefault =
-                !srcTileExists && defaultPixelsCoincide;
-            bool dstTileExists = false;
-            KisTileSP dstTile = getReadOnlyTileLazy(
-                column, row, dstTileExists);
-            if (!dstTile) return;
-            bool unchanged = sparseDefault && !dstTileExists;
-            if (!sparseDefault && dstTileExists) {
-                if (!dstTile->lockForRead()) return;
-                const auto unlockDestination = qScopeGuard([&] { dstTile->unlockForRead(); });
-                KisTileData *dstData = dstTile->tileData();
-                if (!dstData) return;
-                unchanged = dstData == td ||
-                    memcmp(dstData->data(), td->data(),
-                           size_t(KisTileData::WIDTH) *
-                               KisTileData::HEIGHT * pixelSize) == 0;
-            }
-            if (unchanged) continue;
-            const bool pageStoreReplaced =
-                pageStoreBatch.replaceFullTile(
-                    column, row, td, sparseDefault);
-            if (!pageStoreReplaced) return;
-
-            const bool wasDeleted =
-                m_hashTable->deleteTile(column, row);
-
-            if (srcTileExists || !defaultPixelsCoincide) {
-                KisTileSP clonedTile = KisTileSP(new KisTile(column, row, td, m_mementoManager));
-                clonedTile->setPageStoreBridge(m_pageStoreBackend, false);
-
-                m_hashTable->addTile(clonedTile);
-
-                if (!wasDeleted) {
-                    m_extentManager.notifyTileAdded(column, row);
-                }
-            } else if (wasDeleted) {
-                m_extentManager.notifyTileRemoved(column, row);
-            }
-        }
-    }
-    published = pageStoreBatch.finish();
+    if (pageStoreTarget) {
+        // Source pixels/pins are gone. Keep the original manager gate across
+        // preparation, root/overlay acceptance and the prepared index install.
+        QWriteLocker lock(&m_lock);
+        pageStoreBatch.finish(true,
+            [&](const auto &changes, QString *failure) {
+                return preparedTiles.prepare(*m_hashTable, m_extentManager,
+                    m_pageStoreBackend->surface(), changes, failure);
+            }, [&](const auto &changes) {
+                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changes);
+            });
+    } else pageStoreBatch.finish();
 }
 
 void KisTiledDataManager::bitBlt(KisTiledDataManager *srcDM, const QRect &rect)
 {
-    bitBltImpl<false>(srcDM, rect);
+    bitBltImpl<false, false>(srcDM, rect);
 }
 
 void KisTiledDataManager::bitBltOldData(KisTiledDataManager *srcDM, const QRect &rect)
 {
-    bitBltImpl<true>(srcDM, rect);
+    bitBltImpl<true, false>(srcDM, rect);
 }
 
 void KisTiledDataManager::bitBltRough(KisTiledDataManager *srcDM, const QRect &rect)
 {
-    bitBltRoughImpl<false>(srcDM, rect);
+    bitBltImpl<false, true>(srcDM, rect);
 }
 
 void KisTiledDataManager::bitBltRoughOldData(KisTiledDataManager *srcDM, const QRect &rect)
 {
-    bitBltRoughImpl<true>(srcDM, rect);
+    bitBltImpl<true, true>(srcDM, rect);
 }
 
 void KisTiledDataManager::setExtent(qint32 x, qint32 y, qint32 w, qint32 h)

@@ -6205,6 +6205,7 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityCopyFailure()
     source.clear(0, 0, 64, 64, &firstSource);
     source.clear(64, 0, 64, 64, &secondSource);
     target.clear(0, 0, 128, 64, &initialTarget);
+    const auto original = target.m_hashTable->getExistingTile(0, 0);
 
     bool exists = false;
     const auto secondTile = source.getReadOnlyTileLazy(1, 0, exists);
@@ -6229,12 +6230,156 @@ void KisTiledDataManagerTest::testPageStoreCompatibilityCopyFailure()
     QCOMPARE(target.m_pageStoreBackend->store()->sessionStats().committedTransactions, committed);
     QVERIFY(!secondData->isResident());
     const auto firstCached = target.m_hashTable->getExistingTile(0, 0);
-    QVERIFY(firstCached);
-    QVERIFY(firstCached->tileData()->data());
-    QCOMPARE(firstCached->tileData()->data()[rough ? 0 : 1], initialTarget);
+    QCOMPARE(firstCached, original);
+    // Cancellation invalidates selection without replacing the wrapper or
+    // revoking borrowed pointers. A real read reacquires the accepted version.
+    QVERIFY(firstCached->lockForRead());
+    {
+        const auto unlock = qScopeGuard([&] { firstCached->unlockForRead(); });
+        QVERIFY(firstCached->data());
+        QCOMPARE(firstCached->data()[rough ? 0 : 1], initialTarget);
+    }
     QByteArray actual(128 * 64, Qt::Uninitialized);
     target.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 128, 64);
     QCOMPARE(actual, QByteArray(actual.size(), char(initialTarget)));
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopyPublicationFailure_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("rough");
+    for (int bpp : {1, 4, 8, 16}) for (bool rough : {false, true})
+        QTest::newRow(qPrintable(QString("B%1-rough%2").arg(bpp).arg(rough))) << bpp << rough;
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopyPublicationFailure()
+{
+    QFETCH(int, bpp); QFETCH(bool, rough);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31)), paint(bpp, char(0x71));
+    const auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager source(bpp, bytes(blank)), target(bpp, bytes(blank));
+    source.m_mementoManager->setPageStoreBridge(nullptr);
+    delete source.m_pageStoreBackend; source.m_pageStoreBackend = nullptr;
+    source.clear(QRect(0, 0, 128, 64), bytes(paint));
+    target.clear(QRect(0, 0, 64, 64), bytes(initial));
+    target.clear(QRect(128, 0, 64, 64), bytes(initial));
+    const auto warm = target.getTile(0, 0, false), removed = target.getTile(2, 0, false);
+    QVERIFY(warm); QVERIFY(removed);
+    auto *backend = target.m_pageStoreBackend; auto *store = backend->store();
+    const auto committed = store->sessionStats().committedTransactions;
+    const QRect area(0, 0, 192, 64); QCOMPARE(target.extent(), area);
+    kisDrainPageStoreReclamation(); auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
+    size_t count = 0; void *filler = nullptr; bool injected = false, unchangedBeforeRoot = false;
+    const auto free = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, count, 1); });
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::CommitEpochPrepare || injected) return;
+        injected = true;
+        unchangedBeforeRoot = target.m_hashTable->getExistingTileForPreparedUpdate(0, 0) == warm &&
+            !target.m_hashTable->getExistingTileForPreparedUpdate(1, 0) &&
+            target.m_hashTable->getExistingTileForPreparedUpdate(2, 0) == removed;
+        const auto usage = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        count = size_t(kisPageProcessStorageLimit() - usage.live.cpuRam - usage.reserved.cpuRam);
+        filler = allocateTestProcessStoragePressure(count, 1);
+    });
+    bool failed = false;
+    {
+        KisStrokeJobFailureContext failure(true);
+        if (rough) target.bitBltRough(&source, area); else target.bitBlt(&source, area);
+        failed = failure.failed();
+    }
+    recorder.setPhaseObserver({});
+    if (filler) freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
+    QVERIFY(injected); QVERIFY(failed);
+    QCOMPARE(store->sessionStats().committedTransactions, committed);
+    qInfo() << "Copy index unchanged before rejected root:" << unchangedBeforeRoot
+            << "indexed pages after refusal:" << target.m_hashTable->numTiles();
+    QVERIFY(unchangedBeforeRoot);
+    QCOMPARE(target.m_hashTable->getExistingTileForPreparedUpdate(0, 0), warm);
+    QVERIFY(!target.m_hashTable->getExistingTileForPreparedUpdate(1, 0));
+    QCOMPARE(target.m_hashTable->getExistingTileForPreparedUpdate(2, 0), removed);
+    QCOMPARE(target.extent(), area);
+    QByteArray actual(192 * bpp, 0), expected(actual.size(), char(0x13));
+    std::memset(expected.data(), 0x31, size_t(64 * bpp));
+    std::memset(expected.data() + 128 * bpp, 0x31, size_t(64 * bpp));
+    target.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 1); QCOMPARE(actual, expected);
+    kisDrainPageStoreReclamation(); QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+    if (rough) target.bitBltRough(&source, area); else target.bitBlt(&source, area);
+    std::memset(expected.data(), 0x71, size_t(128 * bpp));
+    std::memset(expected.data() + 128 * bpp, 0x13, size_t(64 * bpp));
+    target.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 192, 1); QCOMPARE(actual, expected);
+    QCOMPARE(target.extent(), QRect(0, 0, 128, 64));
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopySegmentFailure_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("rough"); QTest::addColumn<bool>("history");
+    for (int bpp : {1, 4, 8, 16}) for (bool rough : {false, true}) for (bool history : {false, true})
+        QTest::newRow(qPrintable(QString("B%1-rough%2-history%3").arg(bpp).arg(rough).arg(history)))
+            << bpp << rough << history;
+}
+
+void KisTiledDataManagerTest::testPageStoreCompatibilityCopySegmentFailure()
+{
+    QFETCH(int, bpp); QFETCH(bool, rough); QFETCH(bool, history);
+    const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31)), paint(bpp, char(0x71));
+    const auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager source(bpp, bytes(blank)), target(bpp, bytes(blank));
+    source.m_mementoManager->setPageStoreBridge(nullptr);
+    delete source.m_pageStoreBackend; source.m_pageStoreBackend = nullptr;
+    source.clear(QRect(0, 0, 128, 64), bytes(paint));
+    source.clear(QRect(256, 0, 64, 64), bytes(paint));
+    for (int column : {0, 2, 4}) target.clear(QRect(column * 64, 0, 64, 64), bytes(initial));
+    const auto original = target.getTile(0, 0, false);
+    const auto owner = history ? target.getMemento() : KisMementoSP{};
+    if (history) { QVERIFY(owner); target.clear(QRect(384, 0, 64, 64), bytes(paint)); }
+    auto *store = target.m_pageStoreBackend->store();
+    const auto committed = store->sessionStats().committedTransactions;
+    const auto read = [&] {
+        QByteArray result(448 * bpp, 0);
+        target.readBytes(reinterpret_cast<quint8 *>(result.data()), 0, 0, 448, 1);
+        return result;
+    };
+    const QByteArray before = read();
+    const QRect extent = target.extent(), area(1, 0, 318, 64);
+    kisDrainPageStoreReclamation(); auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
+    size_t count = 0; void *filler = nullptr; bool injected = false;
+    const auto free = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, count, 1); });
+    KisPageStoreDiagnosticRecorder recorder(true, store);
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::MutationSealStoragePrepare || injected) return;
+        injected = true;
+        const auto usage = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        count = size_t(kisPageProcessStorageLimit() - usage.live.cpuRam - usage.reserved.cpuRam);
+        filler = allocateTestProcessStoragePressure(count, 1);
+    });
+    {
+        KisStrokeJobFailureContext failure(true);
+        if (rough) target.bitBltRough(&source, area); else target.bitBlt(&source, area);
+        QVERIFY(failure.failed());
+    }
+    recorder.setPhaseObserver({});
+    if (filler) freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
+    QVERIFY(injected); QCOMPARE(store->sessionStats().committedTransactions, committed);
+    QCOMPARE(target.m_hashTable->getExistingTile(0, 0), original);
+    QVERIFY(!target.m_hashTable->getExistingTile(1, 0));
+    QCOMPARE(target.extent(), extent); QCOMPARE(read(), before);
+    // The arena can also defer physical cancellation. Observe the original
+    // scheduled retry after relief; draining in-flight jobs excludes future wakes.
+    QTRY_COMPARE_WITH_TIMEOUT(store->sessionStats().activeCpuWritePages, qsizetype(0), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(store->sessionStats().activeTransactions, qsizetype(history ? 1 : 0), 5000);
+    if (rough) target.bitBltRough(&source, area); else target.bitBlt(&source, area);
+    QByteArray expected = before;
+    const int begin = rough ? 0 : 1, end = rough ? 320 : 319;
+    for (int x = begin; x < end; ++x)
+        std::memset(expected.data() + x * bpp, x < 128 || x >= 256 ? 0x71 : 0x13, size_t(bpp));
+    QCOMPARE(read(), expected);
+    if (history) {
+        QVERIFY(target.tryCommit()); target.rollback(owner);
+        QByteArray undo = before; std::memset(undo.data() + 384 * bpp, 0x13, size_t(64 * bpp));
+        QCOMPARE(read(), undo); target.rollforward(owner); QCOMPARE(read(), expected);
+        target.purgeHistory(owner);
+    }
+    kisDrainPageStoreReclamation(); QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
 }
 
 void KisTiledDataManagerTest::testPageStoreDefaultLifecycleDoesNotMaterialize()

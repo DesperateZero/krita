@@ -55,7 +55,13 @@ public:
                          KisTileData *tileData,
                          bool sparseDefault,
                          QString *error = nullptr);
-    bool finish(QString *error = nullptr);
+    // Optional adapter hooks prepare before overlay acceptance and install
+    // only after this batch's publication. The caller holds its manager gate;
+    // callbacks stay on this stack. Retain original admission until the facade
+    // dies after the caller's prepared adapter storage, outside that gate.
+    bool finish(QString *error = nullptr,
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     // Cancel this operation. If borrowed guards are still live, destruction of
     // their final shared control block completes the cancellation.
     bool cancel();
@@ -268,7 +274,8 @@ private:
     // A public writable miss establishes explicit default content even if no
     // pixel guard follows. Reuse the original legacy batch when present.
     KisSharedPtr<KisTile> ensureWritablePage(qint32 column, qint32 row, QString *error);
-    bool completeAdapters(KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published);
+    bool completeAdapters(KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published,
+        const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     struct TrimPage {
         KisLogicalPageId page;
         QRect extent;
