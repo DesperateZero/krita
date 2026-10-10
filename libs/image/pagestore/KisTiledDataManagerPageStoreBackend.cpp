@@ -2635,27 +2635,56 @@ bool KisTiledDataManagerPageStoreBackend::setDefaultPixel(
     return true;
 }
 
-bool KisTiledDataManagerPageStoreBackend::clearAll(QString *error)
+bool KisTiledDataManagerPageStoreBackend::clearAll(
+    QString *error, OperationDelivery *delivery,
+    const std::function<bool(QString *)> &prepareAdapter,
+    const AdapterCompletion &completeAdapter) try
 {
+    if (!isOperational() || (delivery && !delivery->isEmpty())) {
+        KisPageStoreDetail::setError(error, QStringLiteral("clear is unavailable"));
+        return false;
+    }
     // A legacy tile caller may retain a raw writable pointer across clear().
     // clearAll is the sequencing barrier that cancels its anonymous
     // mutation before creating the post-clear transaction.
     if (!cancelAnonymousLeasesForBarrier(error)) return false;
-    return removePages(allocatedPages(), error);
+    return removePages(allocatedPages(), error, delivery, prepareAdapter, completeAdapter);
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("clear storage preparation was refused"));
+    return false;
 }
 
 bool KisTiledDataManagerPageStoreBackend::removePages(
     const QVector<KisLogicalPageId> &pages,
-    QString *error)
+    QString *error, OperationDelivery *delivery,
+    const std::function<bool(QString *)> &prepareAdapter,
+    const AdapterCompletion &completeAdapter) try
 {
-    if (pages.isEmpty()) { KisPageStoreDetail::setError(error, {}); return isOperational(); }
+    if (!isOperational() || (delivery && !delivery->isEmpty())) {
+        KisPageStoreDetail::setError(error, QStringLiteral("page removal is unavailable"));
+        return false;
+    }
+    if (pages.isEmpty()) {
+        // No canonical work needs a new transaction. A whole-index clear can
+        // still have compatibility remnants left by an independent producer.
+        if (prepareAdapter && !prepareAdapter(error)) return false;
+        if (completeAdapter && !completeAdapter([](QString *) { return true; }, error)) return false;
+        KisPageStoreDetail::setError(error, {});
+        return true;
+    }
     auto batch = beginMutationBatch(error);
     if (!batch) return false;
     for (const KisLogicalPageId &page : pages) {
-        if (!batch->replaceFullTile(page.column, page.row, nullptr, true, error))
+        if (!batch->d->replaceFullTile(page.column, page.row, nullptr, true, error))
             return false;
     }
-    return batch->finish(error);
+    if (prepareAdapter && !prepareAdapter(error)) return false;
+    return finishOperationBatch(batch, delivery, completeAdapter, error);
+}
+catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("removal storage preparation was refused"));
+    return false;
 }
 
 bool KisTiledDataManagerPageStoreBackend::trimToRect(

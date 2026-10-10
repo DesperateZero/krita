@@ -184,6 +184,8 @@ private Q_SLOTS:
     void testPageStoreOldTileOwnerLifetime();
     void testPageStoreSemanticRemovalFailure_data();
     void testPageStoreSemanticRemovalFailure();
+    void testPageStoreClearPreparedDelivery_data();
+    void testPageStoreClearPreparedDelivery();
     void testPageStoreAliasRegionFailure_data();
     void testPageStoreAliasRegionFailure();
     void testPageStoreCopyFixedView_data();

@@ -5227,6 +5227,77 @@ void KisTiledDataManagerTest::testIteratorRejectedWriteAdmission()
     QCOMPARE(actual, initial);
 }
 
+void KisTiledDataManagerTest::testPageStoreClearPreparedDelivery_data()
+{
+    QTest::addColumn<bool>("history");
+    QTest::addColumn<bool>("remnants");
+    QTest::addColumn<int>("count");
+    for (bool history : {false, true}) for (bool remnants : {false, true}) for (int count : {0, 1, 17})
+        QTest::newRow(qPrintable(QStringLiteral("history%1-remnants%2-count%3")
+            .arg(history).arg(remnants).arg(count))) << history << remnants << count;
+}
+
+void KisTiledDataManagerTest::testPageStoreClearPreparedDelivery()
+{
+    QFETCH(bool, history); QFETCH(bool, remnants); QFETCH(int, count);
+    const quint8 blank = 0x13, initial = 0x71;
+    KisTiledDataManager dm(1, &blank);
+    dm.clear(0, 0, count * 64, 64, &initial);
+    auto *backend = dm.m_pageStoreBackend;
+    auto *originalTable = dm.m_hashTable;
+    auto retained = backend->captureReadView(); QVERIFY(retained.isValid());
+    KisTileSP reader;
+    if (count) { reader = dm.getTile(0, 0, false); QVERIFY(reader && reader->lockForRead()); }
+    const auto unlock = qScopeGuard([&] { if (reader) reader->unlockForRead(); });
+    QVector<KisLogicalPageId> pages;
+    for (int i = 0; i < count; ++i) pages.append({i, 0});
+    if (remnants) QVERIFY(backend->removePages(pages));
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    if (history) QVERIFY(memento);
+    const auto extent = dm.extent();
+    const auto commits = backend->store()->sessionStats().committedTransactions;
+    KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+    QString error; bool prepared = false, delivered = false;
+    QVERIFY(!backend->clearAll(&error, &delivery,
+        [&](QString *failure) { prepared = true; *failure = QStringLiteral("test adapter refusal"); return false; },
+        [&](const auto &, QString *) { delivered = true; return true; }));
+    QVERIFY(prepared); QVERIFY(!delivered); QVERIFY(delivery.isEmpty());
+    QCOMPARE(backend->store()->sessionStats().committedTransactions, commits);
+    QCOMPARE(dm.m_hashTable, originalTable); QCOMPARE(dm.extent(), extent);
+    QCOMPARE(dm.m_hashTable->numTiles(), count);
+    QCOMPARE(backend->allocatedPages().size(), remnants ? 0 : count);
+
+    bool installed = false, heldAdmission = false;
+    KisPageStoreDiagnosticRecorder recorder(true, backend->store());
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::MutationAdapterInstalled) return;
+        installed = true;
+        heldAdmission = backend->store()->sessionStats().activeCpuWritePages ==
+            qsizetype(remnants ? 0 : count);
+    });
+    {
+        KisStrokeJobFailureContext failures(true);
+        dm.clear(); QVERIFY2(!failures.failed(), qPrintable(failures.error()));
+    }
+    recorder.setPhaseObserver({});
+    QVERIFY(installed); QVERIFY(heldAdmission);
+    QCOMPARE(dm.m_hashTable, originalTable);
+    QCOMPARE(dm.m_hashTable->numTiles(), 0); QCOMPARE(dm.extent(), QRect());
+    QVERIFY(backend->allocatedPages().isEmpty());
+    QCOMPARE(backend->store()->sessionStats().activeCpuWritePages, qsizetype(0));
+    if (reader) QCOMPARE(reader->data()[0], initial);
+    if (count) {
+        auto exact = retained.readResidentPage({backend->surface(), {0, 0}});
+        QVERIFY(exact.isValid()); QCOMPARE(static_cast<const quint8 *>(exact.data())[0], initial);
+    }
+    if (history) {
+        QVERIFY(dm.tryCommit(&error)); dm.rollback(memento);
+        quint8 actual = 0; dm.readBytes(&actual, 0, 0, 1, 1);
+        QCOMPARE(actual, count && !remnants ? initial : blank);
+        dm.purgeHistory(memento);
+    }
+}
+
 void KisTiledDataManagerTest::testPageStoreSemanticRemovalFailure_data()
 {
     QTest::addColumn<bool>("history"); QTest::addColumn<bool>("clearAll");

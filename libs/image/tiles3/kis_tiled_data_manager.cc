@@ -139,6 +139,24 @@ public:
             installPage(table, extent, bridge, changed[i], !present || present[i]);
     }
 
+    bool prepareClear(KisTileHashTable &table, QString *error)
+    {
+        try {
+            prepareRemovals(table, [](const KisLogicalPageId &) { return false; });
+            return true; // Deleting the complete set needs no sort or lookup.
+        } catch (const std::bad_alloc &) {
+            if (error) *error = QStringLiteral("Clear compatibility preparation was refused");
+            return false;
+        }
+    }
+
+    void installRemovals(KisTileHashTable &table, KisTiledExtentManager &extent)
+    {
+        for (auto &candidate : m_prepared)
+            if (candidate.storage.removesTile() && table.removePreparedTile(candidate.storage))
+                extent.notifyTileRemoved(candidate.page.column, candidate.page.row);
+    }
+
     void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
                        KisTiledDataManagerPageStoreBackend *bridge, KisSurfaceId surface,
                        const KisPageVersion *targets, qsizetype count)
@@ -186,22 +204,8 @@ private:
             // Equal raw counts alone prove nothing. After the exhaustive pass,
             // H = N - missing proves that H has no extra members. Intent-only
             // wrappers otherwise require the reverse membership scan.
-            if (table.numTiles() != targetCount - missingCount) {
-                {
-                    KisTileHashTableConstIterator it(&table);
-                    while (!it.isDone()) {
-                        const auto tile = it.tile();
-                        const KisLogicalPageId page{tile->col(), tile->row()};
-                        if (!contains(page)) appendPrepared(page, {});
-                        it.next();
-                    }
-                }
-                // Iterators release their table locks before preparation.
-                for (qsizetype i = missingCount; i < m_prepared.size(); ++i) {
-                    auto &candidate = m_prepared[i];
-                    candidate.storage = table.prepareTileUpdate(candidate.page.column, candidate.page.row, KisTileHashTable::Update::Absent);
-                }
-            }
+            if (table.numTiles() != targetCount - missingCount)
+                prepareRemovals(table, contains);
             sortPrepared();
             return coverage.isEmpty() || extent.prepareTileRange(coverage);
         } catch (const std::bad_alloc &) {
@@ -209,11 +213,24 @@ private:
         }
     }
 
-    void installRemovals(KisTileHashTable &table, KisTiledExtentManager &extent)
+    template<class Contains>
+    void prepareRemovals(KisTileHashTable &table, const Contains &contains)
     {
-        for (auto &candidate : m_prepared)
-            if (candidate.storage.removesTile() && table.removePreparedTile(candidate.storage))
-                extent.notifyTileRemoved(candidate.page.column, candidate.page.row);
+        const auto firstRemoval = m_prepared.size();
+        {
+            KisTileHashTableConstIterator it(&table);
+            while (!it.isDone()) {
+                const auto tile = it.tile();
+                const KisLogicalPageId page{tile->col(), tile->row()};
+                if (!contains(page)) appendPrepared(page, {});
+                it.next();
+            }
+        }
+        // Iterators release their table locks before preparing map keys/GC.
+        for (qsizetype i = firstRemoval; i < m_prepared.size(); ++i) {
+            auto &candidate = m_prepared[i];
+            candidate.storage = table.prepareTileUpdate(candidate.page.column, candidate.page.row, KisTileHashTable::Update::Absent);
+        }
     }
 
     void installMissing(KisTileHashTable &table, KisTiledExtentManager &extent,
@@ -1206,13 +1223,30 @@ void KisTiledDataManager::clear(qint32 x, qint32 y, qint32 w, qint32 h, quint8 c
 void KisTiledDataManager::clear()
 {
     if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
+    OperationDelivery delivery;
+    PreparedTileUpdates preparedTiles;
     QWriteLocker locker(&m_lock);
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         QString error;
-        if (!m_pageStoreBackend->clearAll(&error)) {
+        if (!m_pageStoreBackend->clearAll(&error, &delivery,
+            [&](QString *failure) {
+                KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
+                    KisPageStoreDiagnosticPhase::MutationAdapterPrepare, 1);
+                const bool prepared = preparedTiles.prepareClear(*m_hashTable, failure);
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterPrepared, 1);
+                return prepared;
+            }, [&](const auto &publish, QString *failure) {
+                if (!publish(failure)) return false;
+                KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
+                    KisPageStoreDiagnosticPhase::MutationIndexRefresh, 1);
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, 1);
+                preparedTiles.installRemovals(*m_hashTable, m_extentManager);
+                phase.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, 1);
+                return true;
+            })) {
             KisStrokeJobFailureContext::reportFailure(error);
-            return;
         }
+        return;
     }
     m_hashTable->clear();
     m_extentManager.clear();

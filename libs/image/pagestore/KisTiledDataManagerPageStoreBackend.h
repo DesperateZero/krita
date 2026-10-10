@@ -241,9 +241,13 @@ public:
     TileLease readCacheForPage(const KisPageStoreReadPage &read, TileLease reuse = {}) const;
     bool setDefaultPixel(const QByteArray &pixel,
                          QString *error = nullptr);
-    bool clearAll(QString *error = nullptr);
+    bool clearAll(QString *error = nullptr, OperationDelivery *delivery = nullptr,
+                  const std::function<bool(QString *)> &prepareAdapter = {},
+                  const AdapterCompletion &completeAdapter = {});
     bool removePages(const QVector<KisLogicalPageId> &pages,
-                     QString *error = nullptr);
+                     QString *error = nullptr, OperationDelivery *delivery = nullptr,
+                     const std::function<bool(QString *)> &prepareAdapter = {},
+                     const AdapterCompletion &completeAdapter = {});
     bool trimToRect(const QRect &rect, QString *error = nullptr);
     QVector<KisLogicalPageId> allocatedPages() const;
     bool pageAllocated(qint32 column, qint32 row, bool oldData) const;
