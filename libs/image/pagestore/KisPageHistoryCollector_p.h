@@ -85,7 +85,10 @@ public:
     KRITAIMAGE_EXPORT void collectUnreachableLocked(
         const KisPageKey *candidateKeys, qsizetype candidateCount,
         bool scanAll = false);
-    void collectEpochBookkeepingLocked(bool rescanHistory = false);
+    // Call after registering this publication's changed keys. Ending an old
+    // base can release history outside that delta; use the same known-work
+    // scan and foreground/background policy as a retained snapshot release.
+    void collectAfterEpochChangeLocked(bool rescanHistory = false);
     void requestKeyLocked(const KisPageKey &key) noexcept;
     void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();

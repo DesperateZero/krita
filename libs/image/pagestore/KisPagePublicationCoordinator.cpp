@@ -1249,7 +1249,6 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
             if (!m_owner.revokePreparedPage(entry.second))
                 qFatal("Owned committed proof changed before revocation");
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
-        m_history.collectEpochBookkeepingLocked(!(transaction.baseEpoch == currentRoot.epoch()));
         for (const auto &entry : owned.proofs) {
             m_history.requestKeyLocked(entry.first);
         }
@@ -1257,7 +1256,13 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
             m_history.requestKeyLocked(change.version.key);
         }
         diagnostic.next(Phase::CommitHistoryCollect, quint64(owned.proofs.size() + descriptorChanges.size()));
-        m_history.collectUnreachableLocked(nullptr, 0);
+        // Ending a non-current base affects other keys only when its last
+        // logical protection is gone. A live sibling or retained snapshot
+        // keeps the same reachability; do not rescan H keys for that exit.
+        // The Store gate excludes new protection changes across this query.
+        const bool releasedOldBase = !(transaction.baseEpoch == currentRoot.epoch())
+            && !m_epochs.root(transaction.baseEpoch).isValid();
+        m_history.collectAfterEpochChangeLocked(releasedOldBase);
         diagnostic.next(Phase::CommitProviderRetire, 0);
         processRetirementsUnlocked(ownerLock);
         ++m_committedTransactions;
@@ -1463,8 +1468,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
     }
     m_epochs.releaseSnapshot(source.token);
     sourceClaim.dismiss();
-    m_history.collectEpochBookkeepingLocked();
-    m_history.collectUnreachableLocked(nullptr, 0);
+    m_history.collectAfterEpochChangeLocked();
     processRetirementsUnlocked(ownerLock);
     return {restored.root.epoch(), completion};
 }
@@ -1513,7 +1517,7 @@ bool KisPagePublicationCoordinator::abortLocked(
         releasedOverlay = {};
         ownerLock.relock();
     });
-    m_history.collectEpochBookkeepingLocked(!(transaction.baseEpoch == m_epochs.captureCommittedRoot().epoch()));
+    m_history.collectAfterEpochChangeLocked(!m_epochs.root(transaction.baseEpoch).isValid());
     return true;
 }
 

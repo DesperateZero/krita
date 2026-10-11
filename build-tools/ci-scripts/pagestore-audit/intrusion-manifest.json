@@ -353,7 +353,7 @@
       "symbols": [
         "KisPageHistoryCollector",
         "collectUnreachableLocked",
-        "collectEpochBookkeepingLocked",
+        "collectAfterEpochChangeLocked",
         "scheduleLocked"
       ],
       "target-owner": "KisPageHistoryCollector"

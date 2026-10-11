@@ -1080,6 +1080,26 @@ private Q_SLOTS:
         QTest::newRow("background") << true;
     }
     void historyPurgeReclaimsOutsideItsOwnDelta();
+    void transactionExitReclaimsOutsideItsOwnDelta_data()
+    {
+        QTest::addColumn<bool>("background");
+        QTest::addColumn<bool>("commit");
+        QTest::addColumn<int>("protection");
+        for (bool background : {false, true}) for (bool commit : {false, true})
+            for (int protection : {0, 1, 2})
+                QTest::newRow(qPrintable(QStringLiteral("background%1-commit%2-protection%3")
+                    .arg(background).arg(commit).arg(protection))) << background << commit << protection;
+    }
+    void transactionExitReclaimsOutsideItsOwnDelta();
+    void snapshotReleaseScansOnlyAfterLastProtection_data()
+    {
+        QTest::addColumn<bool>("background");
+        QTest::addColumn<int>("protection");
+        for (bool background : {false, true}) for (int protection : {0, 1, 2})
+            QTest::newRow(qPrintable(QStringLiteral("background%1-protection%2")
+                .arg(background).arg(protection))) << background << protection;
+    }
+    void snapshotReleaseScansOnlyAfterLastProtection();
     void restoreIgnoresDetachedRetirement_data();
     void restoreIgnoresDetachedRetirement();
     void concurrentDisjointCommitsKeepEveryPage();
@@ -4399,6 +4419,86 @@ void KisPageStoreCpuMutationTest::historyPurgeReclaimsOutsideItsOwnDelta()
     QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(2 * 64 * 64 * f.bpp));
     QVERIFY(history.close()); QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::transactionExitReclaimsOutsideItsOwnDelta()
+{
+    QFETCH(bool, background); QFETCH(bool, commit);
+    QFETCH(int, protection);
+    Fixture f; f.provider->disableBackgroundRetirement = !background;
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const quint64 pageBytes = 64 * 64 * f.bpp;
+    const auto old = f.store->beginCurrentTransaction(); QVERIFY(old.isValid());
+    const auto keeper = protection == 1 ? f.store->beginCurrentTransaction() : KisPageTransaction{};
+    const auto retained = protection == 2 ? f.store->captureRetainedEpoch() : KisRetainedImageEpochSnapshot{};
+    QCOMPARE(keeper.isValid(), protection == 1); QCOMPARE(retained.isValid(), protection == 2);
+    const auto newer = f.store->beginCurrentTransaction(); QVERIFY(newer.isValid());
+    QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, newer,
+        QRect(64, 0, 64, 64), QByteArray(f.bpp, char(0x72)), &f.error));
+    QVERIFY(f.store->commit(newer, f.store->preparedPages(newer)).isValid());
+    QVERIFY(f.store->waitForRetirementIdle());
+    // The old transaction's base protects page 1 despite never writing it.
+    QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
+    QCOMPARE(f.pixel(KisPageReadView::transactionBase(old.id), 1), QByteArray(f.bpp, char(0x31)));
+    QVERIFY(f.store->waitForRetirementIdle());
+    const auto scansBefore = f.store->readScopeStatistics().historicalGcPagesVisited;
+    if (commit) {
+        QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, old,
+            QRect(0, 0, 64, 64), QByteArray(f.bpp, char(0x55)), &f.error));
+        QVERIFY(f.store->commit(old, f.store->preparedPages(old)).isValid());
+    } else {
+        QVERIFY(f.store->abort(old));
+    }
+    // No snapshot release or later mutation is allowed to help this exit.
+    QVERIFY(f.store->waitForRetirementIdle());
+    if (protection) {
+        QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(commit ? 4 : 3) * pageBytes);
+        QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited - scansBefore,
+                 quint64(commit ? 1 : 0)); // Only the committed page 0 needs a new scan.
+        // Only the actual last protection release may collect the old base.
+        if (keeper.isValid()) QVERIFY(f.store->abort(keeper));
+        else QVERIFY(f.store->releaseSnapshot(retained.token));
+        QVERIFY(f.store->waitForRetirementIdle());
+    }
+    QCOMPARE(f.provider->memoryUsage().committedBytes, 2 * pageBytes);
+    QCOMPARE(f.pixel({}, 0), QByteArray(f.bpp, char(commit ? 0x55 : 0x31)));
+    QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x72)));
+    QCOMPARE(f.store->sessionStats().activeTransactions, qsizetype(0));
+    QVERIFY(f.store->closeSession());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::snapshotReleaseScansOnlyAfterLastProtection()
+{
+    QFETCH(bool, background); QFETCH(int, protection);
+    Fixture f; f.provider->disableBackgroundRetirement = !background;
+    QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const quint64 pageBytes = 64 * 64 * f.bpp;
+    const auto retained = f.store->captureRetainedEpoch(); QVERIFY(retained.isValid());
+    const auto keeper = protection == 1 ? f.store->beginCurrentTransaction() : KisPageTransaction{};
+    const auto second = protection == 2 ? f.store->captureRetainedEpoch() : KisRetainedImageEpochSnapshot{};
+    QCOMPARE(keeper.isValid(), protection == 1); QCOMPARE(second.isValid(), protection == 2);
+    const auto newer = f.store->beginCurrentTransaction(); QVERIFY(newer.isValid());
+    QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, newer,
+        QRect(64, 0, 64, 64), QByteArray(f.bpp, char(0x72)), &f.error));
+    QVERIFY(f.store->commit(newer, f.store->preparedPages(newer)).isValid());
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
+    const auto scansBefore = f.store->readScopeStatistics().historicalGcPagesVisited;
+    QVERIFY(f.store->releaseSnapshot(retained.token));
+    QVERIFY(f.store->waitForRetirementIdle());
+    if (protection) {
+        QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
+        QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited, scansBefore);
+        if (keeper.isValid()) QVERIFY(f.store->abort(keeper));
+        else QVERIFY(f.store->releaseSnapshot(second.token));
+        QVERIFY(f.store->waitForRetirementIdle());
+    }
+    QCOMPARE(f.provider->memoryUsage().committedBytes, 2 * pageBytes);
+    QCOMPARE(f.pixel({}, 0), QByteArray(f.bpp, char(0x31)));
+    QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x72)));
+    QVERIFY(f.store->closeSession());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::restoreIgnoresDetachedRetirement_data()

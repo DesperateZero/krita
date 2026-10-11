@@ -1094,16 +1094,14 @@ bool KisPageReadCoordinator::releaseSnapshot(KisImageEpochSnapshotToken token)
         !m_epochs.releaseSnapshot(token, nullptr, &becameUnretained)) {
         return false;
     }
-    if (m_backgroundReclamation) {
-        if (becameUnretained) m_history.collectUnreachableLocked(nullptr, 0, true);
-    } else {
-        m_epochs.collectUnretainedRoots();
+    if (becameUnretained) {
+        if (!m_backgroundReclamation) m_epochs.collectUnretainedRoots();
         // A root may be the last owner of versions outside the transaction
         // that originally created its memento. Revisit the existing history
         // work index, as the background path does; never infer a complete
         // release set from that transaction's write delta.
         m_history.collectUnreachableLocked(nullptr, 0, true);
-        processRetirementsUnlocked(lock);
+        if (!m_backgroundReclamation) processRetirementsUnlocked(lock);
     }
     retryCapturedReleasesLocked(lock);
     return true;

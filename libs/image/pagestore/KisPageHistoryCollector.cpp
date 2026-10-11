@@ -345,15 +345,16 @@ void KisPageHistoryCollector::scheduleLocked()
     }
 }
 
-void KisPageHistoryCollector::collectEpochBookkeepingLocked(bool rescanHistory)
+void KisPageHistoryCollector::collectAfterEpochChangeLocked(bool rescanHistory)
 {
-    if (m_backgroundReclamation) {
-        m_rescanRequested = m_rescanRequested || rescanHistory;
-        scheduleLocked();
-    } else {
+    if (!m_backgroundReclamation) {
         m_epochs.collectFinishedTransactions();
         m_epochs.collectUnretainedRoots();
     }
+    // Root protection changed, not the set of registered history keys.
+    // Missing-key recovery alone needs m_rescanRequested's metadata walk.
+    // This also pumps foreground abort, which has no later publish callback.
+    collectUnreachableLocked(nullptr, 0, rescanHistory);
 }
 
 void KisPageHistoryCollector::waitForIdleLocked()
