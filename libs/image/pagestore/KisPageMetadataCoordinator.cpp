@@ -3884,6 +3884,8 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     ++shard->acceptedTransitions;
     ++shard->readProtectionTransitions;
     result.accepted = true;
+    result.historyNeedsRevisit = page->second.historyCount != 0
+        && (!releaseRead || !transition.completion.isValid());
     return result;
 }
 
@@ -3993,6 +3995,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtect
         ++page->second.revision;
         ++shard->acceptedTransitions;
         result.accepted = true;
+        result.historyNeedsRevisit = !retain && page->second.historyCount != 0;
         return result;
     }
 }

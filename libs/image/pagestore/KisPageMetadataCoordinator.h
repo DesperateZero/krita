@@ -35,6 +35,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
 {
     bool accepted = false;
     bool storageRefused = false;
+    // Accepted removal of read/last-use/captured protection found history on
+    // this page. The owner consumes this notification before releasing its gate.
+    bool historyNeedsRevisit = false;
     QString rejectionReason;
 };
 class KisPageStore;

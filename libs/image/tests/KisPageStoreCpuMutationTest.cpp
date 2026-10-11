@@ -852,6 +852,13 @@ private Q_SLOTS:
         QTest::newRow("ledger-preparation-storage") << 4;
     }
     void historyRefusalPreservesOriginalWork();
+    void readWithoutHistoryAvoidsReclamationAdmission_data()
+    {
+        QTest::addColumn<bool>("cancel");
+        QTest::newRow("pending-cancel") << true;
+        QTest::newRow("resolved-release") << false;
+    }
+    void readWithoutHistoryAvoidsReclamationAdmission();
     void historyDetachRequiresRetirementOwner_data()
     {
         QTest::addColumn<int>("missing");
@@ -6082,7 +6089,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QCOMPARE(f.physical.provider->retireCalls.load(), 0);
     freeFiller();
     lock.unlock(); cleanupContext.deferred = {}; lock.relock();
-    f.history.collectUnreachableLocked(nullptr, 0); // Resume the original scan without replaying installation.
+    f.history.collectUnreachableLocked(); // Resume the original scan without replaying installation.
     lock.unlock();
     f.retirement.process(std::numeric_limits<qsizetype>::max());
     f.retirement.waitForIdle(); // Registered provider permission retains its original worker dispatch.
@@ -6132,7 +6139,8 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
         QMutexLocker lock(&f.mutex);
         if (refusal != 0) {
             const auto k = key();
-            f.history.collectUnreachableLocked(&k, 1); // Prepare Work before filling capacity.
+            f.history.requestKeyLocked(k); // Prepare Work before filling capacity.
+            f.history.collectUnreachableLocked();
         }
         fillerBytes = size_t(f.limits.metadataArenaBytes - f.live())
             - (refusal == 4 ? sizeof(KisPageTransitionEffect) : 0);
@@ -6160,7 +6168,7 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
         blockingDebt.release();
         freeTestStoragePressure(&f.budget, filler, fillerBytes, 1);
     });
-    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
     if (refusal != 2) QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
     else QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
     KisPageStateSnapshot page;
@@ -6187,6 +6195,34 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     QCOMPARE(f.references.loadAcquire(), 1);
 }
 
+void KisPageStoreCpuMutationTest::readWithoutHistoryAvoidsReclamationAdmission()
+{
+    QFETCH(bool, cancel);
+    ReadTerminalFixture f;
+    QVERIFY2(f.init(), qPrintable(f.error));
+    // Keep the normal notification path but prevent a worker from hiding a
+    // needless admission by immediately processing the empty history slice.
+    f.history.stopAutomaticWakeups();
+    const auto request = f.acquire();
+    QVERIFY(request.isValid());
+    auto lease = cancel ? KisReadLease{} : f.resolve(request);
+    QVERIFY(cancel || lease.isValid());
+    const size_t bytes = size_t(f.limits.metadataArenaBytes - f.live());
+    void *filler = allocateTestStoragePressure(&f.budget, bytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(&f.budget, filler, bytes, 1); });
+    const auto before = f.budget.usage().backpressureCount;
+    if (cancel) QVERIFY(f.cancel(request));
+    else f.release(std::move(lease));
+    QCOMPARE(f.budget.usage().backpressureCount, before);
+    const auto reads = f.snapshot();
+    QCOMPARE(reads.activeLeases, qsizetype(0));
+    QMutexLocker lock(&f.mutex);
+    const auto history = f.history.snapshotLocked();
+    QCOMPARE(history.pendingPages, qsizetype(0));
+    QCOMPARE(history.pagesVisited, quint64(0));
+    QVERIFY(!history.retryScheduled);
+}
+
 void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()
 {
     QFETCH(int, missing);
@@ -6207,7 +6243,7 @@ void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()
         QVERIFY(retained);
     }
     const auto stats = [&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked(); };
-    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
     QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
     f.history.stopAutomaticWakeups();
     { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
@@ -6789,7 +6825,7 @@ void KisPageStoreCpuMutationTest::historyPreparationRevalidatesProtection()
         f.history.stopAutomaticWakeups();
         QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked();
     });
-    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
     QTRY_VERIFY_WITH_TIMEOUT(([&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked().deferredPages == 1; }()), 5000);
     QVERIFY(installed);
     QCOMPARE(f.physical.provider->retireCalls.load(), 0);
@@ -6801,7 +6837,7 @@ void KisPageStoreCpuMutationTest::historyPreparationRevalidatesProtection()
     read.kind = KisPageTransitionKind::ReleaseRead;
     { QMutexLocker lock(&f.mutex);
       QVERIFY(f.metadata.applyOwner(key(), read).accepted);
-      const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+      f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
     QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
     f.retirement.waitForIdle();
     { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
@@ -6838,7 +6874,7 @@ void KisPageStoreCpuMutationTest::retirementResultBindsAtCapacity()
         f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded);
         freeTestStoragePressure(&f.budget, filler, fillerBytes, 1);
     });
-    { QMutexLocker lock(&f.mutex); const auto k = key(); f.history.collectUnreachableLocked(&k, 1); }
+    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
     QTRY_COMPARE_WITH_TIMEOUT(f.owner.providerOperationCount(), qsizetype(1), 5000);
     QTRY_VERIFY_WITH_TIMEOUT(f.retirement.snapshot().retryWakeups >= 3, 5000);
     f.retirement.waitForIdle();

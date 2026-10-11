@@ -82,14 +82,12 @@ public:
     KisPageHistoryCollector(KisPageHistoryCollector &&) = delete;
     KisPageHistoryCollector &operator=(KisPageHistoryCollector &&) = delete;
 
-    KRITAIMAGE_EXPORT void collectUnreachableLocked(
-        const KisPageKey *candidateKeys, qsizetype candidateCount,
-        bool scanAll = false);
+    KRITAIMAGE_EXPORT void collectUnreachableLocked(bool scanAll = false);
     // Call after registering this publication's changed keys. Ending an old
     // base can release history outside that delta; use the same known-work
     // scan and foreground/background policy as a retained snapshot release.
     void collectAfterEpochChangeLocked(bool rescanHistory = false);
-    void requestKeyLocked(const KisPageKey &key) noexcept;
+    KRITAIMAGE_EXPORT void requestKeyLocked(const KisPageKey &key) noexcept;
     void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();

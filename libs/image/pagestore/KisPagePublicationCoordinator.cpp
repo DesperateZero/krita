@@ -480,7 +480,7 @@ void KisPagePublicationCoordinator::KisPreparedOverlayUpdate::finishUnlocked(
             owner.m_history.requestKeyLocked(change.replacement.key);
         }
         if (!data->detachments.empty())
-            owner.m_history.collectUnreachableLocked(nullptr, 0);
+            owner.m_history.collectUnreachableLocked();
         ownerLock.unlock();
     }
     // Consume the allocator retention as well as its payload. An empty

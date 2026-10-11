@@ -216,15 +216,13 @@ bool KisPageHistoryCollector::collectPassLocked()
     return blocked;
 }
 
-void KisPageHistoryCollector::collectUnreachableLocked(
-    const KisPageKey *candidateKeys, qsizetype candidateCount, bool scanAll)
+void KisPageHistoryCollector::collectUnreachableLocked(bool scanAll)
 {
     if (scanAll) {
         // Every accepted key stays indexed while history remains. Do not
         // visit unchanged pages merely because a retained root was released.
         for (const auto &entry : m_work) requestKeyLocked(entry.first);
     }
-    for (qsizetype i = 0; i < candidateCount; ++i) requestKeyLocked(candidateKeys[i]);
     if (!m_backgroundReclamation || m_closing || m_automaticWakeupsStopped) {
         while (!m_ready.empty() || m_rescanRequested) {
             if (collectPassLocked()) {
@@ -354,7 +352,7 @@ void KisPageHistoryCollector::collectAfterEpochChangeLocked(bool rescanHistory)
     // Root protection changed, not the set of registered history keys.
     // Missing-key recovery alone needs m_rescanRequested's metadata walk.
     // This also pumps foreground abort, which has no later publish callback.
-    collectUnreachableLocked(nullptr, 0, rescanHistory);
+    collectUnreachableLocked(rescanHistory);
 }
 
 void KisPageHistoryCollector::waitForIdleLocked()

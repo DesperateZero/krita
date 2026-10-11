@@ -665,7 +665,7 @@ bool KisPageReadCoordinator::cancelLocked(
     if (released) {
         pending.state = KisPagePendingReadRecord::State::Collecting;
         try {
-            m_history.collectUnreachableLocked(&request.version.key, 1);
+            m_history.collectUnreachableLocked();
             processRetirementsUnlocked(ownerLock);
             requestIt = m_requests.find(request.id.value);
             Q_ASSERT(requestIt != m_requests.end());
@@ -779,12 +779,11 @@ bool KisPageReadCoordinator::finishHistoryReadLocked(
     record->historyProcessing = true;
     const auto done = qScopeGuard([&] { record->historyProcessing = false; });
     try {
-        const auto key = record->replica.version.key;
-        m_history.collectUnreachableLocked(&key, 1);
+        m_history.collectUnreachableLocked();
         processRetirementsUnlocked(ownerLock);
     } catch (const std::bad_alloc &) {
-        // Preserve the exact key in its original admitted read record. A
-        // failed GC notification must not discard that obligation after ack.
+        // The collector already owns the notification (or its missing-key
+        // rescan). Keep the original read until its foreground cleanup ends.
         QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
         ++m_lastUseWakeContext->dispatchFailures;
         return false;
@@ -811,6 +810,7 @@ bool KisPageReadCoordinator::releaseReadLocked(
     release.lease = lease;
     release.completion = completion;
     const auto result = m_metadata.applyOwner(replica.version.key, release, &cleanup.m_storage);
+    if (result.historyNeedsRevisit) m_history.requestKeyLocked(replica.version.key);
     cleanup.retainLocked();
     return result.accepted;
 }
@@ -904,6 +904,7 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
             record->replica.version, record->replica, completion, &cleanup.m_storage);
         cleanup.retainLocked();
         if (!result.accepted) return false;
+        if (result.historyNeedsRevisit) m_history.requestKeyLocked(record->replica.version.key);
     }
     record->metadataReleased = false;
     --m_pendingLastUses;
@@ -1038,15 +1039,17 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
                 release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
                 release.version = version;
                 release.readView = pending.token;
-                if (!m_metadata.applyOwner(version.key, release, &pending.cleanup).accepted) {
+                const auto result = m_metadata.applyOwner(version.key, release, &pending.cleanup);
+                if (!result.accepted) {
                     pending.processing = false;
                     return false;
                 }
+                if (result.historyNeedsRevisit) m_history.requestKeyLocked(version.key);
                 pending.versionReleased = true;
             }
-            // Keep the exact key until history accepts it. Retrying a refused
-            // handoff must not release the already removed metadata token again.
-            m_history.collectUnreachableLocked(&version.key, 1);
+            // Notification has transferred to the original collector. A
+            // cleanup retry must not release the metadata token a second time.
+            m_history.collectUnreachableLocked();
             processRetirementsUnlocked(lock);
             ++pending.next;
             pending.versionReleased = false;
@@ -1063,10 +1066,10 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
         }
         if (pending.historyPending) {
             if (m_backgroundReclamation) {
-                m_history.collectUnreachableLocked(nullptr, 0, true);
+                m_history.collectUnreachableLocked(true);
             } else {
                 m_epochs.collectUnretainedRoots();
-                m_history.collectUnreachableLocked(nullptr, 0, true);
+                m_history.collectUnreachableLocked(true);
                 processRetirementsUnlocked(lock);
             }
             pending.historyPending = false;
@@ -1100,7 +1103,7 @@ bool KisPageReadCoordinator::releaseSnapshot(KisImageEpochSnapshotToken token)
         // that originally created its memento. Revisit the existing history
         // work index, as the background path does; never infer a complete
         // release set from that transaction's write delta.
-        m_history.collectUnreachableLocked(nullptr, 0, true);
+        m_history.collectUnreachableLocked(true);
         if (!m_backgroundReclamation) processRetirementsUnlocked(lock);
     }
     retryCapturedReleasesLocked(lock);

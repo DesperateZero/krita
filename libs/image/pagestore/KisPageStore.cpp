@@ -3553,7 +3553,7 @@ bool KisPageStore::closeSession(QString *error)
     locker.relock();
     d->historyCollector.waitForIdleLocked();
     d->epochs.collectFinishedTransactions();
-    d->historyCollector.collectUnreachableLocked(nullptr, 0);
+    d->historyCollector.collectUnreachableLocked();
     d->readCoordinator.retryCancelledRequestsLocked(locker, cleanup, true);
     d->readCoordinator.retryCapturedReleasesLocked(locker, true);
     d->readCoordinator.retryReleasedReadsLocked(locker, cleanup, {}, nullptr, true);
