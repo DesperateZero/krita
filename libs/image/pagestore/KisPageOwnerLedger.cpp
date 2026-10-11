@@ -1303,6 +1303,7 @@ bool KisPageOwnerLedger::retainRetirementDebtReservation(
     const KisReplicaHandle &replica,
     KisBackingBudgetReservation &reservation,
     QString *error)
+try
 {
     const KisReplicaBackingFootprint footprint = observeBackingFootprint(replica);
     QMutexLocker locker(&d->mutex);
@@ -1328,6 +1329,12 @@ bool KisPageOwnerLedger::retainRetirementDebtReservation(
     }
     KisPageStoreDetail::setError(error, {});
     return true;
+}
+catch (const std::bad_alloc &) {
+    // Observation precedes any reservation change. Both first handoff and
+    // queued retries keep the original paid record/debt on refusal.
+    KisPageStoreDetail::setError(error, QStringLiteral("orphan backing observation was refused"));
+    return false;
 }
 
 bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)

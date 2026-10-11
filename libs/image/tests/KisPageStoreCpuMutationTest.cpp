@@ -830,16 +830,20 @@ private Q_SLOTS:
     }
     void ledgerBackingNodesRefusedBeforePhysicalResult();
     void ledgerBackingRegistrationExcludesDomainMovement();
+    void orphanRetirementFootprintRefusal();
     void retirementRecordTransfersAtCapacity_data()
     {
         QTest::addColumn<bool>("orphan");
         QTest::addColumn<bool>("automatic");
         QTest::addColumn<bool>("waitForBudget");
-        QTest::newRow("registered") << false << false << false;
-        QTest::newRow("rejected-unregistered") << true << false << false;
-        QTest::newRow("registered-automatic") << false << true << false;
-        QTest::newRow("rejected-unregistered-automatic") << true << true << false;
-        QTest::newRow("registered-automatic-budget-release") << false << true << true;
+        QTest::addColumn<bool>("footprintRefused");
+        QTest::newRow("registered") << false << false << false << false;
+        QTest::newRow("rejected-unregistered") << true << false << false << false;
+        QTest::newRow("registered-automatic") << false << true << false << false;
+        QTest::newRow("rejected-unregistered-automatic") << true << true << false << false;
+        QTest::newRow("registered-automatic-budget-release") << false << true << true << false;
+        QTest::newRow("orphan-footprint-refused") << true << false << false << true;
+        QTest::newRow("orphan-footprint-refused-automatic") << true << true << false << true;
     }
     void retirementRecordTransfersAtCapacity();
     void historyRefusalPreservesOriginalWork_data()
@@ -859,6 +863,14 @@ private Q_SLOTS:
         QTest::newRow("resolved-release") << false;
     }
     void readWithoutHistoryAvoidsReclamationAdmission();
+    void readTerminalTransfersBeforePhysicalPump_data()
+    {
+        QTest::addColumn<int>("exit");
+        QTest::newRow("cancel-request") << 0;
+        QTest::newRow("release-lease") << 1;
+        QTest::newRow("acknowledge-last-use") << 2;
+    }
+    void readTerminalTransfersBeforePhysicalPump();
     void historyDetachRequiresRetirementOwner_data()
     {
         QTest::addColumn<int>("missing");
@@ -5667,11 +5679,47 @@ void KisPageStoreCpuMutationTest::ledgerBackingRegistrationExcludesDomainMovemen
     QVERIFY(f.store->closeSession());
 }
 
+void KisPageStoreCpuMutationTest::orphanRetirementFootprintRefusal()
+{
+    Fixture f; QVERIFY(f.init());
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    KisBackingBudgetController budget;
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
+    owner.attachBackingBudget(budget); QVERIFY(owner.registerProvider(f.provider));
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    KisImageEpochReferenceModel epochs;
+    KisPageWriteCoordinator coordinator(metadata, epochs, budget, owner);
+    auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
+        KisBackingBudgetClass::Current, &f.error);
+    QVERIFY(prepared.reservation.isValid() && prepared.retirement);
+    auto *identity = prepared.retirement.get();
+    const auto result = f.provider->prepareWrite(owner.nextOperationId(), {key(5), {1}},
+        surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
+        KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(result.isValid());
+    f.provider->afterBackingFootprint = [] { throw std::bad_alloc(); };
+    bool escaped = false, admitted = false;
+    try { admitted = owner.retainRetirementDebtReservation(result.replica, prepared.reservation); }
+    catch (const std::bad_alloc &) { escaped = true; }
+    f.provider->afterBackingFootprint = {};
+    QVERIFY(!admitted);
+    QVERIFY(prepared.reservation.isValid());
+    QCOMPARE(prepared.retirement.get(), identity);
+    // Clean the physical result even on the unmodified parent's failure.
+    // A refused observation may neither consume the paid node nor its debt.
+    QVERIFY(owner.retainRetirementDebtReservation(result.replica, prepared.reservation));
+    QVERIFY(f.provider->retire(owner.nextOperationId(), result.replica, {}).isValid());
+    prepared = {};
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
+    QVERIFY2(!escaped, "footprint allocation refusal escaped the original debt admission boundary");
+}
+
 void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
 {
     QFETCH(bool, orphan);
     QFETCH(bool, automatic);
     QFETCH(bool, waitForBudget);
+    QFETCH(bool, footprintRefused);
     Fixture f; QVERIFY(f.init());
     KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
@@ -5728,16 +5776,20 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
         }
     }
     f.provider->rejectRetire = true;
+    std::atomic<bool> rejectFootprint{footprintRefused};
+    f.provider->afterBackingFootprint = [&] { if (rejectFootprint) throw std::bad_alloc(); };
     std::atomic<int> permissionQueries{0};
     f.provider->beforeCapabilities = [&] { ++permissionQueries; };
     const auto cleanup = qScopeGuard([&] {
         f.provider->beforeCapabilities = {};
+        rejectFootprint = false;
         blockingDebt.release();
         f.provider->rejectRetire = false;
         queue.beginClose(); queue.waitForIdle();
         auto records = queue.takeForClose();
         for (auto &record : records) queue.retireRecord(record);
         kisDrainPageStoreReclamation();
+        f.provider->afterBackingFootprint = {};
     });
     QCOMPARE(live(), limits.metadataArenaBytes);
     queue.retireOrDefer(result.replica, f.provider, {}, std::move(prepared));
@@ -5756,6 +5808,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
             QCOMPARE(owner.backingClass(result.replica), KisBackingBudgetClass::Current);
             blockingDebt.release(); // Actual capacity release, with no new request/input.
         }
+        rejectFootprint = false;
         f.provider->rejectRetire = false;
         QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
         queue.waitForIdle(); kisDrainPageStoreReclamation();
@@ -5774,6 +5827,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     QCOMPARE(records.size(), size_t(1));
     QCOMPARE(&records.front(), identity); // Original node, including orphan reservation.
     QCOMPARE(live(), limits.metadataArenaBytes);
+    rejectFootprint = false;
     f.provider->rejectRetire = false;
     QVERIFY(queue.retireRecord(records.front()));
     QCOMPARE(live(), limits.metadataArenaBytes - (orphan ? 0 : installedBytes)); // Only real inert storage remains.
@@ -6221,6 +6275,59 @@ void KisPageStoreCpuMutationTest::readWithoutHistoryAvoidsReclamationAdmission()
     QCOMPARE(history.pendingPages, qsizetype(0));
     QCOMPARE(history.pagesVisited, quint64(0));
     QVERIFY(!history.retryScheduled);
+}
+
+void KisPageStoreCpuMutationTest::readTerminalTransfersBeforePhysicalPump()
+{
+    QFETCH(int, exit);
+    ReadTerminalFixture f(256 * 1024);
+    f.background = false;
+    f.physical.provider->disableBackgroundRetirement = true;
+    f.metadata.attachBackingBudget(f.budget);
+    f.metadata.attachRetirementDebtOwner(&f,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            return static_cast<ReadTerminalFixture *>(p)->owner.prepareRetirementDebt(effects, count, cookie, error);
+        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
+            auto &f = *static_cast<ReadTerminalFixture *>(p);
+            f.owner.commitRetirementDebt(cookie);
+            for (qsizetype i = 0; i < count; ++i) f.retirement.acceptEffect(effects[i]);
+        }, +[](void *p, quint64 cookie) noexcept { static_cast<ReadTerminalFixture *>(p)->owner.cancelRetirementDebt(cookie); });
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    const auto request = f.acquire(); QVERIFY(request.isValid());
+    auto lease = exit ? f.resolve(request) : KisReadLease{};
+    QVERIFY(!exit || lease.isValid());
+    bool observed = false;
+    f.physical.provider->beforeRetire = [&] {
+        observed = true;
+        // A real foreground retirement reenters after the owner gate opens.
+        // Cleanup still pins disposal, but the read no longer blocks admission.
+        const auto stats = f.snapshot();
+        QCOMPARE(stats.pendingRequests, qsizetype(0));
+        QCOMPARE(stats.activeLeases, qsizetype(0));
+        QCOMPARE(stats.pendingLastUses, qsizetype(0));
+        QVERIFY(f.activeCalls > 0);
+        QVERIFY(!f.cancel(request));
+        QCOMPARE(f.retirement.snapshot().pendingReplicas, qsizetype(1));
+    };
+    const auto clearCallback = qScopeGuard([&] { f.physical.provider->beforeRetire = {}; });
+    if (!exit) QVERIFY(f.cancel(request));
+    else if (exit == 1) f.release(std::move(lease));
+    else {
+        const auto ticket = f.physical.completions->allocatePending(
+            f.physical.completions->registerSource(KisCompletionDomain::HostLogical));
+        QVERIFY(ticket.isValid());
+        f.release(std::move(lease), ticket);
+        QVERIFY(!observed);
+        QVERIFY(f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded));
+        KisPageReadCleanup cleanup(f.read); QMutexLocker lock(&f.mutex);
+        f.read.acknowledgeCompletedLastUsesLocked(lock, cleanup);
+    }
+    QVERIFY(observed);
+    QVERIFY(f.retirement.isDrained());
+    QCOMPARE(f.physical.provider->retireCalls.load(), 1);
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    QCOMPARE(f.activeCalls, qsizetype(0));
+    QCOMPARE(f.budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()

@@ -51,9 +51,6 @@ struct KisPageCapturedRelease
     KisPageMetadataReadCleanup cleanup;
     size_t retained = 0;
     size_t next = 0;
-    bool versionReleased = false;
-    bool snapshotReleased = false;
-    bool historyPending = false;
     bool capturedScope = false;
     bool processing = false;
     boost::intrusive::list_member_hook<> releaseHook;
@@ -61,7 +58,7 @@ struct KisPageCapturedRelease
 
 struct KisPagePendingReadRecord
 {
-    enum class State : quint8 { Pending, Resolving, Cancelling, Released, Collecting };
+    enum class State : quint8 { Pending, Resolving, Cancelling };
     State state = State::Pending;
     KisReplicaHandle replica;
     KisPageAccessRequirement access;
@@ -191,8 +188,6 @@ private:
         KisCompletionTicket releaseLastUse;
         quint64 leaseId = 0;
         bool metadataReleased = false; // owner mutex; this record now owns last-use debt
-        bool historyPending = false;
-        bool historyProcessing = false;
         boost::intrusive::list_member_hook<> releaseHook;
         KisPageReadinessSubscription lastUseSubscription;
         // Intrusive ready queue under LastUseWakeContext::mutex. The original
@@ -209,12 +204,12 @@ private:
     void processLastUses(const std::shared_ptr<LastUseWakeContext> &context);
     bool acknowledgeRecordLocked(const std::shared_ptr<ActiveReadRecord> &record,
                                  const KisVerifiedCompletion &completion,
-                                 KisPageReadCleanup &cleanup);
-
-    bool finishReleasedReadLocked(quint64 leaseId, KisPageReadCleanup &cleanup,
-                                  bool *lastUseAcknowledged = nullptr);
-    bool finishHistoryReadLocked(const std::shared_ptr<ActiveReadRecord> &record,
                                  QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
+
+    bool finishReleasedReadLocked(quint64 leaseId, QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup,
+                                  bool *lastUseAcknowledged = nullptr);
+    void finishReadLocked(const std::shared_ptr<ActiveReadRecord> &record,
+                          QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup);
     bool releaseReadLocked(const KisReplicaHandle &replica,
                            KisPageLeaseId lease, KisPageReadCleanup &cleanup,
                            const KisCompletionTicket &completion = {});
@@ -264,7 +259,6 @@ private:
         KisPageCapturedRelease, boost::intrusive::list_member_hook<>,
         &KisPageCapturedRelease::releaseHook>> m_capturedReleaseRetries;
     qsizetype m_pendingLastUses = 0;
-    qsizetype m_pendingHistoryReads = 0;
     std::shared_ptr<LastUseWakeContext> m_lastUseWakeContext;
     bool m_automaticWakeupsStopped = false;
     bool m_lastUseClosing = false;

@@ -304,24 +304,22 @@ void KisPageReadCoordinator::processLastUses(const std::shared_ptr<LastUseWakeCo
                 active == m_activeReads.end() || active->second != record) continue;
             if (record->releaseHook.is_linked()) {
                 m_releaseRetries.erase(m_releaseRetries.iterator_to(*record));
-                if (!finishReleasedReadLocked(record->leaseId, cleanup)) {
+                if (!finishReleasedReadLocked(record->leaseId, ownerLock, cleanup)) {
                     m_releaseRetries.push_back(*record);
                     notifyLastUse(context, record);
                     retry = true;
                     continue;
                 }
+                progressed = progressed || !record->metadataReleased;
             }
             if (record->metadataReleased) {
                 const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
-                if (!terminal.isValid() || !acknowledgeRecordLocked(record, terminal, cleanup)) {
+                if (!terminal.isValid() || !acknowledgeRecordLocked(record, terminal, ownerLock, cleanup)) {
                     notifyLastUse(context, record);
                     retry = true;
                     continue;
                 }
-            }
-            if (record->historyPending) {
-                if (finishHistoryReadLocked(record, ownerLock, cleanup)) progressed = true;
-                else { notifyLastUse(context, record); retry = true; }
+                progressed = true;
             }
         }
         if (visited) {
@@ -379,7 +377,7 @@ void KisPageReadCoordinator::cancelCloseLocked()
         after = it->first;
         const auto record = it->second;
         if (record->metadataReleased) armLastUseLocked(record);
-        else if (record->historyPending || record->releaseHook.is_linked())
+        else if (record->releaseHook.is_linked())
             notifyLastUse(m_lastUseWakeContext, record);
     }
 }
@@ -651,33 +649,23 @@ bool KisPageReadCoordinator::cancelLocked(
     if (!m_operational || !request.isValid() ||
         requestIt == m_requests.end() ||
         requestIt->second.state == KisPagePendingReadRecord::State::Resolving ||
-        requestIt->second.state == KisPagePendingReadRecord::State::Collecting ||
         !(requestIt->second.replica.version == request.version) ||
         !(requestIt->second.readiness == request.readiness) ||
         !(requestIt->second.access == request.access)) {
         return false;
     }
     auto &pending = requestIt->second;
-    const bool released = pending.state == KisPagePendingReadRecord::State::Released
-        || releaseReadLocked(pending.replica, pending.reservedLease, cleanup);
-    pending.state = released ? KisPagePendingReadRecord::State::Released
-                             : KisPagePendingReadRecord::State::Cancelling;
-    if (released) {
-        pending.state = KisPagePendingReadRecord::State::Collecting;
-        try {
-            m_history.collectUnreachableLocked();
-            processRetirementsUnlocked(ownerLock);
-            requestIt = m_requests.find(request.id.value);
-            Q_ASSERT(requestIt != m_requests.end());
-            if (requestIt->second.cancelHook.is_linked())
-                m_cancelRetries.erase(m_cancelRetries.iterator_to(requestIt->second));
-            cleanup.m_requests.insert(m_requests.extract(requestIt));
-            cleanup.retainLocked();
-            return true;
-        } catch (const std::bad_alloc &) {
-            pending.state = KisPagePendingReadRecord::State::Released;
-        }
+    if (releaseReadLocked(pending.replica, pending.reservedLease, cleanup)) {
+        if (pending.cancelHook.is_linked()) m_cancelRetries.erase(m_cancelRetries.iterator_to(pending));
+        cleanup.m_requests.insert(m_requests.extract(requestIt));
+        cleanup.retainLocked();
+        // Protection and notification have transferred. Remove this request
+        // before the physical pump can unlock/reenter the original owner.
+        m_history.collectUnreachableLocked();
+        processRetirementsUnlocked(ownerLock);
+        return true;
     }
+    pending.state = KisPagePendingReadRecord::State::Cancelling;
     if (!pending.cancelHook.is_linked()) m_cancelRetries.push_back(pending);
     if (m_backgroundReclamation && !m_lastUseClosing && !m_automaticWakeupsStopped) {
         QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
@@ -729,17 +717,14 @@ void KisPageReadCoordinator::releaseLocked(
     activeIt = m_activeReads.find(lease.m_leaseId.value);
     if (activeIt == m_activeReads.end()) return;
     active->provider.reset();
-    if (!finishReleasedReadLocked(lease.m_leaseId.value, cleanup)) {
+    if (!finishReleasedReadLocked(lease.m_leaseId.value, ownerLock, cleanup)) {
         if (!active->releaseHook.is_linked()) m_releaseRetries.push_back(*active);
         if (m_backgroundReclamation) notifyLastUse(m_lastUseWakeContext, active);
-        return;
     }
-    if (active->historyPending && !finishHistoryReadLocked(active, ownerLock, cleanup) && m_backgroundReclamation)
-        notifyLastUse(m_lastUseWakeContext, active);
 }
 
 bool KisPageReadCoordinator::finishReleasedReadLocked(
-    quint64 leaseId, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged)
+    quint64 leaseId, QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup, bool *lastUseAcknowledged)
 {
     if (lastUseAcknowledged) *lastUseAcknowledged = false;
     auto activeIt = m_activeReads.find(leaseId);
@@ -758,44 +743,30 @@ bool KisPageReadCoordinator::finishReleasedReadLocked(
         const auto terminal = m_completions
             ? m_completions->verifyTerminal(active->releaseLastUse)
             : KisVerifiedCompletion{};
-        if (terminal.isValid() && acknowledgeRecordLocked(active, terminal, cleanup)) {
+        if (terminal.isValid() && acknowledgeRecordLocked(active, terminal, ownerLock, cleanup)) {
             if (lastUseAcknowledged) *lastUseAcknowledged = true;
         } else {
             armLastUseLocked(active);
         }
     } else {
-        active->historyPending = true;
-        ++m_pendingHistoryReads;
+        finishReadLocked(active, ownerLock, cleanup);
     }
     return true;
 }
 
-bool KisPageReadCoordinator::finishHistoryReadLocked(
+void KisPageReadCoordinator::finishReadLocked(
     const std::shared_ptr<ActiveReadRecord> &record,
     QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
 {
-    if (!record->historyPending) return true;
-    if (record->historyProcessing) return false;
-    record->historyProcessing = true;
-    const auto done = qScopeGuard([&] { record->historyProcessing = false; });
-    try {
-        m_history.collectUnreachableLocked();
-        processRetirementsUnlocked(ownerLock);
-    } catch (const std::bad_alloc &) {
-        // The collector already owns the notification (or its missing-key
-        // rescan). Keep the original read until its foreground cleanup ends.
-        QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
-        ++m_lastUseWakeContext->dispatchFailures;
-        return false;
-    }
     const auto active = m_activeReads.find(record->leaseId);
     Q_ASSERT(active != m_activeReads.end() && active->second == record);
-    record->historyPending = false;
-    --m_pendingHistoryReads;
     if (record->releaseHook.is_linked()) m_releaseRetries.erase(m_releaseRetries.iterator_to(*record));
     cleanup.m_reads.insert(m_activeReads.extract(active));
     cleanup.retainLocked();
-    return true;
+    // The original collector/retirement records own further refusals. The
+    // read node only needs gate-free disposal, including during pump reentry.
+    m_history.collectUnreachableLocked();
+    processRetirementsUnlocked(ownerLock);
 }
 
 bool KisPageReadCoordinator::releaseReadLocked(
@@ -830,9 +801,7 @@ void KisPageReadCoordinator::retryReleasedReadsLocked(
         if (!active || active->metadataReleased) continue;
         const bool matches = observed.isValid() && active && active->releaseLastUse == observed;
         bool lastUseAcknowledged = false;
-        if (finishReleasedReadLocked(leaseId, cleanup, &lastUseAcknowledged)) {
-            if (active->historyPending && !finishHistoryReadLocked(active, ownerLock, cleanup) && m_backgroundReclamation)
-                notifyLastUse(m_lastUseWakeContext, active);
+        if (finishReleasedReadLocked(leaseId, ownerLock, cleanup, &lastUseAcknowledged)) {
             if (acknowledged && matches && lastUseAcknowledged) *acknowledged = true;
         } else {
             m_releaseRetries.push_back(*active);
@@ -857,12 +826,7 @@ KisPageReadCoordinator::acknowledgeLastUseLocked(
         const auto record = it->second;
         if (!record->metadataReleased || !(record->releaseLastUse == completion.ticket())) continue;
         result.matched = true;
-        if (acknowledgeRecordLocked(record, completion, cleanup)) {
-            if (!finishHistoryReadLocked(record, ownerLock, cleanup) && m_backgroundReclamation)
-                notifyLastUse(m_lastUseWakeContext, record);
-        } else {
-            result.accepted = false;
-        }
+        if (!acknowledgeRecordLocked(record, completion, ownerLock, cleanup)) result.accepted = false;
     }
     return result;
 }
@@ -879,15 +843,14 @@ void KisPageReadCoordinator::acknowledgeCompletedLastUsesLocked(
         const auto record = it->second;
         if (record->metadataReleased) {
             const auto terminal = m_completions->verifyTerminal(record->releaseLastUse);
-            if (terminal.isValid()) acknowledgeRecordLocked(record, terminal, cleanup);
+            if (terminal.isValid()) acknowledgeRecordLocked(record, terminal, ownerLock, cleanup);
         }
-        if (record->historyPending) finishHistoryReadLocked(record, ownerLock, cleanup);
     }
 }
 
 bool KisPageReadCoordinator::acknowledgeRecordLocked(
     const std::shared_ptr<ActiveReadRecord> &record, const KisVerifiedCompletion &completion,
-    KisPageReadCleanup &cleanup)
+    QMutexLocker<QMutex> &ownerLock, KisPageReadCleanup &cleanup)
 {
     const auto active = m_activeReads.find(record->leaseId);
     if (!record->metadataReleased || !(record->releaseLastUse == completion.ticket()) ||
@@ -909,8 +872,7 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
     record->metadataReleased = false;
     --m_pendingLastUses;
     record->lastUseSubscription.reset();
-    record->historyPending = true;
-    ++m_pendingHistoryReads;
+    finishReadLocked(record, ownerLock, cleanup);
     return true;
 }
 
@@ -943,10 +905,8 @@ bool KisPageReadCoordinator::cancelPreparedRequestsLocked(
             ++it;
             continue;
         }
-        if (it->second.state == KisPagePendingReadRecord::State::Resolving ||
-            it->second.state == KisPagePendingReadRecord::State::Collecting) return false;
-        if (it->second.state != KisPagePendingReadRecord::State::Released &&
-            !releaseReadLocked(it->second.replica, it->second.reservedLease, cleanup)) {
+        if (it->second.state == KisPagePendingReadRecord::State::Resolving) return false;
+        if (!releaseReadLocked(it->second.replica, it->second.reservedLease, cleanup)) {
             return false;
         }
         if (it->second.cancelHook.is_linked()) m_cancelRetries.erase(m_cancelRetries.iterator_to(it->second));
@@ -1031,55 +991,38 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
 {
     Q_ASSERT(!pending.processing);
     pending.processing = true;
-    try {
-        while (pending.next < pending.retained) {
-            const auto &version = pending.versions[pending.next];
-            if (!pending.versionReleased) {
-                KisPageTransition release;
-                release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-                release.version = version;
-                release.readView = pending.token;
-                const auto result = m_metadata.applyOwner(version.key, release, &pending.cleanup);
-                if (!result.accepted) {
-                    pending.processing = false;
-                    return false;
-                }
-                if (result.historyNeedsRevisit) m_history.requestKeyLocked(version.key);
-                pending.versionReleased = true;
-            }
-            // Notification has transferred to the original collector. A
-            // cleanup retry must not release the metadata token a second time.
-            m_history.collectUnreachableLocked();
-            processRetirementsUnlocked(lock);
-            ++pending.next;
-            pending.versionReleased = false;
+    while (pending.next < pending.retained) {
+        const auto &version = pending.versions[pending.next];
+        KisPageTransition release;
+        release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
+        release.version = version;
+        release.readView = pending.token;
+        const auto result = m_metadata.applyOwner(version.key, release, &pending.cleanup);
+        if (!result.accepted) {
+            pending.processing = false;
+            return false;
         }
-        if (!pending.snapshotReleased) {
-            bool becameUnretained = false;
-            if (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained)) {
-                pending.processing = false;
-                return false;
-            }
-            pending.snapshotReleased = true;
-            pending.historyPending = becameUnretained;
-            if (pending.capturedScope) ++m_capturedViewReleases;
-        }
-        if (pending.historyPending) {
-            if (m_backgroundReclamation) {
-                m_history.collectUnreachableLocked(true);
-            } else {
-                m_epochs.collectUnretainedRoots();
-                m_history.collectUnreachableLocked(true);
-                processRetirementsUnlocked(lock);
-            }
-            pending.historyPending = false;
-        }
-    } catch (const std::bad_alloc &) {
-        pending.processing = false;
-        return false; // The original linked record retains every unfinished fact.
+        if (result.historyNeedsRevisit) m_history.requestKeyLocked(version.key);
+        // Release unlinks existing metadata storage; its accepted prefix is
+        // the only per-version progress fact. Collector/retirement refusals
+        // stay with those owners after the notification transfers.
+        ++pending.next;
+        m_history.collectUnreachableLocked();
+        processRetirementsUnlocked(lock);
     }
+    bool becameUnretained = false;
+    if (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained)) {
+        pending.processing = false;
+        return false;
+    }
+    if (pending.capturedScope) ++m_capturedViewReleases;
     m_capturedReleaseRetries.erase(m_capturedReleaseRetries.iterator_to(pending));
     KisPageCapturedReleasePointer finished(&pending, KisPageCapturedReleaseDeleter{&m_budget});
+    if (becameUnretained) {
+        if (!m_backgroundReclamation) m_epochs.collectUnretainedRoots();
+        m_history.collectUnreachableLocked(true);
+        processRetirementsUnlocked(lock);
+    }
     // This record has handed off all semantic work. Its original lifetime pin
     // covers physical disposal; it must not make a concurrent restore Busy.
     lock.unlock();
@@ -1112,7 +1055,7 @@ bool KisPageReadCoordinator::releaseSnapshot(KisImageEpochSnapshotToken token)
 
 KisPageReadCoordinatorSnapshot KisPageReadCoordinator::snapshotLocked() const
 {
-    KisPageReadCoordinatorSnapshot result{qsizetype(m_requests.size()), qsizetype(m_activeReads.size()) - m_pendingLastUses - m_pendingHistoryReads,
+    KisPageReadCoordinatorSnapshot result{qsizetype(m_requests.size()), qsizetype(m_activeReads.size()) - m_pendingLastUses,
         m_pendingLastUses, m_requestsCreated, m_capturedViewsCreated, m_capturedViewReleases};
     result.lastUsePasses = m_lastUsePasses;
     result.maximumLastUsesPerPass = m_maximumLastUsesPerPass;
