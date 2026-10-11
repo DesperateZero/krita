@@ -11,9 +11,9 @@
       "reason": "The tile compatibility boundary stores one exact read and one writable move-only capability in fixed slots; cache validity and pre-exposure write intent remain distinct non-authoritative lifetime facts. Current design 92 section 16.8 reviews one backend friend (6 to 7 identifiers, same include/layout limits): selectCurrentReadTile atomically inspects/reuses existing cache state under the original tile barrier and separates an active old reader from a fresh selection. No new Tile state or public PageStore identity API. Remove the friend and lower this ceiling when the raw-read adapter is migrated."
     },
     "libs/image/tiles3/kis_tiled_data_manager.cc": {
-      "identifier_occurrences": 25,
-      "direct_includes": 3,
-      "reason": "Current design 92 HX7 candidate-consumer review: manager cursor installation now declares the same diagnostic phase/timer already used by refreshPageStorePages (23 to 25 identifiers; same type set and 3 includes). Existing WriteBatch/execution holders retain original admission through preparation and delivery. PreparedTileUpdates is operation-local missing-wrapper storage, not a page authority; no manager field or TLS is added. Remove this instrumentation/storage with the adapter consumer; other intrusion/layout ceilings are unchanged."
+      "identifier_occurrences": 60,
+      "direct_includes": 4,
+      "reason": "Current design 92 section 16.177 explicitly reviews the completed pipeline responsibility, rather than treating a refreshed checkpoint as permission: 32 diagnostic timer/phase occurrences and 28 operation/backend/capability occurrences, four direct includes. PreparedTileUpdates is operation-local B/R/extent storage; the original manager gate covers prepare/accept/install and the original scope retains admission. No new manager field, transaction directory, recovery queue or canonical authority. Preparation, gate duration, cache frees and final release remain charged; zero late allocation is not a zero-free or performance claim. Only this file ceiling changes. Lower it as the raw adapter consumers or their diagnostics migrate; other file and layout limits stay unchanged."
     },
     "libs/image/tiles3/kis_tiled_data_manager.h": {
       "identifier_occurrences": 12,
@@ -32,7 +32,7 @@
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
-        "KisTiledDataManagerTest::testPageStoreWriteIntentDoesNotAllocateUntilDataExposure",
+        "KisTiledDataManagerTest::testPageStoreWritablePresencePrecedesDataExposure",
         "KisTiledDataManagerTest::testPageStoreFreshReadSelection",
         "KisTiledDataManagerTest::testPageStoreFreshReadOutlivesManager"
       ],
@@ -120,31 +120,38 @@
       "category": "compatibility-intrusion",
       "current-owner": "KisTiledDataManager",
       "facts-owned": [
-        "transaction-lifetime",
-        "default-materialization",
-        "history-reachability"
+        "compatibility-index-extent-delivery",
+        "default-adapter-backing-lifetime",
+        "legacy-operation-routing"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreHistoryClearStagesAbsence",
         "KisTiledDataManagerTest::testPageStorePackedWriteNative",
         "KisTiledDataManagerTest::testPageStoreFreshReadFailure",
-        "KisTiledDataManagerTest::testPageStoreFreshReadDefaultPressure"
+        "KisTiledDataManagerTest::testPageStoreFreshReadDefaultPressure",
+        "KisTiledDataManagerTest::testPageStoreCompatibilityCopyPublicationFailure",
+        "KisTiledDataManagerTest::testPageStoreCompatibilityCopySegmentFailure",
+        "KisTiledDataManagerTest::testPageStoreHistorySegmentRefusal"
       ],
       "id": "BR1-PS-DM-ROUTING-004",
       "path": "libs/image/tiles3/kis_tiled_data_manager.cc",
       "remove-after": "R4/M8 backend becomes semantic-only adapter",
-      "replacement-type": "canonical PageStore facade operations",
+      "replacement-type": "operation-local prepared compatibility delivery under the original manager gate; canonical authority remains in PageStore",
       "runtime-counter": "existing:KisPageStoreSessionStats",
       "static-callers": [
         "KisTiledDataManager::writeBytes",
         "KisTiledDataManager::readBytes",
         "KisTiledDataManager::setDefaultPixel",
-        "KisTiledDataManager::getReadOnlyTileLazy"
+        "KisTiledDataManager::getReadOnlyTileLazy",
+        "KisTiledDataManager::bitBltImpl",
+        "KisTiledDataManager::checkpointStrokeMutation",
+        "KisTiledDataManager::restoreHistory",
+        "KisTiledDataManager::read"
       ],
       "status": "inventoried",
       "symbols": [
         "m_pageStoreBackend",
-        "refreshPageStorePages",
+        "PreparedTileUpdates",
         "capturePageStoreReadScope",
         "writePageStoreOperation"
       ],
@@ -178,34 +185,35 @@
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManagerPageStoreBackend anonymous transaction group",
+      "current-owner": "original per-operation WriteBatch::Private clients and raw-lease registry; original mutation owns its standalone transaction",
       "facts-owned": [
-        "transaction-lifetime",
-        "legacy-unlock"
+        "legacy-client-lifetime",
+        "legacy-unlock",
+        "raw-lease-barrier-membership"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
-        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+        "KisTiledDataManagerTest::testPageStoreOwnedCancellationUnderPressure",
+        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease"
       ],
       "id": "BR1-PS-BACKEND-ANON-006",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
       "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
-      "replacement-type": "adapter RAII transaction group",
+      "replacement-type": "original batch adapter lifetime plus original mutation owned-transaction terminal",
       "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/activeCpuWritePages/committedTransactions",
       "static-callers": [
         "writableTransaction",
         "registerAnonymousLease",
         "cancelAnonymousLeasesForBarrier"
       ],
-      "status": "quarantined",
+      "status": "callers-migrated",
       "symbols": [
-        "anonymousTransaction",
-        "anonymousClients",
-        "anonymousFailed",
         "anonymousLeases",
+        "cpuMutationBatches",
         "KisTiledDataManagerPageStoreLease"
       ],
-      "target-owner": "KisPageMutationSession adapter transaction group"
+      "target-owner": "original batch and mutation scope, each for its own lifetime fact"
     },
     {
       "category": "compatibility-intrusion",
@@ -228,7 +236,7 @@
       ],
       "status": "callers-migrated",
       "symbols": [
-        "iteratorScope",
+        "cpuMutationBatches",
         "clients",
         "beginIteratorMutationScope"
       ],
@@ -401,7 +409,7 @@
       ],
       "id": "BR1-PS-STORE-PUBLICATION-019",
       "path": "libs/image/pagestore/KisPagePublicationCoordinator.cpp",
-      "remove-after": "never: canonical coordinator; R2/M4 parallel side maps were replaced by one transaction state and KisPreparedMutationCommit",
+      "remove-after": "never: canonical coordinator owns original KisPagePublicationDelta; protected internal borrowing replaces prepared-set export, while external input validation remains",
       "replacement-type": "KisPreparedMutationCommit installed by KisPagePublicationCoordinator",
       "runtime-counter": "existing:KisPageStorePublicationStatistics plus prepared delta/session counters",
       "static-callers": [
@@ -414,7 +422,7 @@
       "symbols": [
         "KisPagePublicationCoordinator",
         "KisPreparedMutationCommit",
-        "PreparedTransactionState",
+        "KisPagePublicationDelta",
         "stageSurfaceMetadataLocked",
         "commitLocked",
         "restoreRetainedEpochLocked",

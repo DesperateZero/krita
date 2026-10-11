@@ -79,11 +79,6 @@ public:
     */
     void setPageStoreNativeReadReady();
     bool refreshPageStoreData();
-    // The caller passes an exact canonical read capability over replacement.
-    // Existing borrowed pointers are not revoked; refresh waits for unlock.
-    void installPageStoreReadCache(TileLease replacement);
-    // Transfer only dormant storage for refresh; never revoke an active pin.
-    TileLease takeIdleReadCache();
     // Invalidate current cache selection, preserving every active pointer/pin.
     // Dormant storage can be reused when the next real reader resolves current.
     void invalidatePageStoreReadCache();

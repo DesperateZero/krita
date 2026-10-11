@@ -80,28 +80,6 @@ void KisTile::invalidatePageStoreReadCache()
     m_pageStoreNativeReadReady.storeRelease(0);
 }
 
-void KisTile::installPageStoreReadCache(TileLease replacement)
-{
-    Q_ASSERT(replacement && replacement->tileData() && replacement->reusableReadCache());
-    QMutexLocker locker(&m_swapBarrierLock);
-    if (m_lockCounter != 0) {
-        m_pageStoreNativeReadReady.storeRelease(0);
-        return;
-    }
-    replacePageStoreReadCacheLocked(replacement->tileData());
-    KIS_SAFE_ASSERT_RECOVER_RETURN(replacement->finish());
-    m_pageStoreLeases[ReadLease] = std::move(replacement);
-    m_pageStoreNativeReadReady.storeRelease(1);
-}
-
-TileLease KisTile::takeIdleReadCache()
-{
-    QMutexLocker lock(&m_swapBarrierLock);
-    if (m_lockCounter || !m_pageStoreLeases[ReadLease]) return {};
-    m_pageStoreNativeReadReady.storeRelease(0);
-    return std::move(m_pageStoreLeases[ReadLease]);
-}
-
 KisTilePageStoreBridge *KisTile::resolvePageStoreBridge(KisMementoManager *manager) const
 {
     KisTilePageStoreBridge *bridge = m_pageStoreBridge.loadAcquire();

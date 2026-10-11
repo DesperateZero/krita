@@ -31,7 +31,7 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "All four data-manager refresh call sites are source-bound and fail closed through their existing safe assertion. Behavior tests retain native refresh, rejection, and resident-read routing coverage; Store request totals remain the canonical fallback observer.",
+      "evidence": "All four old raw rectangular refresh callers have migrated to original prepared delivery or batch D/B cancellation. Public read selection and cache reuse remain live; no late whole-rectangle capture/resolve recovery remains. Source-bound graph and behavior evidence qualify these routes, not zero-free or net performance.",
       "id": "tile-refresh-and-manager-routing",
       "manifest-entries": [
         "BR1-PS-TILE-BRIDGE-002",
@@ -40,7 +40,9 @@
       "metrics-source": "source-bound reverse callgraph and KisPageStoreSessionStats",
       "representative-tests": [
         "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
-        "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard"
+        "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard",
+        "KisTiledDataManagerTest::testPageStoreCompatibilityCopyPublicationFailure",
+        "KisTiledDataManagerTest::testPageStoreCompatibilityCopySegmentFailure"
       ],
       "status": "static-only"
     },
@@ -91,7 +93,7 @@
           "KisPageStoreSessionStats.committedTransactions"
         ]
       },
-      "evidence": "Standalone legacy tile writers share one real PageStore transaction while retaining independent mutation sessions. The client count delays publication, the failed bit rejects new joins and forces final abort, and the lease set is the barrier cancellation capability; Store snapshots remain the canonical transaction/proof observer.",
+      "evidence": "Independent standalone operations own independent transactions in their original mutation scope. Explicit iterator/history scopes still group their real clients. The backend anonymous lease list is only raw barrier membership, not an anonymous transaction cohort. Refused physical cancellation and owned abort stay in the original scope/orphan until the existing automatic retry accepts them; finished facades cannot retain idle responsibility.",
       "id": "anonymous-compatibility-transactions",
       "manifest-entries": [
         "BR1-PS-BACKEND-ANON-006"
@@ -99,7 +101,9 @@
       "metrics-source": "KisPageStoreSessionStats",
       "representative-tests": [
         "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
-        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+        "KisTiledDataManagerTest::testPageStoreOwnedCancellationUnderPressure",
+        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease"
       ],
       "status": "existing"
     },
@@ -331,7 +335,7 @@
           "KisPageStoreSessionStats.committedTransactions"
         ]
       },
-      "evidence": "KisPagePublicationCoordinator owns one per-transaction staged publication state and a move-only KisPreparedMutationCommit aggregating metadata/epoch/capacity and contiguous proof/descriptor/completion inputs. Publication statistics expose prepare/install/cancel, retry, live preparation, descriptor and cleanup outcomes.",
+      "evidence": "KisPagePublicationCoordinator owns the original KisPagePublicationDelta per transaction and move-only KisPreparedMutationCommit metadata/epoch candidates. Internal commit borrows protected delta instead of exporting and comparing a second prepared set; external prepared inputs retain their validator. Prepare/install/cancel/retry/live/descriptor/cleanup statistics remain independent of performance qualification.",
       "id": "publication-coordinator",
       "manifest-entries": [
         "BR1-PS-STORE-PUBLICATION-019"

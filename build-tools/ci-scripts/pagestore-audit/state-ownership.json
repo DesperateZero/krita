@@ -27,28 +27,48 @@
     },
     {
       "creation-paths": [
-        "KisTiledDataManagerPageStoreBackend::writableTransaction"
+        "prepareMutationBatch and acquireTile join only the original explicit batch or create their own standalone operation"
       ],
       "current-writers": [
-        "KisTiledDataManagerPageStoreBackend compatibility group through its existing WriteBatch::Private client and live-capability control block"
+        "KisTiledDataManagerPageStoreWriteBatch::Private, with the original backend registry for its slot and raw leases"
       ],
-      "fact": "legacy anonymous transaction client, failure and raw-lease barrier lifetime",
+      "fact": "legacy adapter clients, raw-lease barrier membership and per-thread batch slot",
       "id": "BR1-OWN-COMPAT-TRANSACTION-GROUP",
-      "lock-or-claim": "backend transaction mutex and registry gate; batch-local leaseMutex orders clear revocation and late unlock, without a second page write set",
+      "lock-or-claim": "backend transaction/registry gates and batch leaseMutex; original mutation claim is distinct from client count",
       "read-only-observers": [
         "tile lock bridge",
         "writable iterator and operation scopes"
       ],
       "status": "canonical",
-      "target-authoritative-owner": "KisTiledDataManagerPageStoreBackend::Private compatibility group",
+      "target-authoritative-owner": "original WriteBatch::Private adapter lifetime",
       "terminal-paths": [
-        "finishOwnedTransaction last client",
-        "abortOwnedTransaction last client",
-        "cancelAnonymousLeasesForBarrier preflights same-thread iterator ownership before revocation",
-        "WriteBatch::Private::cancelForBarrier cancels the native mutation and removes only its matching thread slot",
-        "late iterator clients finish without removing or publishing a newer batch",
-        "Completed managed WriteBatch leaves the original thread/client registry during finish; its backend pointer is cleared. Only original sealed admission/storage remains until synchronous adapter delivery drops that same batch. Escaped legacy clients or leases reject this delivery path."
+        "final client or guard completes only its original batch; finished facade drops the original reference",
+        "completeAdapters delivers cache invalidation/B rollback before manager responsibility leaves the batch",
+        "escaped native leases retain the original thread slot until their final release outside the tile barrier",
+        "cancelAnonymousLeasesForBarrier preflights same-thread ownership; late iterator clients cannot remove or publish a newer batch",
+        "successful prepared delivery retains original admission until local candidates are destroyed outside the manager gate"
       ]
+    },
+    {
+      "id": "BR1-OWN-MUTATION-OWNED-TRANSACTION",
+      "fact": "standalone transaction terminal responsibility, including refused cancel or abort",
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageMutationSession::Private original scope",
+      "current-writers": [
+        "KisPageMutationSession::Private ownsTransaction"
+      ],
+      "read-only-observers": [
+        "backend finishOwnedTransaction and raw-lease barrier admission"
+      ],
+      "creation-paths": [
+        "KisPageMutationSession::takeTransactionOwnership transfers the already-created standalone transaction into its original scope"
+      ],
+      "terminal-paths": [
+        "finishOwnedTransaction clears ownership only after accepted commit/abort or facade-gone terminal cleanup",
+        "releaseOrRetain and retryOrphans share cancelAndAbort on the same original scope; no manager callback enters orphan retirement",
+        "borrowed explicit history never takes this ownership; source storage and scope lifetime remain until accepted cancellation/terminal release"
+      ],
+      "lock-or-claim": "scope mutex plus Store owner mutex and original transaction; history collector schedules the original intrusive orphan link"
     },
     {
       "creation-paths": [

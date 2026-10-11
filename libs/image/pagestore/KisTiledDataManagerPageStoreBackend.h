@@ -253,7 +253,6 @@ public:
     // Borrowed backing: the caller must retain the exact read page throughout
     // cache installation. No implicit head lookup or generic request.
     KisTileData *tileDataForReadPage(const KisPageStoreReadPage &read) const;
-    TileLease readCacheForPage(const KisPageStoreReadPage &read, TileLease reuse = {}) const;
     bool setDefaultPixel(const QByteArray &pixel,
                          QString *error = nullptr);
     bool clearAll(QString *error = nullptr, OperationDelivery *delivery = nullptr,
@@ -271,6 +270,7 @@ private:
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;
+    TileLease readCacheForPage(const KisPageStoreReadPage &read, TileLease reuse) const;
     // A public writable miss establishes explicit default content even if no
     // pixel guard follows. Reuse the original legacy batch when present.
     KisSharedPtr<KisTile> ensureWritablePage(qint32 column, qint32 row, QString *error);
