@@ -28,7 +28,7 @@ private Q_SLOTS:
     void accessRequirementSeparatesUmaConsumers();
     void leaseCapabilitiesAreMoveOnly();
     void stateMachineCommitsPreparedGeneration();
-    void stateMachineAdoptsSynchronousPreparedWriteAtomically();
+    void stateMachineLeaseCompletionCreatesPreparedVersion();
     void stateMachineSeparatesCommitAndIdleHistoryRetirement();
     void stateMachineCommitsLatestTransactionGeneration();
     void stateMachineDiscardsOnlyIdleHistoricalVersions();
@@ -442,15 +442,22 @@ void KisPageStoreFoundationTest::stateMachineCommitsPreparedGeneration()
              qPrintable(invariantFailure));
 }
 
-void KisPageStoreFoundationTest::stateMachineAdoptsSynchronousPreparedWriteAtomically()
+void KisPageStoreFoundationTest::stateMachineLeaseCompletionCreatesPreparedVersion()
 {
     const KisPageStateMachine stateMachine;
     const KisPageStateSnapshot before = initialPageState();
-    KisPageTransition adopt = writeTransition(
-        KisPageTransitionKind::AdoptPreparedWrite, 2);
+    KisPageTransition adopt = writeTransition(KisPageTransitionKind::AcquireWrite, 2);
     adopt.writeMode = KisPageWriteMode::DiscardContents;
 
-    const KisPageTransitionResult adopted = stateMachine.apply(before, adopt);
+    KisPageTransitionResult adopted;
+    auto next = before;
+    for (auto kind : {KisPageTransitionKind::AcquireWrite, KisPageTransitionKind::PrepareWrite,
+                      KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite}) {
+        auto step = adopt; step.kind = kind;
+        adopted = stateMachine.apply(next, step);
+        QVERIFY2(adopted.accepted, qPrintable(adopted.rejectionReason));
+        next = adopted.next;
+    }
     QVERIFY2(adopted.accepted, qPrintable(adopted.rejectionReason));
     QCOMPARE(adopted.next.publishedGeneration.value, quint64(1));
     QCOMPARE(adopted.next.nextGeneration.value, quint64(3));
@@ -471,7 +478,7 @@ void KisPageStoreFoundationTest::stateMachineAdoptsSynchronousPreparedWriteAtomi
              qPrintable(invariantFailure));
 
     KisPageTransition invalidMode = adopt;
-    invalidMode.writeMode = KisPageWriteMode::PreserveContents;
+    invalidMode.writer = {};
     const KisPageTransitionResult rejected =
         stateMachine.apply(before, invalidMode);
     QVERIFY(!rejected.accepted);
@@ -485,11 +492,10 @@ void KisPageStoreFoundationTest::
 stateMachineSeparatesCommitAndIdleHistoryRetirement()
 {
     const KisPageStateMachine stateMachine;
-    KisPageTransition adopt = writeTransition(
-        KisPageTransitionKind::AdoptPreparedWrite, 2);
-    adopt.writeMode = KisPageWriteMode::DiscardContents;
-    const KisPageStateSnapshot prepared =
-        applyAccepted(stateMachine, initialPageState(), adopt);
+    auto prepared = initialPageState();
+    for (auto kind : {KisPageTransitionKind::AcquireWrite, KisPageTransitionKind::PrepareWrite,
+                      KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite})
+        prepared = applyAccepted(stateMachine, prepared, writeTransition(kind, 2));
 
     KisPageTransition commit;
     commit.kind = KisPageTransitionKind::CommitTransaction;
@@ -519,7 +525,9 @@ stateMachineSeparatesCommitAndIdleHistoryRetirement()
     acquireRead.target = testReplica(1, 1, 1, 1, 1);
     acquireRead.lease = KisPageLeaseId{77};
     leased = applyAccepted(stateMachine, leased, acquireRead);
-    leased = applyAccepted(stateMachine, leased, adopt);
+    for (auto kind : {KisPageTransitionKind::AcquireWrite, KisPageTransitionKind::PrepareWrite,
+                      KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite})
+        leased = applyAccepted(stateMachine, leased, writeTransition(kind, 2));
     const KisPageTransitionResult published = stateMachine.apply(leased, commit);
     QVERIFY(published.accepted);
     const KisPageTransitionResult rejected = stateMachine.apply(published.next, discard);

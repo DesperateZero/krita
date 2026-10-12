@@ -1343,7 +1343,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivity) <= 96)",
             "MetadataMap<KisPageKey, MetadataPageActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
-            "MetadataMap<KisPageVersion, std::shared_ptr<KisCpuReadBindingLink>> cpuBindings",
+            "facts->nativeBinding",
             "struct MetadataMapAllocator : KisMutationStorageAllocator<T, false>",
             "decltype(pages)::allocator_type(storage.borrowed(), &mapAllocationBytes)",
             "const auto storage = data->storage.borrowed()",
@@ -1554,8 +1554,17 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(f"mutation cold resources regained duplicate state: {forbidden}")
         if "static_assert(sizeof(Page) <= 512)" not in cold_page:
             errors.append("mutation cold resource layout lost its 512-byte ceiling")
-        if "const KisPageAllocationDescriptor *descriptor" not in cold_page:
+        private_records = code_only(metadata_records_header.read_text(encoding="utf-8"))
+        if ("struct Page : KisPagePrivateWrite" not in cold_page
+                or "std::shared_ptr<const KisPageAllocationDescriptor> descriptor" not in private_records
+                or "static_assert(sizeof(KisVersionFactsRecord) <= 64)" not in private_records):
             errors.append("mutation cold resources regained a duplicate descriptor value")
+        if "KisPageAllocationDescriptor descriptor" in cold_page:
+            errors.append("mutation cold resources copied the shared descriptor")
+        for retired in ("AdoptPreparedWrite", "ReplacePrivatePreparedBacking", "KisPageNativeWrite",
+                        "overwriteFinalPage", "nativeWriteSnapshot", "publishPrivateWrite"):
+            if retired in store_text or retired in metadata_text or retired in selector_text:
+                errors.append(f"retired CPU read/write protocol returned: {retired}")
         for contract in (
             "KisPageWriteAdmission writeAdmission",
             "KisBackingBudgetController backingBudget",

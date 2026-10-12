@@ -15,7 +15,7 @@ class KisCpuResidentBinding;
 
 // Lives in the original mutation's stable cold page. The shard activity only
 // borrows it while reserved; it is not a readable version until acceptance.
-struct KisPageNativeWrite {
+struct KisPagePrivateWrite {
     KisReplicaHandle target;
     KisPreparedPageProof proof;
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;

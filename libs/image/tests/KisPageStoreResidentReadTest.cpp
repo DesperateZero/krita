@@ -870,21 +870,22 @@ void KisPageStoreResidentReadTest::lazyBindingsFollowNativeReaders()
     Fixture f; QVERIFY(f.init(tiles3));
     for (int i = 0; i < 8; ++i) QVERIFY(f.fill(3, quint8(0x31 + i)));
     QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(0));
+    const quint64 currentBindings = tiles3 ? 3 : 0;
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, currentBindings);
     const auto request = f.store->acquireRead(key(0), {}, cpu, KisPagePriority::Normal);
     auto lease = f.store->resolve(request, request.readiness); QVERIFY(lease.isValid());
     f.store->release(std::move(lease));
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(0));
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, currentBindings);
     auto old = f.store->captureReadView();
     QVERIFY(f.fill(3, 0x59));
     // Native write sessions now actually read their oldData pages. The
     // retained old view keeps those provider-specific demand bindings live:
     // tiles3 exposes each page, while the CPU provider reuses one binding.
     const quint64 oldBindings = tiles3 ? 3 : 1;
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, oldBindings);
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, oldBindings + currentBindings);
     auto before = old.tryReadResidentPage(key(0)); QVERIFY(before.isValid());
     QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x38));
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, qMax(oldBindings, quint64(1)));
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, oldBindings + currentBindings);
     auto current = f.store->captureReadView();
     // Several cold readers race to install the same exact cache entry.
     std::atomic<int> ready{0}; std::atomic<bool> go{false}, correct{true};
@@ -903,10 +904,10 @@ void KisPageStoreResidentReadTest::lazyBindingsFollowNativeReaders()
     for (auto &reader : readers) reader.join();
     QVERIFY(correct.load());
     auto now = current.tryReadResidentPage(key(0)); QVERIFY(now.isValid());
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, qMax(oldBindings, quint64(1)) + 1);
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, oldBindings + qMax(currentBindings, quint64(1)));
     old = {}; before = {};
     QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(1));
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, qMax(currentBindings, quint64(1)));
     now = {}; current = {};
     QVERIFY(f.store->closeSession(&f.error));
     QCOMPARE(kisPageStoreMetadataMetrics(*f.store).cpuReadBindings, quint64(0));

@@ -1095,7 +1095,7 @@ private Q_SLOTS:
     {
         QTest::addColumn<int>("variant");
         QTest::newRow("read-release") << 0;
-        QTest::newRow("private-replacement") << 1;
+        QTest::newRow("prepared-abort") << 1;
         QTest::newRow("write-prepare-cancel") << 2;
     }
     void genericWorkingStorageRefusalIsAtomic();
@@ -5689,7 +5689,7 @@ void KisPageStoreReferenceTest::indexedMutationTransitions_data()
     QTest::addColumn<int>("history");
     QTest::addColumn<int>("variant");
     for (int h : {0, 17, 257})
-        for (int v = 0; v < 16; ++v)
+        for (int v = 0; v < 16; ++v) if (v != 10 && v != 13)
             QTest::newRow(qPrintable(QStringLiteral("history%1-case%2").arg(h).arg(v))) << h << v;
 }
 
@@ -5794,21 +5794,7 @@ void KisPageStoreReferenceTest::indexedMutationTransitions()
         run({cancel});
         return;
     }
-    if (variant == 10 || variant == 13) {
-        auto alias = write;
-        alias.kind = KisPageTransitionKind::AdoptPreparedWrite;
-        alias.writeMode = KisPageWriteMode::DiscardContents;
-        run({alias});
-        KisPageTransition replace;
-        replace.kind = KisPageTransitionKind::ReplacePrivatePreparedBacking;
-        replace.version = write.version;
-        replace.source = write.target;
-        replace.transaction = write.transaction;
-        replace.target = replica(write.version, 1, 1, write.target.allocation.slot + 1);
-        if (variant == 13)
-            replace.target.allocation = initial.versions.last().authority.allocation;
-        run({replace});
-    } else {
+    {
         if (variant == 1) {
             run({write});
             run({cancel});
@@ -5984,11 +5970,9 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
             prepared.publication = KisPagePublicationState::Prepared;
             prepared.preparedBy = write.transaction;
             initial.versions.append(prepared);
-            auto replacement = write;
-            replacement.kind = KisPageTransitionKind::ReplacePrivatePreparedBacking;
-            replacement.source = write.target;
-            replacement.target.allocation.slot++;
-            transitions = {replacement};
+            auto abort = write;
+            abort.kind = KisPageTransitionKind::AbortPreparedVersion;
+            transitions = {abort};
         } else {
             auto prepare = write; prepare.kind = KisPageTransitionKind::PrepareWrite;
             auto cancel = write; cancel.kind = KisPageTransitionKind::CancelWrite;
@@ -6424,119 +6408,53 @@ void KisPageStoreReferenceTest::indexedCompetingPreparedTransactions()
 void KisPageStoreReferenceTest::privatePreparedBackingReplacement_data()
 {
     QTest::addColumn<int>("variant");
-    const char *names[] = {"idle",
-                           "foreign-tx",
-                           "published",
-                           "wrong-source",
-                           "wrong-version",
-                           "same-allocation",
-                           "older-slot",
-                           "captured-view",
-                           "read-lease",
-                           "pin",
-                           "last-use",
-                           "replica",
-                           "writer"};
-    for (int i = 0; i < 13; ++i)
-        QTest::newRow(names[i]) << i;
+    const char *names[] = {"idle", "foreign-result", "cancelled", "incomplete",
+        "wrong-version", "same-allocation", "visible-slot", "sealed"};
+    for (int i = 0; i < 8; ++i) QTest::newRow(names[i]) << i;
 }
 
 void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
 {
     QFETCH(int, variant);
-    KisPageStateMachine machine;
     auto page = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
-    const auto version = pageVersion(0, 2);
-    const auto authority = replica(version, 1, 1, 2);
-    page.versions.append({version,
-                          KisPagePublicationState::Prepared,
-                          {{authority, KisReplicaValidity::Valid, {}, {}, 0, {}}},
-                          authority,
-                          {74},
-                          {}});
-    page.nextGeneration = {3};
-    KisPageTransition change;
-    change.kind = KisPageTransitionKind::ReplacePrivatePreparedBacking;
-    change.transaction = {74};
-    change.version = version;
-    change.source = authority;
-    change.target = replica(version, 1, 1, 3);
-    KisCompletionRegistry completions;
-    const KisCompletionDomain completionSource = KisCompletionDomain::HostLogical;
-    const auto ticket = completions.allocatePending(completions.registerSource(completionSource));
-    switch (variant) {
-    case 1:
-        change.transaction = {75};
-        break;
-    case 2:
-        change.version = pageVersion(0, 1);
-        change.source = page.versions.first().authority;
-        change.target.version = change.version;
-        break;
-    case 3:
-        change.source.allocation.slot = 19;
-        break;
-    case 4:
-        change.target.version = pageVersion(0, 3);
-        break;
-    case 5:
-        change.target = authority;
-        break;
-    case 6:
-        change.target.allocation = page.versions.first().authority.allocation;
-        break;
-    case 7:
-        page.versions.last().capturedReadViews = {{19}};
-        break;
-    case 8:
-        page.versions.last().replicas.first().readLeases = {{19}};
-        break;
-    case 9:
-        page.versions.last().replicas.first().pinCount = 1;
-        break;
-    case 10:
-        page.versions.last().replicas.first().pendingLastUses = {ticket};
-        break;
-    case 11:
-        page.versions.last().replicas.append({replica(version, 2, 1, 9), KisReplicaValidity::Valid, {}, {}, 0, {}});
-        break;
-    case 12: {
-        KisPageTransition write;
-        write.kind = KisPageTransitionKind::AcquireWrite;
-        write.baseVersion = version;
-        write.version = pageVersion(0, 3);
-        write.source = authority;
-        write.target = replica(write.version, 1, 1, 4);
-        write.transaction = {74};
-        write.operation = {19};
-        write.writer = {19};
-        const auto result = machine.apply(page, write);
-        QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
-        page = result.next;
-        break;
+    KisPageMetadataCoordinator metadata;
+    QVERIFY(metadata.configure(1)); QVERIFY(metadata.registerPage(page));
+    KisPageTransition write;
+    write.kind = KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = page.versions.first().version;
+    write.source = page.versions.first().authority;
+    write.version = pageVersion(0, 2); write.target = replica(write.version, 1, 1, 2);
+    write.transaction = {74}; write.operation = {19}; write.writer = {19};
+    KisPagePrivateWrite result;
+    QVERIFY(metadata.reservePrivateWrite(write, &result, 64));
+    if (variant != 3) QVERIFY(metadata.completePrivateWrite(&result));
+    auto replacement = replica(write.version, 1, 1, 3);
+    KisPagePrivateWrite foreign = result;
+    auto *selected = variant == 1 ? &foreign : &result;
+    if (variant == 2) QVERIFY(metadata.cancelPrivateResult(&result));
+    if (variant == 4) replacement.version = pageVersion(0, 3);
+    if (variant == 5) replacement = write.target;
+    if (variant == 6) replacement.allocation = write.source.allocation;
+    if (variant == 7) {
+        KisCompletionRegistry registry;
+        const auto source = registry.registerSource(KisCompletionDomain::HostLogical);
+        const auto completion = registry.allocatePending(source);
+        QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
+        QVERIFY(metadata.bindCpuProofIssuer(1, completion));
+        KisPreparedPageProof proof;
+        proof.authority = result.target; proof.transaction = write.transaction;
+        proof.producerCompletion = completion; proof.providerValidationStamp = 1;
+        QVERIFY(metadata.sealCpuProof(proof, 1));
     }
-    }
-    QString error;
-    QVERIFY2(machine.validateInvariants(page, &error), qPrintable(error));
-    const auto result = machine.apply(page, change);
-    QCOMPARE(result.accepted, variant == 0);
-    QVERIFY2(machine.validateInvariants(result.next, &error), qPrintable(error));
-    QCOMPARE(result.next.publishedGeneration, page.publishedGeneration);
-    QCOMPARE(result.next.nextGeneration, page.nextGeneration);
-    QCOMPARE(result.next.versions.size(), page.versions.size());
-    if (variant == 0) {
-        QCOMPARE(result.effects.size(), 1);
-        QCOMPARE(result.effects.first().replica, authority);
-        QCOMPARE(result.next.versions.last().authority, change.target);
-        QCOMPARE(result.next.versions.last().preparedBy, change.transaction);
-    } else {
-        QVERIFY(result.effects.isEmpty());
-        QCOMPARE(result.next.versions.at(1).authority, authority);
-        QCOMPARE(result.next.versions.at(1).capturedReadViews, page.versions.at(1).capturedReadViews);
-        QCOMPARE(result.next.versions.at(1).replicas.first().readLeases,
-                 page.versions.at(1).replicas.first().readLeases);
-        QCOMPARE(result.next.writer.token, page.writer.token);
-    }
+    QCOMPARE(metadata.replacePrivateWrite(selected, replacement), variant == 0);
+    QCOMPARE(result.target, variant == 0 ? replacement : write.target);
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, &actual));
+    // Private targets cannot be captured/read as visible metadata, and the
+    // exact before's authority/reader facts survive every refused replacement.
+    QVERIFY(!actual.findVersion(write.version));
+    QCOMPARE(actual.versions.first().authority, write.source);
+    QCOMPARE(actual.nextGeneration.value, quint64(3));
+    if (result.reserved) QVERIFY(metadata.cancelPrivateResult(&result));
 }
 
 void KisPageStoreReferenceTest::indexedPublicationTransitions()
@@ -7504,8 +7422,13 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     KisPageMetadataCoordinator metadata;
     QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(page));
     KisPageNativeReadRef a, b;
-    QVERIFY(metadata.retainNativeRead(identity, &a));
-    QVERIFY(metadata.retainNativeRead(identity, &b));
+    a.shard = b.shard = quint32(metadata.shardFor(identity.key));
+    auto selected = identity;
+    const auto select = +[](void *context, quint32, KisPageVersion *version) {
+        *version = *static_cast<KisPageVersion *>(context); return true;
+    };
+    QCOMPARE(metadata.retainNativeReads(&a, 1, &selected, select), size_t(1));
+    QCOMPARE(metadata.retainNativeReads(&b, 1, &selected, select), size_t(1));
     QCOMPARE(metadata.nativeReadVersion(a), identity);
     KisPageStateSnapshot actual;
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
@@ -7525,10 +7448,10 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     discard.versions.append(identity);
     QVERIFY(!KisPageStateMachine{}.apply(actual, discard).accepted);
     KisPageKey revisit;
-    QVERIFY(metadata.releaseNativeRead(a, &revisit)); QVERIFY(!revisit.isValid());
+    QCOMPARE(metadata.releaseNativeReads(&a, 1, &revisit), size_t(1)); QVERIFY(!revisit.isValid());
     QCOMPARE(metadata.nativeReadVersion(b), identity);
-    QVERIFY(metadata.releaseNativeRead(b, &revisit)); QCOMPARE(revisit, page.key);
-    QVERIFY(!metadata.releaseNativeRead(b, &revisit));
+    QCOMPARE(metadata.releaseNativeReads(&b, 1, &revisit), size_t(1)); QCOMPARE(revisit, page.key);
+    QCOMPARE(metadata.releaseNativeReads(&b, 1, &revisit), size_t(0));
     QVERIFY(!metadata.nativeReadVersion(a).isValid());
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
     QVERIFY(KisPageStateMachine{}.apply(actual, discard).accepted);
@@ -7536,7 +7459,8 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     overflow.findVersion(identity)->nativeReaders = std::numeric_limits<quint32>::max();
     KisPageMetadataCoordinator full;
     QVERIFY(full.configure(4)); QVERIFY(full.registerPage(overflow));
-    QVERIFY(!full.retainNativeRead(identity, &a));
+    a = {}; a.shard = quint32(full.shardFor(identity.key));
+    QCOMPARE(full.retainNativeReads(&a, 1, &selected, select), size_t(0));
 }
 
 void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter_data()
@@ -7609,22 +7533,33 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
         QVERIFY2(captured.accepted, qPrintable(captured.rejectionReason));
         input = captured.next;
     }
-    auto adopt = write; adopt.kind = KisPageTransitionKind::AdoptPreparedWrite;
-    const auto result = machine.apply(input, adopt);
-    QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
-    QVERIFY(result.effects.isEmpty());
-    comparePageRecords(result.next, expected);
-    // Exercise the real compact installation too. This proves final metadata
-    // equivalence, not physical permission or a multi-page atomic accept.
+    // The private result has no intermediate writer/Prepared arena version.
+    // Compare its common publication with the reference lease producer's
+    // final publication, including the exact before's late protection.
     KisPageMetadataCoordinator metadata;
     QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(input));
-    QVERIFY(metadata.applyOwner(page.key, adopt).accepted);
+    KisPagePrivateWrite result;
+    auto collision = write; collision.target.allocation = write.source.allocation;
+    QVERIFY(!metadata.reservePrivateWrite(collision, &result, 64));
+    auto stale = write; ++stale.version.generation.value; stale.target.version = stale.version;
+    QVERIFY(!metadata.reservePrivateWrite(stale, &result, 64));
+    QVERIFY(metadata.reservePrivateWrite(write, &result, 64));
+    QVERIFY(metadata.completePrivateWrite(&result));
+    const auto completion = registry.allocatePending(registry.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
+    QVERIFY(metadata.bindCpuProofIssuer(1, completion));
+    KisPreparedPageProof proof;
+    proof.transaction = transaction; proof.authority = write.target;
+    proof.producerCompletion = completion; proof.providerValidationStamp = 1;
+    QVERIFY(metadata.sealCpuProof(proof, 1));
+    auto commit = write; commit.kind = KisPageTransitionKind::CommitTransaction; commit.imageEpoch = {2};
+    const KisPageTransaction tx{transaction, {1}};
+    auto candidate = metadata.preparePublication(tx, {2}, QVector<KisPageTransition>{commit});
+    QVERIFY(candidate.isValid());
+    QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}));
     KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, &actual));
-    comparePageRecords(actual, expected);
-    auto collision = adopt; collision.target.allocation = write.source.allocation;
-    QVERIFY(!machine.apply(input, collision).accepted);
-    auto stale = adopt; ++stale.version.generation.value; stale.target.version = stale.version;
-    QVERIFY(!machine.apply(input, stale).accepted);
+    const auto committed = machine.apply(expected, commit); QVERIFY(committed.accepted);
+    comparePageRecords(actual, committed.next);
     // Cancellation consumes a generation even though no target survives.
     // A deferred-record design must keep this reservation in the original
     // operation; it cannot simply rewind the page's identity counter.
@@ -7679,7 +7614,7 @@ void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection()
     QVERIFY(metadata.configure(4));
     QVERIFY(metadata.registerPage(page));
     auto expected = page;
-    auto candidate = metadata.preparePrivateWrite(tx, write);
+    auto candidate = metadata.prepareLeaseWrite(tx, write);
     QVERIFY(candidate.isValid());
     // No replacement storage for either existing replica or its protections.
     QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
@@ -7693,14 +7628,14 @@ void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection()
         QVERIFY(changed.accepted);
         QVERIFY(metadata.applyOwner(page.key, read).accepted);
         expected = changed.next;
-        QVERIFY(!metadata.installPrivateWrite(std::move(candidate), tx, nullptr, nullptr));
-        candidate = metadata.preparePrivateWrite(tx, write);
+        QVERIFY(!metadata.installLeaseWrite(std::move(candidate), tx, nullptr, nullptr));
+        candidate = metadata.prepareLeaseWrite(tx, write);
         QVERIFY(candidate.isValid());
     }
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (outcome == 3) candidate = {};
     else {
-        QVERIFY(metadata.installPrivateWrite(std::move(candidate), tx, nullptr, &cleanup));
+        QVERIFY(metadata.installLeaseWrite(std::move(candidate), tx, nullptr, &cleanup));
         const auto acquired = machine.apply(expected, write);
         QVERIFY(acquired.accepted);
         auto ready = write; ready.kind = KisPageTransitionKind::PrepareWrite;

@@ -22,7 +22,7 @@
 
 class KisCpuResidentBinding;
 struct KisPageNativeReadRef;
-struct KisPageNativeWrite;
+struct KisPagePrivateWrite;
 // A borrowed selection value, never another per-version allocation or owner.
 struct KisCpuReadBinding {
     KisReplicaHandle replica;
@@ -283,12 +283,12 @@ private:
     bool exchangeVersionDescriptor(const KisPageVersion &,
         std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
     bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer, KisPreparedPageProof *destination = nullptr);
-    bool reserveNativeWrite(const KisPageTransition &, KisPageNativeWrite *, quint32 limit,
+    bool reservePrivateWrite(const KisPageTransition &, KisPagePrivateWrite *, quint32 limit,
                             QString *error = nullptr);
-    bool completeNativeWrite(KisPageNativeWrite *);
-    bool cancelNativeWrite(KisPageNativeWrite *);
-    KisPageNativeWrite *nativeWrite(const KisPageVersion &) const;
-    bool nativeWriteSnapshot(const KisPageVersion &, VersionInfo *) const;
+    bool completePrivateWrite(KisPagePrivateWrite *);
+    bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &);
+    bool cancelPrivateResult(KisPagePrivateWrite *);
+    KisPagePrivateWrite *nativeWrite(const KisPageVersion &) const;
     bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
@@ -369,11 +369,9 @@ private:
                               const KisCpuResidentBinding *expected = nullptr);
     KisCpuReadBinding cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
-    bool retainNativeRead(const KisPageVersion &version, KisPageNativeReadRef *reference);
     size_t retainNativeReads(KisPageNativeReadRef *references, size_t count,
         void *context, bool (*select)(void *, quint32, KisPageVersion *));
     size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t count, KisPageKey *revisit);
-    bool releaseNativeRead(const KisPageNativeReadRef &reference, KisPageKey *revisit);
     KisPageVersion nativeReadVersion(const KisPageNativeReadRef &reference, KisCpuReadBinding *binding = nullptr) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;
@@ -472,7 +470,7 @@ private:
         KisPageVersion version;
         size_t ownerIndex = 0;
         bool releaseUnusedCapacity = false;
-        KisPageNativeWrite *native = nullptr;
+        KisPagePrivateWrite *native = nullptr;
     };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
@@ -482,7 +480,8 @@ private:
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
-                                               const MutationDetachment *detachments = nullptr) const;
+                                               const MutationDetachment *detachments = nullptr,
+                                               KisPagePrivateWrite *privateResult = nullptr) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.
@@ -508,15 +507,16 @@ private:
     // no bytes may be exposed until provider retag has also been consumed.
     PreparedPublication prepareRecoverableWrite(const KisPageTransaction &transaction,
                                                 const KisPageTransition &transition,
-                                                QString *error = nullptr) const;
+                                                QString *error = nullptr,
+                                                KisPagePrivateWrite *privateResult = nullptr) const;
     bool installRecoverableWrite(PreparedPublication &&prepared,
                                  const KisPageTransaction &transaction,
                                  QString *error = nullptr,
                                  DeferredPublicationCleanup *deferredCleanup = nullptr);
-    PreparedPublication preparePrivateWrite(const KisPageTransaction &transaction,
+    PreparedPublication prepareLeaseWrite(const KisPageTransaction &transaction,
                                             const KisPageTransition &transition,
                                             QString *error = nullptr) const;
-    bool installPrivateWrite(PreparedPublication &&prepared,
+    bool installLeaseWrite(PreparedPublication &&prepared,
                              const KisPageTransaction &transaction,
                              QString *error,
                              DeferredPublicationCleanup *deferredCleanup);
@@ -545,7 +545,7 @@ private:
     friend class KisPageStoreResidentReadTest;
     KisPageMetadataTransitionResult applyWriteSequence(const KisPageKey &key,
         const KisPageTransition *transitions, qsizetype count, bool acceptPreparedRetry = false);
-    KisPageMetadataTransitionResult publishPrivateWrite(const KisPageTransition &write);
+    KisPageMetadataTransitionResult publishLeaseWrite(const KisPageTransition &write);
     KisPageMetadataTransitionResult applyProjectedSequence(const KisPageKey &key,
                                                    const KisPageTransition *transitions, qsizetype count);
     KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,

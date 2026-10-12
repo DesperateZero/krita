@@ -212,7 +212,6 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         switch (transition.kind) {
         case KisPageTransitionKind::AcquireWrite:
         case KisPageTransitionKind::AcquireRecoverableWrite:
-        case KisPageTransitionKind::AdoptPreparedWrite:
         case KisPageTransitionKind::PrepareWrite:
         case KisPageTransitionKind::BeginPublish:
         case KisPageTransitionKind::PublishWrite:
@@ -222,7 +221,6 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         case KisPageTransitionKind::AbortTransaction:
         case KisPageTransitionKind::AbortPreparedVersion:
         case KisPageTransitionKind::DetachPreparedVersion:
-        case KisPageTransitionKind::ReplacePrivatePreparedBacking:
         case KisPageTransitionKind::ReplaceDefaultPixel:
         case KisPageTransitionKind::RestoreCommittedVersion:
             return reject(QStringLiteral("page has an unaccepted native write reservation"));
@@ -392,63 +390,6 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         result.next.writer.target = transition.target;
         result.next.writer.mode = transition.writeMode;
         result.next.writer.phase = KisPageWriterPhase::Reserved;
-        result.next.nextGeneration.value++;
-        break;
-    }
-    case KisPageTransitionKind::AdoptPreparedWrite: {
-        if (!isWriterEmpty(result.next.writer)) {
-            return reject(QStringLiteral("page already has a reserved writer"));
-        }
-        if (!transition.writer.isValid() || !transition.operation.isValid() ||
-            !transition.transaction.isValid() ||
-            !transition.baseVersion.isValid() ||
-            !transition.version.isValid() ||
-            !transition.target.isValid() ||
-            transition.writeMode != KisPageWriteMode::DiscardContents) {
-            return reject(QStringLiteral(
-                "prepared write adoption identity is incomplete"));
-        }
-        if (!(transition.baseVersion.key == result.next.key) ||
-            !(transition.version.key == result.next.key) ||
-            !(transition.target.version == transition.version)) {
-            return reject(QStringLiteral(
-                "prepared write adoption targets another page"));
-        }
-        const Version *base =
-            result.next.findVersion(transition.baseVersion);
-        if (!isVisibleToTransaction(base, transition.transaction)) {
-            return reject(QStringLiteral(
-                "prepared write adoption base is not transaction-visible"));
-        }
-        const Replica *baseAuthority =
-            base->findReplica(transition.source);
-        if (!(base->authority == transition.source) ||
-            (!base->isVirtualDefault() &&
-             (!baseAuthority || baseAuthority->validity != KisReplicaValidity::Valid))) {
-            return reject(QStringLiteral(
-                "prepared write adoption base authority is invalid"));
-        }
-        if (transition.version.generation.value !=
-                result.next.nextGeneration.value ||
-            transition.version.generation.value <=
-                transition.baseVersion.generation.value ||
-            result.next.findVersion(transition.version) ||
-            result.next.nextGeneration.value ==
-                std::numeric_limits<quint64>::max()) {
-            return reject(QStringLiteral(
-                "prepared write adoption generation is not the next free generation"));
-        }
-        if (physicalSlotInUse(result.next, transition.target))
-            return reject(QStringLiteral(
-                "prepared write adoption token is already in use"));
-
-        auto writeVersion = kisPageVersionValue(result.next);
-        writeVersion.version = transition.version;
-        writeVersion.publication = KisPagePublicationState::Prepared;
-        appendReplica(writeVersion, transition.target, KisReplicaValidity::Valid, {});
-        writeVersion.authority = transition.target;
-        writeVersion.preparedBy = transition.transaction;
-        result.next.versions.push_back(std::move(writeVersion));
         result.next.nextGeneration.value++;
         break;
     }
@@ -924,27 +865,6 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
             }
             result.next.versions.erase(result.next.versions.begin() + i - 1);
         }
-        break;
-    }
-    case KisPageTransitionKind::ReplacePrivatePreparedBacking: {
-        auto *version = result.next.findVersion(transition.version);
-        if (!transition.transaction.isValid() || !version ||
-            version->publication != KisPagePublicationState::Prepared ||
-            !(version->preparedBy == transition.transaction) || result.next.writer.isValid() ||
-            !version->capturedReadViews.empty() || version->nativeReaders || version->replicas.size() != 1 ||
-            !(version->authority == transition.source) || !transition.target.isValid() ||
-            !(transition.target.version == version->version))
-            return reject(QStringLiteral("private backing replacement identity is invalid"));
-        const auto &old = version->replicas.front();
-        if (old.activeOperation.isValid() || !old.readLeases.empty() || old.pinCount ||
-            !old.pendingLastUses.empty() || old.validity != KisReplicaValidity::Valid)
-            return reject(QStringLiteral("private backing replacement still has consumers"));
-        if (physicalSlotInUse(result.next, transition.target))
-            return reject(QStringLiteral("private replacement allocation is already used"));
-        result.effects.push_back({old.replica, {}});
-        version->replicas.clear();
-        appendReplica(*version, transition.target, KisReplicaValidity::Valid);
-        version->authority = transition.target;
         break;
     }
     case KisPageTransitionKind::DetachPreparedVersion: {

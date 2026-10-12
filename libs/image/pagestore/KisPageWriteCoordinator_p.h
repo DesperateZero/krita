@@ -47,7 +47,7 @@ class KisCpuWriteBindingReservation;
 class KisCpuResidentBinding;
 class KisPageStoreWriteReservation;
 struct KisPageTransition;
-struct KisPageNativeWrite;
+struct KisPagePrivateWrite;
 enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
 
@@ -630,10 +630,9 @@ public:
     bool prepareWriteBaseLocked(const KisPageTransaction &, const KisPageWriteIntent &,
                                 KisPagePublicationCoordinator &, KisPageTransition *,
                                 KisPageAllocationDescriptor *, QString *error,
-                                const KisPageTransition *pending = nullptr,
                                 KisReplicaHandle *recoverableBefore = nullptr,
                                 std::shared_ptr<KisCpuResidentBinding> *binding = nullptr);
-    KisPageMetadataTransitionResult preparePrivateWrite(KisPageTransition &, KisPageTransitionKind preparation);
+    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageTransition &);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
     // the retagged physical reservation. Otherwise write is unchanged and the
@@ -645,8 +644,8 @@ public:
         KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
         QMutexLocker<QMutex> &,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
-        KisPageNativeWrite *native = nullptr);
-    KisPageMetadataTransitionResult publishPrivateWrite(KisPageTransition);
+        KisPagePrivateWrite *native = nullptr);
+    KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
         KisPageReplicaProvider &, const KisPageTransition &,
         const KisPageAllocationDescriptor &, KisPageAccessRequirement,
@@ -663,7 +662,7 @@ public:
         QString *error) const;
     // The caller retains admission until detach succeeds. Metadata, not an
     // adapter-local flag, determines which private state must be cancelled.
-    KisPageMetadataTransitionResult cancelPrivateWrite(KisPageTransition write);
+    KisPageMetadataTransitionResult cancelLeaseWrite(KisPageTransition write);
 
     KisPageWritePlanKind select(const KisPageWriteIntent &,
                                 const KisMutationPageEntry *pending = nullptr,

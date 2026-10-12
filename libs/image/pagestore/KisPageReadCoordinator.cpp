@@ -1002,48 +1002,29 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
 {
     Q_ASSERT(!pending.processing);
     pending.processing = true;
-    if (pending.nativeRange) {
-        while (pending.next < pending.retained) {
-            KisPageKey revisit[16];
-            const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data() + pending.next,
-                size_t(pending.retained - pending.next), revisit);
-            if (!released) {
-                pending.processing = false;
-                return false;
-            }
-            pending.next += released;
-            for (size_t i = 0; i < released; ++i)
-                if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i]);
-        }
-        if (pending.capturedScope) --m_nativeRanges;
-        m_history.collectUnreachableLocked();
-        processRetirementsUnlocked(lock);
-    }
     while (pending.next < pending.retained) {
-        const auto &version = pending.versions[pending.next];
-        KisPageTransition release;
-        release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-        release.version = version;
-        release.readView = pending.token;
-        const auto result = m_metadata.applyOwner(version.key, release, &pending.cleanup);
-        if (!result.accepted) {
+        KisPageKey revisit[16];
+        const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data() + pending.next,
+            size_t(pending.retained - pending.next), revisit);
+        if (!released) {
             pending.processing = false;
             return false;
         }
-        if (result.historyNeedsRevisit) m_history.requestKeyLocked(version.key);
-        // Release unlinks existing metadata storage; its accepted prefix is
-        // the only per-version progress fact. Collector/retirement refusals
-        // stay with those owners after the notification transfers.
-        ++pending.next;
+        pending.next += released;
+        for (size_t i = 0; i < released; ++i)
+            if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i]);
+    }
+    if (pending.retained) {
         m_history.collectUnreachableLocked();
         processRetirementsUnlocked(lock);
     }
     bool becameUnretained = false;
-    if (!pending.nativeRange
+    if (pending.token.isValid()
         && (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained))) {
         pending.processing = false;
         return false;
     }
+    if (pending.capturedScope && pending.nativeRange) --m_nativeRanges;
     if (pending.capturedScope) ++m_capturedViewReleases;
     m_capturedReleaseRetries.erase(m_capturedReleaseRetries.iterator_to(pending));
     KisPageCapturedReleasePointer finished(&pending, KisPageCapturedReleaseDeleter{&m_budget});

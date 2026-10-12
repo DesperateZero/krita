@@ -50,7 +50,6 @@ struct KisPageCapturedRelease
     std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removedPages;
     std::vector<KisSurfaceEpochState, KisMutationStorageAllocator<KisSurfaceEpochState>> stagedSurfaces;
     std::vector<KisPageNativeReadRef, KisMutationStorageAllocator<KisPageNativeReadRef>> nativeRefs;
-    KisPageMetadataReadCleanup cleanup;
     size_t retained = 0;
     size_t next = 0;
     bool capturedScope = false;

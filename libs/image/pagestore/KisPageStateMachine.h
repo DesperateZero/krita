@@ -173,7 +173,6 @@ enum class KisPageTransitionKind : quint8 {
     ReleaseRead,
     AcknowledgeLastUse,
     AcquireWrite,
-    AdoptPreparedWrite,
     PrepareWrite,
     BeginPublish,
     PublishWrite,
@@ -203,9 +202,6 @@ enum class KisPageTransitionKind : quint8 {
     // Drop sealed-overlay membership, not outstanding pixel/read capabilities.
     // Reclamation follows ordinary historical reachability/pin/last-use rules.
     DetachPreparedVersion,
-    // Owner-only replacement of this segment's not-yet-exposed Prepared
-    // target, after returning its guards. Keeps the pending generation.
-    ReplacePrivatePreparedBacking,
     // Logical half of a recoverable backing transfer. source is the existing
     // independent exact before replica; target retags the old authority's
     // physical slot for a newer logical version. Production must prepare all

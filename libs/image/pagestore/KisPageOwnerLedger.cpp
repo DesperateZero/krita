@@ -7,6 +7,7 @@
 #include "KisPageOwnerLedger.h"
 #include "KisPageRetirementRecord_p.h"
 #include "KisPageWriteCoordinator_p.h"
+#include "KisPageMetadataCoordinator_p.h"
 
 #include <QMutex>
 #include <QMutexLocker>
@@ -2157,42 +2158,44 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
     return metadata && metadata->ownsCpuProof(proof, issuer);
 }
 
-bool KisPageOwnerLedger::sealPreparedPage(
-    const KisPageMetadataCoordinator &metadata,
-    const KisPageVersion &version,
-    KisPageTransactionId transaction,
-    const KisPageAllocationDescriptor &descriptor,
-    const KisCompletionTicket &producerCompletion,
-    KisPreparedPageProof *proof,
-    QString *error, bool *storageRefused)
+bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
+    KisPageTransactionId transaction, const KisCompletionTicket &producerCompletion, QString *error)
 {
-    return sealPreparedPageImpl(metadata, version, transaction, descriptor,
-        producerCompletion, proof, error, storageRefused, nullptr);
-}
-
-bool KisPageOwnerLedger::sealCpuPreparedPage(const KisPageVersion &version,
-    KisPageTransactionId transaction, const KisPageAllocationDescriptor &descriptor,
-    const KisCompletionTicket &producerCompletion, KisPreparedPageProof *proof,
-    QString *error, bool *storageRefused)
-{
+    // The caller retains its scope/claims and has joined every mutable guard.
+    // The fixed successful CPU ticket was verified when binding this issuer;
+    // sealCpuProof checks that exact ticket and the original reservation.
+    const auto authorityProvider = provider(result.target.provider, result.target.providerEpoch);
+    if (!result.reserved || !result.completed || !result.descriptor || !authorityProvider
+        || !authorityProvider->validate(result.target, *result.descriptor)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
+        return false;
+    }
     KisPageMetadataCoordinator *metadata;
+    KisPreparedPageProof sealed;
+    quint64 issuer;
     {
         QMutexLocker locker(&d->mutex);
         metadata = d->cpuMetadata;
+        issuer = d->cpuProofIssuer;
+        if (!metadata || !d->nextValidationStamp
+            || d->nextValidationStamp == std::numeric_limits<quint64>::max()) return false;
+        sealed.transaction = transaction;
+        sealed.authority = result.target;
+        sealed.producerCompletion = producerCompletion;
+        sealed.providerValidationStamp = d->nextValidationStamp++;
     }
-    if (!metadata) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU proof owner is not configured"));
+    if (!metadata->sealCpuProof(sealed, issuer, &result.proof)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU result changed or already has a capability"));
         return false;
     }
-    return sealPreparedPageImpl(*metadata, version, transaction, descriptor,
-        producerCompletion, proof, error, storageRefused, metadata);
+    KisPageStoreDetail::setError(error, {});
+    return true;
 }
 
-bool KisPageOwnerLedger::sealPreparedPageImpl(const KisPageMetadataCoordinator &metadata,
+bool KisPageOwnerLedger::sealPreparedPage(const KisPageMetadataCoordinator &metadata,
     const KisPageVersion &version, KisPageTransactionId transaction,
     const KisPageAllocationDescriptor &descriptor, const KisCompletionTicket &producerCompletion,
-    KisPreparedPageProof *proof, QString *error, bool *storageRefused,
-    KisPageMetadataCoordinator *cpuDestination)
+    KisPreparedPageProof *proof, QString *error, bool *storageRefused)
 try
 {
     if (storageRefused) *storageRefused = false;
@@ -2221,8 +2224,7 @@ try
     }
 
     KisPageMetadataCoordinator::VersionInfo snapshot;
-    if (!(cpuDestination && metadata.nativeWriteSnapshot(version, &snapshot))
-        && !metadata.versionSnapshot(version, &snapshot)) {
+    if (!metadata.versionSnapshot(version, &snapshot)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page metadata is unavailable"));
         return false;
     }
@@ -2232,8 +2234,7 @@ try
         return false;
     }
 
-    LedgerNode<SealedProofRecord> record;
-    if (!cpuDestination) record = prepareLedgerNode<SealedProofRecord>(budget);
+    auto record = prepareLedgerNode<SealedProofRecord>(budget);
     const std::shared_ptr<KisPageReplicaProvider> authorityProvider =
         provider(snapshot.authority.provider, snapshot.authority.providerEpoch);
     if (!authorityProvider ||
@@ -2256,19 +2257,6 @@ try
     if (!sealed.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof could not be sealed"));
         return false;
-    }
-    if (cpuDestination) {
-        const auto issuer = d->cpuProofIssuer;
-        // Reserve the nonce under the ledger lock, then enter the metadata
-        // shard without reversing the owner/shard/ledger lock order.
-        ++d->nextValidationStamp;
-        locker.unlock();
-        if (!cpuDestination->sealCpuProof(sealed, issuer, proof)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("CPU proof version changed or already has a capability"));
-            return false;
-        }
-        KisPageStoreDetail::setError(error, {});
-        return true;
     }
     record->proof = sealed;
     d->sealedProofs.insert(*record);
@@ -2320,8 +2308,7 @@ try
     }
 
     KisPageMetadataCoordinator::VersionInfo snapshot;
-    if ((!metadata.nativeWriteSnapshot(proof.authority.version, &snapshot)
-         && !metadata.versionSnapshot(proof.authority.version, &snapshot)) || !snapshot.version.isValid()
+    if (!metadata.versionSnapshot(proof.authority.version, &snapshot) || !snapshot.version.isValid()
         || snapshot.publication != KisPagePublicationState::Prepared
         || !(snapshot.preparedBy == proof.transaction) || !(snapshot.authority == proof.authority)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof no longer matches metadata"));

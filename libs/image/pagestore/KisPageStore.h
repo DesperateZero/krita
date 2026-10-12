@@ -135,9 +135,7 @@ private:
     enum class PreparationResult : quint8 { Unsupported, Failed, Ready };
     // Adapter producer supplies each complete final key once. Acceptance
     // closes mutable access to that key; ordinary overwritePage stays mutable.
-    bool overwriteFinalPage(const KisPageKey &, const KisCpuPagePayload &, QString *error);
     bool writeFinalRect(const KisPageKey &, const QRect &, const KisCpuPagePayload &, QString *error);
-    bool writeFinalPage(const KisPageKey &, const QRect &, const KisCpuPagePayload &, bool compare, QString *error);
     // Prepare ordinary mutable backing for the complete borrowed range before
     // a caller can expose pixels. Semantic removal/alias entries keep their
     // existing path because preparing them would itself change pending bytes.
