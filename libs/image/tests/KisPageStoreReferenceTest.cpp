@@ -1277,6 +1277,8 @@ private Q_SLOTS:
     void preparedRecoverableWriteLifecycle();
     void preparedPrivateWritePreservesProtection_data();
     void preparedPrivateWritePreservesProtection();
+    void finalAdoptionMatchesPrivateWriter_data();
+    void finalAdoptionMatchesPrivateWriter();
     void recoverableWritePreparationHonorsBudget();
     void mutationWriteSetUsesInlineAndSparseIndexStorage();
     void mutationStorageGrowthIsStableAndCharged();
@@ -7453,6 +7455,104 @@ void KisPageStoreReferenceTest::recoverableWriteGuards()
         QVERIFY(!machine.apply(page, fresh).accepted);
         QVERIFY(!metadata.prepareRecoverableWrite(tx, fresh).isValid());
     }
+}
+
+void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter_data()
+{
+    QTest::addColumn<bool>("preparedBase");
+    QTest::addColumn<int>("captureCount");
+    QTest::addColumn<int>("lateCaptureAfter");
+    for (bool prepared : {false, true})
+        for (int captures : {0, 20})
+            for (int late : {0, 1, 2, 3, 4})
+                QTest::newRow(qPrintable(QStringLiteral("prepared%1-captures%2-late%3")
+                    .arg(prepared).arg(captures).arg(late))) << prepared << captures << late;
+}
+
+void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
+{
+    QFETCH(bool, preparedBase);
+    QFETCH(int, captureCount);
+    QFETCH(int, lateCaptureAfter);
+    const KisPageTransactionId transaction{74};
+    auto page = pageWithHistory(3);
+    auto &base = preparedBase ? page.versions.last() : page.versions.first();
+    if (preparedBase) {
+        base.publication = KisPagePublicationState::Prepared;
+        base.preparedBy = transaction;
+    }
+    KisCompletionRegistry registry;
+    const auto pending = registry.allocatePending(registry.registerSource(KisCompletionDomain::CpuJob));
+    base.replicas.first().pinCount = 2;
+    base.replicas.first().readLeases.append({4});
+    base.replicas.first().pendingLastUses.append(pending);
+    auto second = base.authority; second.allocation.slot = 10000;
+    base.replicas.append({second, KisReplicaValidity::Valid, {}, {{5}}, 3, {pending}});
+    for (int token = 1; token <= captureCount; ++token) base.capturedReadViews.append({quint64(token)});
+    KisPageTransition write;
+    write.kind = KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = base.version; write.source = base.authority;
+    write.version = {page.key, page.nextGeneration};
+    write.target = base.authority; write.target.version = write.version;
+    write.target.allocation = {10001, 19}; // independent, already retagged spare
+    write.writer = {51}; write.operation = {52}; write.transaction = transaction;
+    write.writeMode = KisPageWriteMode::DiscardContents;
+    KisPageTransition read;
+    // Committed-root capture is an epoch protection, not a private-version
+    // token transition. Use a real late lease for the published-base case.
+    read.kind = preparedBase ? KisPageTransitionKind::RetainCapturedVersion
+                             : KisPageTransitionKind::AcquireRead;
+    read.version = base.version; read.target = base.authority; read.lease = {99};
+    read.transaction = transaction; read.readView = {99};
+    const KisPageStateMachine machine;
+    QVERIFY(machine.validateInvariants(page));
+    auto expected = page;
+    int stepIndex = 0;
+    for (auto kind : {KisPageTransitionKind::AcquireWrite, KisPageTransitionKind::PrepareWrite,
+                      KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite}) {
+        auto transition = write; transition.kind = kind;
+        const auto step = machine.apply(expected, transition);
+        QVERIFY2(step.accepted, qPrintable(step.rejectionReason));
+        QVERIFY(step.effects.isEmpty());
+        expected = step.next;
+        if (++stepIndex == lateCaptureAfter) {
+            const auto captured = machine.apply(expected, read);
+            QVERIFY2(captured.accepted, qPrintable(captured.rejectionReason));
+            expected = captured.next;
+        }
+    }
+    auto input = page;
+    if (lateCaptureAfter) {
+        const auto captured = machine.apply(input, read);
+        QVERIFY2(captured.accepted, qPrintable(captured.rejectionReason));
+        input = captured.next;
+    }
+    auto adopt = write; adopt.kind = KisPageTransitionKind::AdoptPreparedWrite;
+    const auto result = machine.apply(input, adopt);
+    QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
+    QVERIFY(result.effects.isEmpty());
+    comparePageRecords(result.next, expected);
+    // Exercise the real compact installation too. This proves final metadata
+    // equivalence, not physical permission or a multi-page atomic accept.
+    KisPageMetadataCoordinator metadata;
+    QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(input));
+    QVERIFY(metadata.applyOwner(page.key, adopt).accepted);
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, &actual));
+    comparePageRecords(actual, expected);
+    auto collision = adopt; collision.target.allocation = write.source.allocation;
+    QVERIFY(!machine.apply(input, collision).accepted);
+    auto stale = adopt; ++stale.version.generation.value; stale.target.version = stale.version;
+    QVERIFY(!machine.apply(input, stale).accepted);
+    // Cancellation consumes a generation even though no target survives.
+    // A deferred-record design must keep this reservation in the original
+    // operation; it cannot simply rewind the page's identity counter.
+    const auto acquired = machine.apply(page, write); QVERIFY(acquired.accepted);
+    auto cancel = write; cancel.kind = KisPageTransitionKind::CancelWrite;
+    const auto cancelled = machine.apply(acquired.next, cancel); QVERIFY(cancelled.accepted);
+    auto afterCancel = page; ++afterCancel.nextGeneration.value;
+    comparePageRecords(cancelled.next, afterCancel);
+    QCOMPARE(cancelled.effects.size(), qsizetype(1));
+    QCOMPARE(cancelled.effects.first().replica, write.target);
 }
 
 void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection_data()
