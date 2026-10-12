@@ -2612,18 +2612,19 @@ try {
                         if (std::any_of(facts.cbegin(), facts.cend(), [&](const auto &v) { return v.version == identity; }))
                             return;
                         KisPageWorkingVersion v(storage);
-                        // Ordinary publication only reads identity/publication,
-                        // authority and physical-slot facts. Recoverable retag
-                        // really consumes/replaces protection and keeps the full
-                        // image; its guards must never see the compact input.
-                        const bool found = writePreparation ? shard->records.snapshot(identity, &v)
+                        // Private acquisition only changes the base pin and a
+                        // new target. Like applyWriteSequence(), it never reads
+                        // or replaces existing protection. Recoverable retag
+                        // removes a replica and must retain the complete image.
+                        const bool found = recoverable ? shard->records.snapshot(identity, &v)
                             : shard->records.snapshot<KisPageWorkingVersion, false>(identity, &v);
                         if (found) {
                             facts.push_back(std::move(v));
                         }
                     };
-                    include({publication.next.key, publication.next.publishedGeneration,
-                        publication.next.publishedDefaultPixelRevision});
+                    if (!privateWrite)
+                        include({publication.next.key, publication.next.publishedGeneration,
+                            publication.next.publishedDefaultPixelRevision});
                     if (writePreparation)
                         include(transition.baseVersion);
                     include(transition.version);
@@ -2660,7 +2661,7 @@ try {
             for (const auto &record : publication.installRecords)
                 shard->publicationHistoryNodesPrepared += record.publication == KisPagePublicationState::Historical;
         }
-        shard->publicationAdditionRecordsPrepared += publication.installRecords.size() - (writePreparation ? 1 : 0);
+        shard->publicationAdditionRecordsPrepared += publication.installRecords.size() - (recoverable ? 1 : 0);
     };
     const auto recordPreparationWork = qScopeGuard([&] {
         // Includes accepted policy work when a later allocation/revalidation
@@ -2722,7 +2723,17 @@ try {
                 step.next.versions.cend(), copiedAuthority)));
         for (const auto &version : std::as_const(step.next.versions))
             if (copiedAuthority(version)) data->backingAuthorities.emplace_back(version.version, version.authority);
-        if (writePreparation) {
+        if (privateWrite) {
+            // The original base and all of its protection stay in the arena.
+            // The next writer identifies its one pin delta; the strict page
+            // revision claim makes that decision valid until installation.
+            auto &records = step.next.versions;
+            records.erase(std::remove_if(records.begin(), records.end(), [&](const auto &record) {
+                return !(record.version == transition.version);
+            }), records.end());
+            Q_ASSERT(records.size() == 1);
+            publication.installRecords = std::move(records);
+        } else if (recoverable) {
             // Strict revision revalidation covers every replica/reader fact
             // used here. Install only this exact base and the new target, in
             // that order, so the old physical slot is unbound before target
@@ -2792,7 +2803,7 @@ try {
             shardGrowth->totalDemand.versions += publication.arenaDemand.versions;
             shardGrowth->totalDemand.replicas += publication.arenaDemand.replicas;
             shardGrowth->totalDemand.overflow += publication.arenaDemand.overflow;
-            shardGrowth->exactInsertions += qsizetype(publication.installRecords.size()) - (writePreparation ? 1 : 0);
+            shardGrowth->exactInsertions += qsizetype(publication.installRecords.size()) - (recoverable ? 1 : 0);
             for (const auto &record : publication.installRecords)
                 shardGrowth->physicalInsertions += record.replicas.size();
         }
@@ -3045,7 +3056,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
                     Q_UNUSED(updated);
                 }
                 ++page->second.revision;
-            } else if (recoverable || privateWrite) {
+            } else if (recoverable) {
                 auto &reservation = data->arenaGrowth.at(publication->arenaGrowthIndex).reservations;
                 for (const auto &record : publication->installRecords) {
                     const bool installed = entry.shardOwner->records.putReserved(&page->second, record, &reservation);
@@ -3059,7 +3070,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
                 ++entry.shardOwner->publicationAdditionRecordsTransferred;
                 entry.shardOwner->publicationVersionInstalls += 2;
             } else {
-                publication->next.publishedEpoch = epoch;
+                if (!privateWrite) publication->next.publishedEpoch = epoch;
                 for (const auto &delta : std::as_const(publication->deltas)) {
                     const bool updated = entry.shardOwner->records.setPublication(&page->second,
                                                                              delta.version,
@@ -3075,6 +3086,18 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
                                                                                                       &reservation);
                 Q_ASSERT(additionsInstalled);
                 Q_UNUSED(additionsInstalled);
+                if (privateWrite && publication->next.writer.baseAuthority.isValid()) {
+                    const auto &writer = publication->next.writer;
+                    KisVersionSlotId base;
+                    KisReplicaSlotId authority;
+                    const bool found = entry.shardOwner->records.findVersion(writer.baseVersion, &base)
+                        && entry.shardOwner->records.findReplicaSlot(base, writer.baseAuthority, &authority);
+                    Q_ASSERT(found); Q_UNUSED(found);
+                    // AcquireWrite already checked overflow. No intervening
+                    // reader can pass the revision claim above; update only
+                    // its pin, preserving every unrelated protection node.
+                    ++entry.shardOwner->records.replica(authority)->pinCount;
+                }
                 entry.shardOwner->publicationAdditionRecordsTransferred += additionRecords;
                 const bool headerInstalled = entry.shardOwner->installReservedHeader(entry.key(), &page->second, publication->next);
                 Q_ASSERT(headerInstalled);

@@ -1275,6 +1275,8 @@ private Q_SLOTS:
     void recoverableWriteGuards();
     void preparedRecoverableWriteLifecycle_data();
     void preparedRecoverableWriteLifecycle();
+    void preparedPrivateWritePreservesProtection_data();
+    void preparedPrivateWritePreservesProtection();
     void recoverableWritePreparationHonorsBudget();
     void mutationWriteSetUsesInlineAndSparseIndexStorage();
     void mutationStorageGrowthIsStableAndCharged();
@@ -7450,6 +7452,98 @@ void KisPageStoreReferenceTest::recoverableWriteGuards()
     if (variant == 0) {
         QVERIFY(!machine.apply(page, fresh).accepted);
         QVERIFY(!metadata.prepareRecoverableWrite(tx, fresh).isValid());
+    }
+}
+
+void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection_data()
+{
+    QTest::addColumn<bool>("preparedBase");
+    QTest::addColumn<int>("outcome");
+    for (bool prepared : {false, true})
+        for (int outcome = 0; outcome != 4; ++outcome)
+            QTest::newRow(qPrintable(QStringLiteral("prepared%1-outcome%2").arg(prepared).arg(outcome)))
+                << prepared << outcome;
+}
+
+void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection()
+{
+    QFETCH(bool, preparedBase);
+    QFETCH(int, outcome);
+    const KisPageTransaction tx{{74}, {1}};
+    auto page = pageWithHistory(128);
+    auto &base = preparedBase ? page.versions.last() : page.versions.first();
+    if (preparedBase) {
+        base.publication = KisPagePublicationState::Prepared;
+        base.preparedBy = tx.id;
+    }
+    KisCompletionRegistry registry;
+    const auto pending = registry.allocatePending(registry.registerSource(KisCompletionDomain::CpuJob));
+    base.replicas.first().pinCount = 2;
+    base.replicas.first().readLeases.append({4});
+    base.replicas.first().pendingLastUses.append(pending);
+    auto second = base.authority; second.allocation.slot = 10000;
+    base.replicas.append({second, KisReplicaValidity::Valid, {}, {{5}}, 3, {pending}});
+    for (quint64 token = 1; token <= 20; ++token) base.capturedReadViews.append({token});
+    KisPageTransition write;
+    write.kind = KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = base.version;
+    write.version = {page.key, page.nextGeneration};
+    write.source = base.authority; write.target = base.authority;
+    write.target.version = write.version; write.target.allocation.slot = 10001;
+    write.writer = {51}; write.operation = {52}; write.transaction = tx.id;
+    KisPageMetadataCoordinator metadata;
+    MetadataEffectReceiver receiver;
+    attachEffects(metadata, receiver);
+    QVERIFY(metadata.configure(4));
+    QVERIFY(metadata.registerPage(page));
+    auto expected = page;
+    auto candidate = metadata.preparePrivateWrite(tx, write);
+    QVERIFY(candidate.isValid());
+    // No replacement storage for either existing replica or its protections.
+    QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
+    QCOMPARE(metadata.footprint().replicaArena.outstandingReservations, quint64(1));
+    const KisPageStateMachine machine;
+    if (outcome == 2) {
+        KisPageTransition read;
+        read.kind = KisPageTransitionKind::AcquireRead;
+        read.version = write.baseVersion; read.target = write.source; read.lease = {99}; read.transaction = tx.id;
+        const auto changed = machine.apply(expected, read);
+        QVERIFY(changed.accepted);
+        QVERIFY(metadata.applyOwner(page.key, read).accepted);
+        expected = changed.next;
+        QVERIFY(!metadata.installPrivateWrite(std::move(candidate), tx, nullptr, nullptr));
+        candidate = metadata.preparePrivateWrite(tx, write);
+        QVERIFY(candidate.isValid());
+    }
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    if (outcome == 3) candidate = {};
+    else {
+        QVERIFY(metadata.installPrivateWrite(std::move(candidate), tx, nullptr, &cleanup));
+        const auto acquired = machine.apply(expected, write);
+        QVERIFY(acquired.accepted);
+        auto ready = write; ready.kind = KisPageTransitionKind::PrepareWrite;
+        const auto writable = machine.apply(acquired.next, ready);
+        QVERIFY(writable.accepted);
+        expected = writable.next;
+    }
+    while (!cleanup.isEmpty()) QVERIFY(cleanup.clearBatch(1) > 0);
+    KisPageStateSnapshot actual;
+    QVERIFY(metadata.pageSnapshot(page.key, &actual));
+    comparePageRecords(actual, expected);
+    QCOMPARE(metadata.footprint().replicaArena.outstandingReservations, quint64(0));
+    QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
+    if (outcome == 3) return;
+    const QVector<KisPageTransitionKind> finish = outcome == 1
+        ? QVector<KisPageTransitionKind>{KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite}
+        : QVector<KisPageTransitionKind>{KisPageTransitionKind::CancelWrite};
+    for (const auto kind : finish) {
+        auto transition = write; transition.kind = kind;
+        const auto next = machine.apply(expected, transition);
+        QVERIFY(next.accepted);
+        QVERIFY(metadata.applyOwner(page.key, transition).accepted);
+        expected = next.next;
+        QVERIFY(metadata.pageSnapshot(page.key, &actual));
+        comparePageRecords(actual, expected);
     }
 }
 
