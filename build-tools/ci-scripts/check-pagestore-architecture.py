@@ -1147,7 +1147,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "class KisPagePublicationCoordinator final",
             "class KisPreparedMutationCommit final",
             "std::unique_ptr<Data, DataDeleter> data",
-            "using DescriptorMap = std::map",
+            "using PreparedDescriptors = boost::container::small_vector",
+            "struct KisPageOperationPublication",
+            "KisReplicaHandle spare",
             "using DefaultRevisionMap = std::map",
             "boost::intrusive::list<CommitPreparation> m_preparingCommits",
             "struct KisPagePublicationDelta",
@@ -1167,6 +1169,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(f"R1 PublicationCoordinator contract is missing: {contract}")
         if "QObject" in header_text:
             errors.append("R1 PublicationCoordinator must not inherit or own QObject behavior")
+        if "DescriptorMap" in header_text:
+            errors.append("Version descriptors must stay in original metadata facts, not a second map")
         for forbidden in (
             "m_preparedProofs",
             "m_synchronousHostCompletions",

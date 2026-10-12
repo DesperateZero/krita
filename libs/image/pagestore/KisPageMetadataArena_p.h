@@ -46,10 +46,12 @@ inline size_t qHash(KisGenerationalSlotId<Tag> slot, size_t seed = 0) noexcept
 }
 
 struct KisVersionSlotTag;
+struct KisVersionFactsSlotTag;
 struct KisReplicaSlotTag;
 struct KisMetadataOverflowSlotTag;
 
 using KisVersionSlotId = KisGenerationalSlotId<KisVersionSlotTag>;
+using KisVersionFactsSlotId = KisGenerationalSlotId<KisVersionFactsSlotTag>;
 using KisReplicaSlotId = KisGenerationalSlotId<KisReplicaSlotTag>;
 using KisMetadataOverflowSlotId = KisGenerationalSlotId<KisMetadataOverflowSlotTag>;
 
@@ -352,6 +354,8 @@ public:
         for (auto &entry : m_directory)
             prepared->m_entries.emplace_back(std::move(entry));
         m_directory.swap(prepared->m_entries);
+        m_statistics.directoryCapacityBytes = kisPageStorageAllocationBytes(
+            m_directory.capacity() * sizeof(DirectoryEntry), alignof(DirectoryEntry));
         return true;
     }
 

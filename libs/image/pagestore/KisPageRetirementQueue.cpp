@@ -615,12 +615,26 @@ KisPageRetirementRecordPointer KisPageRetirementQueue::takeEffectRecord(
 
 void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect) noexcept
 {
-    auto record = takeEffectRecord(effect);
+    acceptRecord(takeEffectRecord(effect));
+}
+
+void KisPageRetirementQueue::acceptUnusedWorkingCapacity(const KisReplicaHandle &replica) noexcept
+{
+    if (m_owner.backingClass(replica) != KisBackingBudgetClass::ActivePending)
+        qFatal("Unused working capacity lost its original charge");
+    m_metadata.removeCpuReadBinding(replica);
+    auto record = m_owner.takeRetirementRecord(replica);
+    if (!record) qFatal("Unused working capacity lost its original retirement record");
+    acceptRecord(std::move(record));
+}
+
+void KisPageRetirementQueue::acceptRecord(KisPageRetirementRecordPointer record) noexcept
+{
     // Registration fixed this threading permission before any backing existed.
     // Transfer needs neither a provider callback nor additional storage.
     const bool background = record->backgroundRetirement;
     QMutexLocker lock(&m_mutex);
-    m_pendingBytes += effect.replica.layout.byteSize;
+    m_pendingBytes += record->replica.layout.byteSize;
     m_ready.push_back(*record.release());
     updatePeaksLocked();
     if (background) schedulePassLocked();

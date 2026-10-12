@@ -29,6 +29,8 @@ std::atomic<quint64> s_nextRequestId{1};
 std::atomic<quint64> s_nextOperationId{1};
 std::atomic<quint64> s_nextLeaseId{1};
 std::atomic<quint64> s_nextWriterToken{1};
+std::atomic<quint64> s_nextProofIssuer{1};
+struct ProofIssuerId { quint64 value = 0; };
 
 using ProviderKey = QPair<quint64, quint64>;
 
@@ -567,6 +569,8 @@ public:
     mutable QMutex mutex;
     std::shared_ptr<KisCompletionRegistry> completions;
     quint64 nextValidationStamp = 1;
+    KisPageMetadataCoordinator *cpuMetadata = nullptr;
+    quint64 cpuProofIssuer = 0;
     ProviderIndex providers;
     quint64 providerRevision = 0;
     OperationIndex operations;
@@ -2120,7 +2124,23 @@ qsizetype KisPageOwnerLedger::publicationBlockingOperationCount() const
 qsizetype KisPageOwnerLedger::sealedProofCount() const
 {
     QMutexLocker locker(&d->mutex);
-    return d->sealedProofs.size();
+    const qsizetype exported = d->sealedProofs.size();
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    locker.unlock();
+    return exported + (metadata ? metadata->cpuProofCount(issuer) : 0);
+}
+
+bool KisPageOwnerLedger::bindCpuProofs(KisPageMetadataCoordinator &metadata)
+{
+    QMutexLocker locker(&d->mutex);
+    if (d->cpuMetadata) return d->cpuMetadata == &metadata;
+    if (!d->completions) return false;
+    const auto issuer = KisPageStoreDetail::allocateMonotonicId<ProofIssuerId>(&s_nextProofIssuer).value;
+    if (!issuer || !metadata.bindCpuProofIssuer(issuer)) return false;
+    d->cpuMetadata = &metadata;
+    d->cpuProofIssuer = issuer;
+    return true;
 }
 
 bool KisPageOwnerLedger::ownsPreparedPageProof(
@@ -2130,7 +2150,11 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
         return false;
     QMutexLocker locker(&d->mutex);
     const auto found = d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
-    return found != d->sealedProofs.end() && found->proof == proof;
+    if (found != d->sealedProofs.end() && found->proof == proof) return true;
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    locker.unlock();
+    return metadata && metadata->ownsCpuProof(proof, issuer);
 }
 
 bool KisPageOwnerLedger::sealPreparedPage(
@@ -2141,6 +2165,34 @@ bool KisPageOwnerLedger::sealPreparedPage(
     const KisCompletionTicket &producerCompletion,
     KisPreparedPageProof *proof,
     QString *error, bool *storageRefused)
+{
+    return sealPreparedPageImpl(metadata, version, transaction, descriptor,
+        producerCompletion, proof, error, storageRefused, nullptr);
+}
+
+bool KisPageOwnerLedger::sealCpuPreparedPage(const KisPageVersion &version,
+    KisPageTransactionId transaction, const KisPageAllocationDescriptor &descriptor,
+    const KisCompletionTicket &producerCompletion, KisPreparedPageProof *proof,
+    QString *error, bool *storageRefused)
+{
+    KisPageMetadataCoordinator *metadata;
+    {
+        QMutexLocker locker(&d->mutex);
+        metadata = d->cpuMetadata;
+    }
+    if (!metadata) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU proof owner is not configured"));
+        return false;
+    }
+    return sealPreparedPageImpl(*metadata, version, transaction, descriptor,
+        producerCompletion, proof, error, storageRefused, metadata);
+}
+
+bool KisPageOwnerLedger::sealPreparedPageImpl(const KisPageMetadataCoordinator &metadata,
+    const KisPageVersion &version, KisPageTransactionId transaction,
+    const KisPageAllocationDescriptor &descriptor, const KisCompletionTicket &producerCompletion,
+    KisPreparedPageProof *proof, QString *error, bool *storageRefused,
+    KisPageMetadataCoordinator *cpuDestination)
 try
 {
     if (storageRefused) *storageRefused = false;
@@ -2179,7 +2231,8 @@ try
         return false;
     }
 
-    auto record = prepareLedgerNode<SealedProofRecord>(budget);
+    LedgerNode<SealedProofRecord> record;
+    if (!cpuDestination) record = prepareLedgerNode<SealedProofRecord>(budget);
     const std::shared_ptr<KisPageReplicaProvider> authorityProvider =
         provider(snapshot.authority.provider, snapshot.authority.providerEpoch);
     if (!authorityProvider ||
@@ -2202,6 +2255,20 @@ try
     if (!sealed.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof could not be sealed"));
         return false;
+    }
+    if (cpuDestination) {
+        const auto issuer = d->cpuProofIssuer;
+        // Reserve the nonce under the ledger lock, then enter the metadata
+        // shard without reversing the owner/shard/ledger lock order.
+        ++d->nextValidationStamp;
+        locker.unlock();
+        if (!cpuDestination->sealCpuProof(sealed, issuer)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("CPU proof version changed or already has a capability"));
+            return false;
+        }
+        *proof = sealed;
+        KisPageStoreDetail::setError(error, {});
+        return true;
     }
     record->proof = sealed;
     d->sealedProofs.insert(*record);
@@ -2232,12 +2299,13 @@ try
         return false;
     }
     std::shared_ptr<KisCompletionRegistry> completions;
+    if (!ownsPreparedPageProof(proof)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof was not sealed by this owner"));
+        return false;
+    }
     {
         QMutexLocker locker(&d->mutex);
-        const auto sealedIt =
-            d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
-        if (!d->completions || sealedIt == d->sealedProofs.end() ||
-            !(sealedIt->proof == proof)) {
+        if (!d->completions) {
             KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof was not sealed by this owner"));
             return false;
         }
@@ -2282,7 +2350,10 @@ bool KisPageOwnerLedger::revokePreparedPage(const KisPreparedPageProof &proof)
     auto proofIt = d->sealedProofs.find(proof.providerValidationStamp, ProofLess{});
     if (!d->completions || proofIt == d->sealedProofs.end() ||
         !(proofIt->proof == proof)) {
-        return false;
+        auto *metadata = d->cpuMetadata;
+        const auto issuer = d->cpuProofIssuer;
+        locker.unlock();
+        return metadata && metadata->revokeCpuProof(proof, issuer);
     }
     released.reset(&*proofIt);
     d->sealedProofs.erase(proofIt);

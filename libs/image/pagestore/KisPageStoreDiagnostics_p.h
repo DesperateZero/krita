@@ -107,8 +107,13 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     // prepared here, before metadata or the visible transaction delta changes.
     MutationSealStoragePrepare,
     MutationSealMetadataPrepare,
+    // Before the chosen destination accepts; owner is not held. An anonymous
+    // operation may next publish canonical directly. Cleanup is after that
+    // acceptance, so it is not a pre-canonical observation boundary.
     MutationSealPublishOwnerWait,
     MutationSealSurfacePrepare,
+    // Destination acceptance, including canonical preparation when selected.
+    // Its atomic installation interval remains CommitMetadataApply/RootPublication.
     MutationSealInstall,
     MutationSealCleanup,
     // Unfiltered product recorder only: source/destination/mask have different

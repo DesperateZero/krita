@@ -112,6 +112,7 @@ struct KRITAIMAGE_EXPORT KisPageMetadataMetrics : KisPageMetadataShardMetrics {
 
 struct KRITAIMAGE_EXPORT KisPageMetadataArenaStatistics {
     quint64 directoryEntries = 0;
+    quint64 directoryCapacityBytes = 0;
     quint64 activeBlocks = 0;
     quint64 attachedBlocks = 0;
     quint64 allocatedBytes = 0;
@@ -128,7 +129,8 @@ struct KRITAIMAGE_EXPORT KisPageMetadataArenaStatistics {
 
     KisPageMetadataArenaStatistics &operator+=(const KisPageMetadataArenaStatistics &rhs)
     {
-        directoryEntries += rhs.directoryEntries; activeBlocks += rhs.activeBlocks;
+        directoryEntries += rhs.directoryEntries; directoryCapacityBytes += rhs.directoryCapacityBytes;
+        activeBlocks += rhs.activeBlocks;
         attachedBlocks += rhs.attachedBlocks; allocatedBytes += rhs.allocatedBytes;
         usedSlots += rhs.usedSlots; freeSlots += rhs.freeSlots; highWaterSlots += rhs.highWaterSlots;
         releasedBytes += rhs.releasedBytes; quarantinedSlots += rhs.quarantinedSlots;
@@ -176,6 +178,7 @@ struct KRITAIMAGE_EXPORT KisPageMetadataFootprint {
     // directory/shared-control allocation requests appear in backing usage.
     quint64 owningCapacityBytes = 0;
     KisPageMetadataArenaStatistics versionArena;
+    KisPageMetadataArenaStatistics versionFactsArena;
     KisPageMetadataArenaStatistics replicaArena;
     KisPageMetadataArenaStatistics overflowArena;
     KisPageMetadataIndexStatistics exactVersionIndex;
@@ -260,6 +263,17 @@ private:
     using ReplicaCandidates = std::vector<ReplicaCandidate, KisMutationStorageAllocator<ReplicaCandidate>>;
     bool versionSnapshot(const KisPageVersion &version, VersionInfo *snapshot,
                          ReplicaCandidates *replicas = nullptr) const;
+    // The original owner gate protects descriptor replacement/removal. A
+    // borrowed pointer requires the caller's existing version/range lifetime.
+    std::shared_ptr<const KisPageAllocationDescriptor> versionDescriptor(const KisPageVersion &) const;
+    const KisPageAllocationDescriptor *borrowVersionDescriptor(const KisPageVersion &) const;
+    bool exchangeVersionDescriptor(const KisPageVersion &,
+        std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
+    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer);
+    bool bindCpuProofIssuer(quint64 issuer);
+    bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
+    bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
+    qsizetype cpuProofCount(quint64 issuer) const;
     struct MutationBaseInfo {
         bool baseExists = false;
         bool hasWriter = false;
@@ -398,6 +412,9 @@ private:
         qsizetype pendingWorkUnits() const;
         qsizetype clearBatch(qsizetype maximumWorkUnits);
         void dispose(const std::shared_ptr<DeferredMetadataCleanupStatistics> &statistics);
+        // Installation result only. Original input ordinals survive shard
+        // ordering; the owner consumes them before handing cleanup to a worker.
+        void forEachReleasedMutation(void *context, void (*visit)(void *, size_t)) const;
 
     private:
         PreparedPublication::DataPointer data;
@@ -422,7 +439,12 @@ private:
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
                                            const KisPageVersion *versions, qsizetype count,
                                            QString *error = nullptr) const;
-    enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite };
+    enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite, PrivateWrite };
+    struct MutationDetachment {
+        KisPageVersion version;
+        size_t ownerIndex = 0;
+        bool releaseUnusedCapacity = false;
+    };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
                                                const KisPageTransition *transitions, qsizetype count,
@@ -430,7 +452,8 @@ private:
                                                QString *error,
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
-                                               const PublicationChange *changes = nullptr) const;
+                                               const PublicationChange *changes = nullptr,
+                                               const MutationDetachment *detachments = nullptr) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.
@@ -440,6 +463,9 @@ private:
     // operation IDs and epoch tags cannot enter this capability.
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
                                         const KisPageVersion *versions, qsizetype count,
+                                        QString *error = nullptr) const;
+    PreparedPublication prepareMutation(const KisPageTransaction &transaction,
+                                        const MutationDetachment *versions, qsizetype count,
                                         QString *error = nullptr) const;
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
@@ -458,6 +484,13 @@ private:
                                  const KisPageTransaction &transaction,
                                  QString *error = nullptr,
                                  DeferredPublicationCleanup *deferredCleanup = nullptr);
+    PreparedPublication preparePrivateWrite(const KisPageTransaction &transaction,
+                                            const KisPageTransition &transition,
+                                            QString *error = nullptr) const;
+    bool installPrivateWrite(PreparedPublication &&prepared,
+                             const KisPageTransaction &transaction,
+                             QString *error,
+                             DeferredPublicationCleanup *deferredCleanup);
     // Publication keeps superseded replicas in history; retirement effects
     // are produced later by history GC or an explicit abort/discard.
     bool installPublication(PreparedPublication &&prepared,

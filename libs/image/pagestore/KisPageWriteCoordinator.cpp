@@ -2767,7 +2767,19 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     KisPageStoreDiagnosticTimer &diagnostic)
 {
     const auto fallback = select(intent);
-    if (!before.isValid() || intent.inputKind == KisPageWriteInputKind::Semantic || !provider
+    auto spare = publication.takeWorkingCapacityLocked(transaction.id, write.version.key);
+    const auto retireUnused = qScopeGuard([&] {
+        if (!spare.isValid()) return;
+        // Give abandoned optional capacity its first retirement attempt
+        // before Fresh admission. Otherwise this operation could be refused
+        // by its own spare's ActivePending charge. Physical refusal still
+        // transfers the original funded record to the existing retry queue.
+        if (locker.isLocked()) locker.unlock();
+        const auto restoreLock = qScopeGuard([&] { locker.relock(); });
+        auto originalProvider = ownerLedger->provider(spare.provider, spare.providerEpoch);
+        publication.m_retirementQueue.retireOrDefer(spare, originalProvider, {}, {});
+    });
+    if (intent.inputKind == KisPageWriteInputKind::Semantic || !provider
         || (intent.flags & quint8(KisPageWriteIntentFlag::SourceInitialization))
         || access.domain != KisPageAccessDomain::CpuRam || access.kind != KisPageAccessKind::CpuPointer
         || write.source.domain != KisPageAccessDomain::CpuRam
@@ -2780,16 +2792,20 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     if (transientLimit != std::numeric_limits<quint32>::max()
         && !metadata->canAddTransientVersion(write.version, transientLimit)) return fallback;
 
+    const bool reuseCapacity = spare.isValid();
+    if (!reuseCapacity && !before.isValid()) return fallback;
+
     // Cold short-lived storage only. The existing owners retain every live
     // fact after install; neither adapter receives a second terminal ledger.
     struct Prepared {
         std::shared_ptr<KisPageReplicaProvider> beforeProvider;
         std::shared_ptr<KisCpuResidentBinding> beforeBinding;
         bool beforePinned = false;
+        const void *sourceBytes = nullptr;
         KisBackingHandoffReservation accounting;
         KisPageMetadataCoordinator::PreparedPublication metadata;
         KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-        KisPagePublicationCoordinator::DescriptorMap descriptors;
+        KisPagePublicationCoordinator::PreparedDescriptors descriptors;
         ~Prepared()
         {
             if (beforePinned) beforeBinding->releaseRead();
@@ -2814,29 +2830,37 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepare, 1);
     // Check the source before pinning the independent before or preparing
     // fallible storage. This observes eligibility but acquires no write claim.
-    physical = KisCpuBackingHandoff::prepare(provider, write.source, write.version, descriptor);
+    physical = KisCpuBackingHandoff::prepare(provider, reuseCapacity ? spare : write.source, write.version, descriptor);
     if (!physical.isValid()) return fallback;
     prepared.emplace();
     // The caller already retains this exact source provider across the plan
     // and its cleanup. Only an independent provider needs another ledger owner.
-    auto *beforeProvider = provider.get();
-    if (!(before.provider == write.source.provider) || !(before.providerEpoch == write.source.providerEpoch)) {
-        prepared->beforeProvider = ownerLedger->provider(before.provider, before.providerEpoch);
-        beforeProvider = prepared->beforeProvider.get();
+    const bool needsSource = !reuseCapacity || (write.writeMode == KisPageWriteMode::PreserveContents
+        && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady)));
+    if (needsSource) {
+        const auto &source = reuseCapacity ? write.source : before;
+        auto *beforeProvider = provider.get();
+        if (!(source.provider == write.source.provider) || !(source.providerEpoch == write.source.providerEpoch)) {
+            prepared->beforeProvider = ownerLedger->provider(source.provider, source.providerEpoch);
+            beforeProvider = prepared->beforeProvider.get();
+        }
+        if (!beforeProvider) return fallback;
+        prepared->beforeBinding = beforeProvider->cpuResidentBinding(source);
+        prepared->sourceBytes = prepared->beforeBinding
+            ? prepared->beforeBinding->acquireRead(source.allocationIdentity(), true) : nullptr;
+        prepared->beforePinned = bool(prepared->sourceBytes);
+        if (!prepared->beforePinned) return fallback;
     }
-    if (!beforeProvider) return fallback;
-    prepared->beforeBinding = beforeProvider->cpuResidentBinding(before);
-    prepared->beforePinned = prepared->beforeBinding
-        && prepared->beforeBinding->acquireRead(before.allocationIdentity(), true);
     auto recoverable = write;
-    recoverable.kind = KisPageTransitionKind::AcquireRecoverableWrite;
-    recoverable.source = before;
-    recoverable.target = physical.target();
-    if (prepared->beforePinned) {
-        prepared->accounting = ownerLedger->prepareBackingHandoff(write.source, recoverable.target);
-        if (prepared->accounting.isValid())
-            prepared->metadata = metadata->prepareRecoverableWrite(transaction, recoverable);
+    if (!reuseCapacity) {
+        recoverable.kind = KisPageTransitionKind::AcquireRecoverableWrite;
+        recoverable.source = before;
     }
+    recoverable.target = physical.target();
+    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, recoverable.target);
+    if (prepared->accounting.isValid())
+        prepared->metadata = reuseCapacity ? metadata->preparePrivateWrite(transaction, recoverable)
+            : metadata->prepareRecoverableWrite(transaction, recoverable);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepared, 1);
     locker.relock();
     if (!prepared->metadata.isValid()) return fallback;
@@ -2844,15 +2868,18 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     // All fallible storage exists before taking the physical claim. Metadata
     // install strictly rechecks the page revision and exact recovery identity.
     prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
-    const auto plan = select(intent, nullptr, true);
+    const auto plan = reuseCapacity ? KisPageWritePlanKind::ReuseWorkingCapacity : select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
-    if (plan != KisPageWritePlanKind::RecoverableHandoff || !physical.tryClaim()) return fallback;
-    if (!metadata->installRecoverableWrite(std::move(prepared->metadata), transaction,
-                                           nullptr, &prepared->cleanup)) return fallback;
+    if (!physical.tryClaim()) return fallback;
+    const bool installed = reuseCapacity
+        ? metadata->installPrivateWrite(std::move(prepared->metadata), transaction, nullptr, &prepared->cleanup)
+        : metadata->installRecoverableWrite(std::move(prepared->metadata), transaction, nullptr, &prepared->cleanup);
+    if (!installed) return fallback;
     writable = physical.commit();
     const bool accounted = ownerLedger->commitBackingHandoff(std::move(prepared->accounting));
     Q_ASSERT(writable.isValid() && accounted);
     Q_UNUSED(accounted);
+    spare = {}; // The original ledger now owns the target identity.
     publication.installDescriptorAdditionsLocked(&prepared->descriptors);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstalled, 1);
     // A discard guard without final input preserves the existing adapter
@@ -2860,7 +2887,17 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     // bypasses this fill and is written directly by the native payload caller.
     // Retag already owns a pinned writer, so this synchronous kernel cannot
     // require storage, I/O, callbacks or another permission check.
-    if (write.writeMode == KisPageWriteMode::DiscardContents
+    if (reuseCapacity && needsSource) {
+        locker.unlock();
+        auto *bytes = static_cast<quint8 *>(writable.pinResident());
+        Q_ASSERT(bytes);
+        const auto rowBytes = descriptor.minimumRowBytes();
+        for (int y = 0; y < descriptor.pageExtent.height(); ++y)
+            std::memcpy(bytes + quint64(y) * recoverable.target.layout.rowStride,
+                static_cast<const quint8 *>(prepared->sourceBytes) + quint64(y) * write.source.layout.rowStride,
+                size_t(rowBytes));
+        locker.relock();
+    } else if (write.writeMode == KisPageWriteMode::DiscardContents
         && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))) {
         locker.unlock();
         auto *bytes = static_cast<quint8 *>(writable.pinResident());
@@ -3228,6 +3265,12 @@ bool KisPageWriteCoordinator::transactionHasSession(KisPageTransactionId transac
 {
     const auto *found = transactionActivities.find(transaction.value);
     return found && found->sessions > 0;
+}
+
+bool KisPageWriteCoordinator::transactionHasSoleSession(KisPageTransactionId transaction) const
+{
+    const auto *found = transactionActivities.find(transaction.value);
+    return found && found->sessions == 1 && !found->preparations && !found->genericWrites;
 }
 
 void KisPageWriteCoordinator::endActivity(KisPageTransactionId transaction, qsizetype TransactionActivity::*member)

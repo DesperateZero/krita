@@ -61,7 +61,8 @@ enum class KisPageWritePlanKind : quint8 {
     FreshPayload,
     FreshDiscard,
     FreshCow,
-    RecoverableHandoff
+    RecoverableHandoff,
+    ReuseWorkingCapacity
 };
 
 enum class KisPageWriteIntentFlag : quint8 {
@@ -681,6 +682,7 @@ public:
     bool transactionHasMutationActivity(KisPageTransactionId) const;
     bool transactionHasSessionOrPreparation(KisPageTransactionId) const;
     bool transactionHasSession(KisPageTransactionId) const;
+    bool transactionHasSoleSession(KisPageTransactionId) const;
 
 private:
     struct TransactionActivity {

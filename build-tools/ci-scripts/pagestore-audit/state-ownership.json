@@ -66,7 +66,8 @@
       "terminal-paths": [
         "finishOwnedTransaction clears ownership only after accepted commit/abort or facade-gone terminal cleanup",
         "releaseOrRetain and retryOrphans share cancelAndAbort on the same original scope; no manager callback enters orphan retirement",
-        "borrowed explicit history never takes this ownership; source storage and scope lifetime remain until accepted cancellation/terminal release"
+        "borrowed explicit history never takes this ownership; source storage and scope lifetime remain until accepted cancellation/terminal release",
+        "Eligible anonymous Final/AdapterDelivery accepts directly through the common canonical commit input while the sole original session transfers to CommitPreparation under the Store gate. Success relinquishes ownsTransaction only after acceptance; rejection retains original cancellation/abort responsibility."
       ],
       "lock-or-claim": "scope mutex plus Store owner mutex and original transaction; history collector schedules the original intrusive orphan link"
     },
@@ -228,7 +229,7 @@
         "KisPageOwnerLedger::bindProviderOperation remains the explicit pending/reference binding seam, not a production synchronous-result consumer",
         "original retirement admission prepares a charged operation-index node before physical allocation; prepareRetirementOperation inserts that node before retire, and bindRetirementOperation only fills its completion",
         "provider registration prepares one actual charged index node before invoking admission; the same pending node becomes accepted by assigning its revision, eliminating the second pending set and post-acceptance insertion allocation. A scalar accepted cut plus gate-local lookup serves both routing and domain synchronization without a Qt registry copy/list; pending/later registrations are excluded",
-        "sealPreparedPage prepares its actual proof index node before provider validation and advances the validation stamp only after allocation-free insertion. Funded nodes retain their allocation budget; pre-attachment allocations use the finite process storage authority rather than an uncharged heap fallback"
+        "Generic sealPreparedPage retains independently issued proof nodes because multiple proofs per version are legal. Internal CPU sealCpuPreparedPage stores its single stamp/completion/transaction in the original prepaid metadata version facts. A monotonic ledger issuer rejects foreign ledgers; provider/completion and exact identity validation remain."
       ],
       "current-writers": [
         "KisPageOwnerLedger"
@@ -249,7 +250,7 @@
         "terminal extraction returns the operation node to its original retirement record; invalid provider refusal cancels the prepared slot without losing its storage",
         "closeSession drain",
         "provider admission refusal or exception unlinks the same pending node before its gate-free disposal; accepted records remain stable until ledger destruction, with no external registration result queue",
-        "revokePreparedPage unlinks the exact original proof node and frees it after the ledger locker; destruction disposes provider/proof indexes at their original member lifetime order"
+        "revokePreparedPage unlinks exported proof nodes outside the ledger gate, or consumes the internal CPU stamp under the metadata shard gate after releasing the ledger gate. Logical removal also consumes that stamp; generic exported proofs retain their independent lifetime."
       ]
     },
     {
@@ -497,7 +498,7 @@
       ],
       "fact": "prepared publication delta and publication orchestration",
       "id": "BR1-OWN-PREPARED-PUBLICATION",
-      "lock-or-claim": "store owner mutex plus original transaction mutation/commit-preparation claims; KisPreparedOverlayUpdate owns real missing nodes, concurrent bucket reservations and deferred old nodes; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
+      "lock-or-claim": "store owner mutex plus original transaction mutation/commit-preparation claims; KisPreparedPagePublication owns real missing nodes, concurrent bucket reservations and deferred old nodes; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
       "read-only-observers": [
         "KisCapturedReadView",
         "KisPageMutationSession",
@@ -511,7 +512,7 @@
         "Prepared -> Cancelled conflict or metadata rejection",
         "transaction abort",
         "move-from -> Empty",
-        "Overlay Data/control, transaction index/state/control, proof/removal nodes and buckets, surface/version/change arrays and extracted-node holders use actual MetadataArena capacity. The original state is the only delta; overlapping candidates reserve all pending insertions. Surface preparation and exact revalidation precede metadata install; install transfers original nodes without growth. Superseded versions remain in metadata until retirement acceptance; missing History key capacity is retained by the original rescanRequested fact, with one foreground/background collection policy. Commit/restore Data, descriptor-change arrays and ordered descriptor/configuration index nodes use actual capacity; every descriptor consumer prepares before provider or metadata success and installs the exact node. Equal layouts share immutable descriptor values in that same index; native Pages borrow them under original claim/session protection rather than retaining duplicate values. Call-owned intrusive commit/abort claims never allocate. Default high-water configuration is prepared atomically before owner/root initialization. Inert commit/descriptor storage tails retain accounting through actual deallocation after controller destruction; active semantic candidates still depend on their original owners. Outer Qt/epoch inputs, other wrappers and complete fixed/bootstrap/permanent-pressure exits remain open."
+        "PreparedPagePublication owns original sorted change rows and actual paid installation capacity. H1 retains the sole transaction delta with at most one charged spare per page. Unprotected superseded CPU Prepared versions exit metadata directly; checkout still requires physical claim, retag and budget rekey. Rejected checkout, removal, commit, abort and shutdown consume the original prepaid retirement record. Protected versions keep the existing history path. Eligible anonymous sole-session H0 borrows the same candidate rows into the common commit core without an intermediate overlay map; commit claim protects all unlocked preparation. Explicit history, checkpoints, legacy and generic producers retain overlay semantics. Descriptors belong to prepaid metadata version facts, sharing only exact base or batch values; transient small-vector preparation is not a second index. Default revision configuration, immutable epoch candidates and exported clone data keep their real consumers. Dynamic revision/provider/budget validation and original failure ownership remain."
       ]
     },
     {
@@ -539,7 +540,8 @@
         "historical collection and retirement",
         "coordinator close",
         "PreparedPublication owns paid Data with bounded trailing claim/publication/growth values, a sorted authority array and nested installation protections. Local projection scopes and the original Data retain storage roots; all their nested working values, arrays and growth carriers use explicit borrowing allocators. Every actual allocation still retains its original owner and charge until physical free. Data declares its root before borrowed members and its deleter retains that root through final free, covering cancellation, incremental and worker cleanup after controller detachment. Arena directory roots live in the arena before its borrowed directory; prepared directories borrow the preparing scope, so swapping into the arena preserves both lifetimes. Shard maps borrow the original budgetAuthority that outlives them. Ordinary publication compacts original deltas and transfers appended records; recoverable preparation transfers base/target records to installRecords. The same Data is its bounded reusable reclamation job; no second cleanup job exists. Entries keep their original activity reservation through transient install claims, and releaseActivity remains shared by cancellation, incremental clear and destruction; semantic reset does not skip physical reservations",
-        "Generic transition work and public oracle value/COW arrays share the single StateMachine policy. Local owner sequences consume their original paid work value and retain only input version identities for accepted removals and stale-attempt accounting. Strict page revision revalidation covers every unlocked growth/retirement preparation; rejection changes no authoritative record and cancels prepared Debt. Nested format byte storage and immutable snapshot arrays have actual process allocation owners. Validation scans original input without duplicate Qt sets"
+        "Generic transition work and public oracle value/COW arrays share the single StateMachine policy. Local owner sequences consume their original paid work value and retain only input version identities for accepted removals and stale-attempt accounting. Strict page revision revalidation covers every unlocked growth/retirement preparation; rejection changes no authoritative record and cancels prepared Debt. Nested format byte storage and immutable snapshot arrays have actual process allocation owners. Validation scans original input without duplicate Qt sets",
+        "Each original version owns one prepaid VersionFactsArena slot for descriptor and internal CPU proof. Growth, directories, reservations and block release use the original shard budget lifecycle; descriptor and read-binding destruction transfers to existing unlocked cleanup. Detachment applies current protection facts under all original page claims. Private working-capacity preparation uses the existing prepared metadata core; it introduces no second version owner."
       ]
     },
     {

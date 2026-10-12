@@ -113,6 +113,9 @@ KisReplicaHandle replicaHandle(const KisReplicaRecord &record, const KisPageVers
 }
 
 using VersionArena = KisShardSlotArena<KisVersionRecord, 16 * 1024>;
+// Few concurrently live versions per shard: a 16 KiB minimum here would
+// replace cheap nodes with mostly empty capacity. Growth remains prepaid.
+using VersionFactsArena = KisShardSlotArena<KisVersionFactsRecord, 512>;
 using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>;
 using OverflowArena = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>;
 
@@ -171,10 +174,12 @@ struct MetadataArenas {
     static constexpr quint64 OverflowBudget = 4 * 1024 * 1024;
 
     explicit MetadataArenas(KisMutationStorageAllocator<char> storage)
-        : versions(VersionBudget, storage), replicas(ReplicaBudget, storage)
+        : versions(VersionBudget, storage), facts(VersionBudget, storage), replicas(ReplicaBudget, storage)
         , overflow(OverflowBudget, storage) {}
 
     VersionArena versions;
+    VersionFactsArena facts;
+    qsizetype cpuProofs = 0;
     ReplicaArena replicas;
     OverflowArena overflow;
 
@@ -183,6 +188,7 @@ struct MetadataArenas {
         // second, so usage never understates memory that is still allocated.
         MetadataBudgetRelease budgetRelease;
         VersionArena::ReleasedBlocks versions;
+        VersionFactsArena::ReleasedBlocks facts;
         ReplicaArena::ReleasedBlocks replicas;
         OverflowArena::ReleasedBlocks overflow;
 
@@ -193,10 +199,12 @@ struct MetadataArenas {
             if (this == &other)
                 return *this;
             versions = {};
+            facts = {};
             replicas = {};
             overflow = {};
             budgetRelease.release();
             versions = std::move(other.versions);
+            facts = std::move(other.facts);
             replicas = std::move(other.replicas);
             overflow = std::move(other.overflow);
             budgetRelease = std::move(other.budgetRelease);
@@ -211,10 +219,11 @@ struct MetadataArenas {
     {
         ReleasedBlocks result;
         result.versions = versions.takeEmptyBlocks(minimumBlocksToKeep);
+        result.facts = facts.takeEmptyBlocks(minimumBlocksToKeep);
         result.replicas = replicas.takeEmptyBlocks(minimumBlocksToKeep);
         result.overflow = overflow.takeEmptyBlocks(minimumBlocksToKeep);
         const quint64 bytes = result.versions.byteSize()
-            + result.replicas.byteSize() + result.overflow.byteSize();
+            + result.facts.byteSize() + result.replicas.byteSize() + result.overflow.byteSize();
         if (bytes) {
             Q_ASSERT(budgetCharge);
             result.budgetRelease = budgetCharge->take(bytes);
@@ -231,6 +240,7 @@ struct MetadataArenaDemand {
 
 struct MetadataArenaReservations {
     VersionArena::Reservation versions;
+    VersionFactsArena::Reservation facts;
     ReplicaArena::Reservation replicas;
     OverflowArena::Reservation overflow;
 
@@ -241,6 +251,11 @@ struct MetadataArenaReservations {
             versions = arenas->versions.reserveSlots(qsizetype(demand.versions));
             if (!versions.isValid())
                 return false;
+            facts = arenas->facts.reserveSlots(qsizetype(demand.versions));
+            if (!facts.isValid()) {
+                cancel(arenas);
+                return false;
+            }
         }
         if (demand.replicas > 0) {
             replicas = arenas->replicas.reserveSlots(qsizetype(demand.replicas));
@@ -264,6 +279,7 @@ struct MetadataArenaReservations {
         if (!arenas)
             return;
         arenas->versions.cancelReservation(&versions);
+        arenas->facts.cancelReservation(&facts);
         arenas->replicas.cancelReservation(&replicas);
         arenas->overflow.cancelReservation(&overflow);
     }
@@ -276,10 +292,12 @@ struct MetadataArenaGrowthPlan {
     quint64 versionDirectory = 0;
     quint64 replicaDirectory = 0;
     quint64 overflowDirectory = 0;
+    quint64 factsBlocks = 0;
+    quint64 factsDirectory = 0;
 
     bool isEmpty() const
     {
-        return versionBlocks == 0 && replicaBlocks == 0 && overflowBlocks == 0;
+        return versionBlocks == 0 && replicaBlocks == 0 && overflowBlocks == 0 && factsBlocks == 0;
     }
 };
 
@@ -302,19 +320,21 @@ MetadataArenaGrowthPlan metadataArenaGrowthPlan(const MetadataArenas &arenas,
     plan.versionDirectory = arenas.versions.directoryCapacityForBlocks(plan.versionBlocks);
     plan.replicaDirectory = arenas.replicas.directoryCapacityForBlocks(plan.replicaBlocks);
     plan.overflowDirectory = arenas.overflow.directoryCapacityForBlocks(plan.overflowBlocks);
+    plan.factsBlocks = arenaBlocksRequired(arenas.facts, demand.versions);
+    plan.factsDirectory = arenas.facts.directoryCapacityForBlocks(plan.factsBlocks);
     return plan;
 }
 
 bool metadataArenaGrowthFitsBudget(const MetadataArenas &arenas, const MetadataArenaGrowthPlan &plan)
 {
     return arenas.versions.canAttachBlocks(plan.versionBlocks) && arenas.replicas.canAttachBlocks(plan.replicaBlocks)
-        && arenas.overflow.canAttachBlocks(plan.overflowBlocks);
+        && arenas.overflow.canAttachBlocks(plan.overflowBlocks) && arenas.facts.canAttachBlocks(plan.factsBlocks);
 }
 
 bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataArenaDemand &demand)
 {
     return arenas.versions.availableSlots() >= demand.versions && arenas.replicas.availableSlots() >= demand.replicas
-        && arenas.overflow.availableSlots() >= demand.overflow;
+        && arenas.overflow.availableSlots() >= demand.overflow && arenas.facts.availableSlots() >= demand.versions;
 }
 
 /**
@@ -327,22 +347,24 @@ bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataAren
  */
 struct MetadataArenaGrowth {
     explicit MetadataArenaGrowth(KisPageWorkingStorage storage)
-        : versions(storage), replicas(storage), overflow(storage)
-        , versionDirectory(storage), replicaDirectory(storage), overflowDirectory(storage) {}
+        : versions(storage), facts(storage), replicas(storage), overflow(storage)
+        , versionDirectory(storage), factsDirectory(storage), replicaDirectory(storage), overflowDirectory(storage) {}
     // Candidate payloads are destroyed before the reservation that accounts
     // for them when preparation exits early.
     KisBackingBudgetReservation budgetReservation;
     KisPageWorkingArray<VersionArena::PreparedBlock> versions;
+    KisPageWorkingArray<VersionFactsArena::PreparedBlock> facts;
     KisPageWorkingArray<ReplicaArena::PreparedBlock> replicas;
     KisPageWorkingArray<OverflowArena::PreparedBlock> overflow;
     VersionArena::PreparedDirectory versionDirectory;
+    VersionFactsArena::PreparedDirectory factsDirectory;
     ReplicaArena::PreparedDirectory replicaDirectory;
     OverflowArena::PreparedDirectory overflowDirectory;
     quint64 attachedBlocks = 0;
 
     quint64 preparedBlockCount() const
     {
-        return quint64(versions.size()) + quint64(replicas.size()) + quint64(overflow.size());
+        return quint64(versions.size()) + quint64(facts.size()) + quint64(replicas.size()) + quint64(overflow.size());
     }
 
     template<class Arena, class Blocks>
@@ -367,7 +389,8 @@ struct MetadataArenaGrowth {
     {
         return plan.versionBlocks * VersionArena::blockByteSize()
             + plan.replicaBlocks * ReplicaArena::blockByteSize()
-            + plan.overflowBlocks * OverflowArena::blockByteSize();
+            + plan.overflowBlocks * OverflowArena::blockByteSize()
+            + plan.factsBlocks * VersionFactsArena::blockByteSize();
     }
 
     bool prepare(const MetadataArenaGrowthPlan &plan,
@@ -386,12 +409,14 @@ struct MetadataArenaGrowth {
             return false;
         try {
             versionDirectory.prepare(plan.versionDirectory);
+            factsDirectory.prepare(plan.factsDirectory);
             replicaDirectory.prepare(plan.replicaDirectory);
             overflowDirectory.prepare(plan.overflowDirectory);
         } catch (const std::bad_alloc &) {
             return false;
         }
         return prepareBlocks<VersionArena>(&versions, plan.versionBlocks)
+            && prepareBlocks<VersionFactsArena>(&facts, plan.factsBlocks)
             && prepareBlocks<ReplicaArena>(&replicas, plan.replicaBlocks)
             && prepareBlocks<OverflowArena>(&overflow, plan.overflowBlocks);
     }
@@ -432,6 +457,7 @@ struct MetadataArenaGrowth {
     {
         const quint64 versionBytesBefore =
             arenas->versions.statistics().allocatedBytes;
+        const quint64 factsBytesBefore = arenas->facts.statistics().allocatedBytes;
         const quint64 replicaBytesBefore =
             arenas->replicas.statistics().allocatedBytes;
         const quint64 overflowBytesBefore =
@@ -439,6 +465,10 @@ struct MetadataArenaGrowth {
         const auto versionResult = attachBlocks(&arenas->versions, demand.versions, &versions,
                                                &versionDirectory, &attachedBlocks);
         auto result = versionResult;
+        if (result == AttachResult::Ready) {
+            result = attachBlocks(&arenas->facts, demand.versions,
+                                  &facts, &factsDirectory, &attachedBlocks);
+        }
         if (result == AttachResult::Ready) {
             result = attachBlocks(&arenas->replicas, demand.replicas,
                                   &replicas, &replicaDirectory, &attachedBlocks);
@@ -449,12 +479,14 @@ struct MetadataArenaGrowth {
         }
         // Destroy unattached candidates before releasing their reservation.
         versions.clear();
+        facts.clear();
         replicas.clear();
         overflow.clear();
         if (budgetReservation.isValid()) {
             KisBackingBudgetDelta installed;
             const quint64 attachedBytes =
                 arenas->versions.statistics().allocatedBytes - versionBytesBefore
+                + arenas->facts.statistics().allocatedBytes - factsBytesBefore
                 + arenas->replicas.statistics().allocatedBytes - replicaBytesBefore
                 + arenas->overflow.statistics().allocatedBytes - overflowBytesBefore;
             installed.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam =
@@ -1022,6 +1054,7 @@ struct ShardRecordStore {
     {
         Q_ASSERT(record && reservation);
         const KisVersionSlotId slot = record->slot;
+        const KisVersionFactsSlotId facts = record->facts;
         const KisVersionSlotId previousVersion = record->previousVersion;
         const KisVersionSlotId nextVersion = record->nextVersion;
         const KisVersionSlotId previousHistory = record->previousHistory;
@@ -1031,6 +1064,7 @@ struct ShardRecordStore {
         *record = {};
         record->version = snapshot.version;
         record->slot = slot;
+        record->facts = facts;
         record->previousVersion = previousVersion;
         record->nextVersion = nextVersion;
         record->previousHistory = previousHistory;
@@ -1445,6 +1479,8 @@ struct ShardRecordStore {
             KisVersionRecord *record = version(slot);
             Q_ASSERT(record);
             record->slot = slot;
+            record->facts = arenas->facts.emplaceReserved(&reservation->arenas.facts);
+            Q_ASSERT(record->facts.isValid());
             linkVersion(page, record);
             assign(record, snapshot, &reservation->arenas);
             const bool indexed = exactVersions.insertReserved(&reservation->exactVersions, snapshot.version, slot);
@@ -1513,7 +1549,8 @@ struct ShardRecordStore {
         return true;
     }
 
-    void remove(MetadataPage *page, const KisPageVersion &identity)
+    void remove(MetadataPage *page, const KisPageVersion &identity,
+                std::shared_ptr<const KisPageAllocationDescriptor> *releasedDescriptor = nullptr)
     {
         KisVersionSlotId slot;
         if (!findVersion(identity, &slot))
@@ -1525,10 +1562,16 @@ struct ShardRecordStore {
         unlinkVersion(page, record);
         eraseChildren(record);
         const bool indexErased = exactVersions.eraseExact(identity, slot);
+        auto *facts = arenas->facts.get(record->facts);
+        Q_ASSERT(facts);
+        if (releasedDescriptor) releasedDescriptor->swap(facts->descriptor);
+        if (facts->stamp) --arenas->cpuProofs;
+        const bool factsErased = arenas->facts.erase(record->facts);
         const bool recordErased = arenas->versions.erase(slot);
-        Q_ASSERT(indexErased && recordErased);
+        Q_ASSERT(indexErased && recordErased && factsErased);
         Q_UNUSED(indexErased);
         Q_UNUSED(recordErased);
+        Q_UNUSED(factsErased);
     }
 
     void clear(MetadataPage *page)
@@ -1949,6 +1992,7 @@ public:
     // Shared identity prevents a capability surviving destruction from being
     // accepted by another coordinator constructed at the same address.
     std::shared_ptr<const quint8> publicationOwner;
+    std::atomic<quint64> cpuProofIssuer{0};
 };
 
 class KisPageMetadataCoordinator::PreparedPublication::Data final : public KisPageReclamationJob
@@ -2008,6 +2052,10 @@ public:
         size_t inputOrdinal = 0;
         size_t shardIndex = 0;
         bool activityReservation = false;
+        bool releaseUnusedCapacity = false;
+        bool releasedUnusedCapacity = false;
+        std::shared_ptr<const KisPageAllocationDescriptor> releasedDescriptor;
+        MetadataMap<KisPageVersion, std::shared_ptr<KisCpuReadBindingLink>>::node_type releasedReadBinding;
         KisPageKey key() const { return version.key; }
     };
     struct Publication {
@@ -2356,6 +2404,23 @@ KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transactio
     return preparePublicationImpl(transaction, {}, nullptr, count, false, error, PreparationKind::Detachment, versions);
 }
 
+KisPageMetadataCoordinator::PreparedPublication
+KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transaction,
+                                            const MutationDetachment *versions, qsizetype count,
+                                            QString *error) const
+{
+    return preparePublicationImpl(transaction, {}, nullptr, count, false, error,
+        PreparationKind::Detachment, nullptr, nullptr, versions);
+}
+
+void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachReleasedMutation(
+    void *context, void (*visit)(void *, size_t)) const
+{
+    if (!data) return;
+    for (const auto &entry : data->entries)
+        if (entry.releasedUnusedCapacity) visit(context, entry.inputOrdinal);
+}
+
 bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
                                                  const KisPageTransaction &transaction,
                                                  QString *error,
@@ -2383,6 +2448,23 @@ bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&p
 }
 
 KisPageMetadataCoordinator::PreparedPublication
+KisPageMetadataCoordinator::preparePrivateWrite(const KisPageTransaction &transaction,
+                                               const KisPageTransition &transition,
+                                               QString *error) const
+{
+    return preparePublicationImpl(transaction, {}, &transition, 1, false, error, PreparationKind::PrivateWrite);
+}
+
+bool KisPageMetadataCoordinator::installPrivateWrite(PreparedPublication &&prepared,
+                                                    const KisPageTransaction &transaction,
+                                                    QString *error,
+                                                    DeferredPublicationCleanup *deferredCleanup)
+{
+    return installPublicationImpl(std::move(prepared), transaction, {}, error,
+        PreparationKind::PrivateWrite, deferredCleanup);
+}
+
+KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &transaction,
                                                    KisImageEpochId minimumEpoch,
                                                    const KisPageTransition *transitions, qsizetype count,
@@ -2390,14 +2472,17 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
                                                    QString *error,
                                                    PreparationKind kind,
                                                    const KisPageVersion *versions,
-                                                   const PublicationChange *changes) const
+                                                   const PublicationChange *changes,
+                                                   const MutationDetachment *detachments) const
 try {
     const bool mutation = kind != PreparationKind::Publication;
     const bool detachment = kind == PreparationKind::Detachment;
     const bool recoverable = kind == PreparationKind::RecoverableWrite;
+    const bool privateWrite = kind == PreparationKind::PrivateWrite;
+    const bool writePreparation = recoverable || privateWrite;
     PreparedPublication result;
     auto *d = m_core.load(std::memory_order_acquire);
-    if (!d || count < 0 || (count && !transitions && !versions && !changes)
+    if (!d || count < 0 || (count && !transitions && !versions && !changes && !detachments)
         || (!restoration && !transaction.isValid())
         || (!mutation && (!minimumEpoch.isValid() || minimumEpoch.value <= transaction.baseEpoch.value))) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
@@ -2432,10 +2517,10 @@ try {
     data->kind = kind;
     const KisPageStateMachine stateMachine;
     const auto transitionAt = [&](size_t i, KisPageTransition &input) -> const KisPageTransition & {
-        if (versions) {
+        if (versions || detachments) {
             input.kind = detachment ? KisPageTransitionKind::DetachPreparedVersion
                                     : KisPageTransitionKind::RestoreCommittedVersion;
-            input.version = versions[i];
+            input.version = detachments ? detachments[i].version : versions[i];
             input.transaction = detachment ? transaction.id : KisPageTransactionId{};
             input.imageEpoch = minimumEpoch;
         } else if (changes) {
@@ -2448,7 +2533,7 @@ try {
         }
         // Compact production inputs and the Qt oracle consume this same
         // transition policy. Only one complete stack value is needed at a time.
-        return versions || changes ? input : transitions[i];
+        return versions || changes || detachments ? input : transitions[i];
     };
     for (qsizetype i = 0; i < count; ++i) {
         KisPageTransition input;
@@ -2456,6 +2541,8 @@ try {
         const bool write = transition.kind == KisPageTransitionKind::CommitTransaction;
         if ((detachment && !transition.version.isValid())
             || (recoverable && (transition.kind != KisPageTransitionKind::AcquireRecoverableWrite
+                || !(transition.transaction == transaction.id) || transition.imageEpoch.isValid()))
+            || (privateWrite && (transition.kind != KisPageTransitionKind::AcquireWrite
                 || !(transition.transaction == transaction.id) || transition.imageEpoch.isValid()))
             || (!mutation
                 && ((restoration && transition.kind != KisPageTransitionKind::RestoreCommittedVersion)
@@ -2473,6 +2560,7 @@ try {
         entry.shardOwner = std::move(shardOwner);
         entry.version = transition.version;
         entry.inputOrdinal = size_t(i);
+        entry.releaseUnusedCapacity = detachments && detachments[i].releaseUnusedCapacity;
         entry.shardIndex = kisStablePageKeyHash(entry.key()) % d->shards.size();
         data->entries.push_back(std::move(entry));
         if (!detachment)
@@ -2519,7 +2607,7 @@ try {
                     auto &publication = data->publications[i];
                     publication.next = shard->header(transition.version.key, page->second);
                     auto &facts = publication.installRecords;
-                    if (recoverable) facts.reserve(2);
+                    if (writePreparation) facts.reserve(2);
                     const auto include = [&](const KisPageVersion &identity) {
                         if (std::any_of(facts.cbegin(), facts.cend(), [&](const auto &v) { return v.version == identity; }))
                             return;
@@ -2528,7 +2616,7 @@ try {
                         // authority and physical-slot facts. Recoverable retag
                         // really consumes/replaces protection and keeps the full
                         // image; its guards must never see the compact input.
-                        const bool found = recoverable ? shard->records.snapshot(identity, &v)
+                        const bool found = writePreparation ? shard->records.snapshot(identity, &v)
                             : shard->records.snapshot<KisPageWorkingVersion, false>(identity, &v);
                         if (found) {
                             facts.push_back(std::move(v));
@@ -2536,7 +2624,7 @@ try {
                     };
                     include({publication.next.key, publication.next.publishedGeneration,
                         publication.next.publishedDefaultPixelRevision});
-                    if (recoverable)
+                    if (writePreparation)
                         include(transition.baseVersion);
                     include(transition.version);
                     if (write) {
@@ -2566,13 +2654,13 @@ try {
     const auto recordPolicyWork = [&](size_t i) {
         auto *shard = data->entries[i].shardOwner.get();
         const auto &publication = data->publications[i];
-        if (!recoverable) {
+        if (!writePreparation) {
             for (const auto &delta : publication.deltas)
                 shard->publicationHistoryNodesPrepared += delta.publication == KisPagePublicationState::Historical;
             for (const auto &record : publication.installRecords)
                 shard->publicationHistoryNodesPrepared += record.publication == KisPagePublicationState::Historical;
         }
-        shard->publicationAdditionRecordsPrepared += publication.installRecords.size() - (recoverable ? 1 : 0);
+        shard->publicationAdditionRecordsPrepared += publication.installRecords.size() - (writePreparation ? 1 : 0);
     };
     const auto recordPreparationWork = qScopeGuard([&] {
         // Includes accepted policy work when a later allocation/revalidation
@@ -2604,10 +2692,10 @@ try {
         // compares every supported publication kind with full apply().
         // Indexed inputs deliberately omit unrelated versions.
         const size_t inputCount = before.versions.size();
-        if (!recoverable)
+        if (!writePreparation)
             publication.deltas.reserve(before.versions.size());
-        stateMachine.applyKnownValid(step, transition, recoverable ? nullptr : &publication,
-            recoverable ? nullptr : +[](void *context, const KisPageVersion &version,
+        stateMachine.applyKnownValid(step, transition, writePreparation ? nullptr : &publication,
+            writePreparation ? nullptr : +[](void *context, const KisPageVersion &version,
                                         KisPagePublicationState state, KisPageTransactionId preparedBy) {
                 static_cast<PreparedPublication::Data::Publication *>(context)->deltas.push_back(
                     {version, state, preparedBy});
@@ -2616,7 +2704,7 @@ try {
             KisPageStoreDetail::setError(error, step.rejectionReason);
             return result;
         }
-        if (recoverable) {
+        if (writePreparation) {
             auto ready = transition;
             ready.kind = KisPageTransitionKind::PrepareWrite;
             stateMachine.applyKnownValid(step, ready);
@@ -2626,7 +2714,7 @@ try {
             }
         }
         const auto copiedAuthority = [&](const auto &version) {
-            return version.authority.isValid() && (!recoverable
+            return version.authority.isValid() && (!writePreparation
                 || (!(version.version == transition.baseVersion) && !(version.version == transition.version)));
         };
         if (data->backingAuthorities.empty())
@@ -2634,7 +2722,7 @@ try {
                 step.next.versions.cend(), copiedAuthority)));
         for (const auto &version : std::as_const(step.next.versions))
             if (copiedAuthority(version)) data->backingAuthorities.emplace_back(version.version, version.authority);
-        if (recoverable) {
+        if (writePreparation) {
             // Strict revision revalidation covers every replica/reader fact
             // used here. Install only this exact base and the new target, in
             // that order, so the old physical slot is unbound before target
@@ -2704,7 +2792,7 @@ try {
             shardGrowth->totalDemand.versions += publication.arenaDemand.versions;
             shardGrowth->totalDemand.replicas += publication.arenaDemand.replicas;
             shardGrowth->totalDemand.overflow += publication.arenaDemand.overflow;
-            shardGrowth->exactInsertions += qsizetype(publication.installRecords.size()) - (recoverable ? 1 : 0);
+            shardGrowth->exactInsertions += qsizetype(publication.installRecords.size()) - (writePreparation ? 1 : 0);
             for (const auto &record : publication.installRecords)
                 shardGrowth->physicalInsertions += record.replicas.size();
         }
@@ -2793,6 +2881,11 @@ try {
     }
     std::sort(data->backingAuthorities.begin(), data->backingAuthorities.end(),
         [](const auto &a, const auto &b) { return MetadataKeyLess{}(a.first, b.first); });
+    // No input is read after preparation. Deliver in the original owner's
+    // stable array coordinates without another index or a lookup per page.
+    if (detachments)
+        for (auto &entry : data->entries)
+            entry.inputOrdinal = detachments[entry.inputOrdinal].ownerIndex;
     result.data = std::move(data);
     KisPageStoreDetail::setError(error, {});
     return result;
@@ -2828,6 +2921,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
     const bool mutation = kind != PreparationKind::Publication;
     const bool detachment = kind == PreparationKind::Detachment;
     const bool recoverable = kind == PreparationKind::RecoverableWrite;
+    const bool privateWrite = kind == PreparationKind::PrivateWrite;
     // Consume even on rejection: callers must prepare again after a conflict.
     auto data = std::move(prepared.data);
     const auto recordRejectedInstall = [&] {
@@ -2923,14 +3017,35 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
                 // the CURRENT replicas, leases, pins, last-use, captured views and
                 // epoch; apply only the already revalidated semantic delta. This
                 // is not permission to merge arbitrary stale publication images.
-                const bool updated = entry.shardOwner->records.setPublication(&page->second,
-                                                                         entry.version,
-                                                                         KisPagePublicationState::Historical,
-                                                                         {});
-                Q_ASSERT(updated);
-                Q_UNUSED(updated);
+                auto &records = entry.shardOwner->records;
+                KisVersionSlotId slot;
+                const bool found = records.findVersion(entry.version, &slot);
+                Q_ASSERT(found);
+                const auto *record = records.version(slot);
+                const auto *replica = records.replica(record->authorityReplica);
+                // This exact Prepared version was never canonical. Captures
+                // and read/operation protection remain authoritative here,
+                // after all pages have been claimed. Raw/clone protection is
+                // physical and will be checked again on capacity checkout.
+                const bool unused = entry.releaseUnusedCapacity && !record->version.isDefaultPixel()
+                    && !record->capturedReadViews.isValid() && record->replicaCount == 1
+                    && replica && replica->domain == KisPageAccessDomain::CpuRam
+                    && replica->validity == KisReplicaValidity::Valid && !replica->pinCount
+                    && !replica->overflow.isValid() && !replica->activeOperation.isValid()
+                    && entry.shardOwner->arenas.facts.get(record->facts)->stamp;
+                if (unused) {
+                    entry.releasedReadBinding = entry.shardOwner->cpuBindings.extract(entry.version);
+                    records.remove(&page->second, entry.version, &entry.releasedDescriptor);
+                    entry.releasedUnusedCapacity = true;
+                    installedHistoryLinks = 0;
+                } else {
+                    const bool updated = records.setPublication(&page->second, entry.version,
+                        KisPagePublicationState::Historical, {});
+                    Q_ASSERT(updated);
+                    Q_UNUSED(updated);
+                }
                 ++page->second.revision;
-            } else if (recoverable) {
+            } else if (recoverable || privateWrite) {
                 auto &reservation = data->arenaGrowth.at(publication->arenaGrowthIndex).reservations;
                 for (const auto &record : publication->installRecords) {
                     const bool installed = entry.shardOwner->records.putReserved(&page->second, record, &reservation);
@@ -3332,6 +3447,118 @@ bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity,
     }
 }
 
+std::shared_ptr<const KisPageAllocationDescriptor>
+KisPageMetadataCoordinator::versionDescriptor(const KisPageVersion &identity) const
+{
+    const auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), identity.key);
+    if (!shard) return {};
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(identity, &slot)) return {};
+    return shard->arenas.facts.get(shard->records.version(slot)->facts)->descriptor;
+}
+
+const KisPageAllocationDescriptor *
+KisPageMetadataCoordinator::borrowVersionDescriptor(const KisPageVersion &identity) const
+{
+    const auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), identity.key);
+    if (!shard) return nullptr;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(identity, &slot)) return nullptr;
+    return shard->arenas.facts.get(shard->records.version(slot)->facts)->descriptor.get();
+}
+
+bool KisPageMetadataCoordinator::exchangeVersionDescriptor(const KisPageVersion &identity,
+    std::shared_ptr<const KisPageAllocationDescriptor> *prepared)
+{
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), identity.key);
+    if (!shard || !prepared) return false;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(identity, &slot)) return false;
+    shard->arenas.facts.get(shard->records.version(slot)->facts)->descriptor.swap(*prepared);
+    return true;
+}
+
+bool KisPageMetadataCoordinator::bindCpuProofIssuer(quint64 issuer)
+{
+    auto *d = m_core.load(std::memory_order_acquire);
+    if (!d || !issuer) return false;
+    quint64 empty = 0;
+    return d->cpuProofIssuer.compare_exchange_strong(empty, issuer) || empty == issuer;
+}
+
+bool KisPageMetadataCoordinator::sealCpuProof(const KisPreparedPageProof &proof, quint64 issuer)
+{
+    auto *d = m_core.load(std::memory_order_acquire);
+    auto *shard = Private::shardFor(d, proof.authority.version.key);
+    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(proof.authority.version, &slot)) return false;
+    const auto *record = shard->records.version(slot);
+    const auto *authority = shard->records.replica(record->authorityReplica);
+    if (record->publication != KisPagePublicationState::Prepared || !(record->preparedBy == proof.transaction)
+        || !authority || !(replicaHandle(*authority, record->version) == proof.authority)) return false;
+    auto *facts = shard->arenas.facts.get(record->facts);
+    if (facts->stamp) return false;
+    facts->completion = proof.producerCompletion;
+    facts->transaction = proof.transaction;
+    facts->stamp = proof.providerValidationStamp;
+    ++shard->arenas.cpuProofs;
+    return true;
+}
+
+bool KisPageMetadataCoordinator::ownsCpuProof(const KisPreparedPageProof &proof, quint64 issuer) const
+{
+    auto *d = m_core.load(std::memory_order_acquire);
+    const auto *shard = Private::shardFor(d, proof.authority.version.key);
+    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(proof.authority.version, &slot)) return false;
+    const auto *record = shard->records.version(slot);
+    const auto *authority = shard->records.replica(record->authorityReplica);
+    const auto *facts = shard->arenas.facts.get(record->facts);
+    return facts->stamp == proof.providerValidationStamp && facts->transaction == proof.transaction
+        && facts->completion == proof.producerCompletion && authority
+        && replicaHandle(*authority, record->version) == proof.authority;
+}
+
+bool KisPageMetadataCoordinator::revokeCpuProof(const KisPreparedPageProof &proof, quint64 issuer)
+{
+    auto *d = m_core.load(std::memory_order_acquire);
+    auto *shard = Private::shardFor(d, proof.authority.version.key);
+    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(proof.authority.version, &slot)) return false;
+    const auto *record = shard->records.version(slot);
+    const auto *authority = shard->records.replica(record->authorityReplica);
+    auto *facts = shard->arenas.facts.get(record->facts);
+    if (facts->stamp != proof.providerValidationStamp || !(facts->transaction == proof.transaction)
+        || !(facts->completion == proof.producerCompletion) || !authority
+        || !(replicaHandle(*authority, record->version) == proof.authority)) return false;
+    facts->stamp = 0;
+    --shard->arenas.cpuProofs;
+    facts->transaction = {};
+    facts->completion = {};
+    return true;
+}
+
+qsizetype KisPageMetadataCoordinator::cpuProofCount(quint64 issuer) const
+{
+    const auto *d = m_core.load(std::memory_order_acquire);
+    if (!d || !issuer || d->cpuProofIssuer.load() != issuer) return 0;
+    qsizetype result = 0;
+    for (const auto &shard : d->shards) {
+        QMutexLocker lock(&shard->mutex);
+        result += shard->arenas.cpuProofs;
+    }
+    return result;
+}
+
 bool KisPageMetadataCoordinator::canAddTransientVersion(const KisPageVersion &target, quint32 limit) const
 {
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), target.key);
@@ -3440,6 +3667,7 @@ bool KisPageMetadataCoordinator::discardHistory(
     for (;;) {
         const auto storageOwner = shard->budgetAuthority->storage<char>();
         KisPageWorkingArray<KisPageTransitionEffect> prepared(storageOwner.borrowed());
+        std::array<std::shared_ptr<const KisPageAllocationDescriptor>, HistorySlice::Limit> releasedDescriptors;
         MetadataArenas::ReleasedBlocks released;
         quint64 debtCookie = 0;
         bool debtPrepared = false;
@@ -3507,7 +3735,7 @@ bool KisPageMetadataCoordinator::discardHistory(
         quint64 removed = 0;
         for (qsizetype i = 0; i < count; ++i) {
             if (!(selected & (quint32(1) << i))) continue;
-            shard->records.remove(&page->second, versions[i]);
+            shard->records.remove(&page->second, versions[i], &releasedDescriptors[size_t(i)]);
             ++removed;
         }
         ++page->second.revision;
@@ -4020,6 +4248,8 @@ try {
         const auto workingStorage = storageOwner.borrowed();
         MetadataArenaGrowth growth(workingStorage);
         KisPageWorkingArray<KisPageTransitionEffect> effects(workingStorage);
+        KisPageWorkingArray<std::shared_ptr<const KisPageAllocationDescriptor>, 2> releasedDescriptors{
+            decltype(releasedDescriptors)::allocator_type(workingStorage)};
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
         if (page == shard->pages.end() || !shard->canMutate(key, page->second)) {
@@ -4173,6 +4403,7 @@ try {
         });
         // The next values already witness retention. No second removal set
         // may allocate after installation starts.
+        releasedDescriptors.resize(size_t(inputVersions.size()));
         if (!shard->records.putAcceptedBatch(&page->second, step)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
@@ -4181,7 +4412,7 @@ try {
         quint64 removed = 0;
         for (const auto &version : inputVersions) {
             if (!next.findVersion(version)) {
-                shard->records.remove(&page->second, version);
+                shard->records.remove(&page->second, version, &releasedDescriptors[size_t(removed)]);
                 ++removed;
             }
         }
@@ -4413,6 +4644,7 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
     for (const std::shared_ptr<MetadataShard> &shard : d->shards) {
         QMutexLocker shardLocker(&shard->mutex);
         result.versionArena += shard->arenas.versions.statistics();
+        result.versionFactsArena += shard->arenas.facts.statistics();
         result.replicaArena += shard->arenas.replicas.statistics();
         result.overflowArena += shard->arenas.overflow.statistics();
         result.exactVersionIndex += shard->records.exactVersions.statistics();
@@ -4439,7 +4671,7 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
                 Q_ASSERT(version);
                 if (!version)
                     break;
-                result.trackedPayloadBytes += sizeof(KisVersionRecord);
+                result.trackedPayloadBytes += sizeof(KisVersionRecord) + sizeof(KisVersionFactsRecord);
                 for (KisMetadataOverflowSlotId overflowSlot = version->capturedReadViews; overflowSlot.isValid();) {
                     const KisMetadataOverflowNode *node = shard->records.overflow(overflowSlot);
                     Q_ASSERT(node);

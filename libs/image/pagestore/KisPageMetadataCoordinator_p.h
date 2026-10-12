@@ -28,10 +28,22 @@ struct KisVersionRecord {
     KisReplicaSlotId firstReplica;
     KisReplicaSlotId authorityReplica;
     KisMetadataOverflowSlotId capturedReadViews;
+    KisVersionFactsSlotId facts;
     KisPageTransactionId preparedBy;
     quint32 replicaCount = 0;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
 };
+
+// Immutable layout and the owner's single internal CPU completion capability.
+// Generic exported capabilities can coexist and retain their original owner
+// records. This slot never copies version/transaction/authority from metadata.
+struct KisVersionFactsRecord {
+    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+    KisCompletionTicket completion;
+    quint64 stamp = 0;
+    KisPageTransactionId transaction;
+};
+static_assert(sizeof(KisVersionFactsRecord) <= 64);
 
 struct KisReplicaRecord {
     KisReplicaAllocationIdentity identity;
@@ -70,6 +82,11 @@ static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 template<>
 struct KisSlotIdFor<KisVersionRecord> {
     using Type = KisVersionSlotId;
+};
+
+template<>
+struct KisSlotIdFor<KisVersionFactsRecord> {
+    using Type = KisVersionFactsSlotId;
 };
 
 template<>

@@ -278,6 +278,8 @@ private:
 
     // Publication supplies the complete owner-validated write set. A refused
     // candidate may be retried or replaced without replaying an incremental delta.
+    bool preparePublication(KisPageTransactionId transaction, const struct KisPageOperationPublication &delta,
+                            QString *error = nullptr);
     bool preparePublication(KisPageTransactionId transaction, const KisPagePublicationDelta &delta,
                             QString *error = nullptr);
     template<class Proofs, class Surfaces, class Removals>

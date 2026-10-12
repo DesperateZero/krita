@@ -186,6 +186,16 @@ public:
     qsizetype publicationBlockingOperationCount() const;
     qsizetype sealedProofCount() const;
     bool ownsPreparedPageProof(const KisPreparedPageProof &proof) const;
+    // Store configuration binds exactly one original metadata owner. The CPU
+    // producer consumes its prepaid version slot; exported proofs keep their
+    // independent capability lifetime and may coexist for the same version.
+    bool bindCpuProofs(KisPageMetadataCoordinator &metadata);
+    bool sealCpuPreparedPage(const KisPageVersion &version,
+                            KisPageTransactionId transaction,
+                            const KisPageAllocationDescriptor &descriptor,
+                            const KisCompletionTicket &producerCompletion,
+                            KisPreparedPageProof *proof, QString *error = nullptr,
+                            bool *storageRefused = nullptr);
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger
@@ -205,6 +215,11 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
+    bool sealPreparedPageImpl(const KisPageMetadataCoordinator &metadata,
+        const KisPageVersion &version, KisPageTransactionId transaction,
+        const KisPageAllocationDescriptor &descriptor, const KisCompletionTicket &producerCompletion,
+        KisPreparedPageProof *proof, QString *error, bool *storageRefused,
+        KisPageMetadataCoordinator *cpuDestination);
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Original publication storage moves into the prepared ledger slot. The

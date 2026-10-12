@@ -754,9 +754,9 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
 }
 
 static const KisPreparedPageProof &epochPreparedProof(const KisPreparedPageProof &proof) { return proof; }
-static const KisPreparedPageProof &epochPreparedProof(const std::pair<const KisPageKey, KisPreparedPageProof> &entry)
+static const KisPreparedPageProof &epochPreparedProof(const KisPagePublicationDelta::ProofMap::value_type &entry)
 {
-    return entry.second;
+    return entry.second.proof;
 }
 
 struct EpochTransactionChanges {
@@ -1144,6 +1144,12 @@ bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPage
 
 bool KisImageEpochReferenceModel::preparePublication(
     KisPageTransactionId transaction, const KisPagePublicationDelta &delta, QString *error)
+{
+    return prepareImpl(transaction, delta.proofs, delta.surfaceChanges, delta.removals, true, error);
+}
+
+bool KisImageEpochReferenceModel::preparePublication(
+    KisPageTransactionId transaction, const KisPageOperationPublication &delta, QString *error)
 {
     return prepareImpl(transaction, delta.proofs, delta.surfaceChanges, delta.removals, true, error);
 }

@@ -107,7 +107,8 @@ bool invokeEpochCallback(void *context, KisImageEpochId epoch)
 void setPublicationDelta(KisPagePublicationDelta &delta, const KisPreparedPageSet &input)
 {
     delta.proofs.clear(); delta.surfaceChanges.clear(); delta.removals.clear();
-    for (const auto &proof : input.proofs) delta.proofs.emplace(proof.authority.version.key, proof);
+    for (const auto &proof : input.proofs)
+        delta.proofs.emplace(proof.authority.version.key, KisPagePublicationDelta::PageState{proof, {}});
     delta.surfaceChanges.assign(input.surfaceChanges.begin(), input.surfaceChanges.end());
     delta.removals.insert(input.removedPages.begin(), input.removedPages.end());
 }
@@ -3844,6 +3845,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         QCOMPARE(sample.footprint.replicas, records);
         QCOMPARE(sample.footprint.overflowArena.usedSlots, quint64(0));
         QCOMPARE(sample.footprint.versionArena.usedSlots, records);
+        QCOMPARE(sample.footprint.versionFactsArena.usedSlots, records);
         QCOMPARE(sample.footprint.replicaArena.usedSlots, records);
         QCOMPARE(sample.footprint.exactVersionIndex.entries, records);
         QCOMPARE(sample.footprint.physicalSlotIndex.entries, records);
@@ -3854,11 +3856,14 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         QCOMPARE(sample.metrics.metadataArenaBlockCandidatesPrepared, sample.metrics.metadataArenaBlocksAttached);
         QCOMPARE(sample.metrics.metadataArenaBlocksAttached,
                  sample.footprint.versionArena.attachedBlocks + sample.footprint.replicaArena.attachedBlocks
-                     + sample.footprint.overflowArena.attachedBlocks);
+                     + sample.footprint.overflowArena.attachedBlocks + sample.footprint.versionFactsArena.attachedBlocks);
         using VersionArena = KisShardSlotArena<KisVersionRecord, 16 * 1024>;
+        using FactsArena = KisShardSlotArena<KisVersionFactsRecord, 512>;
         using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>;
         QCOMPARE(sample.footprint.versionArena.allocatedBytes,
                  sample.footprint.versionArena.activeBlocks * VersionArena::blockByteSize());
+        QCOMPARE(sample.footprint.versionFactsArena.allocatedBytes,
+                 sample.footprint.versionFactsArena.activeBlocks * FactsArena::blockByteSize());
         QCOMPARE(sample.footprint.replicaArena.allocatedBytes,
                  sample.footprint.replicaArena.activeBlocks * ReplicaArena::blockByteSize());
     };
@@ -3880,10 +3885,11 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
                 {"logical_bytes", double(sample->footprint.trackedPayloadBytes)},
                 {"arena_bytes",
                  double(sample->footprint.versionArena.allocatedBytes + sample->footprint.replicaArena.allocatedBytes
-                        + sample->footprint.overflowArena.allocatedBytes)},
+                        + sample->footprint.overflowArena.allocatedBytes + sample->footprint.versionFactsArena.allocatedBytes)},
                 {"block_candidates", double(sample->metrics.metadataArenaBlockCandidatesPrepared)},
                 {"blocks_attached", double(sample->metrics.metadataArenaBlocksAttached)},
                 {"version_slack", double(sample->footprint.versionArena.freeSlots)},
+                {"version_facts_slack", double(sample->footprint.versionFactsArena.freeSlots)},
                 {"replica_slack", double(sample->footprint.replicaArena.freeSlots)},
                 {"overflow_slack", double(sample->footprint.overflowArena.freeSlots)}});
         }
@@ -4944,6 +4950,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
 {
     QString error;
     quint64 oneCapacityBatch = 0;
+    quint64 oneFactsBatch = 0;
     quint64 pageNodeBytes = 0;
     {
         KisBackingBudgetController budget;
@@ -4960,6 +4967,7 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         oneCapacityBatch = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
         const auto footprint = metadata.footprint();
+        oneFactsBatch = footprint.versionFactsArena.allocatedBytes + footprint.versionFactsArena.directoryCapacityBytes;
         QVERIFY(oneCapacityBatch > 0);
         QVERIFY(footprint.owningCapacityBytes > 0);
         QCOMPARE(footprint.exactVersionIndex.capacity, quint64(64));
@@ -4992,7 +5000,9 @@ void KisPageStoreReferenceTest::metadataOwningCapacityIsBudgeted()
         }
         const auto before = budget.usage()
             .buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        QCOMPARE(before.live.cpuRam, oneCapacityBatch + 63 * pageNodeBytes);
+        QCOMPARE(before.live.cpuRam, oneCapacityBatch + 63 * pageNodeBytes
+            + metadata.footprint().versionFactsArena.allocatedBytes
+            + metadata.footprint().versionFactsArena.directoryCapacityBytes - oneFactsBatch);
         const size_t fillerBytes = size_t(limits.metadataArenaBytes - before.live.cpuRam);
         void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
         const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
@@ -8895,7 +8905,7 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     QVERIFY(!coordinator.prepareMutation(tx, invalid.constData(), invalid.size()).isValid());
     // This private entry accepts only versions, so foreign transition kinds,
     // operation IDs and epoch tags are no longer representable inputs.
-    QVERIFY(!coordinator.prepareMutation(tx, nullptr, 1).isValid());
+    QVERIFY(!coordinator.prepareMutation(tx, static_cast<const KisPageVersion *>(nullptr), 1).isValid());
     QVERIFY(!coordinator.prepareMutation(tx, changes.constData(), -1).isValid());
     wrong = tx;
     ++wrong.id.value;

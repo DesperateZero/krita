@@ -230,7 +230,7 @@ public:
 
     static void removeHistoryDescriptor(void *context, const KisPageVersion &version)
     {
-        static_cast<KisPageStore::Private *>(context)->publicationCoordinator.removeDescriptorLocked(version);
+        static_cast<KisPageStore::Private *>(context)->publicationCoordinator.noteVersionExitLocked(version);
     }
 
     static bool hasAbandonedMutations(void *context)
@@ -403,7 +403,7 @@ public:
     {
         auto result = writeCoordinator.cancelPrivateWrite(request.transition(KisPageTransitionKind::CancelWrite));
         if (result.accepted)
-            publicationCoordinator.removeDescriptorLocked(request.version);
+            publicationCoordinator.noteVersionExitLocked(request.version);
         return result;
     }
 
@@ -910,7 +910,7 @@ public:
         owner->writeCoordinator.recordCancelled(*entry);
         if (page.proof.isValid())
             owner->owner.revokePreparedPage(page.proof);
-        owner->publicationCoordinator.removeDescriptorLocked(page.target.version);
+        owner->publicationCoordinator.noteVersionExitLocked(page.target.version);
         if (entry->isCpuWrite())
             ++owner->mutationStats.pagesCancelled;
         return true;
@@ -1201,10 +1201,15 @@ public:
             lock.unlock(); backing.retirement.reset(); lock.relock();
         });
         KisReplicaOperation allocation;
+        const auto spare = owner->publicationCoordinator.takeWorkingCapacityLocked(transaction.id, key);
         {
             ++owner->activeProviderCalls;
             lock.unlock();
             const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
+            if (spare.isValid()) {
+                const auto originalProvider = owner->owner.provider(spare.provider, spare.providerEpoch);
+                owner->retirementQueue.retireOrDefer(spare, originalProvider, {}, {});
+            }
             backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
                 KisBackingBudgetClass::ActivePending, error, adoption.version);
             if (!backing.reservation.isValid()) {
@@ -1387,7 +1392,7 @@ KisPageMutationSession::Private::prepareTarget(
     }
     PreparedTarget result;
     bool finalAccepted = false;
-    if (plan != KisPageWritePlanKind::RecoverableHandoff) {
+    if (plan != KisPageWritePlanKind::RecoverableHandoff && plan != KisPageWritePlanKind::ReuseWorkingCapacity) {
         decltype(owner->publicationCoordinator.prepareDescriptorLocked(target, descriptor)) descriptors;
         const auto discardDescriptors = qScopeGuard([&] {
             owner->publicationCoordinator.discardDescriptorAdditionsLocked(&descriptors, lock);
@@ -2746,8 +2751,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
                 failure = QStringLiteral("mutation prepared proof lost its owner");
                 break;
             }
-            if (!owner->owner.sealPreparedPage(owner->metadata,
-                                               page->target.version,
+            if (!owner->owner.sealCpuPreparedPage(page->target.version,
                                                d->transaction.id,
                                                *page->descriptor,
                                                completion,
@@ -2803,11 +2807,19 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         return {}; // The common validator rejects an inconsistent input count.
     };
     const bool hasOverlay = success && overlayChangeCount != 0;
+    // Only the bridge can transfer its private anonymous transaction to this
+    // scope. Ordinary seal/history/checkpoint retain their overlay contract.
+    // Revalidate the sole activity under this same gate at acceptance, where
+    // the original commit claim then excludes all new transaction activity.
+    const bool canonical = d->ownsTransaction
+        && (mode == SealMode::Final || mode == SealMode::AdapterDelivery)
+        && owner->writeCoordinator.transactionHasSoleSession(d->transaction.id)
+        && !owner->publicationCoordinator.hasPreparedDeltaLocked(d->transaction.id);
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
     auto overlay = hasOverlay
-        ? owner->publicationCoordinator.prepareOverlayUpdateLocked(
-              d->transaction, overlayChangeCount, readChange, &failure, &storageRefused)
-        : KisPagePublicationCoordinator::KisPreparedOverlayUpdate{};
+        ? owner->publicationCoordinator.preparePagePublicationLocked(
+              d->transaction, overlayChangeCount, readChange, &failure, &storageRefused, canonical)
+        : KisPagePublicationCoordinator::KisPreparedPagePublication{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
         if (failure.isEmpty())
@@ -2826,7 +2838,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     }
     const AdapterChanges adapterChanges(&overlay,
         [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
-            return static_cast<const KisPagePublicationCoordinator::KisPreparedOverlayUpdate *>(changes)
+            return static_cast<const KisPagePublicationCoordinator::KisPreparedPagePublication *>(changes)
                 ->forEachAdapterChange(visitor, visit);
         });
     if (success && hasOverlay && prepareAdapter) {
@@ -2846,8 +2858,11 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure, &storageRefused)) success = false;
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims(owner->operational && owner->writeCoordinator.transactionHasSession(d->transaction.id));
-    if (success && hasOverlay && !overlay.tryAcceptLocked(
-            &metadataCleanup, &failure)) {
+    const bool acceptsCanonical = success && hasOverlay && overlay.acceptsCanonical();
+    if (success && hasOverlay && !(acceptsCanonical
+            ? owner->writeCoordinator.transactionHasSoleSession(d->transaction.id)
+                && overlay.tryAcceptCanonicalLocked(d->diagnosticOwner, lock)
+            : overlay.tryAcceptLocked(&metadataCleanup, &failure))) {
         success = false;
         if (failure.isEmpty())
             failure = QStringLiteral("overlay installation was rejected");
@@ -2872,17 +2887,18 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     }
     // Installation now owns the replacements. The original pages cease
     // owning them only at this acceptance point, never at prepare success.
+    if (acceptsCanonical) d->ownsTransaction = false;
     for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
         if (auto *page = d->pageAtEntry(slot.index)) page->proof = {};
     owner->mutationStats.pagesSealed += sealedCpuWrites;
     owner->synchronousHostWrites += sealedSources;
     owner->mutationStats.removalsSealed += sealedRemovals;
-    // The complete overlay is installed. Its candidate still supplies the
+    // The chosen destination is installed. Its candidate still supplies the
     // exact accepted changes until finishUnlocked. Adapter callbacks and
     // retirement must not hold the owner gate.
     lock.unlock();
     if (hasOverlay && installAdapter) {
-        // The overlay is accepted and its candidate/claims are still live.
+        // Publication is accepted and its candidate/claims are still live.
         // Install cannot refuse; all adapter storage was prepared above.
         phase.next(Phase::MutationAdapterInstall, quint64(overlayChangeCount));
         installAdapter(adapterChanges);
@@ -3708,6 +3724,9 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     const bool ownerConfigured = d->owner.configure(completions, &failure);
     Q_ASSERT(ownerConfigured);
     Q_UNUSED(ownerConfigured);
+    const bool cpuProofsBound = d->owner.bindCpuProofs(d->metadata);
+    Q_ASSERT(cpuProofsBound);
+    if (!cpuProofsBound) qFatal("PageStore CPU proof metadata owner changed");
     const bool epochInstalled = d->epochs.installInitialization(std::move(epoch));
     Q_ASSERT(epochInstalled);
     Q_UNUSED(epochInstalled);
@@ -4369,7 +4388,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         d->writeRequests.erase(requestId.value);
         return fail();
     }
-    if (plan == KisPageWritePlanKind::RecoverableHandoff) {
+    if (plan == KisPageWritePlanKind::RecoverableHandoff || plan == KisPageWritePlanKind::ReuseWorkingCapacity) {
         // The preallocated request is the sole generic terminal owner. The
         // logical writer/admission survive releasing the short native pin;
         // resolve() acquires the ordinary generic provider access later.
@@ -4957,12 +4976,12 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
                                          descriptor, completion, &proof);
         lock.relock();
     }
-    KisPagePublicationCoordinator::KisPreparedOverlayUpdate overlay;
+    KisPagePublicationCoordinator::KisPreparedPagePublication overlay;
     if (success) {
         const auto transaction = d->epochs.activeTransaction(request.transaction);
         if (transaction.isValid()) {
             const KisPagePublicationCoordinator::OverlayChange change{request.version.key, proof, false};
-            overlay = d->publicationCoordinator.prepareOverlayUpdateLocked(
+            overlay = d->publicationCoordinator.preparePagePublicationLocked(
                 transaction, &change, 1, nullptr);
         }
         success = overlay.isValid();

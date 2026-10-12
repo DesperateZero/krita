@@ -83,6 +83,10 @@ public:
     // Detach committed Debt and retain the original record. Transfer is
     // infallible under the metadata owner's gate and invokes no provider.
     KRITAIMAGE_EXPORT void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
+    // Original working capacity has no logical version, but remains charged
+    // with its prepaid retirement headroom. Enqueue without a provider call;
+    // the existing worker performs class admission and physical retirement.
+    void acceptUnusedWorkingCapacity(const KisReplicaHandle &replica) noexcept;
     KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();
@@ -96,6 +100,7 @@ public:
     KRITAIMAGE_EXPORT KisPageRetirementQueueSnapshot snapshot() const;
 
 private:
+    void acceptRecord(KisPageRetirementRecordPointer record) noexcept;
     KisPageRetirementRecordPointer takeEffectRecord(const KisPageTransitionEffect &effect) noexcept;
     bool admitOwnedRetirementDebt(KisPageRetirementRecord &record,
                                   KisBackingBudgetReservation *reservation,

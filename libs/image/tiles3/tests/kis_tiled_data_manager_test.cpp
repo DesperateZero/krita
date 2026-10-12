@@ -2497,7 +2497,9 @@ void KisTiledDataManagerTest::testPageStoreOverlayExtent()
     KisPageStoreDiagnosticRecorder recorder(true, store);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         const bool published = phase == KisPageStoreDiagnosticPhase::CommitCleanup;
-        if (!published && phase != KisPageStoreDiagnosticPhase::MutationSealCleanup) return;
+        // The anonymous operation now accepts directly into canonical state.
+        // Observe the old cut before acceptance, not after destination cleanup.
+        if (!published && phase != KisPageStoreDiagnosticPhase::MutationSealPublishOwnerWait) return;
         if (published) ++committed; else ++sealed;
         auto view = backend->captureReadView();
         auto page = view.readResidentPage({backend->surface(), {2, 0}});
@@ -7260,7 +7262,7 @@ void KisTiledDataManagerTest::testPageStoreClonePublishedBounds()
     bool observed = false, sourceCoherent = false, cloneSucceeded = false;
     KisPageStoreDiagnosticRecorder recorder(true, backend->store());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
-        const auto wanted = atSeal ? KisPageStoreDiagnosticPhase::MutationSealCleanup
+        const auto wanted = atSeal ? KisPageStoreDiagnosticPhase::MutationSealPublishOwnerWait
                                   : KisPageStoreDiagnosticPhase::PixelOperationCleanup;
         if (phase != wanted || observed) return;
         observed = true;
@@ -7349,7 +7351,7 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
     KisPageStoreDiagnosticRecorder recorder(true, backend->store());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         if (phase == KisPageStoreDiagnosticPhase::MutationPresenceResolve) ++presenceResolutions;
-        if (phase == KisPageStoreDiagnosticPhase::MutationSealCleanup) {
+        if (phase == KisPageStoreDiagnosticPhase::MutationSealPublishOwnerWait) {
             ++sealed;
             observe(warm ? old : blank, warm);
         }
