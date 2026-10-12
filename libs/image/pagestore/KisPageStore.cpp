@@ -339,6 +339,7 @@ public:
         result.activeTransactions = epochs.activeTransactionCount();
         result.retainedSnapshots = epochs.retainedSnapshotCount();
         const KisPageReadCoordinatorSnapshot readSnapshot = readCoordinator.snapshotLocked();
+        result.activeReadRanges = readSnapshot.nativeRanges;
         const KisPagePublicationCoordinatorSnapshot publicationSnapshot = publicationCoordinator.snapshotLocked();
         result.pendingRequests = writeRequests.size() + readSnapshot.pendingRequests;
         result.activeReadLeases = readSnapshot.activeLeases;
@@ -700,13 +701,10 @@ class KisPageMutationSession::Private
 {
 public:
     explicit Private(KisBackingBudgetController *budget) : writes(budget), coldPages(budget) {}
-    struct Page {
+    struct Page : KisPageNativeWrite {
         KisReplicaHandle source;
-        KisReplicaHandle target;
-        const KisPageAllocationDescriptor *descriptor = nullptr;
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
-        KisPreparedPageProof proof;
     };
     static_assert(sizeof(Page) <= 512);
     struct ColdPageSet {
@@ -903,6 +901,13 @@ public:
         auto *entry = writes.at(index);
         Q_ASSERT(entry && !entry->isExposed());
         page.writable.reset();
+        if (page.reserved) {
+            if (!owner->metadata.cancelNativeWrite(&page)) return false;
+            owner->retirementQueue.acceptUnusedWorkingCapacity(page.target);
+            owner->writeCoordinator.recordCancelled(*entry);
+            if (entry->isCpuWrite()) ++owner->mutationStats.pagesCancelled;
+            return true;
+        }
         const auto result = owner->writeCoordinator.cancelPrivateWrite(writeTransition(index, page));
         if (storageRefused) *storageRefused = result.storageRefused;
         if (!result.accepted)
@@ -981,6 +986,13 @@ public:
             slot = next;
         }
         ColdPageSet abandonedPages;
+        if (terminalWithoutFacade)
+            for (auto slot = writes.firstEntry(); slot.isValid(); slot = writes.nextEntry(slot))
+                if (auto *page = pageAtEntry(slot.index); page && page->reserved) {
+                    page->writable.reset();
+                    const bool cancelled = owner->metadata.cancelNativeWrite(page);
+                    Q_ASSERT(cancelled); Q_UNUSED(cancelled);
+                }
         std::swap(coldPages, abandonedPages);
         ++owner->activeProviderCalls;
         lock.unlock();
@@ -1264,7 +1276,7 @@ public:
             owner->writeCoordinator.recordTarget(*entry, intent, adoption,
                                                   KisMutationPageEntryState::AliasAccepted);
             owner->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
-            page->descriptor = owner->publicationCoordinator.descriptorLocked(adoption.version);
+            page->descriptor = owner->metadata.versionDescriptor(adoption.version);
             Q_ASSERT(page->descriptor);
             ++owner->mutationStats.aliasGenerationsReserved;
         } else {
@@ -1325,14 +1337,19 @@ public:
     PreparedTarget prepareTarget(KisMutationWriteSet::EntryIndex index,
                                  KisPageWriteIntent intent, const KisCpuPagePayload *payload,
                                  Counters &local, QMutexLocker<QMutex> &lock,
-                                 KisPageStoreDiagnosticTimer &diagnostic, QString *error);
+                                 KisPageStoreDiagnosticTimer &diagnostic, QString *error,
+                                 const KisPageTransition *selected = nullptr,
+                                 const KisPageAllocationDescriptor *selectedLayout = nullptr,
+                                 const KisReplicaHandle &selectedBefore = {});
 };
 
 KisPageMutationSession::Private::PreparedTarget
 KisPageMutationSession::Private::prepareTarget(
     KisMutationWriteSet::EntryIndex index, KisPageWriteIntent intent,
     const KisCpuPagePayload *payload, Counters &local, QMutexLocker<QMutex> &lock,
-    KisPageStoreDiagnosticTimer &diagnostic, QString *error)
+    KisPageStoreDiagnosticTimer &diagnostic, QString *error,
+    const KisPageTransition *selected, const KisPageAllocationDescriptor *selectedLayout,
+    const KisReplicaHandle &selectedBefore)
 {
     auto *entry = writes.at(index);
     Q_ASSERT(entry && !pageAtEntry(index));
@@ -1351,7 +1368,11 @@ KisPageMutationSession::Private::prepareTarget(
     KisPageTransition acquire;
     KisReplicaHandle recoverableBefore;
     KisPageAllocationDescriptor descriptor;
-    if (!owner->writeCoordinator.prepareWriteBaseLocked(transaction, intent, owner->publicationCoordinator,
+    if (selected) {
+        acquire = *selected;
+        descriptor = *selectedLayout;
+        recoverableBefore = selectedBefore;
+    } else if (!owner->writeCoordinator.prepareWriteBaseLocked(transaction, intent, owner->publicationCoordinator,
                                                         &acquire, &descriptor, error, nullptr, &recoverableBefore))
         return {};
     const auto source = acquire.source;
@@ -1385,7 +1406,8 @@ KisPageMutationSession::Private::prepareTarget(
         plan = owner->writeCoordinator.prepareWritePlanLocked(
             transaction, intent, provider,
             {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
-            owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic);
+            owner->publicationCoordinator, acquire, recoverableBefore, lock, writable, diagnostic,
+            intent.inputKind == KisPageWriteInputKind::FinalPayload ? page : nullptr);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation write plan storage is unavailable"));
         return {};
@@ -1456,22 +1478,30 @@ KisPageMutationSession::Private::prepareTarget(
             return {};
         }
         acquire.target = allocation.replica;
-        const auto applied = owner->writeCoordinator.preparePrivateWrite(acquire,
-            finalPayload ? KisPageTransitionKind::AdoptPreparedWrite : KisPageTransitionKind::PrepareWrite);
+        KisPageMetadataTransitionResult applied;
+        if (intent.inputKind == KisPageWriteInputKind::FinalPayload) {
+            applied.accepted = owner->metadata.reserveNativeWrite(acquire, page,
+                owner->backingBudget.maxTransientVersionsPerPage(), &applied.rejectionReason);
+            if (applied.accepted && finalPayload) owner->metadata.completeNativeWrite(page);
+        } else {
+            applied = owner->writeCoordinator.preparePrivateWrite(acquire, KisPageTransitionKind::PrepareWrite);
+        }
         if (!applied.accepted) {
             rejectAllocation();
             KisPageStoreDetail::setError(error, applied.rejectionReason);
             return {};
         }
         finalAccepted = finalPayload;
+        if (page->reserved) page->binding = binding;
         owner->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
         result.payloadInitialized = directPayload;
     }
     page->source = acquire.source;
     page->target = acquire.target;
-    page->descriptor = owner->publicationCoordinator.descriptorLocked(target);
+    page->descriptor = owner->metadata.versionDescriptor(target);
     Q_ASSERT(page->descriptor);
     page->writable = std::move(writable);
+    if (page->reserved && !page->binding) page->binding = page->writable.binding();
     owner->writeCoordinator.recordTarget(*entry, intent, acquire,
         finalAccepted ? KisMutationPageEntryState::PrivatePrepared : KisMutationPageEntryState::MutableReady);
     discardUnprepared.dismiss();
@@ -1862,6 +1892,18 @@ bool KisPageMutationExecution::overwritePage(const KisPageKey &key, const KisCpu
 bool KisPageMutationExecution::overwriteFinalPage(
     const KisPageKey &key, const KisCpuPagePayload &payload, QString *error)
 {
+    return writeFinalPage(key, {}, payload, false, error);
+}
+
+bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect &rect,
+    const KisCpuPagePayload &payload, QString *error)
+{
+    return writeFinalPage(key, rect, payload, true, error);
+}
+
+bool KisPageMutationExecution::writeFinalPage(const KisPageKey &key, const QRect &rect,
+    const KisCpuPagePayload &payload, bool compare, QString *error)
+{
     if (!d) return false;
     QMutexLocker executionLock(&d->mutex);
     auto *scope = d->scope.get();
@@ -1879,27 +1921,100 @@ bool KisPageMutationExecution::overwriteFinalPage(
     auto *page = bound->page;
     void *data = nullptr;
     bool initialized = false;
+    QRect affected = rect;
     const auto fail = [&] {
         scope->state = KisPageMutationSession::Private::State::Failed;
         return false;
+    };
+    const auto validRect = [&](const KisPageAllocationDescriptor &descriptor) {
+        if (affected.isEmpty()) affected = QRect(QPoint(), descriptor.pageExtent);
+        const quint64 rowBytes = quint64(affected.width()) * descriptor.format.pixelStride;
+        // Internal uniform fill borrows one immutable row (stride zero).
+        // Public complete-payload admission keeps its ordinary layout rules.
+        return QRect(QPoint(), descriptor.pageExtent).contains(affected) && payload.data
+            && (payload.rowStride >= qint64(rowBytes) || (compare && payload.rowStride == 0))
+            && quint64(payload.rowStride) <= std::numeric_limits<quint64>::max() / quint64(affected.height())
+            && payload.byteSize >= 0 && quint64(payload.byteSize) >= quint64(affected.height()-1) * payload.rowStride + rowBytes;
     };
     if (!page) {
         QMutexLocker ownerLock(&scope->owner->mutex);
         if (!scope->selectCpuProviderLocked(error)) return fail();
         KisPageWriteIntent intent;
         intent.key = key;
-        intent.mode = KisPageWriteMode::DiscardContents;
+        intent.mode = compare ? KisPageWriteMode::PreserveContents : KisPageWriteMode::DiscardContents;
         intent.inputKind = KisPageWriteInputKind::FinalPayload;
-        intent.flags = quint8(KisPageWriteIntentFlag::InputBytesReady);
-        const auto target = scope->prepareTarget(index, intent, &payload, d->counters, ownerLock, diagnostic, error);
+        KisPageTransition selected;
+        KisPageAllocationDescriptor descriptor;
+        KisReplicaHandle before;
+        std::shared_ptr<KisCpuResidentBinding> binding;
+        if (!scope->owner->writeCoordinator.prepareWriteBaseLocked(scope->transaction, intent,
+                scope->owner->publicationCoordinator, &selected, &descriptor, error, nullptr, &before, &binding)) return fail();
+        if (!validRect(descriptor)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
+            return fail();
+        }
+        const quint64 rowBytes = quint64(affected.width()) * descriptor.format.pixelStride;
+        if (compare && !selected.baseVersion.isDefaultPixel()) {
+            // The original admission and transaction retain this selection.
+            // A physical pin covers the comparison, then ends before any
+            // writable claim. No captured overlay or second base lookup.
+            ++scope->owner->activeProviderCalls;
+            ownerLock.unlock();
+            const auto restore = qScopeGuard([&] { ownerLock.relock(); --scope->owner->activeProviderCalls; });
+            if (!binding) binding = scope->provider->cpuResidentBinding(selected.source);
+            const auto *bytes = binding ? static_cast<const quint8 *>(binding->acquireRead(
+                selected.source.allocationIdentity(), false, nullptr, true)) : nullptr;
+            const auto matches = [&](const void *data) {
+                for (int row = 0; row < affected.height(); ++row)
+                    if (std::memcmp(static_cast<const quint8 *>(data)
+                        + quint64(affected.y()+row) * selected.source.layout.rowStride
+                        + quint64(affected.x()) * descriptor.format.pixelStride,
+                        static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes))) return false;
+                return true;
+            };
+            bool same = false;
+            if (bytes) {
+                const auto release = qScopeGuard([&] { binding->releaseRead(); });
+                same = matches(bytes);
+            } else {
+                // Generic access consumes the SAME selected replica and
+                // transaction. It never resolves a later head after a miss.
+                KisPageReadCleanup cleanup(scope->owner->readCoordinator);
+                std::optional<KisReadLease> read;
+                ownerLock.relock();
+                const auto finish = qScopeGuard([&] {
+                    if (!ownerLock.isLocked()) ownerLock.relock();
+                    if (read && read->isValid()) scope->owner->readCoordinator.releaseLocked(std::move(*read), {}, ownerLock, cleanup);
+                    cleanup.finishUnlocked(ownerLock);
+                    ownerLock.unlock();
+                });
+                if (!cleanup.prepareRequestLocked(ownerLock, error)) return fail();
+                const auto request = scope->owner->readCoordinator.registerRequestLocked(selected.baseVersion,
+                    selected.source, {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
+                    scope->owner->readyHostCompletion, scope->transaction.id, cleanup);
+                read.emplace(scope->owner->readCoordinator.resolveLocked(request, request.readiness, ownerLock, cleanup));
+                if (!read->isValid() || !read->cpuData()) {
+                    scope->owner->readCoordinator.cancelLocked(request, ownerLock, cleanup);
+                    KisPageStoreDetail::setError(error, QStringLiteral("final CPU comparison could not read its exact base"));
+                    return fail();
+                }
+                ownerLock.unlock();
+                same = matches(read->cpuData());
+            }
+            if (same) { KisPageStoreDetail::setError(error, {}); return true; }
+        }
+        const bool full = affected == QRect(QPoint(), descriptor.pageExtent);
+        if (full) { intent.mode = selected.writeMode = KisPageWriteMode::DiscardContents; }
+        const auto target = scope->prepareTarget(index, intent, full && payload.rowStride ? &payload : nullptr,
+            d->counters, ownerLock, diagnostic, error, &selected, &descriptor, before);
         if (!target.page) return fail();
         page = bound->page = target.page;
         data = target.data;
         initialized = target.payloadInitialized;
     }
     if (!entry->hasPrivateResult()) {
-        if (!payload.isValidFor(*page->descriptor)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("complete CPU payload layout is invalid"));
+        if (!validRect(*page->descriptor)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
             return fail();
         }
         if (!data) data = scope->pinWritable(page->writable, d->counters);
@@ -1912,17 +2027,20 @@ bool KisPageMutationExecution::overwriteFinalPage(
         ++d->counters.pinsAcquired;
         d->counters.maximumPins = qMax(d->counters.maximumPins, d->counters.activePins + 1);
         if (!initialized) {
-            KisPageStoreDiagnosticTimer copy(scope->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto rowBytes = page->descriptor->minimumRowBytes();
-            const int rows = page->descriptor->pageExtent.height();
+            diagnostic.next(KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
+            const auto rowBytes = quint64(affected.width()) * page->descriptor->format.pixelStride;
+            const int rows = affected.height();
             for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target.layout.rowStride,
+                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * page->target.layout.rowStride
+                                + quint64(affected.x()) * page->descriptor->format.pixelStride,
                             static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes));
             d->counters.payloadCopyBytes += rowBytes * rows;
         }
         page->writable.unpin();
         ++d->counters.pinsReleased;
-        const auto applied = scope->owner->writeCoordinator.publishPrivateWrite(scope->writeTransition(index, *page));
+        KisPageMetadataTransitionResult applied;
+        if (page->reserved) applied.accepted = scope->owner->metadata.completeNativeWrite(page);
+        else applied = scope->owner->writeCoordinator.publishPrivateWrite(scope->writeTransition(index, *page));
         if (!applied.accepted) {
             KisPageStoreDetail::setError(error, applied.rejectionReason);
             return fail();
@@ -2859,10 +2977,20 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims(owner->operational && owner->writeCoordinator.transactionHasSession(d->transaction.id));
     const bool acceptsCanonical = success && hasOverlay && overlay.acceptsCanonical();
-    if (success && hasOverlay && !(acceptsCanonical
+    bool accepted = !hasOverlay;
+    if (success && hasOverlay) accepted = acceptsCanonical
             ? owner->writeCoordinator.transactionHasSoleSession(d->transaction.id)
                 && overlay.tryAcceptCanonicalLocked(d->diagnosticOwner, lock)
-            : overlay.tryAcceptLocked(&metadataCleanup, &failure))) {
+            : overlay.tryAcceptLocked(&metadataCleanup, &failure);
+    if (success && !accepted && metadataCleanup.needsNativeCapacity()) {
+        lock.unlock();
+        metadataCleanup = {};
+        success = overlay.prepareNativeCapacityRetry(&failure, &storageRefused);
+        lock.relock();
+        if (success) success = overlay.prepareSurfaceLocked(&failure, &storageRefused);
+        if (success) accepted = overlay.tryAcceptLocked(&metadataCleanup, &failure);
+    }
+    if (success && !accepted) {
         success = false;
         if (failure.isEmpty())
             failure = QStringLiteral("overlay installation was rejected");
@@ -3015,10 +3143,27 @@ public:
         return true;
     }
 
-    bool resolve(const KisPageKey &key, KisPageVersion *version) const
+    bool resolve(const KisPageKey &key, KisPageVersion *version, KisCpuReadBinding *binding = nullptr) const
     {
-        if (!key.isValid())
+        if (!key.isValid() || (exactVersion.isValid() && !(key == exactVersion.key)))
             return false;
+        if (release->nativeRange) {
+            if (release->stagedSurfaces.empty() || !(key.surface == release->stagedSurfaces.front().surface)
+                || !range.contains(key.page.column, key.page.row)) return false;
+            const size_t index = size_t(qint64(key.page.row) - range.top()) * size_t(range.width())
+                + size_t(qint64(key.page.column) - range.left());
+            const auto shard = quint32(owner->metadata.shardFor(key));
+            const auto &references = release->nativeRefs;
+            const auto found = std::lower_bound(references.cbegin(), references.cend(),
+                std::pair<quint32, quint32>{shard, quint32(index)}, [](const auto &reference, const auto &position) {
+                    return std::make_pair(reference.shard, reference.ordinal) < position;
+                });
+            if (found == references.cend() || found->shard != shard || found->ordinal != index) return false;
+            const auto &reference = *found;
+            *version = reference.version.isValid() ? owner->metadata.nativeReadVersion(reference, binding)
+                : KisPageVersion{key, KisPageGeneration{1}, release->stagedSurfaces.front().defaultPixelRevision};
+            return version->isValid();
+        }
         const auto &versions = release->versions;
         const auto found = std::lower_bound(versions.begin(), versions.end(), key,
             [&](const KisPageVersion &candidate, const KisPageKey &value) { return lessKey(candidate.key, value); });
@@ -3072,6 +3217,8 @@ public:
     KisImageEpochSnapshotToken retention;
     KisPageVersion exactVersion;
     KisPageTransactionId overlayTransaction;
+    QRect range;
+    KisImageEpochId rangeEpoch;
     KisPageCapturedReleasePointer release;
     mutable QMutex defaultMutex;
     mutable DefaultCache defaults;
@@ -3088,14 +3235,14 @@ bool KisCapturedReadView::isTransactionOverlay() const
 }
 KisImageEpochId KisCapturedReadView::epoch() const
 {
-    return d ? d->root.epoch() : KisImageEpochId{};
+    return d ? (d->release->nativeRange ? d->rangeEpoch : d->root.epoch()) : KisImageEpochId{};
 }
 
 KisImageEpochSnapshot KisPageStore::snapshotForClone(const KisCapturedReadView &view, QString *error) const
 try
 {
     KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::CopyPrepare);
-    if (!view.d || view.d->owner.get() != d.data() || view.d->exactVersion.isValid()) {
+    if (!view.d || view.d->owner.get() != d.data() || view.d->exactVersion.isValid() || view.d->release->nativeRange) {
         KisPageStoreDetail::setError(error, QStringLiteral("clone requires this store's complete captured view"));
         return {};
     }
@@ -3116,7 +3263,7 @@ bool KisCapturedReadView::resolvePageVersion(const KisPageKey &key, KisPageVersi
 {
     if (version)
         *version = {};
-    if (!d || !version || (d->exactVersion.isValid() && !(key == d->exactVersion.key)))
+    if (!d || !version)
         return false;
     return d->resolve(key, version);
 }
@@ -3152,7 +3299,8 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     if (status)
         *status = KisCpuResidentReadStatus::InvalidIdentity;
     KisPageVersion version;
-    if (!resolvePageVersion(key, &version))
+    KisCpuReadBinding link;
+    if (!d->resolve(key, &version, &link))
         return guard;
     if (version.isDefaultPixel()) {
         auto buffer = d->defaultReadBuffer(version);
@@ -3170,29 +3318,28 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     }
     auto observed = version.defaultPixelRevision ? KisCpuResidentReadStatus::VirtualDefault
                                                  : KisCpuResidentReadStatus::BindingUnavailable;
-    auto link = d->owner->metadata.cpuReadBinding(version);
+    if (!d->release->nativeRange) link = d->owner->metadata.cpuReadBinding(version);
     // The captured root and its exact version remain protected across every
-    // cold miss/recheck. No provider lookup or large handle on the warm path.
+    // cold miss/recheck. Facts supplies the binding without a separate map.
     if (!link)
-        link = KisPageReadCoordinator::discoverCpuReadBinding(d->owner->metadata, d->owner->owner, version);
+        link = KisPageReadCoordinator::discoverCpuReadBinding(d->owner->metadata, d->owner->owner, version, {}, &observed);
     std::shared_ptr<KisCpuResidentBinding> binding;
     const void *data = nullptr;
     constexpr int maximumAttempts = 3; // initial pin plus two immediate rediscoveries
-    for (int attempt = 0; link && attempt < maximumAttempts; ++attempt) {
-        if (!(link->replica.version == version)) {
+    for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
+        if (link && !(link.replica.version == version)) {
             observed = KisCpuResidentReadStatus::InvalidIdentity;
             break;
         }
-        binding = link->resolve(&observed);
+        binding = link.binding;
         if (binding)
-            data = binding->acquireRead(link->replica.allocationIdentity(), true, &observed, waitForLocalGate);
+            data = binding->acquireRead(link.replica.allocationIdentity(), true, &observed, waitForLocalGate);
         if (data || (observed != KisCpuResidentReadStatus::InvalidIdentity
                      && observed != KisCpuResidentReadStatus::Retired)
             || attempt + 1 == maximumAttempts)
             break;
         link = KisPageReadCoordinator::discoverCpuReadBinding(
-            d->owner->metadata, d->owner->owner, version, link);
-        if (!link) observed = KisCpuResidentReadStatus::BindingUnavailable;
+            d->owner->metadata, d->owner->owner, version, link, &observed);
     }
     if (status) *status = observed;
     if (!data)
@@ -3200,10 +3347,10 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     guard.m_scope = d;
     guard.m_binding = std::move(binding);
     guard.m_data = data;
-    guard.m_version = link->replica.version;
-    guard.m_pageExtent = link->replica.layout.pageExtent;
-    guard.m_rowStride = link->replica.layout.rowStride;
-    guard.m_byteSize = link->replica.layout.byteSize;
+    guard.m_version = link.replica.version;
+    guard.m_pageExtent = link.replica.layout.pageExtent;
+    guard.m_rowStride = link.replica.layout.rowStride;
+    guard.m_byteSize = link.replica.layout.byteSize;
     return guard;
 }
 
@@ -3330,6 +3477,76 @@ void KisPageStore::PrivateReleaser::cleanup(Private *owner)
             else Private::destroy(owner);
         }
     }
+}
+
+KisCapturedReadView KisPageStore::captureReadRange(KisSurfaceId surface, const QRect &pages,
+    const KisPageReadView &selector, QString *error)
+try
+{
+    if (!surface.isValid() || pages.isEmpty()
+        || (selector.kind != KisPageReadViewKind::CurrentCommittedEpoch && selector.kind != KisPageReadViewKind::TransactionOverlay)
+        || quint64(pages.width()) * quint64(pages.height()) > std::numeric_limits<quint32>::max()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("native read range is invalid"));
+        return {};
+    }
+    KisCapturedReadView result;
+    result.d = std::allocate_shared<KisCapturedReadView::Private>(
+        KisMutationStorageAllocator<KisCapturedReadView::Private>::retained(&d->backingBudget), d->backingBudget);
+    result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
+    auto &release = *result.d->release;
+    release.nativeRange = true;
+    release.nativeRefs.resize(size_t(pages.width()) * size_t(pages.height()));
+    release.stagedSurfaces.resize(1);
+    const auto keyAt = [&](quint32 i) {
+        return KisPageKey{surface, {qint32(qint64(pages.left()) + qint64(i % quint32(pages.width()))),
+                                   qint32(qint64(pages.top()) + qint64(i / quint32(pages.width())))}};
+    };
+    for (size_t i = 0; i < release.nativeRefs.size(); ++i) {
+        release.nativeRefs[i].ordinal = quint32(i);
+        release.nativeRefs[i].shard = quint32(d->metadata.shardFor(keyAt(quint32(i))));
+    }
+    std::sort(release.nativeRefs.begin(), release.nativeRefs.end(), [](const auto &a, const auto &b) {
+        return std::tie(a.shard, a.ordinal) < std::tie(b.shard, b.ordinal);
+    });
+    QMutexLocker lock(&d->mutex);
+    if (!d->operational || d->closing
+        || !d->publicationCoordinator.resolveSurfaceLocked(surface, selector, &release.stagedSurfaces.front())) {
+        KisPageStoreDetail::setError(error, QStringLiteral("native read surface is unavailable"));
+        return {};
+    }
+    result.d->range = pages;
+    result.d->rangeEpoch = selector.kind == KisPageReadViewKind::CurrentCommittedEpoch
+        ? d->epochs.captureCommittedRoot().epoch() : d->epochs.activeTransaction(selector.transaction).baseEpoch;
+    if (selector.kind == KisPageReadViewKind::TransactionOverlay) result.d->overlayTransaction = selector.transaction;
+    auto select = [&](quint32 ordinal, KisPageVersion *version) {
+        return d->publicationCoordinator.resolveVersionLocked(keyAt(ordinal), selector, version);
+    };
+    while (size_t(release.retained) < release.nativeRefs.size()) {
+        const size_t first = size_t(release.retained);
+        size_t end = first + 1;
+        while (end < release.nativeRefs.size() && end - first < 16
+            && release.nativeRefs[end].shard == release.nativeRefs[first].shard) ++end;
+        release.retained += d->metadata.retainNativeReads(release.nativeRefs.data() + first, end-first, &select,
+            [](void *context, quint32 ordinal, KisPageVersion *version) {
+                return (*static_cast<decltype(select) *>(context))(ordinal, version);
+            });
+        if (size_t(release.retained) != end) {
+            d->readCoordinator.releaseCapturedView(std::move(result.d->release), &lock);
+            KisPageStoreDetail::setError(error, QStringLiteral("native read range selection was refused"));
+            return {};
+        }
+    }
+    d->lifetimeReferences.ref();
+    result.d->owner.reset(d.data());
+    release.capturedScope = true;
+    d->readCoordinator.noteCapturedViewCreatedLocked(true);
+    KisPageStoreDetail::setError(error, {});
+    return result;
+}
+catch (const std::bad_alloc &)
+{
+    KisPageStoreDetail::setError(error, QStringLiteral("native read range storage was refused"));
+    return {};
 }
 
 KisCapturedReadView KisPageStore::captureReadView(const KisPageReadView &selector, QString *error)
@@ -3724,7 +3941,7 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     const bool ownerConfigured = d->owner.configure(completions, &failure);
     Q_ASSERT(ownerConfigured);
     Q_UNUSED(ownerConfigured);
-    const bool cpuProofsBound = d->owner.bindCpuProofs(d->metadata);
+    const bool cpuProofsBound = d->owner.bindCpuProofs(d->metadata, ready);
     Q_ASSERT(cpuProofsBound);
     if (!cpuProofsBound) qFatal("PageStore CPU proof metadata owner changed");
     const bool epochInstalled = d->epochs.installInitialization(std::move(epoch));

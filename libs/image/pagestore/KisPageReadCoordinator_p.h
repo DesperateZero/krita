@@ -42,16 +42,19 @@ struct KisPageCapturedRelease
     explicit KisPageCapturedRelease(KisBackingBudgetController &budget)
         : versions(KisMutationStorageAllocator<KisPageVersion>(&budget))
         , removedPages(KisMutationStorageAllocator<KisPageKey>(&budget))
-        , stagedSurfaces(KisMutationStorageAllocator<KisSurfaceEpochState>(&budget)) {}
+        , stagedSurfaces(KisMutationStorageAllocator<KisSurfaceEpochState>(&budget))
+        , nativeRefs(KisMutationStorageAllocator<KisPageNativeReadRef>(&budget)) {}
     KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget);
     KisImageEpochSnapshotToken token;
     std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> versions;
     std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removedPages;
     std::vector<KisSurfaceEpochState, KisMutationStorageAllocator<KisSurfaceEpochState>> stagedSurfaces;
+    std::vector<KisPageNativeReadRef, KisMutationStorageAllocator<KisPageNativeReadRef>> nativeRefs;
     KisPageMetadataReadCleanup cleanup;
     size_t retained = 0;
     size_t next = 0;
     bool capturedScope = false;
+    bool nativeRange = false;
     bool processing = false;
     boost::intrusive::list_member_hook<> releaseHook;
 };
@@ -88,6 +91,7 @@ struct KisPageReadCoordinatorSnapshot
     quint64 maximumLastUsesPerPass = 0;
     quint64 lastUseDispatchFailures = 0;
     qsizetype pendingCapturedReleases = 0;
+    qsizetype nativeRanges = 0;
 };
 
 class KisPageReadCoordinator final
@@ -120,10 +124,10 @@ public:
     // Cold native selection only. The caller retains this exact version/root
     // across discovery and pinning; never substitute the current version.
     // A stale candidate is conditionally evicted, preserving a newer cache.
-    static Q_NEVER_INLINE KRITAIMAGE_EXPORT std::shared_ptr<KisCpuReadBindingLink> discoverCpuReadBinding(
+    static Q_NEVER_INLINE KRITAIMAGE_EXPORT KisCpuReadBinding discoverCpuReadBinding(
         KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
         const KisPageVersion &version,
-        const std::shared_ptr<KisCpuReadBindingLink> &stale = {});
+        const KisCpuReadBinding &stale = {}, KisCpuResidentReadStatus *status = nullptr);
 
     KRITAIMAGE_EXPORT KisReadRequest registerRequestLocked(
         const KisPageVersion &version,
@@ -164,7 +168,7 @@ public:
     bool cancelPreparedRequestsLocked(KisPageTransactionId transaction,
                                       KisPageReadCleanup &cleanup);
 
-    void noteCapturedViewCreatedLocked();
+    void noteCapturedViewCreatedLocked(bool nativeRange = false);
     KRITAIMAGE_EXPORT bool releaseCapturedView(
         KisPageCapturedReleasePointer pending,
         QMutexLocker<QMutex> *heldOwnerLock = nullptr);
@@ -267,6 +271,7 @@ private:
     quint64 m_requestsCreated = 0;
     quint64 m_capturedViewsCreated = 0;
     quint64 m_capturedViewReleases = 0;
+    qsizetype m_nativeRanges = 0;
 };
 
 // Construct before the outer store lock. Transfer the original map nodes and

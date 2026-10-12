@@ -456,21 +456,31 @@ KisPageReadCoordinator::KisPageReadCoordinator(
 {
 }
 
-std::shared_ptr<KisCpuReadBindingLink> KisPageReadCoordinator::discoverCpuReadBinding(
+KisCpuReadBinding KisPageReadCoordinator::discoverCpuReadBinding(
     KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
-    const KisPageVersion &version, const std::shared_ptr<KisCpuReadBindingLink> &stale)
+    const KisPageVersion &version, const KisCpuReadBinding &stale, KisCpuResidentReadStatus *status)
 {
+    if (status) *status = KisCpuResidentReadStatus::BindingUnavailable;
     if (stale) {
-        if (!(stale->replica.version == version)) return {};
-        metadata.removeCpuReadBinding(stale->replica, stale.get());
+        if (!(stale.replica.version == version)) return {};
+        metadata.removeCpuReadBinding(stale.replica, stale.binding.get());
     }
     // Another reader may already have installed the replacement. Preserve its
-    // shared one-time provider lookup rather than creating another candidate.
-    if (auto current = metadata.cpuReadBinding(version)) return current;
+    // direct binding rather than installing a duplicate selection.
+    if (auto current = metadata.cpuReadBinding(version)) {
+        if (status) *status = KisCpuResidentReadStatus::Ready;
+        return current;
+    }
     const auto replica = metadata.cpuReadReplica(version);
     if (!replica.isValid()) return {};
     const auto provider = owner.provider(replica.provider, replica.providerEpoch);
-    return metadata.installCpuReadBinding(replica, provider);
+    if (!provider) return {};
+    auto binding = provider->cpuResidentBinding(replica, status);
+    if (!binding) {
+        if (status && *status == KisCpuResidentReadStatus::Ready) *status = KisCpuResidentReadStatus::InvalidIdentity;
+        return {};
+    }
+    return metadata.installCpuReadBinding(replica, std::move(binding));
 }
 
 KisReadRequest KisPageReadCoordinator::registerRequestLocked(
@@ -929,9 +939,10 @@ void KisPageReadCoordinator::processRetirementsUnlocked(QMutexLocker<QMutex> &ow
     m_retirementQueue.process(std::numeric_limits<qsizetype>::max());
 }
 
-void KisPageReadCoordinator::noteCapturedViewCreatedLocked()
+void KisPageReadCoordinator::noteCapturedViewCreatedLocked(bool nativeRange)
 {
     ++m_capturedViewsCreated;
+    m_nativeRanges += nativeRange;
 }
 
 void KisPageCapturedReleaseDeleter::operator()(KisPageCapturedRelease *record) const noexcept
@@ -957,7 +968,7 @@ bool KisPageReadCoordinator::releaseCapturedView(
         heldOwnerLock = &*acquired;
     }
     auto &lock = *heldOwnerLock;
-    Q_ASSERT(pending && pending->token.isValid());
+    Q_ASSERT(pending && (pending->token.isValid() || pending->nativeRange));
     m_ownerLifetime.ref();
     auto *record = pending.release();
     m_capturedReleaseRetries.push_back(*record);
@@ -991,6 +1002,23 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
 {
     Q_ASSERT(!pending.processing);
     pending.processing = true;
+    if (pending.nativeRange) {
+        while (pending.next < pending.retained) {
+            KisPageKey revisit[16];
+            const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data() + pending.next,
+                size_t(pending.retained - pending.next), revisit);
+            if (!released) {
+                pending.processing = false;
+                return false;
+            }
+            pending.next += released;
+            for (size_t i = 0; i < released; ++i)
+                if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i]);
+        }
+        if (pending.capturedScope) --m_nativeRanges;
+        m_history.collectUnreachableLocked();
+        processRetirementsUnlocked(lock);
+    }
     while (pending.next < pending.retained) {
         const auto &version = pending.versions[pending.next];
         KisPageTransition release;
@@ -1011,7 +1039,8 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
         processRetirementsUnlocked(lock);
     }
     bool becameUnretained = false;
-    if (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained)) {
+    if (!pending.nativeRange
+        && (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained))) {
         pending.processing = false;
         return false;
     }
@@ -1060,6 +1089,7 @@ KisPageReadCoordinatorSnapshot KisPageReadCoordinator::snapshotLocked() const
     result.lastUsePasses = m_lastUsePasses;
     result.maximumLastUsesPerPass = m_maximumLastUsesPerPass;
     result.pendingCapturedReleases = qsizetype(m_capturedReleaseRetries.size());
+    result.nativeRanges = m_nativeRanges;
     if (m_lastUseWakeContext) {
         QMutexLocker lock(&m_lastUseWakeContext->mutex);
         result.lastUseJobScheduled = m_lastUseWakeContext->jobScheduled ||

@@ -655,7 +655,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     page.versions = {old}; QVERIFY(metadata.registerPage(page));
     auto stale = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version); QVERIFY(stale);
     std::shared_ptr<KisCpuResidentBinding> binding;
-    if (warm) { binding = stale->resolve(); QVERIFY(binding); }
+    if (warm) { binding = stale.binding; QVERIFY(binding); }
     auto physical = KisCpuBackingHandoff::prepare(provider, a.replica, {key(0), {2}}, desc); QVERIFY(physical.isValid());
     const auto target = physical.target();
     const KisPageTransaction tx{{71}, {1}};
@@ -674,7 +674,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     auto *bytes = static_cast<quint8 *>(writer.pinResident()); QVERIFY(bytes);
     std::memset(bytes, 0x72, size_t(target.layout.byteSize)); writer.reset();
     KisCpuResidentReadStatus observed{};
-    binding = stale->resolve(&observed);
+    binding = stale.binding;
     if (binding) QVERIFY(!binding->acquireRead(a.replica.allocationIdentity(), true, &observed));
     QCOMPARE(observed, KisCpuResidentReadStatus::InvalidIdentity);
     if (publish) {
@@ -692,25 +692,25 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     // Production captured reads call this exact cold selection with the
     // version resolved once from their retained root, never the latest key.
     auto selected = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, stale);
-    QVERIFY(selected); QCOMPARE(selected->replica, b.replica);
-    auto beforeBinding = selected->resolve(); QVERIFY(beforeBinding);
+    QVERIFY(selected); QCOMPARE(selected.replica, b.replica);
+    auto beforeBinding = selected.binding; QVERIFY(beforeBinding);
     const auto *before = static_cast<const quint8 *>(beforeBinding->acquireRead(b.replica.allocationIdentity(), true));
     QVERIFY(before); const bool beforeExact = before[0] == 0x31 && before[b.replica.layout.byteSize - 1] == 0x31;
     beforeBinding->releaseRead(); QVERIFY(beforeExact);
     if (publish) {
         auto current = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, target.version);
-        QVERIFY(current); QCOMPARE(current->replica, target);
-        auto currentBinding = current->resolve(); QVERIFY(currentBinding);
+        QVERIFY(current); QCOMPARE(current.replica, target);
+        auto currentBinding = current.binding; QVERIFY(currentBinding);
         const auto *after = static_cast<const quint8 *>(currentBinding->acquireRead(target.allocationIdentity(), true));
         QVERIFY(after); const bool afterExact = after[0] == 0x72 && after[target.layout.byteSize - 1] == 0x72;
         currentBinding->releaseRead(); QVERIFY(afterExact);
     }
-    // A late reader of A cannot evict B; even a replacement with the same B
-    // handle survives eviction requested by an older B cache object.
+    // A late reader of A cannot select or evict A as the current B. Reinstall
+    // of B retains the same provider binding; there is no cache-object ABA.
     QCOMPARE(KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, stale), selected);
     metadata.removeCpuReadBinding(b.replica);
-    auto newer = metadata.installCpuReadBinding(b.replica, beforeProvider); QVERIFY(newer); QVERIFY(newer != selected);
-    std::shared_ptr<KisCpuReadBindingLink> concurrent;
+    auto newer = metadata.installCpuReadBinding(b.replica, beforeBinding); QVERIFY(newer); QCOMPARE(newer, selected);
+    KisCpuReadBinding concurrent;
     std::thread late([&] { concurrent = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, selected); });
     late.join(); QCOMPARE(concurrent, newer); QCOMPARE(metadata.cpuReadBinding(version), newer);
     QVERIFY(!KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, target.version, stale));

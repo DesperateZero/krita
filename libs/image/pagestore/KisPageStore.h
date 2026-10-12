@@ -136,6 +136,8 @@ private:
     // Adapter producer supplies each complete final key once. Acceptance
     // closes mutable access to that key; ordinary overwritePage stays mutable.
     bool overwriteFinalPage(const KisPageKey &, const KisCpuPagePayload &, QString *error);
+    bool writeFinalRect(const KisPageKey &, const QRect &, const KisCpuPagePayload &, QString *error);
+    bool writeFinalPage(const KisPageKey &, const QRect &, const KisCpuPagePayload &, bool compare, QString *error);
     // Prepare ordinary mutable backing for the complete borrowed range before
     // a caller can expose pixels. Semantic removal/alias entries keep their
     // existing path because preparing them would itself change pending bytes.
@@ -645,6 +647,9 @@ private:
     std::unique_ptr<KisPageStoreWriteReservation> reserveManagedRange(
         KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
         bool legacyIntent, bool *borrowed, QString *error);
+    // Internal finite selection. It cannot be used as a whole-image snapshot.
+    KisCapturedReadView captureReadRange(KisSurfaceId surface, const QRect &pages,
+        const KisPageReadView &selector, QString *error);
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
     // Product composition prepares the real facade/root storage before its

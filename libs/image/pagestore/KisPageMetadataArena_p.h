@@ -504,6 +504,22 @@ public:
         return resolved.slot ? resolved.slot->value() : nullptr;
     }
 
+    bool canRebind(SlotId id) const
+    {
+        const auto resolved = resolve(id);
+        return resolved.slot && resolved.slot->generation + 1 < MaximumGeneration;
+    }
+
+    // Changes the identity of an occupied slot, keeping its paid storage and
+    // value. The owner must update every link/index before releasing its gate.
+    SlotId rebind(SlotId id)
+    {
+        auto resolved = resolve(id);
+        if (!resolved.slot || resolved.slot->generation + 1 >= MaximumGeneration) return {};
+        ++resolved.slot->generation;
+        return makeId(resolved.directoryIndex, resolved.offset, *resolved.entry, *resolved.slot);
+    }
+
     bool erase(SlotId id, ReleasedBlocks *released = nullptr,
                quint64 minimumActiveBlocksToKeep = 0)
     {

@@ -1017,6 +1017,12 @@ private Q_SLOTS:
     void finalPayload_data();
     void finalPayload();
     void finalPayloadSealRetry();
+    void nativeFinalSlotReplacement_data();
+    void nativeFinalSlotReplacement();
+    void nativeFinalRect_data();
+    void nativeFinalRect();
+    void nativeRangeResources_data();
+    void nativeRangeResources();
     void invalidCompletePayload_data();
     void invalidCompletePayload();
     void completePayloadPreparationClaims();
@@ -1166,9 +1172,11 @@ private Q_SLOTS:
     void capturedOverlayFreezesSealedDelta_data()
     {
         QTest::addColumn<int>("terminal");
-        QTest::newRow("commit") << 0;
-        QTest::newRow("abort") << 1;
-        QTest::newRow("removal") << 2;
+        QTest::addColumn<bool>("nativeRange");
+        for (int terminal = 0; terminal != 3; ++terminal)
+            for (bool native : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("terminal%1-native%2").arg(terminal).arg(native)))
+                    << terminal << native;
     }
     void capturedOverlayFreezesSealedDelta();
     void capturedOverlayDefaultIdentitySurvivesAbortAndRestore();
@@ -1776,6 +1784,7 @@ void KisPageStoreCpuMutationTest::capturedOverlayConcurrentSegments()
 void KisPageStoreCpuMutationTest::capturedOverlayFreezesSealedDelta()
 {
     QFETCH(int, terminal);
+    QFETCH(bool, nativeRange);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     const auto tx = f.store->beginCurrentTransaction();
     auto segment = f.begin(tx);
@@ -1786,8 +1795,12 @@ void KisPageStoreCpuMutationTest::capturedOverlayFreezesSealedDelta()
     QVERIFY(segment.seal());
     KisPageReadView overlay; overlay.kind = KisPageReadViewKind::TransactionOverlay;
     overlay.transaction = tx.id;
-    auto captured = f.store->captureReadView(overlay, &f.error);
-    auto independent = f.store->captureReadView(overlay, &f.error);
+    const auto capture = [&] {
+        return nativeRange ? f.store->captureReadRange({1}, QRect(0, 0, 2, 1), overlay, &f.error)
+                           : f.store->captureReadView(overlay, &f.error);
+    };
+    auto captured = capture();
+    auto independent = capture();
     QVERIFY2(captured.isValid() && independent.isValid(), qPrintable(f.error));
     QVERIFY(captured.isTransactionOverlay()); QCOMPARE(captured.epoch(), tx.baseEpoch);
     const auto stats = f.store->sessionStats();
@@ -1800,7 +1813,7 @@ void KisPageStoreCpuMutationTest::capturedOverlayFreezesSealedDelta()
     static_cast<quint8 *>(pending.data())[0] = 0x72;
     // Capturing while an unpublished writer is active must expose the last
     // sealed delta, never the writable allocation currently being modified.
-    auto duringWrite = f.store->captureReadView(overlay, &f.error);
+    auto duringWrite = capture();
     auto sealed = duringWrite.readResidentPage(key(1)); QVERIFY(sealed.isValid());
     QCOMPARE(static_cast<const quint8 *>(sealed.data())[0], quint8(0x52));
     pending = {}; QVERIFY(segment.seal());
@@ -2047,7 +2060,10 @@ void KisPageStoreCpuMutationTest::sharedReadFailureReleasesOnlyExpiredPins()
     f.provider->rejectNativeBinding = true;
     const auto second = reader.readPage(1, 0, &f.error); QVERIFY2(second.isValid(), qPrintable(f.error));
     QCOMPARE(second.data[0], quint8(0x31)); // cache miss still uses the captured root
-    QCOMPARE(f.store->sessionStats().activeReadLeases, qsizetype(cursor ? 1 : 2));
+    // Failed provider discoveries no longer create persistent negative link
+    // objects. The intervening fill can populate G's valid direct binding;
+    // this read still pins G but does not create another generic lease.
+    QCOMPARE(f.store->sessionStats().activeReadLeases, qsizetype(cursor ? 0 : 1));
     QVERIFY(reader.finish(&f.error));
     QCOMPARE(f.store->sessionStats().activeReadLeases, qsizetype(0));
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
@@ -2735,30 +2751,36 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
 
 void KisPageStoreCpuMutationTest::captureStorageRefusalPrecedesProtection()
 {
+    for (bool native : {false,true}) {
     Fixture f;
     KisPageBackingLimits limits; limits.metadataArenaBytes = 128 * 1024;
     QVERIFY(f.store->configureBackingLimits(limits));
     QVERIFY2(f.init(), qPrintable(f.error));
     const auto before = f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    const auto capture = [&] { return native ? f.store->captureReadRange({1}, QRect(0,0,16,1), {}, &f.error)
+                                            : f.store->captureReadView({}, &f.error); };
+    const auto protectedScopes = [&] { const auto stats = f.store->sessionStats();
+        return native ? stats.activeReadRanges : stats.retainedSnapshots; };
     std::vector<KisCapturedReadView> held;
     for (int i = 0; i < 2048; ++i) {
-        auto view = f.store->captureReadView({}, &f.error);
+        auto view = capture();
         if (!view.isValid()) break;
         held.push_back(std::move(view));
     }
     QVERIFY(!held.empty() && held.size() < 2048);
-    const auto snapshots = f.store->sessionStats().retainedSnapshots;
+    const auto snapshots = protectedScopes();
     QCOMPARE(snapshots, qsizetype(held.size()));
-    QVERIFY(!f.store->captureReadView({}, &f.error).isValid());
-    QCOMPARE(f.store->sessionStats().retainedSnapshots, snapshots);
+    QVERIFY(!capture().isValid());
+    QCOMPARE(protectedScopes(), snapshots);
     QVERIFY(!f.store->closeSession());
     held.pop_back();
-    auto recovered = f.store->captureReadView(); QVERIFY(recovered.isValid());
+    auto recovered = capture(); QVERIFY(recovered.isValid());
     recovered = {}; held.clear();
     QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->sessionStats().retainedSnapshots, qsizetype(0));
+    QCOMPARE(protectedScopes(), qsizetype(0));
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, before);
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    }
 }
 
 void KisPageStoreCpuMutationTest::readProtectionBlockCleanup_data()
@@ -7631,7 +7653,8 @@ void KisPageStoreCpuMutationTest::finalPayload()
         if (terminal == 1) QVERIFY(segment.cancel());
         else {
             if (terminal == 3) f.provider->validationsUntilFailure = 0;
-            QCOMPARE(segment.seal(&f.error), terminal != 3);
+            const bool sealed = segment.seal(&f.error);
+            QVERIFY2(sealed == (terminal != 3), qPrintable(f.error));
         }
     }
     const bool committed = terminal == 0 || terminal == 4;
@@ -7679,6 +7702,157 @@ void KisPageStoreCpuMutationTest::finalPayloadSealRetry()
     segment = {};
     QVERIFY(f.store->closeSession());
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement_data()
+{
+    QTest::addColumn<int>("reader");
+    for (int reader = 0; reader < 3; ++reader)
+        QTest::newRow(qPrintable(QStringLiteral("late-reader-%1").arg(reader))) << reader;
+}
+
+void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
+{
+    QFETCH(int, reader);
+    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    const auto overlay = KisPageReadView::transactionOverlay(tx.id);
+    const auto prepare = [&](auto &segment, char value) {
+        auto execution = segment.borrowExecution({1}, {{0,0}, {1,0}}, &f.error);
+        const QByteArray bytes(64 * 64 * f.bpp, value);
+        return execution.isActive()
+            && execution.overwriteFinalPage(key(), {bytes.constData(), 64*f.bpp, bytes.size()}, &f.error)
+            && execution.overwriteFinalPage(key(1), {bytes.constData(), 64*f.bpp, bytes.size()}, &f.error)
+            && execution.finish(&f.error);
+    };
+    auto first = f.begin(tx);
+    QVERIFY2(prepare(first, 0x51), qPrintable(f.error));
+    QVERIFY2(first.seal(&f.error), qPrintable(f.error));
+    auto second = f.begin(tx);
+    QVERIFY2(prepare(second, 0x71), qPrintable(f.error));
+    QVERIFY(!f.store->abort(tx));
+    QVERIFY(!f.store->closeSession());
+    const auto before = kisPageStoreMetadataMetrics(*f.store);
+    const auto payload = f.provider->p->payloadWork();
+    KisCapturedReadView late;
+    bool visited = false;
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    recorder.setPhaseObserver([&](auto phase) {
+        if (phase != KisPageStoreDiagnosticPhase::MutationSealPublishOwnerWait || visited) return;
+        visited = true;
+        if (reader == 1) late = f.store->captureReadRange({1}, QRect(0,0,1,1), overlay, &f.error);
+        if (reader == 2) late = f.store->captureReadView(overlay, &f.error);
+    });
+    QVERIFY2(second.seal(&f.error), qPrintable(f.error));
+    QVERIFY(visited);
+    const auto after = kisPageStoreMetadataMetrics(*f.store);
+    QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, quint64(reader ? 0 : 2));
+    QCOMPARE(after.nativeCapacityRetries - before.nativeCapacityRetries, quint64(reader ? 1 : 0));
+    QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages, payload.payloadInitializedPages);
+    if (reader) {
+        QVERIFY(late.isValid());
+        auto old = late.readResidentPage(key()); QVERIFY(old.isValid());
+        QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x51));
+    }
+    QCOMPARE(f.pixel(overlay), QByteArray(f.bpp, char(0x71)));
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    late = {}; first = {}; second = {};
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::nativeFinalRect_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("partial");
+    QTest::addColumn<bool>("generic"); QTest::addColumn<bool>("noop");
+    QTest::addColumn<bool>("repeatRow");
+    for (int bpp : {1,4,8,16}) for (bool partial : {false,true})
+        for (bool generic : {false,true}) for (bool noop : {false,true}) for (bool repeatRow : {false,true})
+            QTest::newRow(qPrintable(QStringLiteral("b%1-partial%2-generic%3-noop%4-repeat%5")
+                .arg(bpp).arg(partial).arg(generic).arg(noop).arg(repeatRow))) << bpp << partial << generic << noop << repeatRow;
+}
+
+void KisPageStoreCpuMutationTest::nativeFinalRect()
+{
+    QFETCH(int, bpp); QFETCH(bool, partial); QFETCH(bool, generic); QFETCH(bool, noop);
+    QFETCH(bool, repeatRow);
+    Fixture f; QVERIFY(f.init(bpp, 1));
+    if (generic) f.provider->rejectBindingFor = f.initialReplicas.first();
+    const auto readsBefore = f.provider->readAccessCalls.load();
+    auto old = f.store->captureReadView();
+    const auto tx = f.store->beginCurrentTransaction(); auto segment = f.begin(tx);
+    auto execution = segment.borrowExecution({1}, {{0,0}}, &f.error); QVERIFY(execution.isActive());
+    const QRect rect = partial ? QRect(13,17,31,23) : QRect(0,0,64,64);
+    const qsizetype stride = repeatRow ? 0 : rect.width() * bpp + 7;
+    const QByteArray input((rect.height()-1) * stride + rect.width()*bpp, char(noop ? 0x31 : 0x73));
+    QVERIFY2(execution.writeFinalRect(key(), rect, {input.constData(), stride, input.size()}, &f.error), qPrintable(f.error));
+    if (generic) QVERIFY(f.provider->readAccessCalls.load() > readsBefore);
+    QVector<KisLogicalPageId> changed; changed.reserve(1);
+    QCOMPARE(execution.finishPreparedWrites(&changed), qsizetype(!noop));
+    QVERIFY(execution.finish());
+    QVERIFY2(segment.seal(&f.error), qPrintable(f.error));
+    if (noop) QVERIFY(f.store->abort(tx));
+    else QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    f.provider->rejectBindingFor = {};
+    auto current = f.store->captureReadView(); auto read = current.readResidentPage(key()); QVERIFY(read.isValid());
+    const auto *bytes = static_cast<const quint8 *>(read.data());
+    for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x)
+        for (int c = 0; c < bpp; ++c)
+            QCOMPARE(bytes[y*read.rowStride()+x*bpp+c], quint8(!noop && rect.contains(x,y) ? 0x73 : 0x31));
+    f.provider->rejectBindingFor = {};
+    auto before = old.readResidentPage(key()); QVERIFY(before.isValid());
+    QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x31));
+    before = {}; old = {}; read = {}; current = {}; segment = {};
+    QVERIFY(f.store->closeSession());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::nativeRangeResources_data()
+{
+    QTest::addColumn<int>("count"); QTest::addColumn<bool>("materialized");
+    for (int count : {1,16,128,1024}) for (bool materialized : {false,true})
+        QTest::newRow(qPrintable(QStringLiteral("k%1-present%2").arg(count).arg(materialized))) << count << materialized;
+}
+
+void KisPageStoreCpuMutationTest::nativeRangeResources()
+{
+    QFETCH(int, count); QFETCH(bool, materialized);
+    Fixture f; QVERIFY(f.init(1));
+    const QRect range(-count/2, -1, count, 1);
+    if (materialized) {
+        KisPageSnapshotArray<KisLogicalPageId> pages;
+        for (int x = range.left(); x <= range.right(); ++x) pages.append({x,-1});
+        const auto tx = f.store->beginCurrentTransaction(); auto segment = f.begin(tx);
+        auto execution = segment.borrowExecution({1}, pages, &f.error); QVERIFY(execution.isActive());
+        const QByteArray input(64*64, char(0x71));
+        for (const auto &page : pages)
+            QVERIFY(execution.overwriteFinalPage({{1},page}, {input.constData(),64,input.size()}, &f.error));
+        QVERIFY(execution.finish()); QVERIFY(segment.seal());
+        QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    }
+    QVERIFY(f.store->waitForRetirementIdle());
+    const auto before = f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+    QCOMPARE(f.store->sessionStats().activeReadRanges, qsizetype(0));
+    QElapsedTimer timer; timer.start();
+    auto read = f.store->captureReadRange({1}, range, {}, &f.error); QVERIFY2(read.isValid(), qPrintable(f.error));
+    const auto captureNs = timer.nsecsElapsed();
+    const auto usage = f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+    for (int x = range.left(); x <= range.right(); ++x) {
+        auto page = read.readResidentPage({{1},{x,-1}}); QVERIFY(page.isValid());
+        QCOMPARE(static_cast<const quint8 *>(page.data())[0], quint8(materialized ? 0x71 : 0x2a));
+    }
+    auto last = read.readResidentPage({{1},{range.left(),-1}}); QVERIFY(last.isValid());
+    read = {};
+    QCOMPARE(f.store->sessionStats().activeReadRanges, qsizetype(1));
+    QVERIFY(!f.store->closeSession());
+    timer.restart(); last = {};
+    QVERIFY(f.store->closeSession());
+    const auto releaseAndCloseNs = timer.nsecsElapsed();
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    qInfo().nospace() << "BR1_RANGE_RESOURCE k=" << count << " present=" << materialized
+        << " capture_ns=" << captureNs << " release_close_ns=" << releaseAndCloseNs
+        << " metadata_live_before=" << before << " metadata_live_with_range=" << usage.live.cpuRam
+        << " metadata_peak=" << usage.peak.cpuRam << " metadata_reserved=" << usage.reserved.cpuRam;
 }
 
 void KisPageStoreCpuMutationTest::invalidCompletePayload_data()

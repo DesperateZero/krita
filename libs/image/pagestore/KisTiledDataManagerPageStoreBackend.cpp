@@ -1334,7 +1334,20 @@ bool KisTiledDataManagerPageStoreBackend::readBytes(
     KisPageStore *pageStore = store();
     using Phase = KisPageStoreDiagnosticPhase;
     KisPageStoreDiagnosticTimer diagnostic(pageStore, Phase::ReadBytesCapture, 1);
-    auto view = captureReadView(false, error);
+    if (qint64(x) + width - 1 > std::numeric_limits<qint32>::max()
+        || qint64(y) + height - 1 > std::numeric_limits<qint32>::max()) return false;
+    const QRect pages(QPoint(pageCoordinate(x, KisTileData::WIDTH), pageCoordinate(y, KisTileData::HEIGHT)),
+        QPoint(pageCoordinate(qint32(qint64(x) + width - 1), KisTileData::WIDTH),
+               pageCoordinate(qint32(qint64(y) + height - 1), KisTileData::HEIGHT)));
+    QReadLocker publicationLocker(&d->publicationLock);
+    KisPageReadView selector;
+    {
+        QMutexLocker lock(&d->mutex);
+        if (!d->operational) return false;
+        selector = d->selectReadViewLocked(false);
+    }
+    auto view = pageStore->captureReadRange(d->surface, pages, selector, error);
+    publicationLocker.unlock();
     KisSurfaceEpochState state;
     if (!view.isValid() || !view.resolveSurfaceState(d->surface, &state)) return false;
     const qint64 tightRow = qint64(width) * state.format.pixelStride;
@@ -1969,15 +1982,14 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
                 recordChange(key.page, !clearsToDefault);
                 continue;
             }
-            auto lease = acquireTile(key.page.column, key.page.row, Access::Write);
-            if (!lease || !lease->writable() || !lease->tileData()) return false;
-            auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const int x = affected.left() - pageRect.left(), y = affected.top() - pageRect.top();
-            for (int row = 0; row < affected.height(); ++row)
-                memcpy(bytes + (qsizetype(y + row) * KisTileData::WIDTH + x) * pixel.size(),
-                       rowBytes.data(), size_t(affected.width() * pixel.size()));
-            lease->markDirty(); if (!lease->finish()) return false;
-            recordChange(key.page, true);
+            auto execution = batch->d->mutation.borrowExecution(d->surface, {key.page}, error);
+            if (!execution.isActive() || !execution.writeFinalRect(key,
+                QRect(x, y, affected.width(), affected.height()),
+                {rowBytes.data(), 0, qsizetype(rowBytes.size())}, error)) return false;
+            const auto count = execution.finishPreparedWrites(nullptr, error);
+            if (count < 0 || !execution.finish(error)) return false;
+            if (count) recordChange(key.page, true);
         }
     }
     before = {};
@@ -2262,13 +2274,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
             return false;
         }
         using Phase = KisPageStoreDiagnosticPhase;
-        KisPageStoreDiagnosticTimer phase(store(), Phase::PackedWriteCapture, 1);
-        const auto selection = KisPageReadView::transactionOverlay(transaction.id);
-        // Reservation precedes capture: a no-op decision must not race another
-        // backend writer to the same page. One immutable overlay for the body,
-        // never a per-page selection of the changing current head.
-        auto before = store()->captureReadView(selection, error);
-        if (!before.isValid()) return false;
+        Q_UNUSED(transaction);
+        KisPageStoreDiagnosticTimer phase(store(), Phase::PackedWritePrepare, 1);
         for (const auto &page : targets) {
             const KisPageKey key{surface(), page};
             const QRect pageRect(page.column * KisTileData::WIDTH, page.row * KisTileData::HEIGHT,
@@ -2279,46 +2286,12 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
             const quint8 *input = data + (qint64(affected.y()) - y) * sourceStride +
                                         (qint64(affected.x()) - x) * pixelStride;
             const size_t lineBytes = size_t(affected.width() * pixelStride);
-            phase.next(Phase::PackedWriteCompare, 1);
-            bool unchanged = true;
-            {
-                KisPageStoreReadPage read(store(), before, key, error);
-                if (!read.data()) return false;
-                // Writing even identical bytes to a previously absent page
-                // creates explicit content. Its extent and future default-
-                // pixel behavior differ from an implicit default page.
-                unchanged = !read.version().isDefaultPixel();
-                for (int row = 0; unchanged && row < affected.height(); ++row) {
-                    if (std::memcmp(read.data() + (localY + row) * read.rowStride() + localX * pixelStride,
-                                    input + row * sourceStride, lineBytes)) {
-                        unchanged = false;
-                        break;
-                    }
-                }
-            } // no read pin overlaps writable acquisition
-            if (unchanged) continue;
             phase.next(Phase::PackedWritePrepare, 1);
-            if (affected == pageRect) {
-                // The input rows initialize fresh backing before it is visible
-                // even to the swapper. This producer visits each final key
-                // once; it needs no subsequent mutable capability.
-                const KisCpuPagePayload payload{input, qsizetype(sourceStride),
-                    qsizetype((affected.height() - 1) * sourceStride + lineBytes)};
-                if (!mutation.overwriteFinalPage(key, payload, error)) return false;
-                continue;
-            }
-            auto write = mutation.beginWrite(key, KisPageWriteMode::PreserveContents, error);
-            if (!write.isValid()) return false;
-            phase.next(Phase::PackedWriteCopy, 1);
-            auto *output = static_cast<quint8 *>(write.data());
-            for (int row = 0; row < affected.height(); ++row)
-                std::memcpy(output + (localY + row) * write.rowStride() + localX * pixelStride,
-                            input + row * sourceStride, lineBytes);
-            phase.next(Phase::PackedWriteRelease, 1);
-            write = {};
+            const KisCpuPagePayload payload{input, qsizetype(sourceStride),
+                qsizetype((affected.height() - 1) * sourceStride + lineBytes)};
+            if (!mutation.writeFinalRect(key, QRect(localX, localY, affected.width(), affected.height()), payload, error)) return false;
         }
         phase.next(Phase::PackedWriteRelease, 1);
-        before = {};
         return true;
     }, changed, error, {}, delivery, prepareAdapter, completeAdapter);
 }
@@ -2466,16 +2439,16 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                 recordChange(to.page, true);
                 continue;
             }
-            auto lease = acquireTile(to.page.column, to.page.row, Access::Write);
-            if (!lease || !lease->writable() || !lease->tileData()) return false;
-            auto *bytes = lease->tileData()->data(); if (!bytes) return false;
             const qsizetype offset = (qsizetype(affected.top() - pageRect.top()) * KisTileData::WIDTH +
                                        affected.left() - pageRect.left()) * pixelSize;
-            for (int y = 0; y < affected.height(); ++y)
-                memcpy(bytes + offset + y * rowStride, input.data() + offset + y * rowStride,
-                       size_t(affected.width() * pixelSize));
-            lease->markDirty(); if (!lease->finish()) return false;
-            recordChange(to.page, true);
+            auto execution = batch->d->mutation.borrowExecution(surface(), {to.page}, error);
+            if (!execution.isActive() || !execution.writeFinalRect(to,
+                affected.translated(-pageRect.topLeft()),
+                {input.data() + offset, rowStride,
+                 (affected.height()-1) * rowStride + affected.width() * pixelSize}, error)) return false;
+            const auto count = execution.finishPreparedWrites(nullptr, error);
+            if (count < 0 || !execution.finish(error)) return false;
+            if (count) recordChange(to.page, true);
         }
     }
     phase.next(KisPageStoreDiagnosticPhase::CopyFinish, 1);

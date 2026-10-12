@@ -163,6 +163,20 @@ public:
         return true;
     }
 
+    bool replaceExact(const Key &oldKey, SlotId oldSlot, const Key &newKey, SlotId newSlot)
+    {
+        SlotId found;
+        if (!newSlot.isValid() || !findExact(oldKey, &found) || !(found == oldSlot)
+            || (!(oldKey == newKey) && findExact(newKey))) return false;
+        const bool erased = eraseExact(oldKey, oldSlot);
+        Q_ASSERT(erased); Q_UNUSED(erased);
+        // Removing one entry supplies exactly this insertion's capacity;
+        // unrelated outstanding reservations retain all of their capacity.
+        m_entries[findBucket(newKey)] = Entry{newKey, newSlot};
+        ++m_size;
+        return true;
+    }
+
     qsizetype size() const
     {
         return m_size;

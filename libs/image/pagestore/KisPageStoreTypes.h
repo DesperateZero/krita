@@ -1175,6 +1175,7 @@ struct KRITAIMAGE_EXPORT KisPageStoreSessionStats
     qsizetype immutableRoots = 0;
     qsizetype activeTransactions = 0;
     qsizetype retainedSnapshots = 0;
+    qsizetype activeReadRanges = 0;
     qsizetype pendingRequests = 0;
     qsizetype activeReadLeases = 0;
     qsizetype activeWriteLeases = 0;
@@ -1248,7 +1249,7 @@ struct KRITAIMAGE_EXPORT KisPageStoreSessionStats
     quint64 committedTransactions = 0;
     bool hasOutstandingCapabilities() const
     {
-        return activeTransactions != 0 || retainedSnapshots != 0 ||
+        return activeTransactions != 0 || retainedSnapshots != 0 || activeReadRanges != 0 ||
                pendingRequests != 0 || activeReadLeases != 0 ||
                activeWriteLeases != 0 || activeControlWritePages != 0 ||
                activeCpuWritePages != 0 || pendingLastUses != 0 ||

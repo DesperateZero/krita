@@ -188,6 +188,7 @@ public:
         // keys are unique. This does not export storage.
         bool forEachAdapterChange(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
         bool prepare(QString *error, bool *storageRefused = nullptr);
+        bool prepareNativeCapacityRetry(QString *error, bool *storageRefused);
         // Keep the owner gate from the latest surface preparation through
         // acceptance. Surface storage is prepared before allocation-free install.
         bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);

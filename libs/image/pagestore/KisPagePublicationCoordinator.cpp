@@ -300,6 +300,15 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepare(
     return true;
 }
 
+bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepareNativeCapacityRetry(
+    QString *error, bool *storageRefused)
+{
+    if (!isValid() || data->canonical || !data->prepared || data->metadata.isValid()) return false;
+    data->prepared = false;
+    data->surfacePrepared = false;
+    return prepare(error, storageRefused);
+}
+
 bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepareSurfaceLocked(
     QString *error, bool *storageRefused)
 {
@@ -1723,7 +1732,7 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
         if (!canonical) candidate->state = preparedStateLocked(transaction.id);
         else if (hasPreparedDeltaLocked(transaction.id) || isPreparingCommitLocked(transaction.id)) return {};
         auto *state = candidate->state.get();
-        if (state) candidate->detachments.reserve(std::min(count, state->proofs.size()));
+        if (state) candidate->detachments.reserve(count);
         KisPageKey previous;
         for (auto &entry : candidate->changes) {
             const auto &change = entry.replacement;
@@ -1739,6 +1748,7 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
             }
             previous = change.key;
             const auto superseded = canonical ? KisPreparedPageProof{} : findPreparedProofLocked(transaction.id, change.key);
+            auto *native = hasProof ? m_metadata.nativeWrite(change.proof.authority.version) : nullptr;
             if (superseded.isValid()) {
                 if (!m_owner.ownsPreparedPageProof(superseded)
                     || (hasProof
@@ -1747,10 +1757,12 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
                     KisPageStoreDetail::setError(error, QStringLiteral("overlay update does not replace its current proof"));
                     return {};
                 }
-                candidate->detachments.push_back({superseded.authority.version,
-                    size_t(&entry - candidate->changes.data()),
-                    m_owner.backingClass(superseded.authority) == KisBackingBudgetClass::ActivePending});
             }
+            if (!canonical && (superseded.isValid() || native))
+                candidate->detachments.push_back({superseded.isValid() ? superseded.authority.version : change.proof.authority.version,
+                    size_t(&entry - candidate->changes.data()),
+                    superseded.isValid() && m_owner.backingClass(superseded.authority) == KisBackingBudgetClass::ActivePending,
+                    native});
             const bool removalWasInBase = change.removal && base.containsPage(change.key);
             const bool wasRemoved = state && state->removals.count(change.key) != 0;
             if (!canonical && hasProof && !superseded.isValid())

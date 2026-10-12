@@ -11,6 +11,27 @@
 #include "KisPageMetadataIndex_p.h"
 #include "KisPageStateMachine.h"
 
+class KisCpuResidentBinding;
+
+// Lives in the original mutation's stable cold page. The shard activity only
+// borrows it while reserved; it is not a readable version until acceptance.
+struct KisPageNativeWrite {
+    KisReplicaHandle target;
+    KisPreparedPageProof proof;
+    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+    bool reserved = false;
+    bool completed = false;
+    bool freshMetadataRequired = false;
+};
+
+struct KisPageNativeReadRef {
+    KisVersionSlotId version;
+    quint32 shard = 0;
+    quint32 ordinal = 0;
+};
+static_assert(sizeof(KisPageNativeReadRef) == 16);
+
 /**
  * Compact authoritative records. Public/reference snapshots are projections
  * of these records and never own production metadata. M2 stores them in the
@@ -39,9 +60,11 @@ struct KisVersionRecord {
 // records. This slot never copies version/transaction/authority from metadata.
 struct KisVersionFactsRecord {
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-    KisCompletionTicket completion;
     quint64 stamp = 0;
     KisPageTransactionId transaction;
+    std::shared_ptr<KisCpuResidentBinding> nativeBinding;
+    KisReplicaSlotId nativeReplica;
+    quint32 nativeReaders = 0;
 };
 static_assert(sizeof(KisVersionFactsRecord) <= 64);
 

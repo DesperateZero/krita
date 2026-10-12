@@ -6820,24 +6820,23 @@ void KisTiledDataManagerTest::testPageStorePackedWriteNative()
     QVERIFY(hidden);
     const auto after = store->mutationStatistics(); const auto work = backend->payloadWork();
     const quint64 changed = noOp ? 0 : 6;
-    QCOMPARE(copies, int(changed));
-    // A byte-identical input is rejected by the preflight comparison before
-    // creating a mutation session; changed input owns exactly one batch.
-    QCOMPARE(after.sessionsCreated - count.sessionsCreated, quint64(noOp ? 0 : 1));
+    QCOMPARE(copies, 6);
+    // One operation selects every exact input; unchanged pages consume no
+    // generation or output. Selection no longer creates a separate View.
+    QCOMPARE(after.sessionsCreated - count.sessionsCreated, quint64(1));
     QCOMPARE(after.generationsReserved - count.generationsReserved, changed);
     QCOMPARE(after.pagesSealed - count.pagesSealed, changed);
-    // Complete final inputs do not expose a mutable capability; partial
-    // input still borrows normally. Logical generations remain unchanged.
+    // Partial final inputs still pin their private target, but neither kind
+    // exposes a public mutable capability.
     QCOMPARE(after.writablePinsAcquired - count.writablePinsAcquired, partial ? changed : quint64(0));
     QCOMPARE(after.writablePinsReleased - count.writablePinsReleased, partial ? changed : quint64(0));
-    QCOMPARE(after.guardsReleased - count.guardsReleased, partial ? changed : quint64(0));
+    QCOMPARE(after.guardsReleased - count.guardsReleased, quint64(0));
     QCOMPARE(store->sessionStats().readRequestsCreated, requests.readRequestsCreated);
     QCOMPARE(store->sessionStats().writeRequestsCreated, requests.writeRequestsCreated);
     QCOMPARE(store->sessionStats().committedTransactions - requests.committedTransactions, quint64(history || noOp ? 0 : 1));
-    // One operation-start body View; successful index refresh is metadata-only.
-    // Test-only captures at Prepare remain counted separately.
+    // Only the test observer creates full captures during the write.
     QCOMPARE(store->readScopeStatistics().capturedReadViewsCreated - views.capturedReadViewsCreated,
-             quint64(1 + copies));
+             quint64(copies));
     QCOMPARE(work.nativeDuplicatePages - payload.nativeDuplicatePages, partial ? changed : quint64(0));
     QCOMPARE(work.explicitCopyPages, payload.explicitCopyPages);
     QCOMPARE(work.defaultInitializedPages,payload.defaultInitializedPages);
@@ -7016,7 +7015,7 @@ void KisTiledDataManagerTest::testPageStorePackedWriteBodyAllowsReader()
     const auto cleanup = qScopeGuard([&] { if (!entered) start.release(); if (reader.joinable()) reader.join(); });
     KisPageStoreDiagnosticRecorder recorder(true, dm.m_pageStoreBackend->store());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
-        if (phase != KisPageStoreDiagnosticPhase::PackedWriteCopy || entered) return;
+        if (phase != KisPageStoreDiagnosticPhase::MutationPayloadCopy || entered) return;
         entered = true; start.release(); completedInside = finished.tryAcquire(1,2000);
     });
     dm.writeBytes(&input,0,0,1,1);

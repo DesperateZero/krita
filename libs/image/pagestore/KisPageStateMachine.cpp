@@ -208,6 +208,28 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         version.preparedBy = preparedBy;
     };
 
+    if (result.next.nativeGeneration.isValid()) {
+        switch (transition.kind) {
+        case KisPageTransitionKind::AcquireWrite:
+        case KisPageTransitionKind::AcquireRecoverableWrite:
+        case KisPageTransitionKind::AdoptPreparedWrite:
+        case KisPageTransitionKind::PrepareWrite:
+        case KisPageTransitionKind::BeginPublish:
+        case KisPageTransitionKind::PublishWrite:
+        case KisPageTransitionKind::FailWrite:
+        case KisPageTransitionKind::CancelWrite:
+        case KisPageTransitionKind::CommitTransaction:
+        case KisPageTransitionKind::AbortTransaction:
+        case KisPageTransitionKind::AbortPreparedVersion:
+        case KisPageTransitionKind::DetachPreparedVersion:
+        case KisPageTransitionKind::ReplacePrivatePreparedBacking:
+        case KisPageTransitionKind::ReplaceDefaultPixel:
+        case KisPageTransitionKind::RestoreCommittedVersion:
+            return reject(QStringLiteral("page has an unaccepted native write reservation"));
+        default: break;
+        }
+    }
+
     switch (transition.kind) {
     case KisPageTransitionKind::RetainCapturedVersion:
     case KisPageTransitionKind::ReleaseCapturedVersion: {
@@ -877,7 +899,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
                 result.next.findVersion(version);
             if (!candidate ||
                 candidate->publication != KisPagePublicationState::Historical ||
-                !candidate->capturedReadViews.empty() ||
+                !candidate->capturedReadViews.empty() || candidate->nativeReaders ||
                 (!candidate->authority.isValid() && !candidate->isVirtualDefault())) {
                 return reject(QStringLiteral(
                     "historical discard target is unavailable"));
@@ -909,7 +931,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         if (!transition.transaction.isValid() || !version ||
             version->publication != KisPagePublicationState::Prepared ||
             !(version->preparedBy == transition.transaction) || result.next.writer.isValid() ||
-            !version->capturedReadViews.empty() || version->replicas.size() != 1 ||
+            !version->capturedReadViews.empty() || version->nativeReaders || version->replicas.size() != 1 ||
             !(version->authority == transition.source) || !transition.target.isValid() ||
             !(transition.target.version == version->version))
             return reject(QStringLiteral("private backing replacement identity is invalid"));
@@ -957,7 +979,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
                 // Abort removes transaction visibility, not an issued read
                 // capability. Retained sealed bytes become detached history;
                 // the owner collects them after view/pin/last-use release.
-                if (!version.capturedReadViews.empty()) {
+                if (!version.capturedReadViews.empty() || version.nativeReaders) {
                     version.publication = KisPagePublicationState::Historical;
                     version.preparedBy = {};
                     found = true;
@@ -1039,6 +1061,12 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
     if (!state.nextGeneration.isValid()) {
         return fail(QStringLiteral("next generation is invalid"));
     }
+    if (state.nativeGeneration.isValid() != state.nativeTransaction.isValid()
+        || (state.nativeGeneration.isValid()
+            && (state.nativeGeneration.value >= state.nextGeneration.value
+                || state.writer.phase != KisPageWriterPhase::None
+                || state.findVersion({state.key, state.nativeGeneration}))))
+        return fail(QStringLiteral("native reservation conflicts with version or writer state"));
     if (state.versions.isEmpty()) return fail(QStringLiteral("page has no versions"));
 
     int publishedCount = 0;
@@ -1077,7 +1105,8 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
             }
         }
         if (version.publication == KisPagePublicationState::Unpublished) {
-            if (!version.capturedReadViews.isEmpty()) return fail(QStringLiteral("unpublished bytes cannot belong to a captured view"));
+            if (!version.capturedReadViews.isEmpty() || version.nativeReaders)
+                return fail(QStringLiteral("unpublished bytes cannot belong to a captured view"));
             unpublishedCount++;
             unpublishedVersion = version.version;
         }

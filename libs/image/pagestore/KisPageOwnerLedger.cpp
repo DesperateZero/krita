@@ -2131,13 +2131,13 @@ qsizetype KisPageOwnerLedger::sealedProofCount() const
     return exported + (metadata ? metadata->cpuProofCount(issuer) : 0);
 }
 
-bool KisPageOwnerLedger::bindCpuProofs(KisPageMetadataCoordinator &metadata)
+bool KisPageOwnerLedger::bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion)
 {
     QMutexLocker locker(&d->mutex);
     if (d->cpuMetadata) return d->cpuMetadata == &metadata;
-    if (!d->completions) return false;
+    if (!d->completions || !d->completions->verifyTerminal(completion).succeeded()) return false;
     const auto issuer = KisPageStoreDetail::allocateMonotonicId<ProofIssuerId>(&s_nextProofIssuer).value;
-    if (!issuer || !metadata.bindCpuProofIssuer(issuer)) return false;
+    if (!issuer || !metadata.bindCpuProofIssuer(issuer, completion)) return false;
     d->cpuMetadata = &metadata;
     d->cpuProofIssuer = issuer;
     return true;
@@ -2221,7 +2221,8 @@ try
     }
 
     KisPageMetadataCoordinator::VersionInfo snapshot;
-    if (!metadata.versionSnapshot(version, &snapshot)) {
+    if (!(cpuDestination && metadata.nativeWriteSnapshot(version, &snapshot))
+        && !metadata.versionSnapshot(version, &snapshot)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page metadata is unavailable"));
         return false;
     }
@@ -2262,11 +2263,10 @@ try
         // shard without reversing the owner/shard/ledger lock order.
         ++d->nextValidationStamp;
         locker.unlock();
-        if (!cpuDestination->sealCpuProof(sealed, issuer)) {
+        if (!cpuDestination->sealCpuProof(sealed, issuer, proof)) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU proof version changed or already has a capability"));
             return false;
         }
-        *proof = sealed;
         KisPageStoreDetail::setError(error, {});
         return true;
     }
@@ -2320,7 +2320,8 @@ try
     }
 
     KisPageMetadataCoordinator::VersionInfo snapshot;
-    if (!metadata.versionSnapshot(proof.authority.version, &snapshot) || !snapshot.version.isValid()
+    if ((!metadata.nativeWriteSnapshot(proof.authority.version, &snapshot)
+         && !metadata.versionSnapshot(proof.authority.version, &snapshot)) || !snapshot.version.isValid()
         || snapshot.publication != KisPagePublicationState::Prepared
         || !(snapshot.preparedBy == proof.transaction) || !(snapshot.authority == proof.authority)) {
         KisPageStoreDetail::setError(error, QStringLiteral("prepared page proof no longer matches metadata"));

@@ -44,8 +44,10 @@ class KisPageWriteCoordinator;
 class KisPageStoreDiagnosticTimer;
 class KisPageStore;
 class KisCpuWriteBindingReservation;
+class KisCpuResidentBinding;
 class KisPageStoreWriteReservation;
 struct KisPageTransition;
+struct KisPageNativeWrite;
 enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
 
@@ -629,7 +631,8 @@ public:
                                 KisPagePublicationCoordinator &, KisPageTransition *,
                                 KisPageAllocationDescriptor *, QString *error,
                                 const KisPageTransition *pending = nullptr,
-                                KisReplicaHandle *recoverableBefore = nullptr);
+                                KisReplicaHandle *recoverableBefore = nullptr,
+                                std::shared_ptr<KisCpuResidentBinding> *binding = nullptr);
     KisPageMetadataTransitionResult preparePrivateWrite(KisPageTransition &, KisPageTransitionKind preparation);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
@@ -641,7 +644,8 @@ public:
         const KisPageAllocationDescriptor &,
         KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
         QMutexLocker<QMutex> &,
-        KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &);
+        KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
+        KisPageNativeWrite *native = nullptr);
     KisPageMetadataTransitionResult publishPrivateWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
         KisPageReplicaProvider &, const KisPageTransition &,

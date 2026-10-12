@@ -189,7 +189,7 @@ public:
     // Store configuration binds exactly one original metadata owner. The CPU
     // producer consumes its prepaid version slot; exported proofs keep their
     // independent capability lifetime and may coexist for the same version.
-    bool bindCpuProofs(KisPageMetadataCoordinator &metadata);
+    bool bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion);
     bool sealCpuPreparedPage(const KisPageVersion &version,
                             KisPageTransactionId transaction,
                             const KisPageAllocationDescriptor &descriptor,

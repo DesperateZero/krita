@@ -299,6 +299,7 @@ public:
     static KisCpuWriteBindingReservation acquire(const std::shared_ptr<KisCpuResidentBinding> &binding,
                                                  const KisReplicaAllocationIdentity &expected);
     bool isValid() const { return bool(m_binding); }
+    const std::shared_ptr<KisCpuResidentBinding> &binding() const { return m_binding; }
     // Waits only for the local gate/swap barrier, never initiates swap-in.
     void *pinResident(KisCpuResidentReadStatus *status = nullptr);
     // Explicit cold control path; the caller must first observe NonResident.
@@ -346,36 +347,6 @@ private:
     KisReplicaHandle m_source;
     KisReplicaHandle m_target;
     bool m_claimed = false;
-};
-
-// Metadata-owned immutable candidate; provider lookup is done once, outside
-// owner/shard locks. Provider allocation nodes stay stable until retirement.
-class KisCpuReadBindingLink
-{
-public:
-    KisCpuReadBindingLink(const KisReplicaHandle &handle,
-                         const std::shared_ptr<KisPageReplicaProvider> &provider)
-        : replica(handle), m_provider(provider) {}
-    std::shared_ptr<KisCpuResidentBinding> resolve(KisCpuResidentReadStatus *status = nullptr) const
-    {
-        std::call_once(m_once, [this] {
-            auto candidate = m_provider->cpuResidentBinding(replica, &m_status);
-            if (candidate) {
-                m_binding = std::move(candidate);
-                m_status = KisCpuResidentReadStatus::Ready;
-            } else if (m_status == KisCpuResidentReadStatus::Ready) {
-                m_status = KisCpuResidentReadStatus::InvalidIdentity;
-            }
-        });
-        if (status) *status = m_status;
-        return m_binding;
-    }
-    const KisReplicaHandle replica;
-private:
-    std::shared_ptr<KisPageReplicaProvider> m_provider;
-    mutable std::once_flag m_once;
-    mutable std::shared_ptr<KisCpuResidentBinding> m_binding;
-    mutable KisCpuResidentReadStatus m_status = KisCpuResidentReadStatus::BindingUnavailable;
 };
 
 #endif

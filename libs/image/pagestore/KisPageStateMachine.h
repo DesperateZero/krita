@@ -50,6 +50,7 @@ struct KRITAIMAGE_EXPORT KisPageVersionStateSnapshot
     // Logical captured-view protection, independent of replica pins and
     // execution last-use. A sealed private version may outlive its transaction.
     KisPageSnapshotArray<KisImageEpochSnapshotToken> capturedReadViews;
+    quint32 nativeReaders = 0;
 
     /** Exact bytes are defined by the retained surface default revision. */
     bool isVirtualDefault() const
@@ -131,6 +132,10 @@ struct KRITAIMAGE_EXPORT KisPageStateSnapshot
     KisPageGeneration publishedGeneration;
     quint64 publishedDefaultPixelRevision = 0;
     KisPageGeneration nextGeneration;
+    // Cold projection of an operation's reservation, not a readable version
+    // or a synthetic mutable target in the version list.
+    KisPageGeneration nativeGeneration;
+    KisPageTransactionId nativeTransaction;
     KisPageSnapshotArray<KisPageVersionStateSnapshot> versions;
     KisPageWriterStateSnapshot writer;
     KisAuthorityHandoffStateSnapshot authorityHandoff;

@@ -215,6 +215,8 @@ KisReplicaHandle replica(const KisPageVersion &version,
 
 void comparePageRecords(const KisPageStateSnapshot &a, const KisPageStateSnapshot &b)
 {
+    QCOMPARE(a.nativeGeneration, b.nativeGeneration);
+    QCOMPARE(a.nativeTransaction, b.nativeTransaction);
     QCOMPARE(a.key, b.key);
     QCOMPARE(a.publishedEpoch, b.publishedEpoch);
     QCOMPARE(a.publishedGeneration, b.publishedGeneration);
@@ -239,6 +241,7 @@ void comparePageRecords(const KisPageStateSnapshot &a, const KisPageStateSnapsho
         QCOMPARE(av.authority, bv.authority);
         QCOMPARE(av.preparedBy, bv.preparedBy);
         QCOMPARE(av.capturedReadViews, bv.capturedReadViews);
+        QCOMPARE(av.nativeReaders, bv.nativeReaders);
         QCOMPARE(av.replicas.size(), bv.replicas.size());
         for (qsizetype j = 0; j < av.replicas.size(); ++j) {
             const auto &ar = av.replicas[j], &br = bv.replicas[j];
@@ -1279,6 +1282,7 @@ private Q_SLOTS:
     void preparedPrivateWritePreservesProtection();
     void finalAdoptionMatchesPrivateWriter_data();
     void finalAdoptionMatchesPrivateWriter();
+    void nativeRangeProtectionRoundtrip();
     void recoverableWritePreparationHonorsBudget();
     void mutationWriteSetUsesInlineAndSparseIndexStorage();
     void mutationStorageGrowthIsStableAndCharged();
@@ -5430,7 +5434,7 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
         QCOMPARE(arena.statistics().outstandingReservations, quint64(0));
         QVERIFY(arena.erase(reserved));
 
-        const auto first = arena.emplace(11, &live);
+        auto first = arena.emplace(11, &live);
         const auto second = arena.emplace(12, &live);
         QVERIFY(first.isValid());
         QVERIFY(second.isValid());
@@ -5438,6 +5442,16 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
         TrackedRecord *const stable = arena.get(first);
         QVERIFY(stable);
         QCOMPARE(stable->value, 11);
+
+        const auto oldIdentity = first;
+        QVERIFY(arena.canRebind(first));
+        first = arena.rebind(first);
+        QCOMPARE(first.index, oldIdentity.index);
+        QVERIFY(first.generation != oldIdentity.generation);
+        QVERIFY(!arena.get(oldIdentity));
+        QVERIFY(!arena.erase(oldIdentity));
+        QCOMPARE(arena.get(first), stable);
+        QCOMPARE(live.load(), 2); // no destructor or constructor was replayed
 
         QVERIFY(arena.erase(first));
         QVERIFY(!arena.get(first));
@@ -5503,6 +5517,28 @@ void KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease()
         QCOMPARE(live.load(std::memory_order_relaxed), 1);
     }
     QCOMPARE(live.load(std::memory_order_relaxed), 0);
+
+    // An occupied slot must refuse incarnation wrap without invalidating the
+    // last live value. Ordinary erase quarantines it, so fresh capacity uses
+    // a different slot instead of resurrecting an old observer's identity.
+    {
+        Arena arena(oneBlockBudget);
+        Arena::PreparedDirectory directory;
+        directory.prepare(arena.directoryCapacityForBlocks(1));
+        QVERIFY(arena.installPreparedDirectory(&directory, 1));
+        auto block = Arena::prepareBlock(); QVERIFY(arena.attachPreparedBlock(&block));
+        auto id = arena.emplace(31, &live); const auto original = id;
+        auto *value = arena.get(id);
+        unsigned turns = 0;
+        while (arena.canRebind(id) && turns < 65536) { id = arena.rebind(id); ++turns; }
+        QCOMPARE(turns, unsigned(65533)); // 65535 is reserved for quarantine.
+        QVERIFY(!arena.rebind(id).isValid()); QCOMPARE(arena.get(id), value);
+        QVERIFY(!arena.get(original)); QVERIFY(arena.erase(id));
+        const auto fresh = arena.emplace(32, &live);
+        QVERIFY(fresh.isValid()); QVERIFY(fresh.index != id.index);
+        QVERIFY(!arena.get(id));
+    }
+    QCOMPARE(live.load(), 0);
 
     // The arena intentionally delegates synchronization to the shard. This
     // stresses concurrent prepare outside the lock and attach/use under it.
@@ -7455,6 +7491,52 @@ void KisPageStoreReferenceTest::recoverableWriteGuards()
         QVERIFY(!machine.apply(page, fresh).accepted);
         QVERIFY(!metadata.prepareRecoverableWrite(tx, fresh).isValid());
     }
+}
+
+void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
+{
+    const KisPageTransactionId tx{74};
+    auto page = pageWithHistory(3);
+    auto &version = page.versions.last();
+    version.publication = KisPagePublicationState::Prepared;
+    version.preparedBy = tx;
+    const auto identity = version.version;
+    KisPageMetadataCoordinator metadata;
+    QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(page));
+    KisPageNativeReadRef a, b;
+    QVERIFY(metadata.retainNativeRead(identity, &a));
+    QVERIFY(metadata.retainNativeRead(identity, &b));
+    QCOMPARE(metadata.nativeReadVersion(a), identity);
+    KisPageStateSnapshot actual;
+    QVERIFY(metadata.pageSnapshot(page.key, &actual));
+    QCOMPARE(actual.findVersion(identity)->nativeReaders, quint32(2));
+    KisPageMetadataCoordinator::VersionInfo info;
+    QVERIFY(metadata.versionSnapshot(identity, &info)); QVERIFY(info.captured);
+    KisPageTransition abort;
+    abort.kind = KisPageTransitionKind::AbortPreparedVersion;
+    abort.version = identity; abort.transaction = tx;
+    const auto expected = KisPageStateMachine{}.apply(actual, abort);
+    QVERIFY(expected.accepted);
+    QVERIFY(metadata.applyOwner(page.key, abort).accepted);
+    QVERIFY(metadata.pageSnapshot(page.key, &actual)); comparePageRecords(actual, expected.next);
+    QCOMPARE(actual.findVersion(identity)->publication, KisPagePublicationState::Historical);
+    KisPageTransition discard;
+    discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
+    discard.versions.append(identity);
+    QVERIFY(!KisPageStateMachine{}.apply(actual, discard).accepted);
+    KisPageKey revisit;
+    QVERIFY(metadata.releaseNativeRead(a, &revisit)); QVERIFY(!revisit.isValid());
+    QCOMPARE(metadata.nativeReadVersion(b), identity);
+    QVERIFY(metadata.releaseNativeRead(b, &revisit)); QCOMPARE(revisit, page.key);
+    QVERIFY(!metadata.releaseNativeRead(b, &revisit));
+    QVERIFY(!metadata.nativeReadVersion(a).isValid());
+    QVERIFY(metadata.pageSnapshot(page.key, &actual));
+    QVERIFY(KisPageStateMachine{}.apply(actual, discard).accepted);
+    auto overflow = page;
+    overflow.findVersion(identity)->nativeReaders = std::numeric_limits<quint32>::max();
+    KisPageMetadataCoordinator full;
+    QVERIFY(full.configure(4)); QVERIFY(full.registerPage(overflow));
+    QVERIFY(!full.retainNativeRead(identity, &a));
 }
 
 void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter_data()

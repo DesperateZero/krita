@@ -42,6 +42,7 @@ struct KisPageWorkingVersion
     KisReplicaHandle authority;
     KisPageTransactionId preparedBy;
     KisPageWorkingArray<KisImageEpochSnapshotToken> capturedReadViews;
+    quint32 nativeReaders = 0;
 
     bool isVirtualDefault() const
     {
@@ -70,6 +71,8 @@ struct KisPageWorkingState
     KisPageGeneration publishedGeneration;
     quint64 publishedDefaultPixelRevision = 0;
     KisPageGeneration nextGeneration;
+    KisPageGeneration nativeGeneration;
+    KisPageTransactionId nativeTransaction;
     KisPageWorkingArray<KisPageWorkingVersion, 2> versions;
     KisPageWriterStateSnapshot writer;
     KisAuthorityHandoffStateSnapshot authorityHandoff;
@@ -81,6 +84,8 @@ struct KisPageWorkingState
         publishedGeneration = header.publishedGeneration;
         publishedDefaultPixelRevision = header.publishedDefaultPixelRevision;
         nextGeneration = header.nextGeneration;
+        nativeGeneration = header.nativeGeneration;
+        nativeTransaction = header.nativeTransaction;
         writer = header.writer;
         authorityHandoff = header.authorityHandoff;
     }
@@ -92,6 +97,8 @@ struct KisPageWorkingState
         result.publishedGeneration = publishedGeneration;
         result.publishedDefaultPixelRevision = publishedDefaultPixelRevision;
         result.nextGeneration = nextGeneration;
+        result.nativeGeneration = nativeGeneration;
+        result.nativeTransaction = nativeTransaction;
         result.writer = writer;
         result.authorityHandoff = authorityHandoff;
         return result;

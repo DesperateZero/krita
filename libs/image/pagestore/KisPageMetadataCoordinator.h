@@ -20,7 +20,17 @@
 #include "KisCompletionRegistry.h"
 #include "KisPageStateMachine.h"
 
-class KisCpuReadBindingLink;
+class KisCpuResidentBinding;
+struct KisPageNativeReadRef;
+struct KisPageNativeWrite;
+// A borrowed selection value, never another per-version allocation or owner.
+struct KisCpuReadBinding {
+    KisReplicaHandle replica;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+    explicit operator bool() const { return bool(binding); }
+    bool operator==(const KisCpuReadBinding &other) const
+    { return replica == other.replica && binding == other.binding; }
+};
 struct DeferredMetadataCleanupStatistics;
 class KisPageHistoryCollector;
 class KisPageOwnerLedger;
@@ -56,6 +66,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
     quint64 readProtectionNodeVisits = 0;
     quint64 readProtectionSlotReuses = 0;
     quint64 readProtectionSlotReleases = 0;
+    quint64 nativeWriteReservations = 0;
+    quint64 nativeSlotReplacements = 0;
+    quint64 nativeCapacityRetries = 0;
     quint64 mutationBaseVersionInputs = 0;
     // Reclamation-thread subsets of the local totals; never add them twice.
     quint64 backgroundLocalTransitionSequences = 0;
@@ -269,8 +282,14 @@ private:
     const KisPageAllocationDescriptor *borrowVersionDescriptor(const KisPageVersion &) const;
     bool exchangeVersionDescriptor(const KisPageVersion &,
         std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
-    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer);
-    bool bindCpuProofIssuer(quint64 issuer);
+    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer, KisPreparedPageProof *destination = nullptr);
+    bool reserveNativeWrite(const KisPageTransition &, KisPageNativeWrite *, quint32 limit,
+                            QString *error = nullptr);
+    bool completeNativeWrite(KisPageNativeWrite *);
+    bool cancelNativeWrite(KisPageNativeWrite *);
+    KisPageNativeWrite *nativeWrite(const KisPageVersion &) const;
+    bool nativeWriteSnapshot(const KisPageVersion &, VersionInfo *) const;
+    bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
     qsizetype cpuProofCount(quint64 issuer) const;
@@ -280,6 +299,8 @@ private:
         KisPageGeneration nextGeneration;
         VersionInfo selected;
         KisReplicaHandle recoverableBefore;
+        std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+        std::shared_ptr<KisCpuResidentBinding> binding;
     };
     // One shard cut for the root base, sealed selection and Fresh candidate.
     // This is a scalar observation; joint write preparation still revalidates
@@ -340,14 +361,20 @@ private:
     // under its registration gate around a whole-directory default/restore
     // plan; per-page revision claims alone cannot detect a newly added key.
     quint64 pageRegistrationCount() const;
-    std::shared_ptr<KisCpuReadBindingLink> installCpuReadBinding(const KisReplicaHandle &replica,
-                                                                const std::shared_ptr<KisPageReplicaProvider> &provider);
+    KisCpuReadBinding installCpuReadBinding(const KisReplicaHandle &replica,
+                                           std::shared_ptr<KisCpuResidentBinding> binding);
     // A stale reader may only evict its own candidate. Retirement omits
     // expected to invalidate every cached selection of this exact replica.
     void removeCpuReadBinding(const KisReplicaHandle &replica,
-                              const KisCpuReadBindingLink *expected = nullptr);
-    std::shared_ptr<KisCpuReadBindingLink> cpuReadBinding(const KisPageVersion &version) const;
+                              const KisCpuResidentBinding *expected = nullptr);
+    KisCpuReadBinding cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
+    bool retainNativeRead(const KisPageVersion &version, KisPageNativeReadRef *reference);
+    size_t retainNativeReads(KisPageNativeReadRef *references, size_t count,
+        void *context, bool (*select)(void *, quint32, KisPageVersion *));
+    size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t count, KisPageKey *revisit);
+    bool releaseNativeRead(const KisPageNativeReadRef &reference, KisPageKey *revisit);
+    KisPageVersion nativeReadVersion(const KisPageNativeReadRef &reference, KisCpuReadBinding *binding = nullptr) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;
     friend class KisPagePublicationCoordinator;
@@ -405,6 +432,7 @@ private:
         DeferredPublicationCleanup(const DeferredPublicationCleanup &) = delete;
         DeferredPublicationCleanup &operator=(const DeferredPublicationCleanup &) = delete;
         bool isEmpty() const;
+        bool needsNativeCapacity() const;
         // One unit is one candidate page (or one empty-candidate terminal
         // payload). Actual candidate capacity remains charged until freed.
         // This is a cooperative destruction budget,
@@ -444,6 +472,7 @@ private:
         KisPageVersion version;
         size_t ownerIndex = 0;
         bool releaseUnusedCapacity = false;
+        KisPageNativeWrite *native = nullptr;
     };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
@@ -508,6 +537,7 @@ private:
     friend class KisPageStore;
     friend class KisPageWriteCoordinator;
     friend class KisPageMutationSession;
+    friend class KisPageMutationExecution;
     friend class KisPageOwnerLedger;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
