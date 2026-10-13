@@ -45,6 +45,7 @@ struct KisPageCapturedRelease
         , stagedSurfaces(KisMutationStorageAllocator<KisSurfaceEpochState>(&budget))
         , nativeRefs(KisMutationStorageAllocator<KisPageNativeReadRef>(&budget)) {}
     KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget);
+    KRITAIMAGE_EXPORT void groupNativeRefs(qsizetype shardCount);
     KisImageEpochSnapshotToken token;
     std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> versions;
     std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removedPages;

@@ -10,6 +10,7 @@
 
 #include "kis_tile.h"
 #include <memory>
+#include <type_traits>
 
 
 
@@ -95,6 +96,9 @@ public:
     {
         return getExistingTile(col, row);
     }
+    // The caller's original page claim/manager exclusion must outlive the
+    // immediate use. This is not an escaping public tile reference.
+    TileType *borrowTileForPreparedUpdate(qint32 col, qint32 row);
 
 
     /**
@@ -129,6 +133,7 @@ private:
 
     TileTypeSP getTileMinefieldWalk(qint32 col, qint32 row, qint32 idx);
     TileTypeSP getTile(qint32 col, qint32 row, qint32 idx);
+    TileType *borrowPreparedTileLocked(qint32 col, qint32 row, qint32 idx);
     void linkTile(TileTypeSP tile, qint32 idx);
     bool unlinkTile(qint32 col, qint32 row, qint32 idx);
 

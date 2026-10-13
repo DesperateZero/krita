@@ -773,21 +773,37 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
     QVERIFY(registerCurrent(f.replica));
     auto old = f.replica;
     QVector<KisReplicaHandle> others;
-    for (int generation = 2; generation <= 3; ++generation) {
+    quint64 nextOperation = 400;
+    int nextKey = 1;
+    for (int generation = 2; generation <= 4; ++generation) {
         auto physical = KisCpuBackingHandoff::prepare(f.provider, old, {key(0), {quint64(generation)}}, f.desc);
         auto prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
         QVERIFY2(prepared.isValid(), qPrintable(f.error));
-        // Grow and rehash the same index after preparation. No saved iterator
-        // or full-table shadow copy may be used during commit.
+        if (generation > 2) {
+            // Original headroom makes this an identity-only claim. Releasing
+            // it must not clear that headroom or leave an occupied cookie.
+            const auto reserved = budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam;
+            prepared.release();
+            QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, reserved);
+            prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+            QVERIFY2(prepared.isValid(), qPrintable(f.error));
+        }
+        // Other map insertions preserve the claimed source node. Removing
+        // its old successor requires commit to compute its hint afresh.
         for (int i = 0; i < 129; ++i) {
-            auto operation = f.provider->requestReplica({quint64(400 + others.size())},
-                {key(others.size() + 1), {1}}, f.desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
+            auto operation = f.provider->requestReplica({nextOperation++},
+                {key(nextKey++), {1}}, f.desc, cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
             QVERIFY(operation.isValid()); QVERIFY(registerCurrent(operation.replica));
             others.append(operation.replica);
         }
+        const auto neighbour = others.takeFirst();
+        QVERIFY(ledger.reclassifyBacking(neighbour, KisBackingBudgetClass::RetirementDebt));
+        QVERIFY(f.provider->retire({quint64(800 + generation)}, neighbour, {}).isValid());
+        ledger.releaseRetiredBacking(neighbour);
         QVERIFY(physical.tryClaim()); auto writer = physical.commit();
         QVERIFY(writer.isValid());
         QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
+        QVERIFY(!ledger.commitBackingHandoff(std::move(prepared)));
         QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::Count);
         old = physical.target();
         writer.reset();

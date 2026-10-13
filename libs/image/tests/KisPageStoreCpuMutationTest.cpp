@@ -2723,7 +2723,8 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
     ReadTerminalFixture f;
     auto release = KisPageCapturedRelease::prepare(f.budget);
     QVERIFY2(f.init(release.get()), qPrintable(f.error));
-    release->retained = f.metadata.retainNativeReads(release->nativeRefs.data(), 1, &f.replica.version,
+    size_t next = release->next;
+    release->retained = f.metadata.retainNativeReads(release->nativeRefs.data(), next, 1, &f.replica.version,
         [](void *context, quint32, KisPageVersion *out) {
             *out = *static_cast<KisPageVersion *>(context); return true;
         });

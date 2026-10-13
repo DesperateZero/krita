@@ -92,6 +92,9 @@ public:
     bool undoPreparedTileInsertion(PreparedTile &prepared);
     // Delivery must not run the collector or participate in map growth.
     TileTypeSP getExistingTileForPreparedUpdate(qint32 col, qint32 row);
+    // Lookup protection ends before a potentially blocking tile barrier;
+    // the original admission/manager exclusion must keep the map owner live.
+    TileType *borrowTileForPreparedUpdate(qint32 col, qint32 row);
 
 
     /**
@@ -477,8 +480,11 @@ KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update upd
     // An Absent candidate consumes only its key and retirement action. The
     // map reference passes to QSBR at removal, so no old tile lookup or extra
     // reference is needed here. Present/MayRemove still need their tile.
-    if (update != Update::Absent) prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
-    if (prepared.m_tile && update == Update::Present) return {};
+    if (update == Update::Present) {
+        if (borrowTileForPreparedUpdate(col, row)) return {};
+    } else if (update != Update::Absent) {
+        prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
+    }
     const quint32 idx = calculateHashSafe(col, row);
     if (!idx) throw std::bad_alloc();
     if (!prepared.m_tile && update != Update::Absent) {
@@ -494,6 +500,16 @@ KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update upd
     prepared.m_key = m_map.prepareKey(idx);
     if (!prepared.m_key) throw std::bad_alloc();
     return prepared;
+}
+
+template <class T>
+typename KisTileHashTableTraits2<T>::TileType *
+KisTileHashTableTraits2<T>::borrowTileForPreparedUpdate(qint32 col, qint32 row)
+{
+    const quint32 idx = calculateHashSafe(col, row);
+    if (!idx) return nullptr;
+    QSBR::RawPointerAccess access(m_map.getGC());
+    return m_map.get(idx);
 }
 
 template <class T>

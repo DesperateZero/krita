@@ -8,6 +8,7 @@
 
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageStoreIteratorReadScope_p.h"
+#include "KisPageMetadataCoordinator.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
 #include "KisStrokeJobFailureContext.h"
@@ -1346,7 +1347,12 @@ bool KisTiledDataManagerPageStoreBackend::readBytes(
         if (!d->operational) return false;
         selector = d->selectReadViewLocked(false);
     }
-    auto view = pageStore->captureReadRange(d->surface, pages, selector, error);
+    KisCapturedReadView view;
+    // These short selections die before the exact view, including failures.
+    // They grant no pin; acquireRead still validates the physical identity.
+    KisCpuReadBinding bindings[16];
+    quint32 indices[16];
+    view = pageStore->captureReadRange(d->surface, pages, selector, error, bindings, 16);
     publicationLocker.unlock();
     KisSurfaceEpochState state;
     if (!view.isValid() || !view.resolveSurfaceState(d->surface, &state)) return false;
@@ -1363,6 +1369,8 @@ bool KisTiledDataManagerPageStoreBackend::readBytes(
     // The observer for ReadBytesPage runs after capture, with neither the
     // backend publication gate nor owner gate held. It is also a test seam
     // for publication between pages, not a production scheduling callback.
+    size_t ordinal = 0;
+    const size_t pageCount = size_t(pages.width()) * size_t(pages.height());
     for (qint64 dy = 0; dy < height;) {
         const qint64 imageY = qint64(y) + dy;
         const qint32 row = pageCoordinate(qint32(imageY), pageHeight);
@@ -1375,20 +1383,44 @@ bool KisTiledDataManagerPageStoreBackend::readBytes(
             const qint64 localX = imageX - qint64(column) * pageWidth;
             const qint64 columns = std::min<qint64>(pageWidth - localX, width - dx);
             const KisPageKey key{d->surface, {column, row}};
-            KisPageStoreReadPage read(pageStore, view, key, error);
-            const auto *source = read.data();
-            if (!source) return false;
-            const qsizetype sourceStride = read.rowStride();
-            for (qint64 line = 0; line < rows; ++line) {
-                std::memcpy(data + (dy + line) * rowStride + dx * state.format.pixelStride,
-                    source + (localY + line) * sourceStride + localX * state.format.pixelStride,
-                    size_t(columns * state.format.pixelStride));
+            if (ordinal && ordinal % 16 == 0) {
+                // Last references must be dropped outside metadata gates.
+                for (auto &binding : bindings) binding = {};
+                view.selectReadWindow(ordinal, std::min<size_t>(16, pageCount - ordinal), indices, bindings);
             }
+            const auto copy = [&](const void *bytes, quint32 sourceStride) {
+                // Snapshot the request before copying. A type-erased callback
+                // cannot otherwise prove that memcpy leaves its captures alone.
+                auto *target = data + dy * rowStride + dx * state.format.pixelStride;
+                const auto *source = static_cast<const quint8 *>(bytes)
+                    + localY * sourceStride + localX * state.format.pixelStride;
+                const auto targetStride = rowStride;
+                const auto rowCount = rows;
+                const auto bytesPerRow = size_t(columns * state.format.pixelStride);
+                for (qint64 line = 0; line < rowCount; ++line) {
+                    std::memcpy(target + line * targetStride,
+                        source + line * sourceStride, bytesPerRow);
+                }
+            };
+            KisCpuResidentReadStatus status;
+            if (!view.visitResidentPage(key, bindings[ordinal % 16], copy, &status)) {
+                if (status != KisCpuResidentReadStatus::NonResident
+                    && status != KisCpuResidentReadStatus::UnsupportedProvider
+                    && status != KisCpuResidentReadStatus::BindingUnavailable) {
+                    KisPageStoreDetail::setError(error, QStringLiteral("resident read was rejected"));
+                    return false;
+                }
+                KisPageStoreReadPage read(pageStore, view, key, error, KisPagePriority::Normal, false);
+                if (!read.data()) return false;
+                copy(read.data(), read.rowStride());
+            }
+            ++ordinal;
             dx += columns;
         }
         dy += rows;
     }
     diagnostic.next(Phase::ReadBytesRelease, 1);
+    for (auto &binding : bindings) binding = {};
     view = {};
     KisPageStoreDetail::setError(error, {});
     return true;

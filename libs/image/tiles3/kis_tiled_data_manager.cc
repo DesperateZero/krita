@@ -310,7 +310,7 @@ private:
         });
     }
 
-    KisTileSP installPage(KisTileHashTable &table, KisTiledExtentManager &extent,
+    void installPage(KisTileHashTable &table, KisTiledExtentManager &extent,
                      KisTiledDataManagerPageStoreBackend *bridge, const KisLogicalPageId &page, bool present)
     {
         const auto prepared = [&] {
@@ -324,23 +324,24 @@ private:
         if (!present) {
             const auto it = prepared();
             if (it == m_prepared.end()) {
-                Q_ASSERT(!table.getExistingTileForPreparedUpdate(page.column, page.row));
-                return {};
+                Q_ASSERT(!table.borrowTileForPreparedUpdate(page.column, page.row));
+                return;
             }
             if (table.removePreparedTile(it->storage)) extent.notifyTileRemoved(page.column, page.row);
-            return {};
+            return;
         }
-        auto tile = table.getExistingTileForPreparedUpdate(page.column, page.row);
+        auto *tile = table.borrowTileForPreparedUpdate(page.column, page.row);
+        KisTileSP installed;
         bool created = false;
         if (!tile) {
             const auto it = prepared();
-            if (it != m_prepared.end()) tile = table.installPreparedTile(it->storage, created);
+            if (it != m_prepared.end()) installed = table.installPreparedTile(it->storage, created);
+            tile = installed.data();
         }
         Q_ASSERT_X(tile, "PreparedTileUpdates::installPage", "admitted tile coverage was lost");
         tile->setPageStoreBridge(bridge, false);
         tile->invalidatePageStoreReadCache();
         if (created) extent.notifyTileAdded(page.column, page.row);
-        return tile;
     }
 
     struct Candidate {

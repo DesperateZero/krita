@@ -303,6 +303,9 @@ public:
         const KisPageTransaction &transaction,
         const OverlayChange *changes, size_t count,
         QString *error, bool *storageRefused = nullptr);
+    KisPreparedPagePublication preparePagePublicationLocked(
+        const KisPageTransaction &transaction, KisPagePublicationChanges changes,
+        QString *error, bool *storageRefused, bool canonical);
     // Consume the caller's stable sequence directly into candidate storage.
     // The reader is borrowed synchronously and is never kept by the candidate.
     template<class ReadChange>

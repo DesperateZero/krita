@@ -127,6 +127,9 @@ public:
         return m_nextTile;
     }
 
+    // Only the chained table's locked prepared lookup borrows this link.
+    KisTile *nextForPreparedUpdate() { return m_nextTile.data(); }
+
     void setNext(KisTileSP next) {
         m_nextTile = next;
     }

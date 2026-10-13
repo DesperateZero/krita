@@ -26,9 +26,10 @@ struct KisPagePrivateWrite {
 };
 
 struct KisPageNativeReadRef {
+    static constexpr quint32 End = std::numeric_limits<quint32>::max();
     KisVersionSlotId version;
     quint32 shard = 0;
-    quint32 ordinal = 0;
+    quint32 next = End;
 };
 static_assert(sizeof(KisPageNativeReadRef) == 16);
 

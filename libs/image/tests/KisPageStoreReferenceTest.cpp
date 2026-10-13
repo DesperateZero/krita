@@ -17,6 +17,7 @@
 #include <QTest>
 
 #include <atomic>
+#include <array>
 #include <ctime>
 #include <functional>
 #include <map>
@@ -49,6 +50,7 @@
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageRetirementRecord_p.h"
 #include "KisPageRetirementQueue_p.h"
+#include "KisPageReadCoordinator_p.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisPageStoreStoragePressure.h"
 #include "KisTiledDataManagerPageStoreBackend.h"
@@ -1283,6 +1285,7 @@ private Q_SLOTS:
     void finalAdoptionMatchesPrivateWriter_data();
     void finalAdoptionMatchesPrivateWriter();
     void nativeRangeProtectionRoundtrip();
+    void nativeShardChainPartialCapture();
     void recoverableWritePreparationHonorsBudget();
     void mutationWriteSetUsesInlineAndSparseIndexStorage();
     void mutationStorageGrowthIsStableAndCharged();
@@ -7411,6 +7414,61 @@ void KisPageStoreReferenceTest::recoverableWriteGuards()
     }
 }
 
+void KisPageStoreReferenceTest::nativeShardChainPartialCapture()
+{
+    for (int shards : {1,8,64,65,4096}) for (size_t limit : {size_t(0),size_t(1),size_t(17),size_t(64),size_t(131)}) {
+        auto page = pageWithHistory(3);
+        const auto identity = page.versions.last().version;
+        KisPageMetadataCoordinator metadata;
+        QVERIFY(metadata.configure(shards)); QVERIFY(metadata.registerPage(page));
+        KisBackingBudgetController budget;
+        auto release = KisPageCapturedRelease::prepare(budget);
+        constexpr size_t count = 131;
+        release->nativeRefs.resize(count);
+        std::array<KisPageVersion, count> selected;
+        for (size_t i = 0; i < count; ++i) {
+            selected[i] = i % 3 == 0 ? identity : KisPageVersion{{{1},{qint32(i),-2}}, {1}, 1};
+            release->nativeRefs[i].shard = quint32(metadata.shardFor(selected[i].key));
+        }
+        release->groupNativeRefs(shards);
+        std::array<bool, count> visited{};
+        size_t accepted = 0, real = 0;
+        auto select = [&](quint32 ordinal, KisPageVersion *out) {
+            if (accepted == limit) return false;
+            if (ordinal >= count || visited[ordinal]) return false;
+            visited[ordinal] = true;
+            *out = selected[ordinal];
+            ++accepted;
+            real += !out->isDefaultPixel();
+            return true;
+        };
+        size_t next = release->next;
+        while (release->retained < count) {
+            const auto n = metadata.retainNativeReads(release->nativeRefs.data(), next, count - release->retained,
+                &select, [](void *context, quint32 ordinal, KisPageVersion *out) {
+                    return (*static_cast<decltype(select) *>(context))(ordinal, out);
+                });
+            QVERIFY(n <= 16);
+            if (!n) break;
+            release->retained += n;
+        }
+        QCOMPARE(release->retained, limit);
+        KisPageStateSnapshot state; QVERIFY(metadata.pageSnapshot(page.key, &state));
+        QCOMPARE(state.findVersion(identity)->nativeReaders, quint32(real));
+        size_t released = 0;
+        while (release->retained) {
+            KisPageKey revisit[16];
+            const auto n = metadata.releaseNativeReads(release->nativeRefs.data(), release->next, release->retained, revisit);
+            QVERIFY(n > 0 && n <= 16);
+            release->retained -= n;
+            released += n;
+        }
+        QCOMPARE(released, limit);
+        QVERIFY(metadata.pageSnapshot(page.key, &state));
+        QCOMPARE(state.findVersion(identity)->nativeReaders, quint32(0));
+    }
+}
+
 void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
 {
     const KisPageTransactionId tx{74};
@@ -7427,8 +7485,10 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     const auto select = +[](void *context, quint32, KisPageVersion *version) {
         *version = *static_cast<KisPageVersion *>(context); return true;
     };
-    QCOMPARE(metadata.retainNativeReads(&a, 1, &selected, select), size_t(1));
-    QCOMPARE(metadata.retainNativeReads(&b, 1, &selected, select), size_t(1));
+    size_t next = 0;
+    QCOMPARE(metadata.retainNativeReads(&a, next, 1, &selected, select), size_t(1));
+    next = 0;
+    QCOMPARE(metadata.retainNativeReads(&b, next, 1, &selected, select), size_t(1));
     QCOMPARE(metadata.nativeReadVersion(a), identity);
     KisPageStateSnapshot actual;
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
@@ -7448,10 +7508,13 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     discard.versions.append(identity);
     QVERIFY(!KisPageStateMachine{}.apply(actual, discard).accepted);
     KisPageKey revisit;
-    QCOMPARE(metadata.releaseNativeReads(&a, 1, &revisit), size_t(1)); QVERIFY(!revisit.isValid());
+    next = 0;
+    QCOMPARE(metadata.releaseNativeReads(&a, next, 1, &revisit), size_t(1)); QVERIFY(!revisit.isValid());
     QCOMPARE(metadata.nativeReadVersion(b), identity);
-    QCOMPARE(metadata.releaseNativeReads(&b, 1, &revisit), size_t(1)); QCOMPARE(revisit, page.key);
-    QCOMPARE(metadata.releaseNativeReads(&b, 1, &revisit), size_t(0));
+    next = 0;
+    QCOMPARE(metadata.releaseNativeReads(&b, next, 1, &revisit), size_t(1)); QCOMPARE(revisit, page.key);
+    next = 0;
+    QCOMPARE(metadata.releaseNativeReads(&b, next, 1, &revisit), size_t(0));
     QVERIFY(!metadata.nativeReadVersion(a).isValid());
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
     QVERIFY(KisPageStateMachine{}.apply(actual, discard).accepted);
@@ -7460,7 +7523,8 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     KisPageMetadataCoordinator full;
     QVERIFY(full.configure(4)); QVERIFY(full.registerPage(overflow));
     a = {}; a.shard = quint32(full.shardFor(identity.key));
-    QCOMPARE(full.retainNativeReads(&a, 1, &selected, select), size_t(0));
+    next = 0;
+    QCOMPARE(full.retainNativeReads(&a, next, 1, &selected, select), size_t(0));
 }
 
 void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter_data()

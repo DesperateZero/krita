@@ -929,10 +929,7 @@ public:
     {
         if (state == State::Detached || !owner)
             return true;
-        if (executions) return false;
-        for (auto slot = writes.firstEntry(); slot.isValid(); slot = writes.nextEntry(slot))
-            if (writes.at(slot)->isExposed())
-                return false;
+        if (executions || counters.activePins) return false;
         std::optional<QMutexLocker<QMutex>> acquired;
         if (!heldOwnerLock) {
             acquired.emplace(&owner->mutex);
@@ -2636,9 +2633,7 @@ bool KisPageMutationSession::visitAdapterPages(const std::function<void(const Ki
 {
     if (!d) return true;
     QMutexLocker lock(&d->mutex);
-    if (d->executions) return false;
-    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
-        if (d->writes.at(slot)->isExposed()) return false;
+    if (d->executions || d->counters.activePins) return false;
     // A successful seal is already Detached. Otherwise this is the original
     // batch's irreversible cancellation, not a new mutable/readable phase.
     if (d->state != Private::State::Detached) d->state = Private::State::Failed;
@@ -2716,11 +2711,9 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation cannot seal"));
         return false;
     }
-    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
-        if (d->writes.at(slot.index)->isExposed()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation still has a writable guard"));
-            return false;
-        }
+    if (d->counters.activePins) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation still has a writable guard"));
+        return false;
     }
     if (d->state == Private::State::Failed) {
         if (!retainAdmission) d->cancelLocked();
@@ -2743,22 +2736,34 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     // A final semantic removal discards only this segment's unsealed target.
     // Previously sealed history remains untouched until the batch install.
     qsizetype privatePageCount = 0;
+    size_t overlayChangeCount = 0;
+    quint64 sealedCpuWrites = 0;
+    quint64 sealedRemovals = 0;
+    quint64 sealedSources = 0;
     for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
         const auto index = slot.index;
+        const auto *entry = d->writes.at(index);
         auto *page = d->pageAtEntry(index);
-        if (!page)
-            continue;
-        if (!d->writes.at(index)->isRemoval()) {
-            ++privatePageCount;
-            continue;
+        const bool source = bool(entry->initializationSource());
+        sealedSources += source;
+        if (entry->isRemoval()) {
+            ++overlayChangeCount;
+            ++sealedRemovals;
+            if (page) {
+                d->cancelPageLocked(index, *page);
+                d->erasePageAtEntry(index);
+            }
+        } else if (page || source) {
+            ++overlayChangeCount;
+            privatePageCount += bool(page);
+            sealedCpuWrites += entry->isCpuWrite();
         }
-        d->cancelPageLocked(index, *page);
-        d->erasePageAtEntry(index);
     }
     // Return detached cold capacity before admitting alias replacements.
     // Otherwise the next prepare would pay for both the dead blocks and their
     // replacements, despite these discarded targets no longer being usable.
     d->releaseStorageLocked(lock);
+    const bool initialClaimsHeld = d->claimsHeldLocked();
     ++owner->activeProviderCalls;
     // One seal owns every unlocked preparation/cleanup window. Restore the
     // gate and its activity on exceptions as well as ordinary refusals.
@@ -2782,65 +2787,66 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
             failure = QStringLiteral("mutation claims were lost");
         }
     };
-    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
-        const auto index = slot.index;
-        auto *page = d->pageAtEntry(index);
-        if (!page)
-            continue;
-        if (!success)
-            break;
+    validateClaims(initialClaimsHeld);
+    const auto completePrivate = [&](quint32 index, Private::Page *page) {
         auto *entry = d->writes.at(index);
-        if (entry->hasPrivateResult())
-            continue;
+        if (entry->hasPrivateResult()) return;
         success = owner->metadata.completePrivateWrite(page);
-        if (success)
-            owner->writeCoordinator.recordPrivateCompletion(*entry);
-        if (!success) {
-            failure = QStringLiteral("CPU private result lost its reservation");
+        if (success) owner->writeCoordinator.recordPrivateCompletion(*entry);
+        else failure = QStringLiteral("CPU private result lost its reservation");
+    };
+    // Alias preparation consumes completed private sources. With no sources,
+    // completion and proof production share the single output traversal.
+    if (sealedSources) {
+        for (auto slot = d->writes.firstEntry(); success && slot.isValid(); slot = d->writes.nextEntry(slot)) {
+            if (auto *page = d->pageAtEntry(slot.index)) completePrivate(slot.index, page);
         }
-    }
-    phase.next(Phase::MutationSealOwnerWait, pageWork);
-    lock.relock();
-    phase.next(Phase::MutationSealInputs, pageWork);
-    validateClaims(d->claimsHeldLocked());
-    qsizetype sealedPageCount = privatePageCount;
-    if (success)
-        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
+        phase.next(Phase::MutationSealOwnerWait, pageWork);
+        lock.relock();
+        phase.next(Phase::MutationSealInputs, pageWork);
+        validateClaims(d->claimsHeldLocked());
+        for (auto slot = d->writes.firstEntry(); success && slot.isValid(); slot = d->writes.nextEntry(slot)) {
             const auto index = slot.index;
             const auto *entry = d->writes.at(index);
             const auto source = entry->initializationSource();
-            const bool hadPage = d->pageAtEntry(index) != nullptr;
             if (source && !d->prepareAliasLocked(entry->key(), source, lock, &failure, &storageRefused)) {
                 success = false;
                 break;
             }
-            if (source && !hadPage)
-                ++sealedPageCount;
         }
-    lock.unlock();
-    phase.next(Phase::MutationSealProofPrepare, quint64(sealedPageCount));
-    if (success)
-        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
-            auto *page = d->pageAtEntry(slot.index);
-            if (!page)
+        lock.unlock();
+    }
+    phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
+    KisPagePublicationChanges changes(KisMutationStorageAllocator<KisPagePublicationChange>::retained(&owner->backingBudget));
+    try {
+        if (success) changes.reserve(overlayChangeCount);
+        phase.next(Phase::MutationSealProofPrepare, quint64(overlayChangeCount - sealedRemovals));
+        for (auto slot = d->writes.firstEntry(); success && overlayChangeCount && slot.isValid(); slot = d->writes.nextEntry(slot)) {
+            const auto *entry = d->writes.at(slot.index);
+            if (entry->isRemoval()) {
+                changes.push_back({{entry->key(), {}, true}, {}, false, false});
                 continue;
+            }
+            auto *page = d->pageAtEntry(slot.index);
+            if (!page) continue;
+            if (!sealedSources) completePrivate(slot.index, page);
+            if (!success) break;
             if (page->proof.isValid()) {
-                if (owner->owner.ownsPreparedPageProof(page->proof)) continue;
-                success = false;
-                failure = QStringLiteral("mutation prepared proof lost its owner");
-                break;
+                success = owner->owner.ownsPreparedPageProof(page->proof);
+                if (!success) failure = QStringLiteral("mutation prepared proof lost its owner");
+            } else {
+                success = owner->owner.sealCpuPreparedPage(*page, d->transaction.id, completion, &failure);
             }
-            if (!owner->owner.sealCpuPreparedPage(*page, d->transaction.id, completion, &failure)) {
-                success = false;
-                break;
-            }
+            if (!success) break;
+            // Proof is still private; no writer may survive its publication.
+            page->writable.reset();
+            changes.push_back({{entry->key(), page->proof, false}, {}, false, false});
         }
-    // No guards remain and these targets are still private. Drop physical
-    // writer reservations before making proofs visible to new readers.
-    if (success)
-        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
-            if (auto *page = d->pageAtEntry(slot.index))
-                page->writable.reset();
+    } catch (const std::bad_alloc &) {
+        success = false;
+        storageRefused = true;
+        failure = QStringLiteral("overlay storage preparation was refused");
+    }
 
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
@@ -2848,38 +2854,6 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     // The scope gate and Sealing keep the accepted claim set unchanged.
     // Readers and metadata remain dynamic and are validated by their owners.
     validateClaims(owner->operational && owner->writeCoordinator.transactionHasSession(d->transaction.id));
-    using OverlayChange = KisPagePublicationCoordinator::OverlayChange;
-    size_t overlayChangeCount = 0;
-    quint64 sealedCpuWrites = 0;
-    quint64 sealedRemovals = 0;
-    quint64 sealedSources = 0;
-    if (success) {
-        for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
-            const auto index = slot.index;
-            auto *entry = d->writes.at(index);
-            auto *page = d->pageAtEntry(index);
-            if (entry->isRemoval()) {
-                ++overlayChangeCount;
-                ++sealedRemovals;
-            } else if (page) {
-                ++overlayChangeCount;
-                sealedCpuWrites += entry->isCpuWrite();
-            }
-            sealedSources += bool(entry->initializationSource());
-        }
-    }
-    auto nextInput = d->writes.firstEntry();
-    const auto readChange = [&](size_t) -> OverlayChange {
-        while (nextInput.isValid()) {
-            const auto index = nextInput.index;
-            nextInput = d->writes.nextEntry(nextInput);
-            const auto *entry = d->writes.at(index);
-            if (entry->isRemoval()) return {entry->key(), {}, true};
-            if (const auto *page = d->pageAtEntry(index))
-                return {entry->key(), page->proof, false};
-        }
-        return {}; // The common validator rejects an inconsistent input count.
-    };
     const bool hasOverlay = success && overlayChangeCount != 0;
     // Only the bridge can transfer its private anonymous transaction to this
     // scope. Ordinary seal/history/checkpoint retain their overlay contract.
@@ -2892,7 +2866,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.preparePagePublicationLocked(
-              d->transaction, overlayChangeCount, readChange, &failure, &storageRefused, canonical)
+              d->transaction, std::move(changes), &failure, &storageRefused, canonical)
         : KisPagePublicationCoordinator::KisPreparedPagePublication{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
@@ -2962,6 +2936,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         if (!storageRefused) d->state = Private::State::Failed;
         lock.unlock();
         phase.next(Phase::MutationSealCleanup, pageWork);
+        changes = KisPagePublicationChanges{};
         overlay.finishUnlocked(std::move(metadataCleanup), lock);
         lock.relock();
         retire();
@@ -2969,11 +2944,9 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         KisPageStoreDetail::setError(error, failure.isEmpty() ? QStringLiteral("CPU mutation seal failed") : failure);
         return false;
     }
-    // Installation now owns the replacements. The original pages cease
-    // owning them only at this acceptance point, never at prepare success.
+    // Acceptance moved authority in metadata. The proof values themselves
+    // own no resources and disappear with the original cold pages below.
     if (acceptsCanonical) d->ownsTransaction = false;
-    for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot))
-        if (auto *page = d->pageAtEntry(slot.index)) page->proof = {};
     owner->mutationStats.pagesSealed += sealedCpuWrites;
     owner->synchronousHostWrites += sealedSources;
     owner->mutationStats.removalsSealed += sealedRemovals;
@@ -2993,7 +2966,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealCleanup, pageWork);
     overlay.finishUnlocked(std::move(metadataCleanup), lock);
     sealedPages = Private::ColdPageSet{};
-    d->clearSources();
+    if (sealedSources) d->clearSources();
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();
@@ -3239,7 +3212,7 @@ KisCpuReadGuard KisCapturedReadView::readResidentPage(const KisPageKey &key, Kis
 
 KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
                                                           KisCpuResidentReadStatus *status,
-                                                          bool waitForLocalGate) const
+                                                          bool waitForLocalGate, KisCpuReadBinding *selection) const
 {
     KisCpuReadGuard guard;
     if (status)
@@ -3250,15 +3223,19 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
         *status = KisCpuResidentReadStatus::InvalidIdentity;
     KisPageVersion version;
     KisCpuReadBinding link;
-    if (!d->resolve(key, &version, &link))
-        return guard;
+    if (selection && *selection) {
+        // Internal windows only contain selections made from this exact cut.
+        link = std::move(*selection);
+        version = link.replica.version;
+        if (!(version.key == key)) return guard;
+    } else if (!d->resolve(key, &version, &link)) return guard;
     if (version.isDefaultPixel()) {
         auto buffer = d->defaultReadBuffer(version);
         if (status)
             *status = buffer ? KisCpuResidentReadStatus::Ready : KisCpuResidentReadStatus::ResourceUnavailable;
         if (!buffer)
             return guard;
-        guard.m_scope = d;
+        if (!selection) guard.m_scope = d;
         guard.m_data = buffer->data;
         guard.m_defaultBuffer = std::move(buffer);
         guard.m_version = version;
@@ -3273,7 +3250,6 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     // cold miss/recheck. Facts supplies the binding without a separate map.
     if (!link)
         link = KisPageReadCoordinator::discoverCpuReadBinding(d->owner->metadata, d->owner->owner, version, {}, &observed);
-    std::shared_ptr<KisCpuResidentBinding> binding;
     const void *data = nullptr;
     constexpr int maximumAttempts = 3; // initial pin plus two immediate rediscoveries
     for (int attempt = 0; attempt < maximumAttempts; ++attempt) {
@@ -3281,9 +3257,8 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
             observed = KisCpuResidentReadStatus::InvalidIdentity;
             break;
         }
-        binding = link.binding;
-        if (binding)
-            data = binding->acquireRead(link.replica.allocationIdentity(), true, &observed, waitForLocalGate);
+        if (link.binding)
+            data = link.binding->acquireRead(link.replica.allocationIdentity(), true, &observed, waitForLocalGate);
         if (data || (observed != KisCpuResidentReadStatus::InvalidIdentity
                      && observed != KisCpuResidentReadStatus::Retired)
             || attempt + 1 == maximumAttempts)
@@ -3294,14 +3269,31 @@ KisCpuReadGuard KisCapturedReadView::readResidentPageImpl(const KisPageKey &key,
     if (status) *status = observed;
     if (!data)
         return guard;
-    guard.m_scope = d;
-    guard.m_binding = std::move(binding);
+    if (!selection) guard.m_scope = d;
+    guard.m_binding = std::move(link.binding);
     guard.m_data = data;
     guard.m_version = link.replica.version;
     guard.m_pageExtent = link.replica.layout.pageExtent;
     guard.m_rowStride = link.replica.layout.rowStride;
     guard.m_byteSize = link.replica.layout.byteSize;
     return guard;
+}
+
+bool KisCapturedReadView::visitResidentPage(const KisPageKey &key, KisCpuReadBinding &selection,
+    const void *context, void (*visit)(const void *, const void *, quint32), KisCpuResidentReadStatus *status) const
+{
+    auto guard = readResidentPageImpl(key, status, true, &selection);
+    if (!guard.m_data) return false;
+    visit(context, guard.m_data, guard.m_rowStride);
+    return true;
+}
+
+void KisCapturedReadView::selectReadWindow(size_t first, size_t count,
+    quint32 *indices, KisCpuReadBinding *bindings) const
+{
+    Q_ASSERT(d && d->release->nativeRange && count <= 16
+        && first + count <= d->release->nativeRefs.size());
+    d->owner->metadata.nativeReadBindings(d->release->nativeRefs.data(), indices, first, count, bindings);
 }
 
 KisCpuReadGuard::~KisCpuReadGuard()
@@ -3430,7 +3422,7 @@ void KisPageStore::PrivateReleaser::cleanup(Private *owner)
 }
 
 KisCapturedReadView KisPageStore::captureReadRange(KisSurfaceId surface, const QRect &pages,
-    const KisPageReadView &selector, QString *error)
+    const KisPageReadView &selector, QString *error, KisCpuReadBinding *firstBindings, size_t bindingCount)
 try
 {
     if (!surface.isValid() || pages.isEmpty()
@@ -3452,9 +3444,10 @@ try
                                    qint32(qint64(pages.top()) + qint64(i / quint32(pages.width())))}};
     };
     for (size_t i = 0; i < release.nativeRefs.size(); ++i) {
-        release.nativeRefs[i].ordinal = quint32(i);
         release.nativeRefs[i].shard = quint32(d->metadata.shardFor(keyAt(quint32(i))));
     }
+    release.groupNativeRefs(d->metadata.shardCount());
+    bindingCount = std::min({bindingCount, size_t(16), release.nativeRefs.size()});
     QMutexLocker lock(&d->mutex);
     if (!d->operational || d->closing
         || !d->publicationCoordinator.resolveSurfaceLocked(surface, selector, &release.stagedSurfaces.front())) {
@@ -3468,16 +3461,15 @@ try
     auto select = [&](quint32 ordinal, KisPageVersion *version) {
         return d->publicationCoordinator.resolveVersionLocked(keyAt(ordinal), selector, version);
     };
-    while (size_t(release.retained) < release.nativeRefs.size()) {
-        const size_t first = size_t(release.retained);
-        size_t end = first + 1;
-        while (end < release.nativeRefs.size() && end - first < 16
-            && release.nativeRefs[end].shard == release.nativeRefs[first].shard) ++end;
-        release.retained += d->metadata.retainNativeReads(release.nativeRefs.data() + first, end-first, &select,
+    size_t next = release.next;
+    while (release.retained < release.nativeRefs.size()) {
+        const auto retained = d->metadata.retainNativeReads(release.nativeRefs.data(), next,
+            release.nativeRefs.size() - release.retained, &select,
             [](void *context, quint32 ordinal, KisPageVersion *version) {
                 return (*static_cast<decltype(select) *>(context))(ordinal, version);
-            });
-        if (size_t(release.retained) != end) {
+            }, firstBindings, bindingCount);
+        release.retained += retained;
+        if (!retained) {
             d->readCoordinator.releaseCapturedView(std::move(result.d->release), &lock);
             KisPageStoreDetail::setError(error, QStringLiteral("native read range selection was refused"));
             return {};
@@ -3560,6 +3552,10 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
                                                                            &versions, &removals, &surfaces);
         if (captured && result.d->release->nativeRefs.capacity() >= result.d->release->versions.size()) break;
         versions = qMax(versions, result.d->release->versions.size());
+        if (versions > KisPageNativeReadRef::End) {
+            KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
+            return {};
+        }
         ++d->activeProviderCalls;
         locker.unlock();
         try {
@@ -3575,6 +3571,10 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         locker.relock(); --d->activeProviderCalls;
     }
     auto &release = *result.d->release;
+    if (release.versions.size() > KisPageNativeReadRef::End) {
+        KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
+        return {};
+    }
     if (selector.kind == KisPageReadViewKind::TransactionOverlay) {
         std::sort(release.versions.begin(), release.versions.end(), [](const auto &a, const auto &b) {
             return KisCapturedReadView::Private::lessKey(a.key, b.key);
@@ -3586,9 +3586,9 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     }
     release.nativeRefs.resize(release.versions.size());
     for (size_t i = 0; i < release.versions.size(); ++i) {
-        release.nativeRefs[i].ordinal = quint32(i);
         release.nativeRefs[i].shard = quint32(d->metadata.shardFor(release.versions[i].key));
     }
+    release.groupNativeRefs(d->metadata.shardCount());
     const auto retained = d->epochs.retainSnapshot(root.epoch());
     if (!retained.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope retention could not be allocated"));
@@ -3603,16 +3603,15 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         *version = release.versions[ordinal];
         return true;
     };
+    size_t next = release.next;
     while (release.retained < release.nativeRefs.size()) {
-        const size_t first = release.retained;
-        size_t end = first + 1;
-        while (end < release.nativeRefs.size() && end - first < 16
-            && release.nativeRefs[end].shard == release.nativeRefs[first].shard) ++end;
-        release.retained += d->metadata.retainNativeReads(release.nativeRefs.data() + first, end - first, &select,
+        const auto count = d->metadata.retainNativeReads(release.nativeRefs.data(), next,
+            release.nativeRefs.size() - release.retained, &select,
             [](void *context, quint32 ordinal, KisPageVersion *version) {
                 return (*static_cast<decltype(select) *>(context))(ordinal, version);
             });
-        if (release.retained != end) {
+        release.retained += count;
+        if (!count) {
             failure = QStringLiteral("read scope exact protection was refused");
             break;
         }

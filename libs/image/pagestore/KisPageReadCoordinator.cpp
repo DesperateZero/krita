@@ -958,6 +958,40 @@ KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetCo
     return {new (record) KisPageCapturedRelease(budget), KisPageCapturedReleaseDeleter{&budget}};
 }
 
+void KisPageCapturedRelease::groupNativeRefs(qsizetype shardCount)
+{
+    Q_ASSERT(nativeRefs.size() <= KisPageNativeReadRef::End);
+    constexpr auto end = KisPageNativeReadRef::End;
+    next = nativeRefs.empty() ? end : 0;
+    for (size_t i = 0; i < nativeRefs.size(); ++i)
+        nativeRefs[i].next = i + 1 == nativeRefs.size() ? end : quint32(i + 1);
+    if (shardCount <= 1) return; // An unconfigured Store will reject capture.
+    // Stable LSD radix on links: original ordinals and the 16-byte records
+    // never move. The two temporary bucket arrays are bounded by 512 bytes.
+    for (unsigned shift = 0; (quint64(shardCount - 1) >> shift) != 0; shift += 6) {
+        quint32 heads[64], tails[64];
+        std::fill_n(heads, 64, end);
+        std::fill_n(tails, 64, end);
+        for (quint32 i = quint32(next); i != end;) {
+            const auto after = nativeRefs[i].next;
+            const auto bucket = (nativeRefs[i].shard >> shift) & 63;
+            if (heads[bucket] == end) heads[bucket] = i;
+            else nativeRefs[tails[bucket]].next = i;
+            tails[bucket] = i;
+            i = after;
+        }
+        quint32 tail = end;
+        next = end;
+        for (unsigned bucket = 0; bucket < 64; ++bucket) {
+            if (heads[bucket] == end) continue;
+            if (tail == end) next = heads[bucket];
+            else nativeRefs[tail].next = heads[bucket];
+            tail = tails[bucket];
+        }
+        if (tail != end) nativeRefs[tail].next = end;
+    }
+}
+
 bool KisPageReadCoordinator::releaseCapturedView(
     KisPageCapturedReleasePointer pending,
     QMutexLocker<QMutex> *heldOwnerLock)
@@ -971,7 +1005,6 @@ bool KisPageReadCoordinator::releaseCapturedView(
     Q_ASSERT(pending && (pending->token.isValid() || pending->nativeRange));
     m_ownerLifetime.ref();
     auto *record = pending.release();
-    m_capturedReleaseRetries.push_back(*record);
     const bool finished = finishCapturedReleaseLocked(*record, lock);
     if (!finished && m_backgroundReclamation && !m_automaticWakeupsStopped && !m_lastUseClosing) {
         QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
@@ -1002,37 +1035,36 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
 {
     Q_ASSERT(!pending.processing);
     pending.processing = true;
-    while (pending.next < pending.retained) {
+    const auto blocked = [&] {
+        pending.processing = false;
+        if (!pending.releaseHook.is_linked()) m_capturedReleaseRetries.push_back(pending);
+        return false;
+    };
+    while (pending.retained) {
         KisPageKey revisit[16];
-        const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data() + pending.next,
-            size_t(pending.retained - pending.next), revisit);
-        if (!released) {
-            pending.processing = false;
-            return false;
-        }
-        pending.next += released;
+        const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data(), pending.next,
+            pending.retained, revisit);
+        if (!released) return blocked();
+        pending.retained -= released;
         for (size_t i = 0; i < released; ++i)
             if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i]);
-    }
-    if (pending.retained) {
-        m_history.collectUnreachableLocked();
-        processRetirementsUnlocked(lock);
     }
     bool becameUnretained = false;
     if (pending.token.isValid()
         && (!m_operational || !m_epochs.releaseSnapshot(pending.token, nullptr, &becameUnretained))) {
-        pending.processing = false;
-        return false;
+        return blocked();
     }
+    pending.token = {};
     if (pending.capturedScope && pending.nativeRange) --m_nativeRanges;
     if (pending.capturedScope) ++m_capturedViewReleases;
-    m_capturedReleaseRetries.erase(m_capturedReleaseRetries.iterator_to(pending));
+    if (pending.releaseHook.is_linked())
+        m_capturedReleaseRetries.erase(m_capturedReleaseRetries.iterator_to(pending));
     KisPageCapturedReleasePointer finished(&pending, KisPageCapturedReleaseDeleter{&m_budget});
-    if (becameUnretained) {
-        if (!m_backgroundReclamation) m_epochs.collectUnretainedRoots();
-        m_history.collectUnreachableLocked(true);
-        processRetirementsUnlocked(lock);
-    }
+    if (becameUnretained && !m_backgroundReclamation) m_epochs.collectUnretainedRoots();
+    // The record is semantically complete before the first owner unlock.
+    // A blocked record instead entered the original retry list above.
+    m_history.collectUnreachableLocked(becameUnretained);
+    processRetirementsUnlocked(lock);
     // This record has handed off all semantic work. Its original lifetime pin
     // covers physical disposal; it must not make a concurrent restore Busy.
     lock.unlock();

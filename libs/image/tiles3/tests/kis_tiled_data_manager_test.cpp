@@ -2670,12 +2670,43 @@ void KisTiledDataManagerTest::testPageStorePackedReadCapturesOneView()
     QVERIFY(!store->sessionStats().hasOutstandingCapabilities());
 }
 
+void KisTiledDataManagerTest::testPreparedWarmBorrowBothTables()
+{
+    const auto check = [&](auto *type) {
+        using Table = std::remove_pointer_t<decltype(type)>;
+        const quint8 initial = 0x2a;
+        auto *data = KisTileDataStore::instance()->createDefaultTileData(1, &initial);
+        Table table(nullptr);
+        table.setDefaultTileData(data);
+        for (int i = 0; i < 32; ++i) {
+            // Same low hash bits exercise chained lookup as the table grows.
+            const int col = i * 1024;
+            auto cold = table.prepareTileUpdate(col, 0);
+            QVERIFY(cold);
+            bool created = false;
+            auto installed = table.installPreparedTile(cold, created);
+            QVERIFY(installed && created);
+            QVERIFY(!table.prepareTileUpdate(col, 0));
+            auto *borrowed = table.borrowTileForPreparedUpdate(col, 0);
+            QCOMPARE(borrowed, installed.data());
+            borrowed->invalidatePageStoreReadCache();
+        }
+        QCOMPARE(table.numTiles(), qsizetype(32));
+    };
+    check(static_cast<KisTileHashTableTraits<KisTile> *>(nullptr));
+    check(static_cast<KisTileHashTableTraits2<KisTile> *>(nullptr));
+}
+
 void KisTiledDataManagerTest::testPageStorePackedReadSurvivesPublication_data()
 {
     QTest::addColumn<int>("terminal");
-    QTest::newRow("committed-head") << 0;
-    QTest::newRow("overlay-commit") << 1;
-    QTest::newRow("overlay-abort") << 2;
+    QTest::addColumn<int>("count"); QTest::addColumn<int>("publishAt");
+    for (int terminal = 0; terminal < 3; ++terminal)
+        for (int count : {3,16,17,33}) for (int at : {2,17}) {
+            if (at > count) continue;
+            QTest::newRow(qPrintable(QStringLiteral("terminal%1-k%2-at%3").arg(terminal).arg(count).arg(at)))
+                << terminal << count << at;
+        }
 }
 
 void KisTiledDataManagerTest::testPageStorePackedReadSurvivesPublication()
@@ -2685,28 +2716,30 @@ void KisTiledDataManagerTest::testPageStorePackedReadSurvivesPublication()
     auto *backend = dm.m_pageStoreBackend;
     auto *store = backend->store();
     QFETCH(int, terminal);
+    QFETCH(int, count); QFETCH(int, publishAt);
+    const int width = count * 64, presentWidth = width - 64;
     QString error;
     if (terminal) QVERIFY(backend->beginHistory(&initial, 1, &error));
-    QVERIFY(backend->fillRect(QRect(0, 0, 128, 64), QByteArray(1, char(0x51)), &error));
-    QByteArray bytes(192 * 64, char(0));
+    QVERIFY(backend->fillRect(QRect(0, 0, presentWidth, 64), QByteArray(1, char(0x51)), &error));
+    QByteArray bytes(width * 64, char(0));
     int pages = 0;
     bool mutationSucceeded = false;
     const auto stats = store->sessionStats();
     KisPageStoreDiagnosticRecorder recorder(true, store);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
-        if (phase != KisPageStoreDiagnosticPhase::ReadBytesPage || ++pages != 2) return;
+        if (phase != KisPageStoreDiagnosticPhase::ReadBytesPage || ++pages != publishAt) return;
         // Same production backend APIs, without re-entering the manager's
         // read lock. The first page is already copied and its pin released.
-        mutationSucceeded = backend->fillRect(QRect(0, 0, 128, 64), QByteArray(1, char(0x71)), &error) &&
+        mutationSucceeded = backend->fillRect(QRect(0, 0, presentWidth, 64), QByteArray(1, char(0x71)), &error) &&
             backend->setDefaultPixel(QByteArray(1, char(0x41)), &error);
         if (terminal == 1) mutationSucceeded &= backend->commitHistory(&initial, 1, &error);
         if (terminal == 2) mutationSucceeded &= backend->abortHistory(&error);
     });
-    dm.readBytes(reinterpret_cast<quint8 *>(bytes.data()), 0, 0, 192, 64);
-    QVERIFY2(mutationSucceeded, qPrintable(error)); QCOMPARE(pages, 3);
+    dm.readBytes(reinterpret_cast<quint8 *>(bytes.data()), 0, 0, width, 64);
+    QVERIFY2(mutationSucceeded, qPrintable(error)); QCOMPARE(pages, count);
     for (int y = 0; y < 64; ++y) {
-        QCOMPARE(bytes.mid(y * 192, 128), QByteArray(128, char(0x51)));
-        QCOMPARE(bytes.mid(y * 192 + 128, 64), QByteArray(64, char(0x2a)));
+        QCOMPARE(bytes.mid(y * width, presentWidth), QByteArray(presentWidth, char(0x51)));
+        QCOMPARE(bytes.mid(y * width + presentWidth, 64), QByteArray(64, char(0x2a)));
     }
     QCOMPARE(store->sessionStats().readRequestsCreated, stats.readRequestsCreated);
     QVERIFY(store->waitForRetirementIdle());

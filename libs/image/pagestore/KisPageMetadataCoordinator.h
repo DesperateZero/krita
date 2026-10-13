@@ -369,10 +369,13 @@ private:
                               const KisCpuResidentBinding *expected = nullptr);
     KisCpuReadBinding cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
-    size_t retainNativeReads(KisPageNativeReadRef *references, size_t count,
-        void *context, bool (*select)(void *, quint32, KisPageVersion *));
-    size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t count, KisPageKey *revisit);
+    size_t retainNativeReads(KisPageNativeReadRef *references, size_t &next, size_t count,
+        void *context, bool (*select)(void *, quint32, KisPageVersion *),
+        KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
+    size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t &next, size_t count, KisPageKey *revisit);
     KisPageVersion nativeReadVersion(const KisPageNativeReadRef &reference, KisCpuReadBinding *binding = nullptr) const;
+    void nativeReadBindings(const KisPageNativeReadRef *references, quint32 *indices,
+        size_t first, size_t count, KisCpuReadBinding *bindings) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;
     friend class KisPagePublicationCoordinator;

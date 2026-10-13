@@ -35,6 +35,7 @@ class KisPageStoreWriteReservation;
 struct KisPageMetadataMetrics;
 struct KisPageBackingLimits;
 struct KisPageBackingUsage;
+struct KisCpuReadBinding;
 
 struct KRITAIMAGE_EXPORT KisPageMutationStatistics {
     quint64 sessionsCreated = 0;
@@ -387,11 +388,27 @@ public:
 
 private:
     KisCpuReadGuard
-    readResidentPageImpl(const KisPageKey &key, KisCpuResidentReadStatus *status, bool waitForLocalGate) const;
+    readResidentPageImpl(const KisPageKey &key, KisCpuResidentReadStatus *status, bool waitForLocalGate,
+                        KisCpuReadBinding *selection = nullptr) const;
+    // Synchronous internal consumer: the caller keeps this view, and a guard
+    // without an escaping scope reference never leaves this function.
+    bool visitResidentPage(const KisPageKey &key, KisCpuReadBinding &selection,
+        const void *context, void (*visit)(const void *, const void *, quint32), KisCpuResidentReadStatus *status) const;
+    template<class Visitor>
+    bool visitResidentPage(const KisPageKey &key, KisCpuReadBinding &selection,
+        const Visitor &visit, KisCpuResidentReadStatus *status) const
+    {
+        return visitResidentPage(key, selection, &visit,
+            [](const void *context, const void *data, quint32 stride) {
+                (*static_cast<const Visitor *>(context))(data, stride);
+            }, status);
+    }
+    void selectReadWindow(size_t first, size_t count, quint32 *indices, KisCpuReadBinding *bindings) const;
     class Private;
     std::shared_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuReadGuard;
+    friend class KisTiledDataManagerPageStoreBackend;
 };
 
 class KRITAIMAGE_EXPORT KisCpuReadGuard
@@ -647,7 +664,8 @@ private:
         bool legacyIntent, bool *borrowed, QString *error);
     // Internal finite selection. It cannot be used as a whole-image snapshot.
     KisCapturedReadView captureReadRange(KisSurfaceId surface, const QRect &pages,
-        const KisPageReadView &selector, QString *error);
+        const KisPageReadView &selector, QString *error,
+        KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
     // Product composition prepares the real facade/root storage before its

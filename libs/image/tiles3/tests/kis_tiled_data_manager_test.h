@@ -79,6 +79,7 @@ private Q_SLOTS:
     void testTileCloneRejectedWrite_data();
     void testTileCloneRejectedWrite();
     void testHashCloneFailureCleanup();
+    void testPreparedWarmBorrowBothTables();
     void testCloneCanonicalOrLegacySource_data();
     void testCloneCanonicalOrLegacySource();
     void testPageStoreSaveReopenRoundTrip();

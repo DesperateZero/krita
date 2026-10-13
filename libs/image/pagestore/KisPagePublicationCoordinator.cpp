@@ -1710,7 +1710,29 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
         return {};
     }
+    try {
+        KisPagePublicationChanges changes(KisMutationStorageAllocator<KisPagePublicationChange>::retained(&m_budget));
+        changes.reserve(count);
+        for (size_t i = 0; i < count; ++i) changes.push_back({readChange(input, i), {}, false, false});
+        return preparePagePublicationLocked(transaction, std::move(changes), error, storageRefused, canonical);
+    } catch (const std::bad_alloc &) {
+        if (storageRefused) *storageRefused = true;
+        KisPageStoreDetail::setError(error, QStringLiteral("overlay storage preparation was refused"));
+        return {};
+    }
+}
 
+KisPagePublicationCoordinator::KisPreparedPagePublication
+KisPagePublicationCoordinator::preparePagePublicationLocked(
+    const KisPageTransaction &transaction, KisPagePublicationChanges changes,
+    QString *error, bool *storageRefused, bool canonical)
+{
+    if (storageRefused) *storageRefused = false;
+    if (!hasActiveTransactionLocked(transaction) || changes.empty()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
+        return {};
+    }
+    const size_t count = changes.size();
     try {
         using Data = KisPreparedPagePublication::Data;
         auto storage = KisMutationStorageAllocator<Data>::retained(&m_budget);
@@ -1722,8 +1744,7 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
         candidate->owner = this;
         candidate->transaction = transaction;
         candidate->canonical = canonical;
-        candidate->changes.reserve(count);
-        for (size_t i = 0; i < count; ++i) candidate->changes.push_back({readChange(input, i), {}, false, false});
+        candidate->changes = std::move(changes);
         std::sort(candidate->changes.begin(), candidate->changes.end(), [](const auto &a, const auto &b) {
             return overlayKeyLess(a.replacement.key, b.replacement.key);
         });

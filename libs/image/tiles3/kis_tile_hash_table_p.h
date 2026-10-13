@@ -231,8 +231,9 @@ KisTileHashTableTraits<T>::prepareTileUpdate(qint32 col, qint32 row, Update upda
     PreparedTile prepared;
     {
         QReadLocker locker(&m_lock);
-        prepared.m_tile = getTile(col, row, calculateHash(col, row));
-        if (prepared.m_tile && update == Update::Present) return {};
+        auto *existing = borrowPreparedTileLocked(col, row, calculateHash(col, row));
+        if (existing && update == Update::Present) return {};
+        prepared.m_tile = existing;
         if (!prepared.m_tile && update != Update::Absent)
             prepared.m_tile = new TileType(col, row, m_defaultTileData, nullptr);
         prepared.m_col = col;
@@ -249,6 +250,26 @@ KisTileHashTableTraits<T>::prepareTileUpdate(qint32 col, qint32 row, Update upda
         prepared.m_identity = m_preparationIdentity;
     }
     return prepared;
+}
+
+template<class T>
+typename KisTileHashTableTraits<T>::TileType *
+KisTileHashTableTraits<T>::borrowPreparedTileLocked(qint32 col, qint32 row, qint32 idx)
+{
+    for (auto *tile = m_hashTable[idx].data(); tile;) {
+        if (tile->col() == col && tile->row() == row) return tile;
+        if constexpr (std::is_same_v<T, KisTile>) tile = tile->nextForPreparedUpdate();
+        else tile = tile->next().data(); // Preserve the generic table's next() contract.
+    }
+    return nullptr;
+}
+
+template<class T>
+typename KisTileHashTableTraits<T>::TileType *
+KisTileHashTableTraits<T>::borrowTileForPreparedUpdate(qint32 col, qint32 row)
+{
+    QReadLocker locker(&m_lock);
+    return borrowPreparedTileLocked(col, row, calculateHash(col, row));
 }
 
 template<class T>

@@ -241,6 +241,9 @@ public:
     // only the net SSD growth of the signed physical move/reclassification.
     KisBackingBudgetReservation reserveChange(const KisBackingBudgetDelta &,
                                                QString *error);
+    // Identity-only handoff still observes hard limits/process peaks, but
+    // has no positive or retained fee and needs no reservation lifetime.
+    bool admitUnchangedBacking(QString *error);
     void commitReservation(KisBackingBudgetReservation &&reservation,
                            const KisBackingBudgetDelta &installed) noexcept;
     KisPageBackingUsage usage() const;

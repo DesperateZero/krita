@@ -1010,6 +1010,23 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveChange(
     return reserveImpl(prepared, aggregateBytes, durableBytes, error);
 }
 
+bool KisBackingBudgetController::admitUnchangedBacking(QString *error)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!fitsLocked({}, {}, 0)) {
+        ++m_usage.backpressureCount;
+        KisPageStoreDetail::setError(error, QStringLiteral("backing reservation exceeds its hard budget"));
+        return false;
+    }
+    if (m_processStorage) {
+        auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
+            saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), processStorageSnapshot().total));
+    }
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
 KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
