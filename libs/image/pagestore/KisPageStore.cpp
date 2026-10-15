@@ -3778,10 +3778,8 @@ bool KisPageStore::closeSession(QString *error)
 
     KisPageRetirementRecords shutdownReplicas =
         std::move(d->pendingShutdownReplicas);
-    // Drain already Debt-admitted records before current live replicas. With
-    // a finite one-page Debt budget, trying current replicas first can reject
-    // all of them even though retiring the queued debt immediately frees the
-    // capacity required for a sequential shutdown.
+    // Queued and live records can each retain their original class. The
+    // retirement owner resumes admission after this close releases capacity.
     auto queuedShutdown = d->retirementQueue.takeForClose();
     shutdownReplicas.splice(shutdownReplicas.end(), queuedShutdown);
     shutdownReplicas.splice(shutdownReplicas.end(), liveShutdownReplicas);
@@ -3791,23 +3789,10 @@ bool KisPageStore::closeSession(QString *error)
     const qsizetype shutdownCount = qsizetype(shutdownReplicas.size());
     d->activeProviderCalls += shutdownCount;
     locker.unlock();
-    KisPageRetirementRecords failedReplicas;
-    for (auto it = shutdownReplicas.begin(); it != shutdownReplicas.end();) {
-        const auto entry = it++;
-        auto &shutdown = *entry;
-        if (!shutdown.provider) {
-            failedReplicas.splice(failedReplicas.end(), shutdownReplicas, entry);
-            continue;
-        }
-        if (!d->retirementQueue.retireRecord(shutdown)) {
-            failedReplicas.splice(failedReplicas.end(), shutdownReplicas, entry);
-        } else {
-            d->metadata.removeCpuReadBinding(shutdown.replica);
-        }
-    }
+    d->retirementQueue.retireForClose(shutdownReplicas);
     locker.relock();
     d->activeProviderCalls -= shutdownCount;
-    d->pendingShutdownReplicas = std::move(failedReplicas);
+    d->pendingShutdownReplicas = std::move(shutdownReplicas);
     d->closing = false;
     if (!d->pendingShutdownReplicas.empty()) {
         d->closed = false;

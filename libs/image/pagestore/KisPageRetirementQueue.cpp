@@ -329,20 +329,26 @@ bool KisPageRetirementQueue::admitOwnedRetirementDebt(
 
 bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
 {
-    if (!record.provider) return false;
+    return attemptRetirement(record) == RetirementOutcome::Complete;
+}
+
+KisPageRetirementQueue::RetirementOutcome
+KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
+{
+    if (!record.provider) return RetirementOutcome::Pending;
     const auto backingClass = m_owner.backingClass(record.replica);
     if (backingClass != KisBackingBudgetClass::Count &&
         !admitOwnedRetirementDebt(record, &record.orphanReservation, backingClass))
-        return false;
+        return RetirementOutcome::AdmissionRefused;
     if (backingClass == KisBackingBudgetClass::Count && record.orphanReservation.isValid() && !record.orphanDebtAdmitted) {
         if (!m_owner.retainRetirementDebtReservation(record.replica, record.orphanReservation))
-            return false;
+            return RetirementOutcome::AdmissionRefused;
         record.orphanDebtAdmitted = true;
     }
 
     if (!record.retirementOperation.isValid()) {
         const auto operation = m_owner.prepareRetirementOperation(record);
-        if (!operation.isValid()) return false;
+        if (!operation.isValid()) return RetirementOutcome::Pending;
         auto cancelPrepared = qScopeGuard([&] { m_owner.cancelRetirementOperation(operation); });
         KisReplicaOperation result;
         try {
@@ -352,9 +358,9 @@ bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
             // The provider did not return an accepted result. Keep this exact
             // record and let the original wait/retry policy resume it; the
             // prepared operation is cancelled by the guard above.
-            return false;
+            return RetirementOutcome::Pending;
         }
-        if (!result.isValid()) return false;
+        if (!result.isValid()) return RetirementOutcome::Pending;
         cancelPrepared.dismiss();
         record.retirementOperation = operation;
         record.retirementResult = result;
@@ -362,24 +368,55 @@ bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
     if (record.retirementResult.isValid()) {
         if (!(record.retirementResult.replica == record.replica) ||
             !m_owner.bindRetirementOperation(record.retirementOperation, record.retirementResult))
-            return false; // Keep an accepted provider result; never reissue retire.
+            return RetirementOutcome::Pending; // Keep an accepted result; never reissue retire.
         record.retirementResult = {};
     }
     // A late completion is polled, never replayed as a second retire.
     const auto terminal =
         m_owner.verifyProviderOperation(record.retirementOperation);
-    if (!terminal.isValid()) return false;
+    if (!terminal.isValid()) return RetirementOutcome::Pending;
     if (!m_owner.releaseTerminalProviderOperation(record.retirementOperation)) {
-        return false;
+        return RetirementOutcome::Pending;
     }
     record.retirementOperation = {};
-    if (!terminal.succeeded()) return false;
+    if (!terminal.succeeded()) return RetirementOutcome::Pending;
     m_owner.releaseRetiredBacking(record.replica);
     // Release orphan charge while the composition root/budget still lives;
     // batch records can outlast the worker's final owner-lifetime release.
     record.orphanReservation.release();
     record.admissionReservation.release();
-    return true;
+    return RetirementOutcome::Complete;
+}
+
+void KisPageRetirementQueue::retireForClose(KisPageRetirementRecords &records)
+{
+    // The queue is frozen and the original root is pinned by close. No queue
+    // or Store gate is held while providers run or completed storage is freed.
+    KisPageRetirementRecords admissionBlocked;
+    bool released = false;
+    auto consume = [&](KisPageRetirementRecords &source, KisPageRetirementRecords::iterator entry) {
+        m_metadata.removeCpuReadBinding(entry->replica);
+        source.erase_and_dispose(entry, KisPageRetirementRecordDeleter{});
+        released = true;
+    };
+    for (auto it = records.begin(); it != records.end();) {
+        const auto entry = it++;
+        const auto outcome = attemptRetirement(*entry);
+        if (outcome == RetirementOutcome::Complete) consume(records, entry);
+        else if (outcome == RetirementOutcome::AdmissionRefused)
+            admissionBlocked.splice(admissionBlocked.end(), records, entry);
+    }
+    // A later funded record may have released the capacity an earlier record
+    // needed. Retry only that admission, once; never replay provider refusal
+    // or Pending in the same close, and never spin on external pressure.
+    if (released) {
+        for (auto it = admissionBlocked.begin(); it != admissionBlocked.end();) {
+            const auto entry = it++;
+            if (attemptRetirement(*entry) == RetirementOutcome::Complete)
+                consume(admissionBlocked, entry);
+        }
+    }
+    records.splice(records.end(), admissionBlocked);
 }
 
 void KisPageRetirementQueue::updatePeaksLocked()

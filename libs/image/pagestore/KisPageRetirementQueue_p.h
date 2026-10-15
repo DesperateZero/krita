@@ -97,11 +97,15 @@ public:
     KRITAIMAGE_EXPORT void waitForIdle();
     KRITAIMAGE_EXPORT KisPageRetirementRecords takeForClose();
     KRITAIMAGE_EXPORT bool retireRecord(KisPageRetirementRecord &record);
+    // Consumes completed original records; leaves real pending work in place.
+    void retireForClose(KisPageRetirementRecords &records);
     KRITAIMAGE_EXPORT bool isDrained() const;
 
     KRITAIMAGE_EXPORT KisPageRetirementQueueSnapshot snapshot() const;
 
 private:
+    enum class RetirementOutcome { Complete, AdmissionRefused, Pending };
+    RetirementOutcome attemptRetirement(KisPageRetirementRecord &record);
     void acceptRecord(KisPageRetirementRecordPointer record) noexcept;
     KisPageRetirementRecordPointer takeEffectRecord(const KisPageTransitionEffect &effect) noexcept;
     bool admitOwnedRetirementDebt(KisPageRetirementRecord &record,

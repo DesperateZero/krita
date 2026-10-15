@@ -1062,6 +1062,8 @@ private Q_SLOTS:
     void commitPreparationClaimsAndLateCapture();
     void canonicalDetachmentKeepsOriginalCharge_data();
     void canonicalDetachmentKeepsOriginalCharge();
+    void closeContinuesAfterDebtRelease_data();
+    void closeContinuesAfterDebtRelease();
     void publicationCleanupUsesBoundedBackgroundPasses();
     void hostLogicalCompletionIsPreparedOnce();
     void commitRevalidatesReadLeaseRevision();
@@ -3076,6 +3078,83 @@ void KisPageStoreCpuMutationTest::canonicalDetachmentKeepsOriginalCharge()
         QCOMPARE(bucket.reserved.discreteVram, quint64(0));
         QCOMPARE(bucket.reserved.ssd, quint64(0));
     }
+}
+
+void KisPageStoreCpuMutationTest::closeContinuesAfterDebtRelease_data()
+{
+    QTest::addColumn<int>("bpp");
+    QTest::addColumn<int>("pageCount");
+    QTest::addColumn<int>("mode");
+    for (int bpp : {1, 4, 8, 16}) for (int count : {2, 17, 65}) for (int mode : {0, 1, 2})
+        QTest::newRow(qPrintable(QString("b%1-pages%2-mode%3").arg(bpp).arg(count).arg(mode)))
+            << bpp << count << mode;
+}
+
+void KisPageStoreCpuMutationTest::closeContinuesAfterDebtRelease()
+{
+    QFETCH(int, bpp); QFETCH(int, pageCount); QFETCH(int, mode);
+    Fixture f;
+    f.provider->disableBackgroundRetirement = true;
+    const quint64 pageBytes = 64 * 64 * bpp;
+    KisPageBackingLimits limits; limits.retirementDebtBytes = pageBytes;
+    QVERIFY(f.store->configureBackingLimits(limits));
+    QVERIFY2(f.init(bpp), qPrintable(f.error));
+    QVERIFY2(f.fill(0x31), qPrintable(f.error));
+    KisCompletionTicket completion;
+    auto cleanup = qScopeGuard([&] {
+        f.provider->rejectRetire = false;
+        f.provider->deferredRetirement = {};
+        if (completion.isValid()) f.completions->complete(completion, KisCompletionStatus::Succeeded);
+        for (int i = 0; i < 3 && !f.store->closeSession(); ++i) {}
+    });
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx);
+    for (int i = 0; i < pageCount; ++i) {
+        auto write = mutation.beginWrite(key(i), &f.error);
+        QVERIFY2(write.isValid(), qPrintable(f.error));
+    }
+    f.provider->rejectRetire = true;
+    QVERIFY(mutation.cancel()); QVERIFY(f.store->abort(tx));
+    // Synchronous provider capability fixes order without racing a worker.
+    QCOMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(pageCount));
+    const auto live = [&](KisBackingBudgetClass c) {
+        return f.store->backingUsage().buckets[size_t(c)].live.cpuRam;
+    };
+    QCOMPARE(live(KisBackingBudgetClass::RetirementDebt), pageBytes);
+    QCOMPARE(live(KisBackingBudgetClass::ActivePending), (pageCount - 1) * pageBytes);
+    QCOMPARE(live(KisBackingBudgetClass::Current), 2 * pageBytes);
+    // A normal bounded foreground pass rotates the funded provider refusal
+    // behind the remaining admission-blocked records, without editing owners.
+    const auto progress = f.store->processRetirements(1);
+    QCOMPARE(progress.attempted, qsizetype(1));
+    QCOMPARE(progress.retired, qsizetype(0));
+    QCOMPARE(progress.pending, qsizetype(pageCount));
+    if (mode == 1) {
+        const int calls = f.provider->retireCalls.load();
+        QVERIFY(!f.store->closeSession(&f.error));
+        QCOMPARE(f.provider->retireCalls.load() - calls, 1);
+        QCOMPARE(f.store->sessionStats().pendingShutdownReplicas, qsizetype(pageCount + 2));
+    }
+    f.provider->rejectRetire = false;
+    const int calls = f.provider->retireCalls.load();
+    if (mode == 2) {
+        completion = f.completions->allocatePending(
+            f.completions->registerSource(KisCompletionDomain::HostLogical));
+        QVERIFY(completion.isValid());
+        f.provider->deferredRetirement = completion;
+        QVERIFY(!f.store->closeSession(&f.error));
+        QCOMPARE(f.provider->retireCalls.load() - calls, 1);
+        QCOMPARE(f.store->sessionStats().pendingShutdownReplicas, qsizetype(pageCount + 2));
+        QVERIFY(f.completions->complete(completion, KisCompletionStatus::Succeeded));
+        f.provider->deferredRetirement = {};
+    }
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    // Accepted Pending is resumed through its original operation, never replayed.
+    QCOMPARE(f.provider->retireCalls.load() - calls, pageCount + 2);
+    QCOMPARE(f.store->sessionStats().pendingShutdownReplicas, qsizetype(0));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    for (auto c : {KisBackingBudgetClass::Current, KisBackingBudgetClass::ActivePending,
+                   KisBackingBudgetClass::RetirementDebt}) QCOMPARE(live(c), quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::commitValidatesOriginalDelta()
@@ -8888,12 +8967,7 @@ void KisPageStoreCpuMutationTest::abandonedMutationsRetainOriginalTerminalLinks(
     f.store->processRetirements(64); QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(0));
     QCOMPARE(f.store->mutationStatistics().pagesCancelled, quint64(4));
-    // A refused close has already moved both Debt and still-ActivePending
-    // records into its original shutdown list. With a one-page debt limit a
-    // later funded record can free room for an earlier refused record.
-    bool closed = false;
-    for (int i = 0; i < 8 && !closed; ++i) closed = f.store->closeSession(&f.error);
-    QVERIFY2(closed, qPrintable(f.error));
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
