@@ -1290,6 +1290,9 @@ private Q_SLOTS:
     void mutationWriteSetUsesInlineAndSparseIndexStorage();
     void mutationStorageGrowthIsStableAndCharged();
     void sharedNonPayloadBudgetBoundsStoresAndReleases();
+    void sharedNonPayloadSignedTransitions_data();
+    void sharedNonPayloadSignedTransitions();
+    void sharedNonPayloadLocalRefusalReturnsParentReservation();
     void mutationStorageReclaimsBlocksAndRejectsABA();
     void mutationStorageIncarnationExhaustion();
     void mutationWriteSetRecyclesHoles_data();
@@ -8101,6 +8104,151 @@ void KisPageStoreReferenceTest::sharedNonPayloadBudgetBoundsStoresAndReleases()
     first.reset();
     QCOMPARE(shared->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
              rootControlBytes);
+}
+
+void KisPageStoreReferenceTest::sharedNonPayloadSignedTransitions_data()
+{
+    QTest::addColumn<int>("domainValue");
+    QTest::addColumn<int>("targetDomainValue");
+    QTest::addColumn<qint64>("metadataBytes");
+    QTest::addColumn<int>("finish");
+    const KisPageAccessDomain domains[] = {KisPageAccessDomain::CpuRam,
+        KisPageAccessDomain::UmaShared, KisPageAccessDomain::DiscreteVram, KisPageAccessDomain::Ssd};
+    for (int domain = 0; domain < 4; ++domain)
+        for (qint64 metadata : {0ll, 2048ll, 4096ll, 8192ll})
+            for (int finish = 0; finish < 3; ++finish)
+                for (int offset = 0; offset < (metadata ? 2 : 1); ++offset)
+                    QTest::newRow(qPrintable(QStringLiteral("domain%1-offset%2-metadata%3-finish%4")
+                        .arg(domain).arg(offset).arg(metadata).arg(finish)))
+                        << int(domains[domain]) << int(domains[(domain + offset) % 4]) << metadata << finish;
+}
+
+void KisPageStoreReferenceTest::sharedNonPayloadSignedTransitions()
+{
+    QFETCH(int, domainValue);
+    QFETCH(int, targetDomainValue);
+    QFETCH(qint64, metadataBytes);
+    QFETCH(int, finish);
+    const auto domain = KisPageAccessDomain(domainValue);
+    const auto targetDomain = KisPageAccessDomain(targetDomainValue);
+    constexpr qint64 bytes = 4096;
+    const size_t metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    const size_t cache = size_t(KisBackingBudgetClass::OptionalCache);
+    const size_t pending = size_t(KisBackingBudgetClass::ActivePending);
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 65536;
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
+    const auto total = [](const KisPageDomainBytes &d) {
+        return d.cpuRam + d.umaShared + d.discreteVram + d.ssd;
+    };
+    // Freeze slot capacity before saturating the shared pool. Neither a
+    // successful transition nor its cancellation may depend on slot growth.
+    const auto warm = [&](KisBackingBudgetController &budget) {
+        std::array<KisBackingBudgetReservation, 8> slots;
+        KisBackingBudgetDelta need;
+        need.buckets[metadata].cpuRam = 1;
+        for (auto &slot : slots) slot = budget.reserve(need, nullptr);
+        for (const auto &slot : slots) QVERIFY(slot.isValid());
+    };
+    {
+        std::array<KisBackingBudgetReservation, 16> slots;
+        for (auto &slot : slots) {
+            slot = parent->reserve({}, nullptr);
+            QVERIFY(slot.isValid());
+        }
+    }
+    const auto parentControl = total(parent->usage().buckets[metadata].live);
+    {
+        KisBackingBudgetController child, sibling;
+        QVERIFY(child.configureSharedNonPayloadBudget(parent));
+        QVERIFY(sibling.configureSharedNonPayloadBudget(parent));
+        warm(child); warm(sibling);
+        KisBackingBudgetDelta initial;
+        *kisPageDomainComponent(initial.buckets[cache], domain) = bytes;
+        auto reservation = child.reserve(initial, nullptr);
+        QVERIFY(reservation.isValid());
+        child.commitReservation(std::move(reservation), initial);
+        quint64 filler = limits.metadataArenaBytes - total(parent->usage().buckets[metadata].live);
+        KisBackingBudgetDelta fill;
+        fill.buckets[cache].cpuRam = qint64(filler);
+        auto pressure = sibling.reserve(fill, nullptr);
+        QVERIFY(pressure.isValid());
+        sibling.commitReservation(std::move(pressure), fill);
+        QCOMPARE(total(parent->usage().buckets[metadata].live), limits.metadataArenaBytes);
+
+        KisBackingBudgetDelta change;
+        *kisPageDomainComponent(change.buckets[cache], domain) = -bytes;
+        *kisPageDomainComponent(change.buckets[metadata], targetDomain) = metadataBytes;
+        *kisPageDomainComponent(change.buckets[pending], domain) = bytes;
+        const qint64 parentChange = metadataBytes - bytes;
+        QString error;
+        if (parentChange > 0) {
+            QVERIFY(!child.reserveChange(change, &error).isValid());
+            sibling.releaseLive(KisBackingBudgetClass::OptionalCache,
+                                KisPageAccessDomain::CpuRam, quint64(parentChange));
+            filler -= quint64(parentChange);
+        }
+        const auto parentBefore = parent->usage().buckets[metadata];
+        auto conversion = child.reserveChange(change, &error);
+        QVERIFY2(conversion.isValid(), qPrintable(error));
+        QCOMPARE(total(parent->usage().buckets[metadata].reserved),
+                 quint64(domain == targetDomain ? std::max(qint64(0), parentChange) : metadataBytes));
+        // No other child can spend the old live charge or the new ticket
+        // before this conversion commits. Cancel must leave the old value.
+        KisBackingBudgetDelta extra;
+        extra.buckets[cache].cpuRam = 1;
+        QVERIFY(!sibling.reserve(extra, nullptr).isValid());
+        if (finish == 0) {
+            conversion.release();
+            QCOMPARE(total(parent->usage().buckets[metadata].live), total(parentBefore.live));
+            child.releaseLive(KisBackingBudgetClass::OptionalCache, domain, bytes);
+        } else {
+            if (finish == 2) {
+                KisBackingBudgetReservation moved(std::move(conversion));
+                QVERIFY(!conversion.isValid());
+                conversion = std::move(moved);
+                QVERIFY(!moved.isValid());
+            }
+            child.commitReservation(std::move(conversion), change);
+            QVERIFY(!conversion.isValid());
+            QCOMPARE(qint64(total(parent->usage().buckets[metadata].live)),
+                     qint64(total(parentBefore.live)) + parentChange);
+            const auto childUsage = child.usage();
+            QCOMPARE(*kisPageDomainComponent(childUsage.buckets[cache].live, domain), quint64(0));
+            child.releaseLive(KisBackingBudgetClass::ActivePending, domain, bytes);
+            child.releaseLive(KisBackingBudgetClass::MetadataArena, targetDomain, quint64(metadataBytes));
+        }
+        QCOMPARE(total(parent->usage().buckets[metadata].reserved), quint64(0));
+        sibling.releaseLive(KisBackingBudgetClass::OptionalCache, KisPageAccessDomain::CpuRam, filler);
+    }
+    QCOMPARE(total(parent->usage().buckets[metadata].live), parentControl);
+    QCOMPARE(total(parent->usage().buckets[metadata].reserved), quint64(0));
+}
+
+void KisPageStoreReferenceTest::sharedNonPayloadLocalRefusalReturnsParentReservation()
+{
+    auto parent = std::make_shared<KisBackingBudgetController>();
+    KisPageBackingLimits limits;
+    limits.optionalCacheBytes = 0;
+    KisBackingBudgetController child(limits);
+    QVERIFY(child.configureSharedNonPayloadBudget(parent));
+    // Warm accounting without asking the intentionally forbidden local class.
+    auto warm = child.reserve({}, nullptr);
+    QVERIFY(warm.isValid()); warm.release();
+    const size_t metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    const auto before = parent->usage().buckets[metadata];
+    KisBackingBudgetDelta need;
+    need.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = 4096;
+    QString error;
+    QVERIFY(!child.reserveChange(need, &error).isValid());
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(parent->usage().buckets[metadata].live.cpuRam, before.live.cpuRam);
+    QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, before.reserved.cpuRam);
+    need.buckets[metadata].cpuRam = std::numeric_limits<qint64>::max();
+    QVERIFY(!child.reserveChange(need, &error).isValid());
+    QVERIFY(error.contains(QStringLiteral("overflows")));
+    QCOMPARE(parent->usage().buckets[metadata].live.cpuRam, before.live.cpuRam);
+    QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, before.reserved.cpuRam);
 }
 
 void KisPageStoreReferenceTest::mutationStorageGrowthIsStableAndCharged()

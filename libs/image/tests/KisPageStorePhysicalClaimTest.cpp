@@ -139,6 +139,15 @@ private Q_SLOTS:
         QTest::newRow("head-representative-last") << true;
     }
     void ledgerAliasMembershipAtCapacity();
+    void sharedCacheClassificationAndDebt_data()
+    {
+        QTest::addColumn<int>("bpp");
+        QTest::addColumn<bool>("alias");
+        for (int bpp : {1, 4, 8, 16}) for (bool alias : {false, true})
+            QTest::newRow(qPrintable(QStringLiteral("bpp%1-alias%2").arg(bpp).arg(alias))) << bpp << alias;
+    }
+    void sharedCacheClassificationAndDebt();
+    void sharedOrphanRetainsOnlyDebt();
 };
 
 void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained_data()
@@ -510,6 +519,119 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
         QCOMPARE(bucket.live.cpuRam, i == size_t(KisBackingBudgetClass::MetadataArena) ? retainedCache : quint64(0)); QCOMPARE(bucket.live.ssd, 0u);
         QCOMPARE(bucket.reserved.cpuRam, 0u); QCOMPARE(bucket.reserved.ssd, 0u);
     }
+}
+
+void KisPageStorePhysicalClaimTest::sharedCacheClassificationAndDebt()
+{
+    QFETCH(int, bpp); QFETCH(bool, alias);
+    Fixture f; QVERIFY(f.init(bpp));
+    const quint64 bytes = f.replica.layout.byteSize;
+    const size_t metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    const size_t cache = size_t(KisBackingBudgetClass::OptionalCache);
+    const size_t pending = size_t(KisBackingBudgetClass::ActivePending);
+    const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
+    auto parent = std::make_shared<KisBackingBudgetController>();
+    {
+        std::array<KisBackingBudgetReservation, 16> slots;
+        for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    }
+    const auto parentControl = parent->usage().buckets[metadata].live.cpuRam;
+    {
+        KisPageBackingLimits limits; limits.retirementDebtBytes = bytes;
+        KisBackingBudgetController budget(limits);
+        QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+        KisPageOwnerLedger ledger;
+        QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+        QVERIFY(ledger.registerProvider(f.provider));
+        KisBackingBudgetDelta initial;
+        initial.buckets[cache].cpuRam = qint64(bytes);
+        if (!alias) initial.buckets[debt].cpuRam = qint64(bytes);
+        auto reservation = budget.reserve(initial, &f.error);
+        QVERIFY(reservation.isValid());
+        QVERIFY2(ledger.registerBacking(f.replica, reservation, KisBackingBudgetClass::OptionalCache,
+                                       &f.error), qPrintable(f.error));
+        // registerBacking uses commitRetaining: only the caller's already paid
+        // debt remains. No parent reservation may follow that payload token.
+        QCOMPARE(reservation.isValid(), !alias);
+        QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, quint64(0));
+        QVector<KisReplicaHandle> replicas{f.replica};
+        if (alias) {
+            auto source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source);
+            auto result = f.provider->prepareSynchronousSource({730}, source, {key(1), {1}},
+                f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
+            QVERIFY(result.isValid()); source.reset();
+            auto aliasReservation = budget.reserve({}, &f.error);
+            QVERIFY(ledger.registerBacking(result.replica, aliasReservation, KisBackingBudgetClass::OptionalCache));
+            replicas.append(result.replica);
+        }
+        QCOMPARE(budget.usage().buckets[cache].live.cpuRam, bytes);
+        const auto parentLessChildStorage = [&] {
+            return parent->usage().buckets[metadata].live.cpuRam - budget.usage().buckets[metadata].live.cpuRam;
+        };
+        const quint64 before = parentLessChildStorage();
+        const auto prepare = [&] {
+            KisPageSnapshotArray<KisBackingClassChange> changes;
+            for (const auto &replica : replicas)
+                changes.append({replica, KisBackingBudgetClass::OptionalCache, KisBackingBudgetClass::ActivePending});
+            return ledger.prepareBackingChanges(std::move(changes), {}, &f.error);
+        };
+        {
+            auto cancelled = prepare(); QVERIFY2(cancelled.isValid(), qPrintable(f.error));
+            QVERIFY(!ledger.reclassifyBacking(replicas.back(), KisBackingBudgetClass::RetirementDebt));
+        }
+        QCOMPARE(budget.usage().buckets[cache].live.cpuRam, bytes);
+        QCOMPARE(parentLessChildStorage(), before);
+        auto accepted = prepare(); QVERIFY2(accepted.isValid(), qPrintable(f.error));
+        ledger.commitBackingChanges(std::move(accepted));
+        QCOMPARE(budget.usage().buckets[cache].live.cpuRam, quint64(0));
+        QCOMPARE(budget.usage().buckets[pending].live.cpuRam, bytes);
+        QCOMPARE(parentLessChildStorage(), before - bytes); // One physical, even with two logical members.
+        QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, alias ? quint64(0) : bytes);
+        for (const auto &replica : replicas) {
+            if (alias) QVERIFY(ledger.reclassifyBacking(replica, KisBackingBudgetClass::RetirementDebt));
+            else QVERIFY(ledger.reclassifyBacking(replica, KisBackingBudgetClass::RetirementDebt, reservation));
+        }
+        QVERIFY(!reservation.isValid());
+        QCOMPARE(budget.usage().buckets[debt].live.cpuRam, bytes);
+        QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, quint64(0));
+        quint64 retireOperation = 731;
+        for (const auto &replica : replicas) {
+            QVERIFY(f.provider->retire({retireOperation++}, replica, {}).isValid());
+            ledger.releaseRetiredBacking(replica);
+        }
+        QCOMPARE(budget.usage().buckets[debt].live.cpuRam, quint64(0));
+        QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    }
+    QCOMPARE(parent->usage().buckets[metadata].live.cpuRam, parentControl);
+    QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, quint64(0));
+}
+
+void KisPageStorePhysicalClaimTest::sharedOrphanRetainsOnlyDebt()
+{
+    Fixture f; QVERIFY(f.init());
+    const qint64 bytes = qint64(f.replica.layout.byteSize);
+    const size_t metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
+    auto parent = std::make_shared<KisBackingBudgetController>();
+    KisBackingBudgetController budget;
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    KisPageOwnerLedger ledger;
+    QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider));
+    KisBackingBudgetDelta initial;
+    initial.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = bytes;
+    initial.buckets[debt].cpuRam = bytes;
+    auto reservation = budget.reserve(initial, &f.error); QVERIFY(reservation.isValid());
+    QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, quint64(bytes));
+    QVERIFY(ledger.retainRetirementDebtReservation(f.replica, reservation, &f.error));
+    QVERIFY(reservation.isValid());
+    QCOMPARE(parent->usage().buckets[metadata].reserved.cpuRam, quint64(0));
+    QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, quint64(bytes));
+    QVERIFY(ledger.registerBacking(f.replica, reservation, KisBackingBudgetClass::RetirementDebt));
+    QVERIFY(!reservation.isValid());
+    QVERIFY(f.provider->retire({732}, f.replica, {}).isValid()); ledger.releaseRetiredBacking(f.replica);
+    QCOMPARE(budget.usage().buckets[debt].live.cpuRam, quint64(0));
+    QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, quint64(0));
 }
 
 void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()

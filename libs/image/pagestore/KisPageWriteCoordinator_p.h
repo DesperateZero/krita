@@ -239,6 +239,8 @@ public:
     KisBackingBudgetReservation reserve(const KisBackingBudgetDelta &, QString *error);
     // Reserves positive per-bucket destinations while durable capacity uses
     // only the net SSD growth of the signed physical move/reclassification.
+    // Shared non-payload classes are mapped before taking positive demand;
+    // the caller must hold the original class/physical claim through commit.
     KisBackingBudgetReservation reserveChange(const KisBackingBudgetDelta &,
                                                QString *error);
     // Identity-only handoff still observes hard limits/process peaks, but
@@ -293,12 +295,9 @@ private:
         return const_cast<KisBackingBudgetController *>(this)->activeReservation(cookie);
     }
 
-    void commit(quint64 cookie, const KisBackingBudgetDelta &) noexcept;
     bool commitRetaining(quint64 cookie,
                          const KisBackingBudgetDelta &installed,
                          const KisBackingBudgetDelta &retained) noexcept;
-    bool retainOnly(quint64 cookie,
-                    const KisBackingBudgetDelta &retained) noexcept;
     // OwnerLedger-only: headroom for reclassifying an already charged physical
     // backing. Moving it creates no payload or additional durable allocation.
     void moveRetirementHeadroom(quint64 cookie, KisPageAccessDomain source,
@@ -311,7 +310,8 @@ private:
                                              const std::array<quint64,
                                                  static_cast<size_t>(KisBackingBudgetClass::Count)> &aggregateBytes,
                                              quint64 durableBytes,
-                                             QString *error);
+                                             QString *error,
+                                             const KisBackingBudgetDelta *signedChange = nullptr);
     KisBackingBudgetReservation reserveSharedNonPayload(
         quint64 child, const KisBackingBudgetDelta &, QString *error);
     quint64 registerSharedNonPayloadChild(QString *error);
@@ -339,7 +339,8 @@ private:
     WaitCallbacks dispatchWaiters();
     void notifyWaitersLocked() noexcept;
     KisBackingBudgetReservation finishWaiter(quint64 sequence, bool take);
-    static KisBackingBudgetDelta sharedNonPayloadDelta(const KisBackingBudgetDelta &) noexcept;
+    static KisBackingBudgetDelta sharedNonPayloadDelta(const KisBackingBudgetDelta &,
+                                                       bool *valid = nullptr) noexcept;
     boost::intrusive_ptr<KisBackingBudgetWaitContext> m_waitContext;
     boost::intrusive_ptr<KisMutationStorageOwner> m_storageOwner;
     QMutex m_storageOwnerMutex;
