@@ -40,12 +40,17 @@ bool appendPublicationBackingChanges(
         return false;
     if (current == target)
         return true;
-    const KisReplicaHandle oldAuthority = publication.backingAuthority(current);
+    bool detached = false;
+    const KisReplicaHandle oldAuthority = publication.backingAuthority(current, &detached);
     const KisReplicaHandle targetAuthority = publication.backingAuthority(target);
     if ((!oldAuthority.isValid() && !current.isDefaultPixel())
         || (!targetAuthority.isValid() && !target.isDefaultPixel()))
         return false;
-    if (oldAuthority.isValid())
+    // A detached old member keeps its existing Current charge. It has no
+    // classification delta: the Store gate keeps this unqueued member owned
+    // until acceptance transfers its original retirement record. Only the
+    // target joins Current, so its true additional physical peak is admitted.
+    if (oldAuthority.isValid() && !detached)
         changes->push_back({oldAuthority, KisBackingBudgetClass::Current, oldAfter});
     if (targetAuthority.isValid())
         changes->push_back({targetAuthority, targetBefore, KisBackingBudgetClass::Current});
@@ -469,12 +474,12 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         if (previous != state.proofs.end()) {
             auto &spare = previous->second.spare;
             if (spare.isValid() && (change.replacement.removal || change.releasedUnusedCapacity)) {
-                owner.m_retirementQueue.acceptUnusedWorkingCapacity(spare);
+                owner.m_retirementQueue.acceptDetachedBacking(spare);
                 spare = {};
             }
             if (change.releasedUnusedCapacity) {
                 if (change.replacement.removal)
-                    owner.m_retirementQueue.acceptUnusedWorkingCapacity(change.superseded.authority);
+                    owner.m_retirementQueue.acceptDetachedBacking(change.superseded.authority);
                 else
                     spare = change.superseded.authority;
             }
@@ -626,6 +631,11 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall(KisRet
 
     if (candidate.result.isCommitted()) {
         owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation));
+        candidate.metadataCleanup.forEachDetachedBacking(&owner, [](void *context, const KisReplicaHandle &replica) {
+            auto &coordinator = *static_cast<KisPagePublicationCoordinator *>(context);
+            coordinator.m_retirementQueue.acceptDetachedBacking(replica);
+            ++coordinator.m_statistics.detachedCurrentBackings;
+        });
         ++owner.m_statistics.installedMutationCommits;
     } else {
         candidate.backingReservation.release();
@@ -1123,6 +1133,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
     if (!deltaPrepared)
         return {};
 
+    bool disableDirectDetachment = false;
     for (;;) {
         diagnostic.next(Phase::CommitDefaultRemovalPreparation, quint64(owned.removals.size()));
         KisPreparedMutationCommit preparedCommit;
@@ -1228,15 +1239,18 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         ownerLock.unlock();
         registeredPages = decltype(preparedCommit.data->directoryHeads){registeredPages.get_allocator()};
         const quint64 publicationTransitionCount = quint64(publicationChanges.size());
-        diagnostic.next(Phase::CommitTransitionPreflight, publicationTransitionCount);
-        auto &publication = preparedCommit.data->metadata;
-        publication = m_metadata.preparePublication(transaction, prospectiveEpoch,
-            publicationChanges.data(), qsizetype(publicationChanges.size()));
-        publicationChanges = decltype(preparedCommit.data->publicationChanges){publicationChanges.get_allocator()};
         diagnostic.next(Phase::CommitEpochPrepare, pageWork);
         KisImageEpochCommitResult candidateFailure;
         auto &rootCandidate = preparedCommit.data->epoch;
         rootCandidate = m_epochs.prepareCommit(transaction, &candidateFailure, bool(retainedAfter), m_derivedExtentSurface);
+        diagnostic.next(Phase::CommitTransitionPreflight, publicationTransitionCount);
+        auto &publication = preparedCommit.data->metadata;
+        publication = m_metadata.preparePublication(transaction, prospectiveEpoch,
+            publicationChanges.data(), qsizetype(publicationChanges.size()), nullptr,
+            !disableDirectDetachment && rootCandidate.mayDetachPreviousRoot());
+        publicationChanges = decltype(preparedCommit.data->publicationChanges){publicationChanges.get_allocator()};
+        const bool detachesBacking = publication.hasDetachedBacking();
+        if (detachesBacking) rootCandidate.requireDetachedPreviousRoot();
         diagnostic.next(Phase::CommitPublishOwnerWait, pageWork);
         ownerLock.relock();
         diagnostic.next(Phase::CommitPublicationRevalidate, pageWork);
@@ -1281,6 +1295,14 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             return {};
         auto backingReservation = m_owner.prepareBackingChanges(
             std::move(backingChanges), nullptr, 0);
+        if (!backingReservation.isValid() && detachesBacking) {
+            // Keeping the old physical charge until retirement has a real
+            // Current peak. If refused, preserve the original history plan;
+            // no pixels or accepted work are replayed by this cold downgrade.
+            disableDirectDetachment = true;
+            ++m_statistics.detachmentBudgetFallbacks;
+            continue;
+        }
         if (!backingReservation.isValid())
             return {};
 
@@ -1321,7 +1343,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                 qFatal("Owned committed proof changed before revocation");
             if constexpr (std::is_same_v<Input, KisPagePublicationDelta>) {
                 if (entry.second.spare.isValid())
-                    m_retirementQueue.acceptUnusedWorkingCapacity(entry.second.spare);
+                    m_retirementQueue.acceptDetachedBacking(entry.second.spare);
             }
         }
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
@@ -1852,7 +1874,7 @@ void KisPagePublicationCoordinator::finishAbortedProofLocked(
             qFatal("Owned aborted proof survived without its capability");
     }
     if (stored->second.spare.isValid())
-        m_retirementQueue.acceptUnusedWorkingCapacity(stored->second.spare);
+        m_retirementQueue.acceptDetachedBacking(stored->second.spare);
     state.proofs.erase(stored);
     // Keep the original state/index until commit or abort has fully changed
     // visibility. Their final exit disposes its aggregate outside the gate.

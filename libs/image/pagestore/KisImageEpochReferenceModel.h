@@ -263,6 +263,10 @@ private:
         PreparedCommit &operator=(PreparedCommit &&) noexcept = default;
         PreparedCommit(const PreparedCommit &) = delete;
         PreparedCommit &operator=(const PreparedCommit &) = delete;
+        // Advisory during preparation. Choosing this disposition also requires
+        // the same protection facts at the original atomic install gate.
+        bool mayDetachPreviousRoot() const { return isValid() && m_mayDetachPrevious; }
+        void requireDetachedPreviousRoot() { Q_ASSERT(mayDetachPreviousRoot()); m_requiresDetachedPrevious = true; }
 
     private:
         using RetentionRegistry = std::map<quint64, KisImageEpochId, std::less<quint64>,
@@ -273,6 +277,8 @@ private:
         KisRetainedImageEpochSnapshot m_retainedAfter;
         KisPageTransactionId m_transaction;
         quint64 m_revision = 0;
+        bool m_mayDetachPrevious = false;
+        bool m_requiresDetachedPrevious = false;
         friend class KisImageEpochReferenceModel;
     };
 

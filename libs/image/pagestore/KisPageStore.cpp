@@ -904,7 +904,7 @@ public:
         // original result and transfers its already funded retirement record.
         if (!owner->metadata.cancelPrivateResult(&page))
             qFatal("CPU private result lost its cancellation reservation");
-        owner->retirementQueue.acceptUnusedWorkingCapacity(page.target);
+        owner->retirementQueue.acceptDetachedBacking(page.target);
         owner->writeCoordinator.recordCancelled(*entry);
         if (entry->isCpuWrite())
             ++owner->mutationStats.pagesCancelled;
@@ -1275,7 +1275,7 @@ public:
             ++owner->mutationStats.aliasGenerationsReserved;
         } else {
             page->writable.reset();
-            owner->retirementQueue.acceptUnusedWorkingCapacity(oldTarget);
+            owner->retirementQueue.acceptDetachedBacking(oldTarget);
             owner->writeCoordinator.recordAliasAccepted(*entry);
         }
         return true;

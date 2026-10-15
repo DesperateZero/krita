@@ -956,6 +956,18 @@ public:
     quint64 rootCandidatesHead = 0;
     quint64 rootCandidatesTail = 0;
     EpochRegistry<KisImageEpochId> retainedSnapshots;
+    // Called only with this original epoch gate held. Structural root copies
+    // grant no pixel admission; every logical consumer is represented here.
+    bool canDetachPreviousRoot(const KisPageTransaction &transaction) const
+    {
+        const auto epoch = current.epoch().value;
+        const auto root = roots.find(epoch);
+        return transaction.baseEpoch == current.epoch()
+            && protectedHead == epoch && protectedTail == epoch
+            && root != roots.end() && root->second.transactionBases == 1
+            && root->second.retainedSnapshots == 0;
+    }
+
     quint64 protectedHead = 0;
     quint64 protectedTail = 0;
     quint64 nextReachabilityCookie = 1;
@@ -1485,6 +1497,7 @@ KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction
     candidate.m_root = root;
     candidate.m_transaction = transaction.id;
     candidate.m_revision = revision;
+    candidate.m_mayDetachPrevious = d->canDetachPreviousRoot(transaction);
     return candidate;
 }
 catch (const std::bad_alloc &) {
@@ -1518,6 +1531,12 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::installCommit(PreparedCom
         || transactionIt->second.state != KisPageTransactionState::Prepared) {
         result.status = KisImageEpochCommitStatus::Conflict;
         result.error = QStringLiteral("epoch or transaction changed before candidate installation");
+        return result;
+    }
+    if (consumed.m_requiresDetachedPrevious
+        && !d->canDetachPreviousRoot(transactionIt->second.transaction)) {
+        result.status = KisImageEpochCommitStatus::Rejected;
+        result.error = QStringLiteral("previous root gained a consumer before installation");
         return result;
     }
     if (!installReservedRoot(consumed, context, installMetadata, &result))

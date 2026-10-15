@@ -80,6 +80,8 @@ struct KRITAIMAGE_EXPORT KisPageStoreRetirementProgress {
 struct KRITAIMAGE_EXPORT KisPageStorePublicationStatistics {
     quint64 preparedMutationCommits = 0;
     quint64 installedMutationCommits = 0;
+    quint64 detachedCurrentBackings = 0;
+    quint64 detachmentBudgetFallbacks = 0;
     quint64 canonicalOperationCommits = 0;
     quint64 overlayAcceptances = 0;
     quint64 cancelledMutationCommits = 0;

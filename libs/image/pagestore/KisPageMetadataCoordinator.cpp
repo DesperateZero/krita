@@ -1572,6 +1572,20 @@ struct ShardRecordStore {
         cpu->ownerVersion = record->slot;
     }
 
+    bool canDetachPublished(const KisPageVersion &identity) const
+    {
+        KisVersionSlotId slot;
+        if (!findVersion(identity, &slot) || identity.isDefaultPixel()) return false;
+        const auto *record = version(slot);
+        const auto *facts = arenas->facts.get(record->facts);
+        const auto *cpu = replica(record->authorityReplica);
+        return record->publication == KisPagePublicationState::Published
+            && !record->capturedReadViews.isValid() && !facts->nativeReaders
+            && record->replicaCount == 1 && cpu && cpu->domain == KisPageAccessDomain::CpuRam
+            && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
+            && !cpu->overflow.isValid() && !cpu->activeOperation.isValid();
+    }
+
     bool canReplaceUnused(const KisPageVersion &identity) const
     {
         KisVersionSlotId slot;
@@ -2188,6 +2202,7 @@ public:
             KisPageVersion version;
             KisPagePublicationState publication;
             KisPageTransactionId preparedBy;
+            bool detach = false;
         };
         Array<PublicationDelta> deltas;
         // Candidate values are contiguous; authoritative ordering is formed
@@ -2241,6 +2256,7 @@ public:
     KisImageEpochId minimumEpoch;
     PreparationKind kind = PreparationKind::Publication;
     bool retryNativeCapacity = false;
+    bool installed = false;
     Payload<Entry> entries;
     // Publication images belong only to publication/recoverable candidates.
     // Detachment retains the same claims and terminal policy in entries.
@@ -2249,7 +2265,12 @@ public:
     // Page keys and projected versions are already unique. This candidate is
     // immutable before any authority lookup; one sorted paid array avoids
     // buckets and one charged allocation for every copied version identity.
-    Array<std::pair<KisPageVersion, KisReplicaHandle>> backingAuthorities;
+    struct BackingAuthority {
+        KisPageVersion version;
+        KisReplicaHandle replica;
+        bool detached = false;
+    };
+    Array<BackingAuthority> backingAuthorities;
 
 private:
     Data(const Storage &allocator, size_t units, Entry *entryData, size_t entryCount,
@@ -2342,14 +2363,18 @@ bool KisPageMetadataCoordinator::PreparedPublication::isValid() const
 
 KisReplicaHandle
 KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
-    const KisPageVersion &version) const
+    const KisPageVersion &version, bool *detached) const
 {
+    if (detached) *detached = false;
     if (!data) return {};
     const auto found = std::lower_bound(data->backingAuthorities.cbegin(),
         data->backingAuthorities.cend(), version, [](const auto &entry, const KisPageVersion &key) {
-            return MetadataKeyLess{}(entry.first, key);
+            return MetadataKeyLess{}(entry.version, key);
         });
-    if (found != data->backingAuthorities.cend() && found->first == version) return found->second;
+    if (found != data->backingAuthorities.cend() && found->version == version) {
+        if (detached) *detached = found->detached;
+        return found->replica;
+    }
     // Recoverable candidates already retain the exact base and target values
     // that will be installed. Their authority is derived from those values,
     // without another paid copy. Unrelated authorities remain indexed.
@@ -2359,6 +2384,12 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
                 if (record.version == version) return record.authority;
     }
     return {};
+}
+
+bool KisPageMetadataCoordinator::PreparedPublication::hasDetachedBacking() const
+{
+    return data && std::any_of(data->backingAuthorities.begin(), data->backingAuthorities.end(),
+        [](const auto &entry) { return entry.detached; });
 }
 
 KisPageMetadataCoordinator::DeferredPublicationCleanup::DeferredPublicationCleanup() = default;
@@ -2509,10 +2540,11 @@ KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::preparePublication(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
                                                const PublicationChange *changes, qsizetype count,
-                                               QString *error) const
+                                               QString *error, bool detachUnprotectedCurrent) const
 {
     return preparePublicationImpl(transaction, minimumEpoch, nullptr, count, false, error,
-                                  PreparationKind::Publication, nullptr, changes);
+                                  PreparationKind::Publication, nullptr, changes, nullptr, nullptr,
+                                  detachUnprotectedCurrent);
 }
 
 KisPageMetadataCoordinator::PreparedPublication
@@ -2547,6 +2579,14 @@ void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachReleasedMuta
     if (!data) return;
     for (const auto &entry : data->entries)
         if (entry.releasedUnusedCapacity) visit(context, entry.inputOrdinal);
+}
+
+void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachDetachedBacking(
+    void *context, void (*visit)(void *, const KisReplicaHandle &)) const
+{
+    if (!data || !data->installed) return;
+    for (const auto &entry : data->backingAuthorities)
+        if (entry.detached) visit(context, entry.replica);
 }
 
 bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
@@ -2603,7 +2643,8 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
                                                    const KisPageVersion *versions,
                                                    const PublicationChange *changes,
                                                    const MutationDetachment *detachments,
-                                                   KisPagePrivateWrite *privateResult) const
+                                                   KisPagePrivateWrite *privateResult,
+                                                   bool detachUnprotectedCurrent) const
 try {
     const bool mutation = kind != PreparationKind::Publication;
     const bool detachment = kind == PreparationKind::Detachment;
@@ -2748,6 +2789,13 @@ try {
                     entry.revision = page->second.revision;
                     auto &publication = data->publications[i];
                     publication.next = shard->header(transition.version.key, page->second);
+                    const KisPageVersion current{publication.next.key, publication.next.publishedGeneration,
+                                                 publication.next.publishedDefaultPixelRevision};
+                    // This only prepares a disposition. The epoch owner must
+                    // revalidate its no-consumer fact at atomic installation;
+                    // this page's exact protection is covered by its revision.
+                    entry.releaseUnusedCapacity = detachUnprotectedCurrent && write
+                        && !(current == transition.version) && shard->records.canDetachPublished(current);
                     auto &facts = publication.installRecords;
                     if (writePreparation) facts.reserve(2);
                     const auto include = [&](const KisPageVersion &identity) {
@@ -2824,7 +2872,8 @@ try {
         const auto &publication = data->publications[i];
         if (!writePreparation) {
             for (const auto &delta : publication.deltas)
-                shard->publicationHistoryNodesPrepared += delta.publication == KisPagePublicationState::Historical;
+                shard->publicationHistoryNodesPrepared += !delta.detach
+                    && delta.publication == KisPagePublicationState::Historical;
             for (const auto &record : publication.installRecords)
                 shard->publicationHistoryNodesPrepared += record.publication == KisPagePublicationState::Historical;
         }
@@ -2851,6 +2900,7 @@ try {
         auto &before = step.next;
         before.setHeader(publication.next);
         before.versions = std::move(publication.installRecords);
+        const KisPageVersion previous{before.key, before.publishedGeneration, before.publishedDefaultPixelRevision};
         // The expensive deterministic work is outside the shard lock and is
         // reused at installation. Revision revalidation includes leases,
         // Only coordinator-owned state reaches this private capability. Like
@@ -2885,11 +2935,14 @@ try {
             return version.authority.isValid() && (!writePreparation
                 || (!(version.version == transition.baseVersion) && !(version.version == transition.version)));
         };
+        for (auto &delta : publication.deltas)
+            delta.detach = entry.releaseUnusedCapacity && delta.version == previous;
         if (data->backingAuthorities.empty())
             data->backingAuthorities.reserve(size_t(std::count_if(step.next.versions.cbegin(),
                 step.next.versions.cend(), copiedAuthority)));
         for (const auto &version : std::as_const(step.next.versions))
-            if (copiedAuthority(version)) data->backingAuthorities.emplace_back(version.version, version.authority);
+            if (copiedAuthority(version)) data->backingAuthorities.push_back(
+                {version.version, version.authority, entry.releaseUnusedCapacity && version.version == previous});
         if (privateWrite) {
             // The original base and all of its protection stay in the arena.
             // The next writer identifies its one pin delta; the strict page
@@ -3097,7 +3150,7 @@ try {
         first = end;
     }
     std::sort(data->backingAuthorities.begin(), data->backingAuthorities.end(),
-        [](const auto &a, const auto &b) { return MetadataKeyLess{}(a.first, b.first); });
+        [](const auto &a, const auto &b) { return MetadataKeyLess{}(a.version, b.version); });
     // No input is read after preparation. Deliver in the original owner's
     // stable array coordinates without another index or a lookup per page.
     if (detachments)
@@ -3235,7 +3288,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             if (!mutation) {
                 installedHistoryLinks +=
                     quint64(std::count_if(publication->deltas.cbegin(), publication->deltas.cend(), [](const auto &delta) {
-                        return delta.publication == KisPagePublicationState::Historical;
+                        return !delta.detach && delta.publication == KisPagePublicationState::Historical;
                     }));
                 installedHistoryLinks +=
                     quint64(std::count_if(publication->installRecords.cbegin(), publication->installRecords.cend(), [](const auto &addition) {
@@ -3312,6 +3365,13 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
             } else {
                 if (!privateWrite) publication->next.publishedEpoch = epoch;
                 for (const auto &delta : std::as_const(publication->deltas)) {
+                    if (delta.detach) {
+                        Q_ASSERT(entry.releaseUnusedCapacity
+                            && entry.shardOwner->records.canDetachPublished(delta.version));
+                        entry.shardOwner->records.remove(&page->second, delta.version,
+                            &entry.releasedDescriptor, &entry.releasedReadBinding);
+                        continue;
+                    }
                     const bool updated = entry.shardOwner->records.setPublication(&page->second,
                                                                              delta.version,
                                                                              delta.publication,
@@ -3388,6 +3448,7 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks(
             &growth.shardOwner->budgetCharge);
     }
+    data->installed = true;
     data->owner.reset();
     KisPageStoreDetail::setError(error, {});
     return true;

@@ -1009,6 +1009,8 @@ class KisPageStoreReferenceTest : public QObject
     }
 
 private Q_SLOTS:
+    void preparedEpochDetachmentRevalidatesProtection_data();
+    void preparedEpochDetachmentRevalidatesProtection();
     void indexedHistorySlices_data()
     {
         QTest::addColumn<int>("history");
@@ -2744,6 +2746,69 @@ void KisPageStoreReferenceTest::preparedEpochCandidateIsInvisibleAndSingleUse()
         QCOMPARE(model.retainedSnapshotCount(), qsizetype(0));
         QCOMPARE(model.collectUnretainedRoots(), qsizetype(1));
     }
+}
+
+void KisPageStoreReferenceTest::preparedEpochDetachmentRevalidatesProtection_data()
+{
+    QTest::addColumn<int>("protection");
+    for (int protection = 0; protection < 5; ++protection)
+        QTest::newRow(qPrintable(QString::number(protection))) << protection;
+}
+
+void KisPageStoreReferenceTest::preparedEpochDetachmentRevalidatesProtection()
+{
+    QFETCH(int, protection);
+    KisImageEpochSnapshot initial;
+    initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.manifest = {pageVersion(0, 1)};
+    initial.surfaces = {surfaceEpochState()};
+    KisImageEpochReferenceModel model;
+    QVERIFY(model.initialize(initial));
+    const auto tx = model.beginTransaction({1});
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
+    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
+    KisPreparedPageSet pages;
+    pages.transaction = tx.id;
+    pages.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
+    QVERIFY(model.prepare(pages));
+    KisRetainedImageEpochSnapshot held;
+    KisPageTransaction other;
+    const auto protect = [&] {
+        if (protection == 1 || protection == 3) held = model.retainSnapshot({1});
+        else other = model.beginTransaction({1});
+    };
+    if (protection == 1 || protection == 2) protect();
+    auto candidate = model.prepareCommit(tx, nullptr);
+    QVERIFY(candidate.isValid());
+    const bool detachable = protection != 1 && protection != 2;
+    QCOMPARE(candidate.mayDetachPreviousRoot(), detachable);
+    if (detachable) candidate.requireDetachedPreviousRoot();
+    if (protection >= 3) protect();
+    int calls = 0;
+    auto install = [&](KisImageEpochId) { ++calls; return true; };
+    auto moved = std::move(candidate);
+    QVERIFY(!candidate.mayDetachPreviousRoot());
+    const auto result = model.installCommit(std::move(moved), &install, invokeEpochCallback<decltype(install)>);
+    QCOMPARE(result.isCommitted(), protection < 3);
+    QCOMPARE(calls, protection < 3 ? 1 : 0);
+    if (protection >= 3) {
+        QCOMPARE(result.status, KisImageEpochCommitStatus::Rejected);
+        QCOMPARE(model.captureCommittedRoot().epoch(), KisImageEpochId{1});
+    }
+    if (held.isValid()) QVERIFY(model.releaseSnapshot(held.token));
+    if (other.isValid()) QVERIFY(model.abort(other));
+    if (protection >= 3) {
+        auto retry = model.prepareCommit(tx, nullptr);
+        QVERIFY(retry.mayDetachPreviousRoot());
+        retry.requireDetachedPreviousRoot();
+        QVERIFY(model.installCommit(std::move(retry), &install, invokeEpochCallback<decltype(install)>).isCommitted());
+        QCOMPARE(calls, 1);
+    }
+    KisPageVersion actual;
+    QVERIFY(model.captureCommittedRoot().resolve(pageKey(0), &actual));
+    QCOMPARE(actual, pageVersion(0, 2));
 }
 
 void KisPageStoreReferenceTest::preparedEpochCandidateRejectsChangedInputs_data()

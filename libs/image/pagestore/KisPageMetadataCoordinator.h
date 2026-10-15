@@ -407,7 +407,8 @@ private:
         // retry a revision race or retain its input until capacity returns.
         bool needsReprepare() const { return m_failure == Failure::Conflict; }
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
-        KisReplicaHandle backingAuthority(const KisPageVersion &version) const;
+        KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr) const;
+        bool hasDetachedBacking() const;
 
     private:
         class Data;
@@ -444,6 +445,7 @@ private:
         // Installation result only. Original input ordinals survive shard
         // ordering; the owner consumes them before handing cleanup to a worker.
         void forEachReleasedMutation(void *context, void (*visit)(void *, size_t)) const;
+        void forEachDetachedBacking(void *context, void (*visit)(void *, const KisReplicaHandle &)) const;
 
     private:
         PreparedPublication::DataPointer data;
@@ -464,7 +466,7 @@ private:
     PreparedPublication preparePublication(const KisPageTransaction &transaction,
                                            KisImageEpochId minimumEpoch,
                                            const PublicationChange *changes, qsizetype count,
-                                           QString *error = nullptr) const;
+                                           QString *error = nullptr, bool detachUnprotectedCurrent = false) const;
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
                                            const KisPageVersion *versions, qsizetype count,
                                            QString *error = nullptr) const;
@@ -484,7 +486,8 @@ private:
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
                                                const MutationDetachment *detachments = nullptr,
-                                               KisPagePrivateWrite *privateResult = nullptr) const;
+                                               KisPagePrivateWrite *privateResult = nullptr,
+                                               bool detachUnprotectedCurrent = false) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
     // writer, then changes only publication/preparedBy in CURRENT metadata.

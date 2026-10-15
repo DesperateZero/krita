@@ -1060,6 +1060,8 @@ private Q_SLOTS:
     void restorationUsesActualRootDifference();
     void commitPreparationClaimsAndLateCapture_data();
     void commitPreparationClaimsAndLateCapture();
+    void canonicalDetachmentKeepsOriginalCharge_data();
+    void canonicalDetachmentKeepsOriginalCharge();
     void publicationCleanupUsesBoundedBackgroundPasses();
     void hostLogicalCompletionIsPreparedOnce();
     void commitRevalidatesReadLeaseRevision();
@@ -2972,6 +2974,108 @@ void KisPageStoreCpuMutationTest::blockedRetirementDoesNotBlockPublication()
     QVERIFY(f.store->waitForRetirementIdle());
     f.provider->beforeRetire = {};
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::canonicalDetachmentKeepsOriginalCharge_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("mode");
+    for (int bpp : {1, 4, 8, 16}) for (int mode = 0; mode < 5; ++mode)
+        QTest::newRow(qPrintable(QString("%1-mode%2").arg(bpp).arg(mode))) << bpp << mode;
+}
+
+void KisPageStoreCpuMutationTest::canonicalDetachmentKeepsOriginalCharge()
+{
+    QFETCH(int, bpp); QFETCH(int, mode);
+    const quint64 pageBytes = 64 * 64 * bpp;
+    Fixture f;
+    KisPageBackingLimits limits;
+    limits.retirementDebtBytes = pageBytes;
+    if (mode == 1) limits.residentCurrentBytes.cpuRam = 2 * pageBytes;
+    QVERIFY(f.store->configureBackingLimits(limits));
+    QVERIFY2(f.init(bpp), qPrintable(f.error));
+    QVERIFY2(f.fill(0x31), qPrintable(f.error));
+    KisCapturedReadView oldView;
+    KisCpuReadGuard oldGuard;
+    std::optional<KisReadLease> lateLease;
+    auto cleanup = qScopeGuard([&] {
+        if (lateLease) f.store->release(std::move(*lateLease));
+        lateLease.reset();
+        oldGuard = {}; oldView = {};
+        f.provider->rejectRetire = false;
+        f.store->processRetirements(64); f.store->waitForRetirementIdle();
+        f.store->closeSession();
+    });
+    if (mode == 2) oldView = f.store->captureReadView();
+    const auto tx = f.store->beginCurrentTransaction();
+    auto segment = f.begin(tx);
+    for (int x : {0, 1}) {
+        auto write = segment.beginWrite(key(x), &f.error);
+        QVERIFY2(write.isValid(), qPrintable(f.error));
+        static_cast<quint8 *>(write.data())[0] = 0x77;
+    }
+    QVERIFY2(segment.seal(&f.error), qPrintable(f.error));
+    // Occupy Debt only after both targets exist: future publication cannot
+    // finance an earlier preparation, nor may this cut expand frozen limits.
+    const auto other = f.store->beginCurrentTransaction();
+    auto cancelled = f.begin(other);
+    auto unused = cancelled.beginWrite(key(2), &f.error);
+    QVERIFY2(unused.isValid(), qPrintable(f.error)); unused = {};
+    f.provider->rejectRetire = true;
+    QVERIFY(cancelled.cancel()); QVERIFY(f.store->abort(other));
+    QVERIFY(f.store->waitForRetirementIdle());
+    const auto live = [&](KisBackingBudgetClass c) { return f.store->backingUsage().buckets[size_t(c)].live.cpuRam; };
+    QCOMPARE(live(KisBackingBudgetClass::RetirementDebt), pageBytes);
+    int attempts = 0;
+    KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
+    recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+        if (phase != KisPageStoreDiagnosticPhase::CommitPublishOwnerWait) return;
+        if (++attempts == 1 && mode == 3) {
+            oldView = f.store->captureReadView();
+            oldGuard = oldView.readResidentPage(key());
+        } else if (attempts == 1 && mode == 4) {
+            const auto request = f.store->acquireRead(key(), {}, cpu, KisPagePriority::Normal);
+            lateLease.emplace(f.store->resolve(request, request.readiness));
+        }
+    });
+    const auto before = f.store->publicationStatistics();
+    const auto beforeMetadata = kisPageStoreMetadataMetrics(*f.store);
+    QVERIFY(f.store->commitPreparedTransaction(tx));
+    recorder.setPhaseObserver({});
+    QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(quint8(f.pixel()[0]), quint8(0x77));
+    const auto after = f.store->publicationStatistics();
+    const quint64 detached = mode == 0 ? 2 : mode == 4 ? 1 : 0;
+    QCOMPARE(after.detachedCurrentBackings - before.detachedCurrentBackings, detached);
+    QCOMPARE(after.detachmentBudgetFallbacks - before.detachmentBudgetFallbacks, quint64(mode == 1));
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).publicationHistoryNodesTransferred
+        - beforeMetadata.publicationHistoryNodesTransferred, 2 - detached);
+    QCOMPARE(live(KisBackingBudgetClass::Current), (2 + detached) * pageBytes);
+    QCOMPARE(live(KisBackingBudgetClass::RetainedHistory), (2 - detached) * pageBytes);
+    QCOMPARE(live(KisBackingBudgetClass::ActivePending), quint64(0));
+    QCOMPARE(live(KisBackingBudgetClass::RetirementDebt), pageBytes);
+    if (mode == 2 || mode == 3) {
+        if (!oldGuard.isValid()) oldGuard = oldView.readResidentPage(key());
+        QVERIFY(oldGuard.isValid());
+        QCOMPARE(static_cast<const quint8 *>(oldGuard.data())[0], quint8(0x31));
+    }
+    if (mode >= 3) QVERIFY(attempts >= 2);
+    if (mode == 4) {
+        QVERIFY(lateLease && lateLease->isValid());
+        QCOMPARE(static_cast<const quint8 *>(lateLease->cpuData())[0], quint8(0x31));
+        f.store->release(std::move(*lateLease)); lateLease.reset();
+    }
+    oldGuard = {}; oldView = {};
+    f.provider->rejectRetire = false;
+    f.store->processRetirements(64);
+    QVERIFY(f.store->waitForRetirementIdle());
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    for (const auto &bucket : f.store->backingUsage().buckets) {
+        QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+        QCOMPARE(bucket.reserved.umaShared, quint64(0));
+        QCOMPARE(bucket.reserved.discreteVram, quint64(0));
+        QCOMPARE(bucket.reserved.ssd, quint64(0));
+    }
 }
 
 void KisPageStoreCpuMutationTest::commitValidatesOriginalDelta()

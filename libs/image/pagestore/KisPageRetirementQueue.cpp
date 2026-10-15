@@ -618,13 +618,14 @@ void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
     acceptRecord(takeEffectRecord(effect));
 }
 
-void KisPageRetirementQueue::acceptUnusedWorkingCapacity(const KisReplicaHandle &replica) noexcept
+void KisPageRetirementQueue::acceptDetachedBacking(const KisReplicaHandle &replica) noexcept
 {
-    if (m_owner.backingClass(replica) != KisBackingBudgetClass::ActivePending)
-        qFatal("Unused working capacity lost its original charge");
+    const auto original = m_owner.backingClass(replica);
+    if (original != KisBackingBudgetClass::ActivePending && original != KisBackingBudgetClass::Current)
+        qFatal("Detached backing lost its original charge");
     m_metadata.removeCpuReadBinding(replica);
     auto record = m_owner.takeRetirementRecord(replica);
-    if (!record) qFatal("Unused working capacity lost its original retirement record");
+    if (!record) qFatal("Detached backing lost its original retirement record");
     acceptRecord(std::move(record));
 }
 

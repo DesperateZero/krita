@@ -83,11 +83,12 @@ public:
     // Detach committed Debt and retain the original record. Transfer is
     // infallible under the metadata owner's gate and invokes no provider.
     KRITAIMAGE_EXPORT void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
-    // Original working capacity has no logical version but remains charged.
+    // The accepting owner has detached the logical version (or proved it was
+    // never visible). Current/working capacity keeps its original charge.
     // Any existing headroom stays with its backing; Fresh capacity need not
     // retain one. Enqueue without a provider call. The existing worker performs
     // class admission or retains the original charge until admission succeeds.
-    void acceptUnusedWorkingCapacity(const KisReplicaHandle &replica) noexcept;
+    void acceptDetachedBacking(const KisReplicaHandle &replica) noexcept;
     KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();
