@@ -56,6 +56,9 @@ struct KisPagePublicationChange {
     KisReplicaHandle supersededAuthority;
     // Commit output, borrowed until immediate handover under Store admission.
     KisPageRetirementRecord *acceptedIdle = nullptr;
+    // Borrowed only inside installOverlayLocked's uninterrupted owner gate.
+    // Revalidation overwrites it on every attempt; it is never an authority.
+    KisPagePublicationProof *acceptedOverlayProof = nullptr;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }

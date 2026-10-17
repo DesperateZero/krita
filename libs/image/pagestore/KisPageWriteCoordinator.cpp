@@ -375,6 +375,14 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
     return true;
 }
 
+quint32 changedBudgetClasses(const KisBackingBudgetDelta &delta) noexcept
+{
+    quint32 result = 0;
+    for (size_t i = 0; i < budgetClassCount; ++i)
+        if (hasDomainDelta(delta.buckets[i])) result |= quint32(1) << i;
+    return result;
+}
+
 } // namespace
 
 struct KisBackingBudgetWaitState
@@ -1312,16 +1320,27 @@ void KisBackingBudgetController::activateReservationLocked(
     // Inactive slot contents have no consumers. Activation overwrites the
     // original storage once; completion need not reconstruct an empty delta.
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
-    slot->delta = signedChange ? *signedChange : delta;
+    const auto &accepted = signedChange ? *signedChange : delta;
     slot->sharedChange = sharedChange ? *sharedChange : KisPageDomainByteDelta{};
-    slot->aggregateBytes = aggregateBytes;
     slot->durableBytes = durableBytes;
     slot->sharedChild = sharedChild;
     slot->active = true;
-    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
-        m_reservedAggregateBytes[bucketIndex] = saturatedAdd(
-            m_reservedAggregateBytes[bucketIndex], aggregateBytes[bucketIndex]);
+    quint32 changed = 0;
+    for (size_t i = 0; i < budgetClassCount; ++i) {
+        const quint32 bit = quint32(1) << i;
+        if (aggregateBytes[i] || hasDomainDelta(accepted.buckets[i])) {
+            changed |= bit;
+            slot->delta.buckets[i] = accepted.buckets[i];
+            slot->aggregateBytes[i] = aggregateBytes[i];
+            m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], aggregateBytes[i]);
+        } else if (slot->changedClasses & bit) {
+            // Recycled slots must not expose a previous class through covers,
+            // a later exact commit, or an embedded storage reservation.
+            slot->delta.buckets[i] = {};
+            slot->aggregateBytes[i] = 0;
+        }
     }
+    slot->changedClasses = quint8(changed);
     m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, durableBytes);
     if (sharedChild) {
         auto child = m_sharedChildren.find(sharedChild);
@@ -1333,7 +1352,9 @@ void KisBackingBudgetController::activateReservationLocked(
         }
     }
 
-    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
+    for (quint32 pending = changed | (quint32(1) << size_t(KisBackingBudgetClass::MetadataArena));
+         pending; pending &= pending - 1) {
+        const auto bucketIndex = size_t(qCountTrailingZeroBits(pending));
         const bool changed = hasDomainDelta(delta.buckets[bucketIndex]) || aggregateBytes[bucketIndex];
         if (changed) m_fittingBudgetClasses &= ~(quint32(1) << bucketIndex);
         if (!changed && bucketIndex != size_t(KisBackingBudgetClass::MetadataArena)) continue;
@@ -1602,8 +1623,8 @@ void KisBackingBudgetController::releaseLive(KisBackingBudgetClass budgetClass,
         *live = bytes > *live ? 0 : *live - bytes;
         if (budgetClass != KisBackingBudgetClass::MetadataArena && domain == KisPageAccessDomain::Ssd && bytes)
             m_nonMetadataLiveSsdValid = false;
-        if (budgetClass != KisBackingBudgetClass::MetadataArena)
-            m_fittingBudgetClasses &= ~(quint32(1) << bucketIndex);
+        // A decrease cannot invalidate a previously fitting class. Metadata,
+        // process storage and cross-class constraints are checked separately.
         notifyWaitersLocked();
     }
     if (m_sharedNonPayloadBudget
@@ -1660,12 +1681,18 @@ bool KisBackingBudgetController::settle(quint64 cookie,
     quint64 retainedDurable = 0;
     bool retainedReservation = false;
     const KisPageDomainByteDelta empty;
-    for (size_t i = 0; i < budgetClassCount; ++i) {
+    quint32 affected = slot->changedClasses;
+    if (installed && !acceptPrepared) affected |= changedBudgetClasses(*installed);
+    if (retained) affected |= changedBudgetClasses(*retained);
+    for (; affected; affected &= affected - 1) {
+        const auto i = size_t(qCountTrailingZeroBits(affected));
         const auto &applied = installed ? installed->buckets[i] : empty;
         const auto &kept = retained ? retained->buckets[i] : empty;
         if (!slot->aggregateBytes[i] && !hasDomainDelta(slot->delta.buckets[i])
             && !hasDomainDelta(applied) && !hasDomainDelta(kept)) continue;
-        m_fittingBudgetClasses &= ~(quint32(1) << i);
+        // Cancellation only releases reserved load. An installed transition
+        // still invalidates this class; its aggregate/domain effects can differ.
+        if (installed) m_fittingBudgetClasses &= ~(quint32(1) << i);
         if (i != metadata && applied.ssd) m_nonMetadataLiveSsdValid = false;
         Q_ASSERT(m_reservedAggregateBytes[i] >= slot->aggregateBytes[i]);
         m_reservedAggregateBytes[i] -= slot->aggregateBytes[i];
@@ -1723,6 +1750,7 @@ bool KisBackingBudgetController::settle(quint64 cookie,
     }
     if (retainedReservation) {
         slot->delta = *retained;
+        slot->changedClasses = quint8(changedBudgetClasses(*retained));
         slot->durableBytes = retainedDurable;
         m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, retainedDurable);
     } else {
@@ -2336,8 +2364,9 @@ KisMutationWriteSet::EntryIndex KisMutationWriteSet::findIndex(const KisPageKey 
     return InvalidEntry;
 }
 
-KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent &intent)
+KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent &intent, bool *inserted)
 {
+    if (inserted) *inserted = false;
     if (KisMutationPageEntry *found = find(intent.key))
         return *found;
     const bool useInline = !inlineEntry && nextInlineIncarnation;
@@ -2359,10 +2388,12 @@ KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent 
         inlineIncarnation = nextInlineIncarnation;
         nextInlineIncarnation = nextInlineIncarnation == std::numeric_limits<quint64>::max()
             ? 0 : nextInlineIncarnation + 1;
+        if (inserted) *inserted = true;
         return *inlineEntry;
     }
     auto *entry = overflow.emplacePrepared(raw, intent);
     Q_ASSERT(entry);
+    if (inserted) *inserted = true;
     return *entry;
 }
 
@@ -2696,12 +2727,7 @@ bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,
         }
         size_t missing = 0;
         for (const auto &page : pages) {
-            const auto *entry = claims.writeSet->find({surface, page});
-            if (!entry) {
-                KisPageStoreDetail::setError(error, QStringLiteral("execution range lost its entry"));
-                return {};
-            }
-            const auto *found = m_claims.find(entry->key());
+            const auto *found = m_claims.find({surface, page});
             if (found && (found->origin == ClaimOrigin::GenericWrite || found->token != claims.token)) {
                 KisPageStoreDetail::setError(error, QStringLiteral("execution range lost its entry or intersects another writer"));
                 return {};
@@ -2712,7 +2738,7 @@ bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,
     };
     return admitMutationRecords(m_claims, lock, required, [&] {
         for (const auto &page : pages) {
-            const auto &key = claims.writeSet->find({surface, page})->key();
+            const KisPageKey key{surface, page};
             if (!m_claims.contains(key)) {
                 const bool inserted = m_claims.insertPrepared(key,
                     {claims.token, ClaimOrigin::NativeSession, QThread::currentThreadId()});

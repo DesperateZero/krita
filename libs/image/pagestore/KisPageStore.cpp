@@ -908,9 +908,9 @@ public:
         Q_ASSERT(entry && entry->key() == page.target.version.key);
         return owner->writeCoordinator.writeTransition(*entry, transaction.id, page.source, page.target);
     }
-    void cancelPageLocked(KisMutationWriteSet::EntryIndex index, Page &page)
+    void cancelPageLocked(KisMutationPageEntry &value, Page &page)
     {
-        auto *entry = writes.at(index);
+        auto *entry = &value;
         Q_ASSERT(entry && !entry->isExposed());
         page.writable.reset();
         // The scope claims exclude installation. Cancellation unlinks the
@@ -962,10 +962,10 @@ public:
         for (auto slot = writes.firstEntry(); !terminalWithoutFacade && slot.isValid();) {
             const auto next = writes.nextEntry(slot);
             auto *entry = writes.at(slot);
-            if (Page *page = pageAtEntry(slot.index)) cancelPageLocked(slot.index, *page);
+            if (Page *page = pageAtEntry(slot.index)) cancelPageLocked(*entry, *page);
             // Also discard an admitted cold slot whose target preparation
             // failed. Such a slot is not returned by pageAtEntry().
-            erasePageAtEntry(slot.index);
+            erasePage(*entry);
             const bool removal = entry->isRemoval();
             auto source = entry->initializationSource();
             entry->setInitializationSource({});
@@ -1026,10 +1026,9 @@ public:
         const auto *page = entry ? coldPages.at(entry->coldPage()) : nullptr;
         return page && page->target.isValid() ? page : nullptr;
     }
-    void erasePageAtEntry(KisMutationWriteSet::EntryIndex index)
+    void erasePage(KisMutationPageEntry &value)
     {
-        auto *entry = writes.at(index);
-        Q_ASSERT(entry);
+        auto *entry = &value;
         coldPages.erase(entry->coldPage());
         entry->setColdPage(KisMutationWriteSet::InvalidEntry);
     }
@@ -1341,7 +1340,7 @@ public:
         void *data = nullptr;
         bool payloadInitialized = false;
     };
-    PreparedTarget prepareTarget(KisMutationWriteSet::EntryIndex index,
+    PreparedTarget prepareTarget(KisMutationPageEntry &entry,
                                  KisPageWriteIntent intent, const KisCpuPagePayload *payload,
                                  Counters &local, QMutexLocker<QMutex> &lock,
                                  KisPageStoreDiagnosticTimer &diagnostic, QString *error,
@@ -1353,15 +1352,15 @@ public:
 
 KisPageMutationSession::Private::PreparedTarget
 KisPageMutationSession::Private::prepareTarget(
-    KisMutationWriteSet::EntryIndex index, KisPageWriteIntent intent,
+    KisMutationPageEntry &value, KisPageWriteIntent intent,
     const KisCpuPagePayload *payload, Counters &local, QMutexLocker<QMutex> &lock,
     KisPageStoreDiagnosticTimer &diagnostic, QString *error,
     const KisPageTransition *selected, const KisPageAllocationDescriptor *selectedLayout,
     const KisReplicaHandle &selectedBefore,
     std::shared_ptr<const KisPageAllocationDescriptor> selectedOwner)
 {
-    auto *entry = writes.at(index);
-    Q_ASSERT(entry && !pageAtEntry(index));
+    auto *entry = &value;
+    Q_ASSERT(!coldPages.at(entry->coldPage()));
     auto initialization = entry->initializationSource();
     if (initialization && intent.mode == KisPageWriteMode::DiscardContents) {
         entry->setInitializationSource({});
@@ -1412,7 +1411,7 @@ KisPageMutationSession::Private::prepareTarget(
     // slot must not be mistaken for a version requiring CancelWrite.
     auto discardUnprepared = qScopeGuard([&] {
         auto layout = std::move(page->descriptor);
-        erasePageAtEntry(index);
+        erasePage(*entry);
         if (layout) {
             if (lock.isLocked()) lock.unlock();
             layout.reset();
@@ -1657,13 +1656,10 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
     size_t i = 0;
     for (const auto &page : std::as_const(pages)) {
         KisPageWriteIntent intent; intent.key = {surface, page};
-        auto index = d->writes.findIndex(intent.key);
-        const bool newEntry = index == KisMutationWriteSet::InvalidEntry;
-        if (newEntry) {
-            d->writes.getOrCreate(intent);
-            index = d->writes.findIndex(intent.key);
-        }
-        range[i] = {d->writes.at(index), d->pageAtEntry(index)};
+        bool newEntry = false;
+        auto &entry = d->writes.getOrCreate(intent, &newEntry);
+        auto *cold = d->coldPages.at(entry.coldPage());
+        range[i] = {&entry, cold && cold->target.isValid() ? cold : nullptr};
         if (newEntry) created[i / 64] |= quint64(1) << (i % 64);
         ++i;
     }
@@ -1737,12 +1733,11 @@ qsizetype KisPageMutationExecution::finishPreparedWrites(
                 continue;
             d->prepared()[i / 64] &= ~mask;
             auto &bound = d->entries()[i];
-            const auto index = scope->writes.findIndex(bound.entry->key());
-            auto *page = scope->pageAtEntry(index);
+            auto *page = bound.page;
             if (!page)
                 continue;
-            scope->cancelPageLocked(index, *page);
-            scope->erasePageAtEntry(index);
+            scope->cancelPageLocked(*bound.entry, *page);
+            scope->erasePage(*bound.entry);
             bound.page = nullptr;
         }
     }
@@ -1809,7 +1804,7 @@ KisPageMutationExecution::prepareWrites(QString *error)
             }
             KisPageWriteIntent intent;
             intent.key = bound.entry->key();
-            const auto target = scope->prepareTarget(scope->writes.findIndex(intent.key), intent, nullptr,
+            const auto target = scope->prepareTarget(*bound.entry, intent, nullptr,
                                                      d->counters, ownerLock, diagnostic, error);
             bound.page = target.page;
             if (!target.page) {
@@ -1902,7 +1897,6 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
     }
     KisPageStoreDiagnosticTimer diagnostic(scope->diagnosticOwner, KisPageStoreDiagnosticPhase::WriteAcquire, 1);
     auto *entry = bound->entry;
-    const auto index = scope->writes.findIndex(key);
     auto *page = bound->page;
     void *data = nullptr;
     bool initialized = false;
@@ -1992,7 +1986,7 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         }
         const bool full = affected == QRect(QPoint(), descriptor.pageExtent);
         if (full) { intent.mode = selected.writeMode = KisPageWriteMode::DiscardContents; }
-        const auto target = scope->prepareTarget(index, intent, full && payload.rowStride ? &payload : nullptr,
+        const auto target = scope->prepareTarget(*entry, intent, full && payload.rowStride ? &payload : nullptr,
             d->counters, ownerLock, diagnostic, error, &selected, &descriptor, before, std::move(layout));
         if (!target.page) return fail();
         page = bound->page = target.page;
@@ -2461,7 +2455,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation is unavailable or used from another thread"));
         return result;
     }
-    auto entryIndex = scopeLock ? d->writes.findIndex(key) : KisMutationWriteSet::InvalidEntry;
+    auto entryIndex = !bound ? d->writes.findIndex(key) : KisMutationWriteSet::InvalidEntry;
     auto *entry = bound ? bound->entry : d->writes.at(entryIndex);
     auto *page = bound ? bound->page : d->pageAtEntry(entryIndex);
     auto &counters = execution ? execution->counters : d->counters;
@@ -2502,7 +2496,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             entry = d->writes.at(entryIndex);
         }
         Q_ASSERT(entry);
-        const auto prepared = d->prepareTarget(entryIndex, intent, payload, counters, lock, diagnostic, error);
+        const auto prepared = d->prepareTarget(*entry, intent, payload, counters, lock, diagnostic, error);
         if (!prepared.page) {
             d->state = Private::State::Failed;
             return result;
@@ -2741,7 +2735,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     quint64 sealedSources = 0;
     for (auto slot = d->writes.firstEntry(); slot.isValid(); slot = d->writes.nextEntry(slot)) {
         const auto index = slot.index;
-        const auto *entry = d->writes.at(index);
+        auto *entry = d->writes.at(index);
         auto *page = d->pageAtEntry(index);
         const bool source = bool(entry->initializationSource());
         sealedSources += source;
@@ -2749,8 +2743,8 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
             ++overlayChangeCount;
             ++sealedRemovals;
             if (page) {
-                d->cancelPageLocked(index, *page);
-                d->erasePageAtEntry(index);
+                d->cancelPageLocked(*entry, *page);
+                d->erasePage(*entry);
             }
         } else if (page || source) {
             ++overlayChangeCount;

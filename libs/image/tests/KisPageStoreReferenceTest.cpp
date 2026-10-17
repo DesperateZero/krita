@@ -1312,6 +1312,7 @@ private Q_SLOTS:
     void writeAdmissionTokenExhaustion();
     void mutationActivityAdmissionPreservesExisting();
     void freshWriteSelectorAndBackingBudgetAreBounded();
+    void backingReservationReuseDoesNotCarryOldCharges();
     void backingBatchMatchesFlatPhysicalAccounting();
     void retirementAliasesExposeRetainedCharge_data();
     void retirementAliasesExposeRetainedCharge();
@@ -8089,14 +8090,18 @@ void KisPageStoreReferenceTest::mutationWriteSetUsesInlineAndSparseIndexStorage(
     };
     for (int x = 0; x < 12; ++x) {
         KisPageWriteIntent intent = intentFor(x);
-        QCOMPARE(writes.getOrCreate(intent).key(), intent.key);
+        bool inserted = false;
+        QCOMPARE(writes.getOrCreate(intent, &inserted).key(), intent.key);
+        QVERIFY(inserted);
     }
     QCOMPARE(writes.size(), 12);
     QCOMPARE(writes.findIndex(pageKey(0)), 0u);
     QCOMPARE(writes.findIndex(pageKey(8)), 8u);
     QCOMPARE(writes.findIndex(pageKey(11)), 11u);
     QCOMPARE(writes.findIndex(pageKey(99)), KisMutationWriteSet::InvalidEntry);
-    QCOMPARE(writes.getOrCreate(intentFor(8)).key(), pageKey(8));
+    bool inserted = true;
+    QCOMPARE(writes.getOrCreate(intentFor(8), &inserted).key(), pageKey(8));
+    QVERIFY(!inserted);
     QCOMPARE(writes.size(), 12);
 }
 
@@ -9409,6 +9414,45 @@ void KisPageStoreReferenceTest::backingBatchMatchesFlatPhysicalAccounting()
         owner.commitBackingChanges(std::move(terminal));
         for (const auto &handle : replicas) owner.releaseRetiredBacking(handle);
         for (Class c : priority) QCOMPARE(budget.usage().buckets[size_t(c)].live.cpuRam, quint64(0));
+    }
+}
+
+void KisPageStoreReferenceTest::backingReservationReuseDoesNotCarryOldCharges()
+{
+    KisBackingBudgetController budget;
+    auto warm = budget.reserve({}, nullptr);
+    QVERIFY(warm.isValid());
+    warm.release();
+    const auto baseline = budget.usage();
+    const KisPageAccessDomain domains[] = {KisPageAccessDomain::CpuRam,
+        KisPageAccessDomain::UmaShared, KisPageAccessDomain::DiscreteVram, KisPageAccessDomain::Ssd};
+    // Reuse one slot across every class/domain, positive commit, signed
+    // refund, and empty cancellation. Old nonzero cells must never reappear.
+    for (size_t c = 0; c < size_t(KisBackingBudgetClass::Count); ++c) {
+        for (auto domain : domains) {
+            KisBackingBudgetDelta delta;
+            *kisPageDomainComponent(delta.buckets[c], domain) = 64;
+            auto reservation = budget.reserve(delta, nullptr);
+            QVERIFY(reservation.isValid());
+            budget.commitReservation(std::move(reservation), delta);
+            const auto installed = budget.usage();
+            QCOMPARE(*kisPageDomainComponent(installed.buckets[c].live, domain),
+                     *kisPageDomainComponent(baseline.buckets[c].live, domain) + 64);
+            *kisPageDomainComponent(delta.buckets[c], domain) = -64;
+            auto refund = budget.reserveChange(delta, nullptr);
+            QVERIFY(refund.isValid());
+            budget.commitReservation(std::move(refund), delta);
+            auto empty = budget.reserve({}, nullptr);
+            QVERIFY(empty.isValid());
+            empty.release();
+            const auto after = budget.usage();
+            for (size_t other = 0; other < size_t(KisBackingBudgetClass::Count); ++other)
+                for (auto d : domains) {
+                    QCOMPARE(*kisPageDomainComponent(after.buckets[other].live, d),
+                             *kisPageDomainComponent(baseline.buckets[other].live, d));
+                    QCOMPARE(*kisPageDomainComponent(after.buckets[other].reserved, d), quint64(0));
+                }
+        }
     }
 }
 

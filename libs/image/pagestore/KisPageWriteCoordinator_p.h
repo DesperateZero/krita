@@ -282,6 +282,9 @@ private:
         quint32 generation = 0;
         quint32 nextFree = std::numeric_limits<quint32>::max();
         bool active = false;
+        // Nonzero signed changes/aggregate reservations in the original slot.
+        // Unlisted buckets remain zero, including after reuse and retention.
+        quint8 changedClasses = 0;
     };
 
     struct SharedChildUsage {
@@ -388,8 +391,8 @@ private:
     quint64 m_nextSharedChild = 1;
     const bool m_processStorage;
     // Derived under m_mutex, never a second balance. A bit proves the
-    // unchanged non-metadata class fits its current limits. Every writer of
-    // that class invalidates it; metadata/process and cross-class constraints
+    // unchanged non-metadata class fits its current limits. Changes that can
+    // increase its load invalidate it; metadata/process and cross-class constraints
     // are checked from live state on every admission.
     mutable quint64 m_nonMetadataLiveSsd = 0;
     mutable quint32 m_fittingBudgetClasses = 0;
@@ -482,7 +485,7 @@ public:
     KisMutationPageEntry *find(const KisPageKey &);
     const KisMutationPageEntry *find(const KisPageKey &) const;
     EntryIndex findIndex(const KisPageKey &) const;
-    KisMutationPageEntry &getOrCreate(const KisPageWriteIntent &);
+    KisMutationPageEntry &getOrCreate(const KisPageWriteIntent &, bool *inserted = nullptr);
     KisMutationPageEntry *at(EntryIndex);
     const KisMutationPageEntry *at(EntryIndex) const;
     KisMutationPageEntry *at(EntryHandle);
@@ -576,8 +579,9 @@ public:
     // refusal, even if that writer releases while unused growth is freed.
     Result claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error,
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
-    // Unique keys, stable under the caller's session gate. Only this range is
-    // visited, not every page previously touched by a long-lived session.
+    // The caller has bound these unique keys to its original write-set rows
+    // under the session gate, and retains that gate across admission growth.
+    // Only dynamic competing claims need resolution here, not the write set.
     bool claimRange(ClaimSet &, KisSurfaceId, const KisPageSnapshotArray<KisLogicalPageId> &,
                     QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;

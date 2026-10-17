@@ -469,7 +469,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         return false;
     }
     auto &state = *data->state;
-    for (const Data::Change &change : std::as_const(data->changes)) {
+    for (Data::Change &change : data->changes) {
         const auto found = state.proofs.find(change.replacement.key);
         const KisPagePublicationProof current = found == state.proofs.end() ? KisPagePublicationProof{} : found->second.proof;
         if (!(current == change.superseded)
@@ -482,6 +482,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
                 error, QStringLiteral("overlay update source changed"));
             return false;
         }
+        change.acceptedOverlayProof = found == state.proofs.end() ? nullptr : &found->second.proof;
     }
 
     // The frozen release set is the only input to optional fees. Admission
@@ -514,7 +515,6 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     // installation. Keep extracted nodes alive until unlocked cleanup.
     for (const Data::Change &change : std::as_const(data->changes)) {
         const auto &key = change.replacement.key;
-        auto previous = state.proofs.find(key);
         if (change.releasesCapacity)
             owner.acceptCapacityLocked(change.supersededAuthority, change.acceptedIdle);
         if (change.replacement.removal) {
@@ -530,7 +530,10 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
             if (change.wasRemoved)
                 data->oldRemovalNodes.push_back(state.removals.extract(key));
             if (change.superseded.isValid()) {
-                previous->second.proof = change.replacement.proof;
+                // Insertions may rehash, but references to other elements stay
+                // stable. Unique input keys cannot erase this row beforehand.
+                Q_ASSERT(change.acceptedOverlayProof);
+                *change.acceptedOverlayProof = change.replacement.proof;
             } else {
                 auto inserted = state.proofs.insert(data->proofNodes.extract(key));
                 Q_ASSERT(inserted.inserted);
