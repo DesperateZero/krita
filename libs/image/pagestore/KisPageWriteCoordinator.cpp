@@ -997,15 +997,27 @@ void KisBackingBudgetReservation::commitRetaining(
     settle(&installed, &retained);
 }
 
+void KisBackingBudgetReservation::commitPrepared(const KisBackingBudgetDelta *retained) noexcept
+{
+    settle(nullptr, retained, true);
+}
+
 void KisBackingBudgetReservation::settle(const KisBackingBudgetDelta *installed,
-                                       const KisBackingBudgetDelta *retained) noexcept
+                                       const KisBackingBudgetDelta *retained,
+                                       bool prepared) noexcept
 {
     KisBackingBudgetController *local = owner;
     const bool hasParent = local && local->m_sharedNonPayloadBudget;
     std::optional<KisBackingBudgetDelta> sharedInstalled, sharedRetained;
-    if (hasParent && installed) sharedInstalled = local->sharedNonPayloadDelta(*installed);
+    if (hasParent && prepared) sharedInstalled.emplace();
+    else if (hasParent && installed) sharedInstalled = local->sharedNonPayloadDelta(*installed);
     if (hasParent && retained) sharedRetained = local->sharedNonPayloadDelta(*retained);
-    if (!local || !local->settle(cookie, installed, retained)) {
+    // Exact ledger completion retains only debt, outside the shared classes.
+    // Its parent change was accepted at preparation, including negative-only
+    // refunds that deliberately did not allocate a parent reservation.
+    Q_ASSERT(!prepared || !sharedRetained || !hasPositiveBytes(*sharedRetained));
+    if (!local || !local->settle(cookie, installed, retained, prepared,
+                                prepared && sharedInstalled ? &*sharedInstalled : nullptr)) {
         owner = nullptr;
         cookie = 0;
     }
@@ -1113,6 +1125,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     quint64 durableBytes, QString *error, const KisBackingBudgetDelta *signedChange)
 {
     KisBackingBudgetReservation sharedReservation;
+    KisPageDomainByteDelta sharedChange;
     if (m_sharedNonPayloadBudget) {
         bool valid = false;
         const KisBackingBudgetDelta sharedDelta = sharedNonPayloadDelta(
@@ -1121,6 +1134,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
             KisPageStoreDetail::setError(error, QStringLiteral("shared non-payload transition delta overflows"));
             return {};
         }
+        sharedChange = sharedDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         if (hasPositiveBytes(sharedDelta)) {
             sharedReservation = m_sharedNonPayloadBudget->reserveSharedNonPayload(
                 m_sharedNonPayloadChild, sharedDelta, error);
@@ -1154,7 +1168,8 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
         }
     }
     KisPageStoreDetail::setError(error, {});
-    auto reservation = reserveLocked(delta, aggregateBytes, durableBytes);
+    auto reservation = reserveLocked(delta, aggregateBytes, durableBytes, 0,
+                                     signedChange, &sharedChange);
     if (sharedReservation.isValid()) {
         reservation.sharedOwner = sharedReservation.owner;
         reservation.sharedCookie = sharedReservation.cookie;
@@ -1259,7 +1274,8 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveLocked(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
     quint64 durableBytes,
-    quint64 sharedChild)
+    quint64 sharedChild, const KisBackingBudgetDelta *signedChange,
+    const KisPageDomainByteDelta *sharedChange)
 {
     quint32 slotIndex = 0;
     if (m_firstFreeSlot == std::numeric_limits<quint32>::max()) {
@@ -1279,7 +1295,8 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveLocked(
         ++slot.generation;
     slot.active = true;
     const quint64 cookie = (quint64(slot.generation) << 32) | slotIndex;
-    activateReservationLocked(cookie, delta, aggregateBytes, durableBytes, sharedChild);
+    activateReservationLocked(cookie, delta, aggregateBytes, durableBytes, sharedChild,
+                              signedChange, sharedChange);
     return {this, cookie};
 }
 
@@ -1287,14 +1304,16 @@ void KisBackingBudgetController::activateReservationLocked(
     quint64 cookie, const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
     quint64 durableBytes,
-    quint64 sharedChild)
+    quint64 sharedChild, const KisBackingBudgetDelta *signedChange,
+    const KisPageDomainByteDelta *sharedChange)
 {
     auto *slot = activeReservation(cookie);
     Q_ASSERT(slot);
     // Inactive slot contents have no consumers. Activation overwrites the
     // original storage once; completion need not reconstruct an empty delta.
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
-    slot->delta = delta;
+    slot->delta = signedChange ? *signedChange : delta;
+    slot->sharedChange = sharedChange ? *sharedChange : KisPageDomainByteDelta{};
     slot->aggregateBytes = aggregateBytes;
     slot->durableBytes = durableBytes;
     slot->sharedChild = sharedChild;
@@ -1375,7 +1394,7 @@ bool KisBackingBudgetController::reservationCovers(quint64 cookie,
         return false;
     const qint64 *reserved = kisPageDomainComponent(
         slot->delta.buckets[classIndex], domain);
-    return reserved && *reserved >= qint64(bytes);
+    return reserved && std::max(qint64(0), *reserved) >= qint64(bytes);
 }
 
 bool KisBackingBudgetController::reservationCovers(
@@ -1388,7 +1407,7 @@ bool KisBackingBudgetController::reservationCovers(
         const auto reserved = components(slot->delta.buckets[i]);
         const auto requested = components(needed.buckets[i]);
         for (size_t domain = 0; domain < requested.size(); ++domain)
-            if (requested[domain] < 0 || requested[domain] > reserved[domain]) return false;
+            if (requested[domain] < 0 || requested[domain] > std::max(qint64(0), reserved[domain])) return false;
     }
     return true;
 }
@@ -1617,13 +1636,18 @@ void KisBackingBudgetController::releaseSharedNonPayloadLive(
 
 bool KisBackingBudgetController::settle(quint64 cookie,
     const KisBackingBudgetDelta *installed,
-    const KisBackingBudgetDelta *retained) noexcept
+    const KisBackingBudgetDelta *retained, bool acceptPrepared,
+    KisBackingBudgetDelta *sharedInstalled) noexcept
 {
     QMutexLocker lock(&m_mutex);
     const quint32 slotIndex = quint32(cookie);
     ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return false;
     constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
+    if (acceptPrepared) {
+        installed = &slot->delta;
+        if (sharedInstalled) sharedInstalled->buckets[metadata] = slot->sharedChange;
+    }
     SharedChildUsage *sharedUsage = nullptr;
     if (slot->sharedChild) {
         auto child = m_sharedChildren.find(slot->sharedChild);
@@ -1650,10 +1674,12 @@ bool KisBackingBudgetController::settle(quint64 cookie,
         auto live = components(usage.live);
         auto peak = components(usage.peak);
         auto reserved = components(usage.reserved);
-        const auto prepared = components(slot->delta.buckets[i]);
+        auto prepared = components(slot->delta.buckets[i]);
         const auto keep = components(kept);
-        const auto commit = components(applied);
+        auto commit = components(applied);
         for (size_t domain = 0; domain < prepared.size(); ++domain) {
+            prepared[domain] = std::max(qint64(0), prepared[domain]);
+            if (acceptPrepared) commit[domain] -= keep[domain];
             Q_ASSERT(prepared[domain] >= 0 && keep[domain] >= 0 && keep[domain] <= prepared[domain]);
             reserved[domain] -= quint64(prepared[domain] - keep[domain]);
             if (commit[domain] < 0) {

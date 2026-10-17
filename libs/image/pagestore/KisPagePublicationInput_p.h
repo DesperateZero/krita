@@ -11,6 +11,7 @@
 #include <vector>
 
 struct KisPagePrivateWrite;
+struct KisPageRetirementRecord;
 
 // Internal identity of an already validated capability. It is not an external
 // capability: full values are projected only from their original live owner.
@@ -53,6 +54,8 @@ struct KisPagePublicationChange {
     bool wasRemoved = false;
     bool releasesCapacity = false;
     KisReplicaHandle supersededAuthority;
+    // Commit output, borrowed until immediate handover under Store admission.
+    KisPageRetirementRecord *acceptedIdle = nullptr;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }

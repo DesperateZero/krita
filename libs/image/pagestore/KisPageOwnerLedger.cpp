@@ -244,6 +244,8 @@ struct PreparedBackingChange
     PhysicalBackingRecord *physical;
     size_t order;
     KisBackingBudgetClass after;
+    KisBackingBudgetClass chargedAfter = KisBackingBudgetClass::Count;
+    KisPageRetirementRecord **idleResult = nullptr;
 };
 
 void subtractBackingDelta(KisBackingBudgetDelta *total, const KisBackingBudgetDelta &part)
@@ -420,7 +422,8 @@ public:
             }
             // Record before claiming: allocation failure must not strand an
             // untracked claim. All partial claims use the original rollback.
-            projected.push_back({found, physical, projected.size(), change.after});
+            projected.push_back({found, physical, projected.size(), change.after,
+                                 KisBackingBudgetClass::Count, change.idleResult});
             if (physical) physical->classClaim = cookie;
             shared |= alias;
         } while (nextChange(&change));
@@ -473,14 +476,14 @@ public:
                 }
                 ++first;
             } while (first < projected.size() && projected[first].backing->second.physical == key);
-            if (!addPhysicalChargeChange(signedDelta, next,
-                                         source->chargedClass,
-                                         chargedBackingClass(next))) {
+            const auto chargedAfter = chargedBackingClass(next);
+            projected[first - 1].chargedAfter = chargedAfter;
+            if (!addPhysicalChargeChange(signedDelta, next, source->chargedClass, chargedAfter)) {
                 KisPageStoreDetail::setError(error, QStringLiteral("physical backing delta overflows"));
                 return false;
             }
             if (source->chargedClass != KisBackingBudgetClass::RetirementDebt
-                && chargedBackingClass(next) == KisBackingBudgetClass::RetirementDebt) {
+                && chargedAfter == KisBackingBudgetClass::RetirementDebt) {
                 // A physical charge needs one credit even when all its aliases
                 // retire together. Only touched records are inspected.
                 if (credit)
@@ -557,8 +560,7 @@ public:
         physicalClaimsChanged.wakeAll();
     }
 
-    void applyBackingChange(const PreparedBackingChange &change,
-                            KisBackingBudgetDelta *signedDelta) noexcept
+    void installBackingChange(const PreparedBackingChange &change) noexcept
     {
         const auto found = change.backing;
         auto *physical = change.physical;
@@ -566,18 +568,23 @@ public:
         const auto before = found->second.budgetClass;
         if (before == change.after) return;
         Q_ASSERT(physical);
-        const KisBackingBudgetClass beforeCharge = physical->chargedClass;
         const bool changed = changePhysicalReferenceClass(
             physical, before, change.after);
         Q_ASSERT(changed);
         Q_UNUSED(changed);
-        const KisBackingBudgetClass afterCharge = chargedBackingClass(*physical);
-        const bool deltaAdded = addPhysicalChargeChange(
-            signedDelta, *physical, beforeCharge, afterCharge);
-        Q_ASSERT(deltaAdded);
-        Q_UNUSED(deltaAdded);
-        physical->chargedClass = afterCharge;
+        // The claim froze the complete physical group at preparation. Only
+        // its final row installs the already admitted charge; intermediate
+        // alias classes are not another budget transaction.
+        if (change.chargedAfter != KisBackingBudgetClass::Count)
+            physical->chargedClass = change.chargedAfter;
         found->second.budgetClass = change.after;
+        if (change.idleResult) {
+            Q_ASSERT(change.after == KisBackingBudgetClass::IdleCapacity);
+            auto *record = found->second.retirement.get();
+            Q_ASSERT(!record || !record->is_linked());
+            if (record) record->replica = found->second.replica;
+            *change.idleResult = record;
+        }
     }
 
     void moveRetirementHeadroom(const PhysicalBackingRecord &physical,
@@ -1261,19 +1268,6 @@ KisPageRetirementRecords KisPageOwnerLedger::takeShutdownRetirementRecords()
     return records;
 }
 
-KisPageRetirementRecord *KisPageOwnerLedger::idleBackingRecord(const KisReplicaHandle &replica)
-{
-    QMutexLocker lock(&d->mutex);
-    const auto found = d->backings.find(replica.allocationIdentity());
-    if (found == d->backings.end() || !(found->second.replica == replica)
-        || found->second.budgetClass != KisBackingBudgetClass::IdleCapacity
-        || !found->second.retirement) return nullptr;
-    auto *record = found->second.retirement.get();
-    Q_ASSERT(!record->is_linked());
-    record->replica = replica;
-    return record;
-}
-
 bool KisPageOwnerLedger::reclassifyBacking(const KisReplicaHandle &replica,
                                            KisBackingBudgetClass budgetClass,
                                            QString *error)
@@ -1553,7 +1547,7 @@ KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
 }
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareIdleCapacity(
-    const KisPagePublicationChange *rows, size_t count, quint64 allowance, QString *error)
+    KisPagePublicationChange *rows, size_t count, quint64 allowance, QString *error)
 try {
     if (count && !rows) {
         KisPageStoreDetail::setError(error, QStringLiteral("capacity release range is invalid"));
@@ -1565,12 +1559,12 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
         return {};
     }
-    auto select = [rows, count, index = size_t(0), allowance]() mutable -> const KisReplicaHandle * {
+    auto select = [rows, count, index = size_t(0), allowance]() mutable -> KisPagePublicationChange * {
         while (index < count) {
-            const auto &row = rows[index++];
+            auto &row = rows[index++];
             if (!row.releasesCapacity || row.supersededAuthority.layout.byteSize > allowance) continue;
             allowance -= row.supersededAuthority.layout.byteSize;
-            return &row.supersededAuthority;
+            return &row;
         }
         return nullptr;
     };
@@ -1580,9 +1574,10 @@ try {
     size_t selected = 0;
     while (counter()) ++selected;
     auto next = [select](KisBackingClassChange *change) mutable {
-        const auto *replica = select();
-        if (!replica) return false;
-        *change = {*replica, KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::IdleCapacity};
+        auto *row = select();
+        if (!row) return false;
+        *change = {row->supersededAuthority, KisBackingBudgetClass::ActivePending,
+                   KisBackingBudgetClass::IdleCapacity, &row->acceptedIdle};
         return true;
     };
     quint64 cookie = 0;
@@ -1755,7 +1750,7 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
         if (!reservation.isValid()) return {};
     }
     KisBackingHandoffReservation result;
-    result.m_source = &backing->second;
+    result.m_source = backing;
     result.m_physical = &physical->second;
     result.m_target = target;
     result.m_budget = std::move(reservation);
@@ -1771,16 +1766,20 @@ bool KisPageOwnerLedger::commitBackingHandoff(
 {
     QMutexLocker locker(&d->mutex);
     if (reservation.m_owner != this) return false;
-    auto *source = reservation.m_source;
+    const auto found = reservation.m_source;
+    auto *source = &found->second;
     auto *physical = reservation.m_physical;
-    const auto found = d->backings.find(source->replica.allocationIdentity());
     Q_ASSERT(found != d->backings.end() && &found->second == source
              && physical->classClaim == HandoffClaim);
     const auto before = source->budgetClass;
-    const PreparedBackingChange change{found, physical, 0, KisBackingBudgetClass::ActivePending};
     const auto &target = reservation.m_target;
-    KisBackingBudgetDelta installed;
-    d->applyBackingChange(change, &installed);
+    if (before != KisBackingBudgetClass::ActivePending) {
+        const bool changed = changePhysicalReferenceClass(
+            physical, before, KisBackingBudgetClass::ActivePending);
+        Q_ASSERT(changed); Q_UNUSED(changed);
+        source->budgetClass = KisBackingBudgetClass::ActivePending;
+        physical->chargedClass = KisBackingBudgetClass::ActivePending;
+    }
 
     // Rekey the same stable node: its physical membership and retirement
     // storage stay attached, with no allocation or new identity placeholder.
@@ -1798,12 +1797,12 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     if (inserted->second.retirementHeadroom.isValid()
         || before == KisBackingBudgetClass::OptionalCache
         || before == KisBackingBudgetClass::IdleCapacity) {
-        if (reservation.m_budget.isValid()) reservation.m_budget.commit(installed);
+        if (reservation.m_budget.isValid()) reservation.m_budget.commitPrepared();
     } else {
         KisBackingBudgetDelta retained;
         addBackingDelta(&retained, KisBackingBudgetClass::RetirementDebt,
                          physical->domain, qint64(physical->byteSize()));
-        reservation.m_budget.commitRetaining(installed, retained);
+        reservation.m_budget.commitPrepared(&retained);
         inserted->second.retirementHeadroom = std::move(reservation.m_budget);
     }
     physical->classClaim = 0;
@@ -1849,19 +1848,16 @@ void KisPageOwnerLedger::commitPreparedBackingChanges(quint64 cookie) noexcept
     PreparedBackingChangeSlot *slot = d->preparedChange(cookie);
     if (!slot) return;
 
-    KisBackingBudgetDelta signedDelta;
     for (const auto &change : std::as_const(slot->changes)) {
         Q_ASSERT(change.physical->classClaim == cookie);
-        d->applyBackingChange(change, &signedDelta);
+        d->installBackingChange(change);
     }
     for (const auto &credit : slot->retirementCredits) {
         Q_ASSERT(credit.backing->retirementHeadroom.isValid());
         const auto funded = credit.delta();
         credit.backing->retirementHeadroom.commit(funded);
-        subtractBackingDelta(&signedDelta, funded);
     }
-    if (slot->reservation.isValid()) slot->reservation.commit(signedDelta);
-    else Q_ASSERT(!hasBackingDelta(signedDelta));
+    if (slot->reservation.isValid()) slot->reservation.commitPrepared();
     for (const auto &change : std::as_const(slot->changes)) {
         if (change.after != KisBackingBudgetClass::ActivePending)
             change.backing->second.retirementHeadroom.release();

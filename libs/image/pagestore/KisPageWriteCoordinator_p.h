@@ -193,8 +193,11 @@ private:
     void commit(const KisBackingBudgetDelta &) noexcept;
     void commitRetaining(const KisBackingBudgetDelta &installed,
                          const KisBackingBudgetDelta &retained) noexcept;
+    // OwnerLedger holds the original physical claim. Consume the admitted
+    // signed change, optionally leaving its already funded retirement debt.
+    void commitPrepared(const KisBackingBudgetDelta *retained = nullptr) noexcept;
     void settle(const KisBackingBudgetDelta *installed,
-                const KisBackingBudgetDelta *retained) noexcept;
+                const KisBackingBudgetDelta *retained, bool prepared = false) noexcept;
     bool retainOnly(const KisBackingBudgetDelta &retained) noexcept;
 
     KisBackingBudgetController *owner = nullptr;
@@ -268,7 +271,10 @@ public:
 
 private:
     struct ReservationSlot {
+        // Accepted signed change; only its positive components are reserved.
+        // Partial consumers still supply installed/retained facts to settle.
         KisBackingBudgetDelta delta;
+        KisPageDomainByteDelta sharedChange;
         std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
             aggregateBytes{};
         quint64 durableBytes = 0;
@@ -302,7 +308,8 @@ private:
     }
 
     bool settle(quint64 cookie, const KisBackingBudgetDelta *installed,
-                const KisBackingBudgetDelta *retained) noexcept;
+                const KisBackingBudgetDelta *retained, bool prepared = false,
+                KisBackingBudgetDelta *sharedInstalled = nullptr) noexcept;
     // OwnerLedger-only: headroom for reclassifying an already charged physical
     // backing. Moving it creates no payload or additional durable allocation.
     void moveRetirementHeadroom(quint64 cookie, KisPageAccessDomain source,
@@ -336,11 +343,13 @@ private:
         quint64 durableBytes, quint64 beforeSequence = std::numeric_limits<quint64>::max()) const;
     KisBackingBudgetReservation reserveLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
-        quint64, quint64 sharedChild = 0);
+        quint64, quint64 sharedChild = 0, const KisBackingBudgetDelta *signedChange = nullptr,
+        const KisPageDomainByteDelta *sharedChange = nullptr);
     bool prepareReservationSlot(QString *error);
     void activateReservationLocked(quint64 cookie, const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
-        quint64, quint64 sharedChild = 0);
+        quint64, quint64 sharedChild = 0, const KisBackingBudgetDelta *signedChange = nullptr,
+        const KisPageDomainByteDelta *sharedChange = nullptr);
     using WaitCallbacks = std::array<KisPageReadinessCallback, 32>;
     WaitCallbacks dispatchWaiters();
     void notifyWaitersLocked() noexcept;

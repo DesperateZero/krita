@@ -9094,19 +9094,29 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     }
     auto partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
+    for (const auto &row : rows) QVERIFY(!row.acceptedIdle);
     partial.release();
-    for (const auto &row : rows) QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
-    const std::array<KisPagePublicationChange, 2> duplicate{rows[0], rows[0]};
+    for (const auto &row : rows) {
+        QVERIFY(!row.acceptedIdle);
+        QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
+    }
+    std::array<KisPagePublicationChange, 2> duplicate{rows[0], rows[0]};
     QVERIFY(!owner.prepareIdleCapacity(duplicate.data(), duplicate.size(), 8192, &error).isValid());
     QVERIFY(error.contains(QStringLiteral("more than once")));
     auto invalid = rows;
     invalid[2].supersededAuthority.allocation.slot = 9999;
     QVERIFY(!owner.prepareIdleCapacity(invalid.data(), invalid.size(), 12288, &error).isValid());
+    for (const auto &row : invalid) QVERIFY(!row.acceptedIdle);
     for (const auto &row : rows) QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
     rows[0].releasesCapacity = false;
     partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
     owner.commitBackingChanges(std::move(partial));
+    QVERIFY(!rows[0].acceptedIdle);
+    QVERIFY(rows[1].acceptedIdle);
+    QCOMPARE(rows[1].acceptedIdle->replica, rows[1].supersededAuthority);
+    QVERIFY(!rows[1].acceptedIdle->is_linked());
+    QVERIFY(!rows[2].acceptedIdle);
     QCOMPARE(owner.backingClass(rows[0].supersededAuthority), Class::ActivePending);
     QCOMPARE(owner.backingClass(rows[1].supersededAuthority), Class::IdleCapacity);
     QCOMPARE(owner.backingClass(rows[2].supersededAuthority), Class::ActivePending);

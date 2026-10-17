@@ -13,6 +13,7 @@
 
 #include "KisCompletionRegistry.h"
 #include "KisPageRetirementStorage_p.h"
+#include "KisPageRetirementRecord_p.h"
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageReplicaProvider.h"
 #include "KisPageWriteCoordinator_p.h"
@@ -32,6 +33,10 @@ struct KisBackingClassChange
     KisReplicaHandle replica;
     KisBackingBudgetClass before;
     KisBackingBudgetClass after;
+    // Borrowed output in the original publication candidate. Written only
+    // on commit; the publication gate protects the ledger-owned record until
+    // its immediate Idle handover. Cancellation never publishes a pointer.
+    KisPageRetirementRecord **idleResult = nullptr;
 };
 
 /**
@@ -76,7 +81,7 @@ private:
     // The original caller already owns this one-shot lifetime. Its physical
     // claim keeps both records stable; no second slot, cookie or target node.
     KisPageOwnerLedger *m_owner = nullptr;
-    KisPageBackingRecord *m_source = nullptr;
+    KisPageBackingIndex::iterator m_source;
     KisPagePhysicalBackingRecord *m_physical = nullptr;
     KisReplicaHandle m_target;
     KisBackingBudgetReservation m_budget;
@@ -228,9 +233,6 @@ public:
 
 private:
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
-    // Non-owning idle index. Caller holds Store admission through unlink or
-    // transfer; the original backing retains the sole terminal record.
-    KisPageRetirementRecord *idleBackingRecord(const KisReplicaHandle &replica);
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Original publication storage moves into the prepared ledger slot. The
     // allocator must belong to this ledger's backing budget.
@@ -240,7 +242,7 @@ private:
     // Read the original frozen release rows; no intermediate class-change array.
     // Uses the same claims, accounting policy and terminal as generic changes.
     KisBackingClassChangeReservation prepareIdleCapacity(
-        const KisPagePublicationChange *rows, size_t count, quint64 allowance,
+        KisPagePublicationChange *rows, size_t count, quint64 allowance,
         QString *error = nullptr);
     KisBackingClassChangeReservation prepareBackingChangesImpl(
         BackingChanges changes,

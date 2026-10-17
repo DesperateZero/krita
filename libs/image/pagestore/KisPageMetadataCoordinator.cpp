@@ -2381,6 +2381,7 @@ public:
         KisPageVersion version;
         KisReplicaHandle replica;
         bool detached = false;
+        KisPageRetirementRecord *acceptedIdle = nullptr;
     };
     Array<BackingAuthority> backingAuthorities;
 
@@ -2479,16 +2480,18 @@ bool KisPageMetadataCoordinator::PreparedPublication::isValid() const
 
 KisReplicaHandle
 KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
-    const KisPageVersion &version, bool *detached) const
+    const KisPageVersion &version, bool *detached, KisPageRetirementRecord ***idleResult) const
 {
     if (detached) *detached = false;
+    if (idleResult) *idleResult = nullptr;
     if (!data) return {};
-    const auto found = std::lower_bound(data->backingAuthorities.cbegin(),
-        data->backingAuthorities.cend(), version, [](const auto &entry, const KisPageVersion &key) {
+    const auto found = std::lower_bound(data->backingAuthorities.begin(),
+        data->backingAuthorities.end(), version, [](const auto &entry, const KisPageVersion &key) {
             return MetadataKeyLess{}(entry.version, key);
         });
-    if (found != data->backingAuthorities.cend() && found->version == version) {
+    if (found != data->backingAuthorities.end() && found->version == version) {
         if (detached) *detached = found->detached;
+        if (idleResult && found->detached) *idleResult = &found->acceptedIdle;
         return found->replica;
     }
     // Recoverable candidates already retain the exact base and target values
@@ -2706,11 +2709,11 @@ void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachCapacityInva
 }
 
 void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachDetachedBacking(
-    void *context, void (*visit)(void *, const KisReplicaHandle &)) const
+    void *context, void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const
 {
     if (!data || !data->installed) return;
     for (const auto &entry : data->backingAuthorities)
-        if (entry.detached) visit(context, entry.replica);
+        if (entry.detached) visit(context, entry.replica, entry.acceptedIdle);
 }
 
 bool KisPageMetadataCoordinator::canBorrowNativeMutation(const KisPageTransaction &transaction,

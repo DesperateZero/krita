@@ -407,7 +407,7 @@ private:
     // is unlinked before the retirement queue obtains ownership.
     boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity;
     static constexpr qint64 IdleCapacityAgeMs = 100;
-    void acceptCapacityLocked(const KisReplicaHandle &replica);
+    void acceptCapacityLocked(const KisReplicaHandle &replica, KisPageRetirementRecord *record);
     quint64 idleAllowanceLocked() const;
 
     quint64 currentDefaultRevisionLocked(KisSurfaceId surface) const;

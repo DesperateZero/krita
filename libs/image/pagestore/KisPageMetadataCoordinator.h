@@ -415,7 +415,8 @@ private:
         // retry a revision race or retain its input until capacity returns.
         bool needsReprepare() const { return m_failure == Failure::Conflict; }
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
-        KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr) const;
+        KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
+                                           KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
         // Prepared semantic disposition, in original input coordinates. All
         // selected releases must pass the joint install claim; late protection
@@ -458,7 +459,8 @@ private:
         qsizetype clearBatch(qsizetype maximumWorkUnits);
         void dispose(const std::shared_ptr<DeferredMetadataCleanupStatistics> &statistics);
         // Installed canonical dispositions; no authority survives rejection.
-        void forEachDetachedBacking(void *context, void (*visit)(void *, const KisReplicaHandle &)) const;
+        void forEachDetachedBacking(void *context,
+            void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
 
     private:
         PreparedPublication::DataPointer data;

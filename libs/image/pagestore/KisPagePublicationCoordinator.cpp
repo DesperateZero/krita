@@ -43,7 +43,8 @@ bool appendPublicationBackingChanges(
     if (current == target)
         return true;
     bool detached = false;
-    const KisReplicaHandle oldAuthority = publication.backingAuthority(current, &detached);
+    KisPageRetirementRecord **idleResult = nullptr;
+    const KisReplicaHandle oldAuthority = publication.backingAuthority(current, &detached, &idleResult);
     const KisReplicaHandle targetAuthority = publication.backingAuthority(target);
     if ((!oldAuthority.isValid() && !current.isDefaultPixel())
         || (!targetAuthority.isValid() && !target.isDefaultPixel()))
@@ -56,7 +57,8 @@ bool appendPublicationBackingChanges(
     if (cacheDetached) *idleAllowance -= oldAuthority.layout.byteSize;
     if (oldAuthority.isValid() && (!detached || cacheDetached))
         changes->push_back({oldAuthority, KisBackingBudgetClass::Current,
-                           detached ? KisBackingBudgetClass::IdleCapacity : oldAfter});
+                           detached ? KisBackingBudgetClass::IdleCapacity : oldAfter,
+                           cacheDetached ? idleResult : nullptr});
     if (targetAuthority.isValid())
         changes->push_back({targetAuthority, targetBefore, KisBackingBudgetClass::Current});
     return true;
@@ -514,7 +516,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         const auto &key = change.replacement.key;
         auto previous = state.proofs.find(key);
         if (change.releasesCapacity)
-            owner.acceptCapacityLocked(change.supersededAuthority);
+            owner.acceptCapacityLocked(change.supersededAuthority, change.acceptedIdle);
         if (change.replacement.removal) {
             if (change.superseded.isValid())
                 data->oldProofNodes.push_back(state.proofs.extract(key));
@@ -663,9 +665,10 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall(KisRet
 
     if (candidate.result.isCommitted()) {
         owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation));
-        candidate.metadataCleanup.forEachDetachedBacking(&owner, [](void *context, const KisReplicaHandle &replica) {
+        candidate.metadataCleanup.forEachDetachedBacking(&owner, [](void *context, const KisReplicaHandle &replica,
+                                                                   KisPageRetirementRecord *record) {
             auto &coordinator = *static_cast<KisPagePublicationCoordinator *>(context);
-            coordinator.acceptCapacityLocked(replica);
+            coordinator.acceptCapacityLocked(replica, record);
             ++coordinator.m_statistics.detachedCurrentBackings;
         });
         if (!owner.m_idleCapacity.empty()) owner.m_history.scheduleLocked();
@@ -1746,13 +1749,14 @@ qint64 KisPagePublicationCoordinator::expireIdleCapacityLocked(qint64 now, bool 
     return 0;
 }
 
-void KisPagePublicationCoordinator::acceptCapacityLocked(const KisReplicaHandle &replica)
+void KisPagePublicationCoordinator::acceptCapacityLocked(const KisReplicaHandle &replica,
+                                                         KisPageRetirementRecord *record)
 {
-    auto *record = m_owner.idleBackingRecord(replica);
     if (!record) {
         m_retirementQueue.acceptDetachedBacking(replica);
         return;
     }
+    Q_ASSERT(record->replica == replica && !record->is_linked());
     auto *previous = m_metadata.exchangeIdleCapacity(replica.version.key, record);
     if (previous) {
         m_idleCapacity.erase(m_idleCapacity.iterator_to(*previous));
