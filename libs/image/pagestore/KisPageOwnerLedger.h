@@ -37,6 +37,7 @@ struct KisBackingClassChange
 /**
  * One-shot owner reservation for a frozen set of backing-class changes.
  * Destruction cancels the budget reservation and releases the physical claims.
+ * A successfully admitted empty set is valid without an entity slot/claim.
  */
 class KRITAIMAGE_EXPORT KisBackingClassChangeReservation final
 {
@@ -236,6 +237,11 @@ private:
     KisBackingClassChangeReservation prepareBackingChanges(
         BackingChanges changes, const KisPageTransitionEffect *effects,
         qsizetype count, QString *error = nullptr);
+    // Read the original frozen release rows; no intermediate class-change array.
+    // Uses the same claims, accounting policy and terminal as generic changes.
+    KisBackingClassChangeReservation prepareIdleCapacity(
+        const KisPagePublicationChange *rows, size_t count, quint64 allowance,
+        QString *error = nullptr);
     KisBackingClassChangeReservation prepareBackingChangesImpl(
         BackingChanges changes,
         const KisPageTransitionEffect *effects, qsizetype count, QString *error);

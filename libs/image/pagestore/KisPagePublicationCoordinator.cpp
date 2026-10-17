@@ -484,28 +484,15 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     // The frozen release set is the only input to optional fees. Admission
     // refusal keeps the original charge and terminal owner; publication is
     // still legal. No physical or fee decision is invented after acceptance.
-    KisPageOwnerLedger::BackingChanges capacityChanges(data->changes.get_allocator());
     KisBackingClassChangeReservation capacityReservation;
-    quint64 allowance = 0;
-    bool observedAllowance = false;
-    try {
-        for (const auto &change : data->changes) {
-            if (!change.releasesCapacity) continue;
-            if (!observedAllowance) {
-                allowance = owner.idleAllowanceLocked();
-                if (allowance) capacityChanges.reserve(data->changes.size());
-                observedAllowance = true;
-            }
-            if (change.supersededAuthority.layout.byteSize <= allowance) {
-                capacityChanges.push_back({change.supersededAuthority,
-                    KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::IdleCapacity});
-                allowance -= change.supersededAuthority.layout.byteSize;
-            }
-        }
-        if (!capacityChanges.empty())
-            capacityReservation = owner.m_owner.prepareBackingChanges(
-                std::move(capacityChanges), nullptr, 0, nullptr);
-    } catch (const std::bad_alloc &) { /* Optional retention is best effort. */ }
+    for (size_t i = 0; i < data->changes.size(); ++i) {
+        if (!data->changes[i].releasesCapacity) continue;
+        const auto allowance = owner.idleAllowanceLocked();
+        if (allowance)
+            capacityReservation = owner.m_owner.prepareIdleCapacity(
+                data->changes.data() + i, data->changes.size() - i, allowance);
+        break;
+    }
 
     if (data->nativeRows) {
         const auto accepted = owner.m_metadata.acceptNativeMutation(data->transaction,
