@@ -17,7 +17,33 @@ class KisCpuResidentBinding;
 // borrows it while reserved; it is not a readable version until acceptance.
 struct KisPagePrivateWrite {
     KisReplicaHandle target;
-    KisPreparedPageProof proof;
+    KisReplicaHandle source;
+    struct NativeProof {
+        KisPageTransactionId transaction;
+        quint64 providerValidationStamp = 0;
+        bool isValid() const { return transaction.isValid() && providerValidationStamp; }
+    } proof;
+    // A value projection, not an ownership test. Real consumers still use
+    // the owner's dynamic validate/owns/revoke policy. The original result
+    // remains alive and immutable through Sealing/CommitPreparation.
+    KisPreparedPageProof proofValue(const KisCompletionTicket &completion) const
+    {
+        if (!completed || !proof.isValid()) return {};
+        KisPreparedPageProof value;
+        value.authority = target; value.transaction = proof.transaction;
+        value.providerValidationStamp = proof.providerValidationStamp;
+        value.producerCompletion = completion;
+        return value;
+    }
+    bool matchesProof(const KisPreparedPageProof &value, const KisCompletionTicket &completion) const
+    {
+        return proof.isValid() && proof.transaction == value.transaction
+            && proof.providerValidationStamp == value.providerValidationStamp
+            && target == value.authority && completion == value.producerCompletion;
+    }
+    // While reserved these belong to the new result. Acceptance transfers
+    // them to metadata; direct replacement returns old references here for
+    // destruction at the original unlocked scope exit. Identity stays intact.
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
     std::shared_ptr<KisCpuResidentBinding> binding;
     bool reserved = false;

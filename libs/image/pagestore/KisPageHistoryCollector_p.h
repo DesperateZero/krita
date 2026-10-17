@@ -60,6 +60,9 @@ public:
                                       const KisPageVersion &version);
     using HasAbandonedMutations = bool (*)(void *context);
     using CollectAbandonedMutations = void (*)(void *context);
+    // Expires due non-owning capacity under the same Store gate; returns the
+    // next monotonic deadline, or zero. Provider work stays on the old queue.
+    using CollectIdleCapacity = qint64 (*)(void *context, qint64 now);
 
     KRITAIMAGE_EXPORT KisPageHistoryCollector(KisPageMetadataCoordinator &metadata,
                             KisImageEpochReferenceModel &epochs,
@@ -73,7 +76,8 @@ public:
                             ReleaseOwnerLifetime releaseOwnerLifetime,
                             RemoveDescriptor removeDescriptor,
                             HasAbandonedMutations hasAbandonedMutations = nullptr,
-                            CollectAbandonedMutations collectAbandonedMutations = nullptr);
+                            CollectAbandonedMutations collectAbandonedMutations = nullptr,
+                            CollectIdleCapacity collectIdleCapacity = nullptr);
     KRITAIMAGE_EXPORT ~KisPageHistoryCollector();
     KRITAIMAGE_EXPORT void prepareTask(KisBackingBudgetController &budget);
 
@@ -136,6 +140,7 @@ private:
     RemoveDescriptor m_removeDescriptor = nullptr;
     HasAbandonedMutations m_hasAbandonedMutations = nullptr;
     CollectAbandonedMutations m_collectAbandonedMutations = nullptr;
+    CollectIdleCapacity m_collectIdleCapacity = nullptr;
 
     WorkIndex m_work;
     boost::intrusive::list<Work> m_ready;
@@ -146,6 +151,8 @@ private:
     std::shared_ptr<KisPageHistoryWakeContext> m_wakeContext;
     KisPageReclamationDelay m_retry;
     bool m_retryScheduled = false;
+    qint64 m_pressureDeadline = 0;
+    qint64 m_timerDeadline = 0;
     bool m_blocked = false;
     bool m_automaticWakeupsStopped = false;
     int m_retryDelayMs = 1;

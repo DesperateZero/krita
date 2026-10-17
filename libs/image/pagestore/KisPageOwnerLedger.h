@@ -15,6 +15,7 @@
 #include "KisPageRetirementStorage_p.h"
 #include "KisPageMetadataCoordinator.h"
 #include "KisPageReplicaProvider.h"
+#include "KisPageWriteCoordinator_p.h"
 
 class KisBackingBudgetController;
 class KisBackingBudgetReservation;
@@ -22,6 +23,8 @@ class KisBackingBudgetWaiter;
 class KisPageOwnerDomainAdmission;
 class KisPageOwnerLedger;
 struct KisPageRetirementRecords;
+struct KisPageBackingRecord;
+struct KisPagePhysicalBackingRecord;
 enum class KisBackingBudgetClass : quint8;
 
 struct KisBackingClassChange
@@ -63,14 +66,19 @@ class KRITAIMAGE_EXPORT KisBackingHandoffReservation final
 {
 public:
     KisBackingHandoffReservation() = default;
-    KisBackingHandoffReservation(KisBackingHandoffReservation &&) noexcept = default;
-    KisBackingHandoffReservation &operator=(KisBackingHandoffReservation &&) noexcept = default;
-    bool isValid() const { return m_change.isValid(); }
-    void release() noexcept { m_change.release(); }
+    ~KisBackingHandoffReservation();
+    KisBackingHandoffReservation(KisBackingHandoffReservation &&) noexcept;
+    KisBackingHandoffReservation &operator=(KisBackingHandoffReservation &&) noexcept;
+    bool isValid() const { return m_owner; }
+    void release() noexcept;
 private:
-    explicit KisBackingHandoffReservation(KisBackingClassChangeReservation change)
-        : m_change(std::move(change)) {}
-    KisBackingClassChangeReservation m_change;
+    // The original caller already owns this one-shot lifetime. Its physical
+    // claim keeps both records stable; no second slot, cookie or target node.
+    KisPageOwnerLedger *m_owner = nullptr;
+    KisPageBackingRecord *m_source = nullptr;
+    KisPagePhysicalBackingRecord *m_physical = nullptr;
+    KisReplicaHandle m_target;
+    KisBackingBudgetReservation m_budget;
     friend class KisPageOwnerLedger;
 };
 
@@ -117,15 +125,18 @@ public:
         const KisPageSnapshotArray<KisPageTransitionEffect> &retirementEffects,
         QString *error = nullptr);
     void commitBackingChanges(KisBackingClassChangeReservation &&reservation) noexcept;
-    // Freeze a sole, resident physical owner and reserve ActivePending plus
-    // cancellation debt before taking the physical claim. The old handle stays
-    // authoritative until commit. Cancel preparation before provider retag.
+    // Freeze a sole, resident physical owner and reserve its real transition
+    // to ActivePending before taking the physical claim. Current/Pending also
+    // retain cancellation debt. Detached Optional borrows without new future
+    // debt; cancellation retains its Pending charge in the original retirement
+    // record. The old handle stays authoritative until commit; cancel this
+    // preparation before provider retag. Logical detachment is the caller's duty.
     KisBackingHandoffReservation prepareBackingHandoff(
         const KisReplicaHandle &source, const KisReplicaHandle &target,
         QString *error = nullptr);
     // Caller has installed logical detachment and consumed physical retag under
     // its admission gate. Reuses the existing index node; no provider call or
-    // allocation. Keeps debt headroom in this ledger until ordinary publication
+    // allocation. Keeps any admitted debt headroom until ordinary publication
     // or retirement consumes it; callers must not own a second terminal token.
     bool commitBackingHandoff(
         KisBackingHandoffReservation &&reservation) noexcept;
@@ -185,6 +196,8 @@ public:
     // counts while retirement workers can bind/release operations.
     qsizetype publicationBlockingOperationCount() const;
     qsizetype sealedProofCount() const;
+    KisPreparedPageProof projectPreparedPage(const KisPageVersion &, KisPageTransactionId, quint64 stamp,
+                                            const KisReplicaAllocationIdentity &) const;
     bool ownsPreparedPageProof(const KisPreparedPageProof &proof) const;
     // Store configuration binds exactly one original metadata owner. The CPU
     // producer consumes its prepaid version slot; exported proofs keep their
@@ -214,6 +227,9 @@ public:
 
 private:
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
+    // Non-owning idle index. Caller holds Store admission through unlink or
+    // transfer; the original backing retains the sole terminal record.
+    KisPageRetirementRecord *idleBackingRecord(const KisReplicaHandle &replica);
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Original publication storage moves into the prepared ledger slot. The
     // allocator must belong to this ledger's backing budget.
@@ -241,6 +257,7 @@ private:
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageOwnerDomainAdmission;
     friend class KisBackingClassChangeReservation;
+    friend class KisBackingHandoffReservation;
     friend class KisPageRetirementQueue;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;

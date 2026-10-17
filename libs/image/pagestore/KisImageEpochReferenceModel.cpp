@@ -753,10 +753,11 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
     return true;
 }
 
-static const KisPreparedPageProof &epochPreparedProof(const KisPreparedPageProof &proof) { return proof; }
-static const KisPreparedPageProof &epochPreparedProof(const KisPagePublicationDelta::ProofMap::value_type &entry)
+static const KisPageVersion &epochPreparedVersion(const KisPreparedPageProof &proof) { return proof.authority.version; }
+static const KisPageVersion &epochPreparedVersion(const KisPagePublicationChange::Replacement &entry) { return entry.proof.version; }
+static const KisPageVersion &epochPreparedVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
 {
-    return entry.second.proof;
+    return entry.second.proof.version;
 }
 
 struct EpochTransactionChanges {
@@ -772,8 +773,7 @@ struct EpochTransactionChanges {
         if (changes.size() != size_t(proofs.size()) || surfaceChanges.size() != size_t(surfaces.size())
             || removedPages.size() != size_t(removals.size())) return false;
         for (const auto &entry : proofs) {
-            const auto &proof = epochPreparedProof(entry);
-            const auto &version = proof.authority.version;
+            const auto &version = epochPreparedVersion(entry);
             const auto found = std::lower_bound(changes.begin(), changes.end(), version.key,
                 [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
             if (found == changes.end() || !(*found == version)) return false;
@@ -1215,8 +1215,7 @@ bool KisImageEpochReferenceModel::prepareImpl(
         next->removedPages.insert(next->removedPages.end(), previous->removedPages.begin(), previous->removedPages.end());
     }
     for (const auto &entry : proofs) {
-        const KisPreparedPageProof &proof = epochPreparedProof(entry);
-        const KisPageVersion &after = proof.authority.version;
+        const KisPageVersion &after = epochPreparedVersion(entry);
         KisPageVersion before;
         const bool hadBefore = base.resolve(after.key, &before);
         if (hadBefore && after.generation.value <= before.generation.value) {

@@ -6631,7 +6631,16 @@ void KisTiledDataManagerTest::testPageStoreFixedPageWork()
     const quint64 realPages = mode == "real" ? expectedChanged : 0;
     QCOMPARE(defaultPages, quint64(0));
     QCOMPARE(copiedPages, defaultPages);
-    QCOMPARE(nativePages, realPages);
+    // This provider counter covers fresh duplicates, not the preserve copy
+    // performed by the coordinator when it reuses idle capacity. Retained
+    // roots prevent that reuse; without them Q/T may retire optional capacity
+    // between cuts, so its exact hit count is not a correctness invariant.
+    if (retainedRoots || mode != "real") {
+        QCOMPARE(nativePages, realPages);
+    } else {
+        QVERIFY(nativePages >= quint64(changedPages));
+        QVERIFY(nativePages <= realPages);
+    }
     QCOMPARE(defaultBytes, defaultPages * tileBytes);
     QCOMPARE(copiedBytes, copiedPages * tileBytes);
     QCOMPARE(nativeBytes, nativePages * tileBytes);

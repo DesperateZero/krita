@@ -7,6 +7,7 @@
 #include "KisPageStoreReclamation_p.h"
 
 #include <QMutexLocker>
+#include <QDeadlineTimer>
 
 #include <algorithm>
 #include <utility>
@@ -33,7 +34,8 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     ReleaseOwnerLifetime releaseOwnerLifetime,
     RemoveDescriptor removeDescriptor,
     HasAbandonedMutations hasAbandonedMutations,
-    CollectAbandonedMutations collectAbandonedMutations)
+    CollectAbandonedMutations collectAbandonedMutations,
+    CollectIdleCapacity collectIdleCapacity)
     : m_metadata(metadata)
     , m_epochs(epochs)
     , m_retirementQueue(retirementQueue)
@@ -47,6 +49,7 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     , m_removeDescriptor(removeDescriptor)
     , m_hasAbandonedMutations(hasAbandonedMutations)
     , m_collectAbandonedMutations(collectAbandonedMutations)
+    , m_collectIdleCapacity(collectIdleCapacity)
 {
     static_assert(PageAdmissionBudget <= KisImageEpochReferenceModel::ReachabilityScanLimit);
     static_assert(RootVisitBudget <= KisImageEpochReferenceModel::ReachabilityRootBudget);
@@ -249,6 +252,7 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
         {
             QMutexLocker lock(&m_ownerMutex);
             m_blocked = false;
+            m_pressureDeadline = 0;
             if (!m_closing && m_operational && m_backgroundReclamation && !m_automaticWakeupsStopped) {
                 m_epochs.collectFinishedTransactions(VersionScanBudget);
                 m_epochs.collectUnretainedRoots(VersionScanBudget);
@@ -271,6 +275,7 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
         {
             QMutexLocker lock(&collector->m_ownerMutex);
             collector->m_jobScheduled = false;
+            if (!collector->m_blocked) collector->m_retryDelayMs = 1;
             collector->scheduleLocked();
             collector->m_idle.wakeAll();
         }
@@ -296,7 +301,7 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
                 if (collector->m_retry.takeReady()) {
                     ++collector->m_retryWakeups;
                     collector->m_retryScheduled = false;
-                    collector->m_blocked = false;
+                    collector->m_timerDeadline = 0;
                     collector->scheduleLocked();
                 }
             }
@@ -313,33 +318,54 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
 
 void KisPageHistoryCollector::scheduleLocked()
 {
-    if (m_closing || m_automaticWakeupsStopped) {
+    if (m_closing || m_automaticWakeupsStopped || !m_backgroundReclamation || !m_operational) {
         m_retry.cancel();
         m_retryScheduled = false;
+        m_timerDeadline = m_pressureDeadline = 0;
         m_idle.wakeAll();
         return;
     }
-    if (!m_backgroundReclamation || m_jobScheduled || !m_operational || m_retryScheduled) return;
-    if (!m_epochs.hasCollectionWork() && m_ready.empty() && !m_rescanRequested
-        && !(m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext))) return;
-    if (m_blocked) {
-        m_retryScheduled = m_retry.arm(m_retryDelayMs);
-        m_retryDelayMs = std::min(100, m_retryDelayMs * 2);
-        return;
+    const qint64 now = QDeadlineTimer::current().deadline();
+    qint64 deadline = m_collectIdleCapacity ? m_collectIdleCapacity(m_ownerContext, now) : 0;
+    const bool work = m_epochs.hasCollectionWork() || !m_ready.empty() || m_rescanRequested
+        || (m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext));
+    if (!work || (m_pressureDeadline && now >= m_pressureDeadline)) {
+        m_blocked = false;
+        m_pressureDeadline = 0;
+        if (!work) m_retryDelayMs = 1;
     }
-    m_retryDelayMs = 1;
-    m_jobScheduled = true;
-    m_ownerLifetimeReferences.ref();
-    { QMutexLocker notificationLock(&m_wakeContext->mutex); ++m_wakeContext->activities; }
-    Q_ASSERT(m_task);
-    if (!kisEnqueuePageStoreReclamation(m_task.get())) {
-        m_jobScheduled = false;
-        const bool alive = m_ownerLifetimeReferences.deref();
-        Q_ASSERT(alive); Q_UNUSED(alive);
-        QMutexLocker notificationLock(&m_wakeContext->mutex);
-        --m_wakeContext->activities;
-        m_wakeContext->idle.wakeAll();
-        m_idle.wakeAll();
+    if (work && !m_blocked && !m_jobScheduled) {
+        m_jobScheduled = true;
+        m_ownerLifetimeReferences.ref();
+        { QMutexLocker notificationLock(&m_wakeContext->mutex); ++m_wakeContext->activities; }
+        Q_ASSERT(m_task);
+        if (!kisEnqueuePageStoreReclamation(m_task.get())) {
+            m_jobScheduled = false;
+            const bool alive = m_ownerLifetimeReferences.deref();
+            Q_ASSERT(alive); Q_UNUSED(alive);
+            QMutexLocker notificationLock(&m_wakeContext->mutex);
+            --m_wakeContext->activities;
+            m_wakeContext->idle.wakeAll();
+            m_idle.wakeAll();
+            m_blocked = true;
+        }
+    }
+    if (work && m_blocked) {
+        if (!m_pressureDeadline) {
+            m_pressureDeadline = now + m_retryDelayMs;
+            m_retryDelayMs = std::min(100, m_retryDelayMs * 2);
+        }
+        if (!deadline || m_pressureDeadline < deadline) deadline = m_pressureDeadline;
+    }
+    if (deadline != m_timerDeadline) {
+        if (deadline) {
+            m_retryScheduled = m_retry.arm(int(std::max<qint64>(1, deadline - now)));
+            m_timerDeadline = m_retryScheduled ? deadline : 0;
+        } else {
+            m_retry.cancel();
+            m_retryScheduled = false;
+            m_timerDeadline = 0;
+        }
     }
 }
 
@@ -378,6 +404,7 @@ void KisPageHistoryCollector::stopAutomaticWakeups()
 {
     QMutexLocker lock(&m_ownerMutex);
     m_automaticWakeupsStopped = true;
+    m_timerDeadline = m_pressureDeadline = 0;
     if (m_wakeContext) {
         QMutexLocker notificationLock(&m_wakeContext->mutex);
         m_wakeContext->collector = nullptr;
@@ -390,6 +417,7 @@ void KisPageHistoryCollector::stopAutomaticWakeups()
 void KisPageHistoryCollector::clearLocked()
 {
     Q_ASSERT(!m_jobScheduled);
+    m_timerDeadline = m_pressureDeadline = 0;
     m_retry.cancel();
     m_retryScheduled = false;
     m_ready.clear();

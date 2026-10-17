@@ -235,6 +235,11 @@ quint64 saturatedAdd(quint64 left, quint64 right)
     return right > maximum - left ? maximum : left + right;
 }
 
+bool hasDomainDelta(const KisPageDomainByteDelta &delta)
+{
+    return delta.cpuRam || delta.umaShared || delta.discreteVram || delta.ssd;
+}
+
 bool hasPositiveBytes(const KisBackingBudgetDelta &delta)
 {
     for (const auto &bucket : delta.buckets)
@@ -255,6 +260,7 @@ std::array<quint64, 4> domainLimits(
     case KisBackingBudgetClass::InFlight:
     case KisBackingBudgetClass::RetirementDebt:
     case KisBackingBudgetClass::OptionalCache:
+    case KisBackingBudgetClass::IdleCapacity:
     case KisBackingBudgetClass::MetadataArena: {
         constexpr auto maximum = std::numeric_limits<quint64>::max();
         return {maximum, maximum, maximum, maximum};
@@ -270,7 +276,7 @@ std::array<quint64, budgetClassCount> aggregateLimits(const KisPageBackingLimits
     return {limits.logicalCurrentBytes, limits.retainedHistoryBytes,
             limits.activePendingBytes, limits.inFlightReplicaBytes,
             limits.retirementDebtBytes, limits.optionalCacheBytes,
-            limits.metadataArenaBytes};
+            limits.idleCapacityBytes, limits.metadataArenaBytes};
 }
 
 quint64 sumComponents(const std::array<quint64, 4> &values)
@@ -279,6 +285,24 @@ quint64 sumComponents(const std::array<quint64, 4> &values)
     for (quint64 value : values)
         result = saturatedAdd(result, value);
     return result;
+}
+
+quint64 optionalBytes(const KisPageBackingUsage &usage,
+                      const std::array<quint64, budgetClassCount> &reserved)
+{
+    quint64 total = 0;
+    for (auto purpose : {KisBackingBudgetClass::OptionalCache, KisBackingBudgetClass::IdleCapacity}) {
+        const auto &bucket = usage.buckets[size_t(purpose)];
+        total = saturatedAdd(total, sumComponents(components(bucket.live)));
+        total = saturatedAdd(total, reserved[size_t(purpose)]);
+    }
+    return total;
+}
+
+quint64 optionalDemand(const std::array<quint64, budgetClassCount> &aggregate)
+{
+    return saturatedAdd(aggregate[size_t(KisBackingBudgetClass::OptionalCache)],
+                        aggregate[size_t(KisBackingBudgetClass::IdleCapacity)]);
 }
 
 bool fitsBudgetBucket(const KisPageDomainBytes &liveBytes,
@@ -306,6 +330,11 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
 {
     qint64 durableChange = 0;
     for (size_t i = 0; i < change.buckets.size(); ++i) {
+        if (!hasDomainDelta(change.buckets[i])) {
+            prepared->buckets[i] = {};
+            (*aggregateBytes)[i] = 0;
+            continue;
+        }
         const auto values = components(change.buckets[i]);
         auto target = components(prepared->buckets[i]);
         qint64 aggregateChange = 0;
@@ -323,6 +352,18 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
             target[0], target[1], target[2], target[3]};
         (*aggregateBytes)[i] = aggregateChange > 0
             ? quint64(aggregateChange) : 0;
+        if (i == size_t(KisBackingBudgetClass::IdleCapacity)) {
+            // Q covers all reserved destination bytes, including a move
+            // between domains, until the original source charge is released.
+            quint64 positive = 0;
+            for (qint64 value : target) {
+                if (__builtin_add_overflow(positive, quint64(value), &positive)) {
+                    KisPageStoreDetail::setError(error, QStringLiteral("idle preparation delta overflows"));
+                    return false;
+                }
+            }
+            (*aggregateBytes)[i] = positive;
+        }
         if (__builtin_add_overflow(durableChange, change.buckets[i].ssd,
                                    &durableChange)) {
             KisPageStoreDetail::setError(
@@ -509,32 +550,55 @@ KisBackingBudgetController::~KisBackingBudgetController()
     }
 }
 
+quint64 KisBackingBudgetController::nonMetadataLiveSsdLocked() const
+{
+    if (!m_nonMetadataLiveSsdValid) {
+        m_nonMetadataLiveSsd = 0;
+        for (size_t i = 0; i < size_t(KisBackingBudgetClass::MetadataArena); ++i)
+            m_nonMetadataLiveSsd = saturatedAdd(m_nonMetadataLiveSsd, m_usage.buckets[i].live.ssd);
+        m_nonMetadataLiveSsdValid = true;
+    }
+    return m_nonMetadataLiveSsd;
+}
+
 bool KisBackingBudgetController::fitsLocked(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
     quint64 durableBytes, bool emptyUsage,
     quint64 irreducibleMetadataBytes) const
 {
-    quint64 liveSsd = 0;
+    if (m_limits.optionalCacheBytes != std::numeric_limits<quint64>::max()) {
+        const quint64 optional = emptyUsage ? 0 : optionalBytes(m_usage, m_reservedAggregateBytes);
+        const quint64 demand = optionalDemand(aggregateBytes);
+        if (demand > m_limits.optionalCacheBytes || optional > m_limits.optionalCacheBytes - demand)
+            return false;
+    }
+    quint64 liveSsd = emptyUsage ? 0 : nonMetadataLiveSsdLocked();
     const auto process = m_processStorage ? processStorageSnapshot() : ProcessStorageSnapshot{};
     const auto classLimits = aggregateLimits(m_limits);
     for (size_t i = 0; i < budgetClassCount; ++i) {
         const auto budgetClass = static_cast<KisBackingBudgetClass>(i);
-        const auto limits = domainLimits(m_limits, budgetClass);
         auto live = emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].live;
+        if (budgetClass == KisBackingBudgetClass::MetadataArena)
+            liveSsd = saturatedAdd(liveSsd, live.ssd);
+        const quint32 bit = quint32(1) << i;
+        const bool metadata = budgetClass == KisBackingBudgetClass::MetadataArena;
+        if (!emptyUsage && !metadata && (m_fittingBudgetClasses & bit)
+            && !aggregateBytes[i] && !hasDomainDelta(delta.buckets[i])) continue;
         auto reserved = emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved;
-        if (emptyUsage && budgetClass == KisBackingBudgetClass::MetadataArena)
-            live.cpuRam = irreducibleMetadataBytes;
-        if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena) {
+        if (emptyUsage && metadata) live.cpuRam = irreducibleMetadataBytes;
+        if (m_processStorage && metadata) {
             live.cpuRam = saturatedAdd(live.cpuRam, process.live);
             reserved.cpuRam = saturatedAdd(reserved.cpuRam, process.reserved);
         }
         auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
-        if (m_processStorage && budgetClass == KisBackingBudgetClass::MetadataArena)
-            pending = saturatedAdd(pending, process.reserved);
-        if (!fitsBudgetBucket(live, reserved, delta.buckets[i], limits,
-                              aggregateBytes[i], pending, classLimits[i])) return false;
-        liveSsd = saturatedAdd(liveSsd, live.ssd);
+        if (m_processStorage && metadata) pending = saturatedAdd(pending, process.reserved);
+        if (!fitsBudgetBucket(live, reserved, delta.buckets[i],
+                domainLimits(m_limits, budgetClass), aggregateBytes[i], pending, classLimits[i]))
+            return false;
+        // A fitting nonnegative proposal also proves its present base fits.
+        // Hypothetical empty-usage admission cannot certify real usage.
+        if (!emptyUsage && !metadata) m_fittingBudgetClasses |= bit;
     }
     const auto limit = m_limits.durableStoreCapacity;
     return durableBytes <= limit && liveSsd <= limit - durableBytes &&
@@ -546,23 +610,21 @@ bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes) const
     if (bytes > quint64(std::numeric_limits<qint64>::max())) return false;
     constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
     static_assert(metadata + 1 == budgetClassCount);
-    if (!m_nonMetadataFitsValid) {
-        m_nonMetadataFits = true;
-        m_nonMetadataLiveSsd = 0;
+    if (m_limits.optionalCacheBytes != std::numeric_limits<quint64>::max()
+        && optionalBytes(m_usage, m_reservedAggregateBytes) > m_limits.optionalCacheBytes) return false;
+    constexpr quint32 nonMetadataMask = (quint32(1) << metadata) - 1;
+    if ((m_fittingBudgetClasses & nonMetadataMask) != nonMetadataMask) {
         const auto classLimits = aggregateLimits(m_limits);
         for (size_t i = 0; i < metadata; ++i) {
+            const quint32 bit = quint32(1) << i;
+            if (m_fittingBudgetClasses & bit) continue;
             const auto &usage = m_usage.buckets[i];
             if (!fitsBudgetBucket(usage.live, usage.reserved, {},
                     domainLimits(m_limits, static_cast<KisBackingBudgetClass>(i)),
-                    0, m_reservedAggregateBytes[i], classLimits[i])) {
-                m_nonMetadataFits = false;
-                break;
-            }
-            m_nonMetadataLiveSsd = saturatedAdd(m_nonMetadataLiveSsd, usage.live.ssd);
+                    0, m_reservedAggregateBytes[i], classLimits[i])) return false;
+            m_fittingBudgetClasses |= bit;
         }
-        m_nonMetadataFitsValid = true;
     }
-    if (!m_nonMetadataFits) return false;
     const auto process = m_processStorage ? processStorageSnapshot() : ProcessStorageSnapshot{};
     auto live = m_usage.buckets[metadata].live;
     auto reserved = m_usage.buckets[metadata].reserved;
@@ -572,7 +634,7 @@ bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes) const
     if (!fitsBudgetBucket(live, reserved, {qint64(bytes), 0, 0, 0},
             domainLimits(m_limits, KisBackingBudgetClass::MetadataArena),
             bytes, pending, m_limits.metadataArenaBytes)) return false;
-    const auto liveSsd = saturatedAdd(m_nonMetadataLiveSsd, live.ssd);
+    const auto liveSsd = saturatedAdd(nonMetadataLiveSsdLocked(), live.ssd);
     const auto limit = m_limits.durableStoreCapacity;
     return liveSsd <= limit && m_reservedDurableBytes <= limit - liveSsd;
 }
@@ -586,6 +648,8 @@ bool KisBackingBudgetController::priorWaiterConflictsLocked(
     const auto classLimits = aggregateLimits(m_limits);
     for (const auto &prior : m_waitContext->requests) {
         if (!prior || prior->granted || prior->sequence >= beforeSequence) continue;
+        if (m_limits.optionalCacheBytes != std::numeric_limits<quint64>::max()
+            && optionalDemand(aggregateBytes) && optionalDemand(prior->aggregateBytes)) return true;
         if (durableBytes && prior->durableBytes &&
             m_limits.durableStoreCapacity != std::numeric_limits<quint64>::max()) return true;
         for (size_t i = 0; i < budgetClassCount; ++i) {
@@ -923,35 +987,41 @@ void KisBackingBudgetReservation::clear() noexcept
 
 void KisBackingBudgetReservation::commit(const KisBackingBudgetDelta &delta) noexcept
 {
-    commitRetaining(delta, {});
+    settle(&delta, nullptr);
 }
 
 void KisBackingBudgetReservation::commitRetaining(
     const KisBackingBudgetDelta &installed,
     const KisBackingBudgetDelta &retained) noexcept
 {
+    settle(&installed, &retained);
+}
+
+void KisBackingBudgetReservation::settle(const KisBackingBudgetDelta *installed,
+                                       const KisBackingBudgetDelta *retained) noexcept
+{
     KisBackingBudgetController *local = owner;
     const bool hasParent = local && local->m_sharedNonPayloadBudget;
-    const KisBackingBudgetDelta sharedInstalled = hasParent
-        ? local->sharedNonPayloadDelta(installed) : KisBackingBudgetDelta{};
-    const KisBackingBudgetDelta sharedRetained = hasParent
-        ? local->sharedNonPayloadDelta(retained) : KisBackingBudgetDelta{};
-    if (!local || !local->commitRetaining(cookie, installed, retained)) {
+    std::optional<KisBackingBudgetDelta> sharedInstalled, sharedRetained;
+    if (hasParent && installed) sharedInstalled = local->sharedNonPayloadDelta(*installed);
+    if (hasParent && retained) sharedRetained = local->sharedNonPayloadDelta(*retained);
+    if (!local || !local->settle(cookie, installed, retained)) {
         owner = nullptr;
         cookie = 0;
     }
     if (sharedOwner) {
-        if (!sharedOwner->commitRetaining(sharedCookie, sharedInstalled, sharedRetained)) {
+        if (!sharedOwner->settle(sharedCookie, sharedInstalled ? &*sharedInstalled : nullptr,
+                                sharedRetained ? &*sharedRetained : nullptr)) {
             sharedOwner = nullptr;
             sharedCookie = 0;
         }
-    } else if (hasParent) {
+    } else if (sharedInstalled) {
         // No positive parent demand means no parent ticket. Releasing its
         // existing child charge still has to happen, without another admission.
         // Existing retained consumers keep only RetirementDebt; a non-payload
         // retained amount would require its own already prepared parent ticket.
-        const auto amounts = components(sharedInstalled.buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
-        Q_ASSERT(!hasPositiveBytes(sharedRetained));
+        const auto amounts = components(sharedInstalled->buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
+        Q_ASSERT(!sharedRetained || !hasPositiveBytes(*sharedRetained));
         const KisPageAccessDomain domains[] = {KisPageAccessDomain::CpuRam,
             KisPageAccessDomain::UmaShared, KisPageAccessDomain::DiscreteVram, KisPageAccessDomain::Ssd};
         for (size_t domain = 0; domain < amounts.size(); ++domain) {
@@ -966,7 +1036,7 @@ void KisBackingBudgetReservation::commitRetaining(
 bool KisBackingBudgetReservation::retainOnly(
     const KisBackingBudgetDelta &retained) noexcept
 {
-    commitRetaining({}, retained);
+    settle(nullptr, &retained);
     return owner != nullptr;
 }
 
@@ -1007,6 +1077,17 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveChange(
     quint64 durableBytes = 0;
     if (!prepareBudgetChange(change, &prepared, &aggregateBytes, &durableBytes, error)) return {};
     return reserveImpl(prepared, aggregateBytes, durableBytes, error, &change);
+}
+
+quint64 KisBackingBudgetController::idleCapacityAllowance() const
+{
+    QMutexLocker lock(&m_mutex);
+    const auto &idle = m_usage.buckets[size_t(KisBackingBudgetClass::IdleCapacity)];
+    const quint64 used = saturatedAdd(sumComponents(components(idle.live)),
+                                     sumComponents(components(idle.reserved)));
+    const quint64 total = optionalBytes(m_usage, m_reservedAggregateBytes);
+    if (used >= m_limits.idleCapacityBytes || total >= m_limits.optionalCacheBytes) return 0;
+    return std::min(m_limits.idleCapacityBytes - used, m_limits.optionalCacheBytes - total);
 }
 
 bool KisBackingBudgetController::admitUnchangedBacking(QString *error)
@@ -1209,8 +1290,9 @@ void KisBackingBudgetController::activateReservationLocked(
     quint64 sharedChild)
 {
     auto *slot = activeReservation(cookie);
-    Q_ASSERT(slot && !hasPositiveBytes(slot->delta));
-    m_nonMetadataFitsValid = false;
+    Q_ASSERT(slot);
+    // Inactive slot contents have no consumers. Activation overwrites the
+    // original storage once; completion need not reconstruct an empty delta.
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
     slot->delta = delta;
     slot->aggregateBytes = aggregateBytes;
@@ -1233,6 +1315,9 @@ void KisBackingBudgetController::activateReservationLocked(
     }
 
     for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
+        const bool changed = hasDomainDelta(delta.buckets[bucketIndex]) || aggregateBytes[bucketIndex];
+        if (changed) m_fittingBudgetClasses &= ~(quint32(1) << bucketIndex);
+        if (!changed && bucketIndex != size_t(KisBackingBudgetClass::MetadataArena)) continue;
         auto reserved = components(m_usage.buckets[bucketIndex].reserved);
         auto peak = components(m_usage.buckets[bucketIndex].peak);
         const auto live = components(m_usage.buckets[bucketIndex].live);
@@ -1326,7 +1411,7 @@ bool KisBackingBudgetController::configureLimits(const KisPageBackingLimits &lim
         }
     }
     m_limits = limits;
-    m_nonMetadataFitsValid = false;
+    m_fittingBudgetClasses = 0;
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -1453,6 +1538,7 @@ KisBackingBudgetDelta KisBackingBudgetController::sharedNonPayloadDelta(
     KisBackingBudgetDelta result;
     const auto metadata = components(delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
     const auto cache = components(delta.buckets[size_t(KisBackingBudgetClass::OptionalCache)]);
+    const auto idle = components(delta.buckets[size_t(KisBackingBudgetClass::IdleCapacity)]);
     auto combined = components(result.buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
     bool overflow = false;
     for (size_t domain = 0; domain < combined.size(); ++domain) {
@@ -1464,6 +1550,14 @@ KisBackingBudgetDelta KisBackingBudgetController::sharedNonPayloadDelta(
             overflow = true;
         } else
             combined[domain] = metadata[domain] + cache[domain];
+        qint64 sum;
+        if (__builtin_add_overflow(combined[domain], idle[domain], &sum)) {
+            combined[domain] = idle[domain] > 0 ? std::numeric_limits<qint64>::max()
+                                              : std::numeric_limits<qint64>::min();
+            overflow = true;
+        } else {
+            combined[domain] = sum;
+        }
     }
     if (valid) *valid = !overflow;
     Q_ASSERT(valid || !overflow); // Already admitted changes cannot overflow at commit.
@@ -1487,13 +1581,16 @@ void KisBackingBudgetController::releaseLive(KisBackingBudgetClass budgetClass,
         if (!live) return;
         Q_ASSERT(*live >= bytes);
         *live = bytes > *live ? 0 : *live - bytes;
+        if (budgetClass != KisBackingBudgetClass::MetadataArena && domain == KisPageAccessDomain::Ssd && bytes)
+            m_nonMetadataLiveSsdValid = false;
         if (budgetClass != KisBackingBudgetClass::MetadataArena)
-            m_nonMetadataFitsValid = false;
+            m_fittingBudgetClasses &= ~(quint32(1) << bucketIndex);
         notifyWaitersLocked();
     }
     if (m_sharedNonPayloadBudget
         && (budgetClass == KisBackingBudgetClass::MetadataArena
-            || budgetClass == KisBackingBudgetClass::OptionalCache)) {
+            || budgetClass == KisBackingBudgetClass::OptionalCache
+            || budgetClass == KisBackingBudgetClass::IdleCapacity)) {
         m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
             m_sharedNonPayloadChild, domain, bytes);
     }
@@ -1518,42 +1615,46 @@ void KisBackingBudgetController::releaseSharedNonPayloadLive(
     notifyWaitersLocked();
 }
 
-bool KisBackingBudgetController::commitRetaining(
-    quint64 cookie,
-    const KisBackingBudgetDelta &installed,
-    const KisBackingBudgetDelta &retained) noexcept
+bool KisBackingBudgetController::settle(quint64 cookie,
+    const KisBackingBudgetDelta *installed,
+    const KisBackingBudgetDelta *retained) noexcept
 {
     QMutexLocker lock(&m_mutex);
     const quint32 slotIndex = quint32(cookie);
     ReservationSlot *slot = activeReservation(cookie);
-    if (!slot) return 0;
-    m_nonMetadataFitsValid = false;
-
+    if (!slot) return false;
+    constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
     SharedChildUsage *sharedUsage = nullptr;
     if (slot->sharedChild) {
         auto child = m_sharedChildren.find(slot->sharedChild);
         Q_ASSERT(child != m_sharedChildren.end());
         if (child != m_sharedChildren.end()) sharedUsage = &child->second;
     }
-
-    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
-        Q_ASSERT(m_reservedAggregateBytes[bucketIndex]
-                 >= slot->aggregateBytes[bucketIndex]);
-        m_reservedAggregateBytes[bucketIndex] -= slot->aggregateBytes[bucketIndex];
-    }
+    const quint64 sharedPreparedBytes = slot->aggregateBytes[metadata];
     Q_ASSERT(m_reservedDurableBytes >= slot->durableBytes);
     m_reservedDurableBytes -= slot->durableBytes;
-
-    for (size_t bucketIndex = 0; bucketIndex < budgetClassCount; ++bucketIndex) {
-        auto live = components(m_usage.buckets[bucketIndex].live);
-        auto peak = components(m_usage.buckets[bucketIndex].peak);
-        auto reserved = components(m_usage.buckets[bucketIndex].reserved);
-        const auto prepared = components(slot->delta.buckets[bucketIndex]);
-        const auto keep = components(retained.buckets[bucketIndex]);
-        const auto commit = components(installed.buckets[bucketIndex]);
+    quint64 retainedDurable = 0;
+    bool retainedReservation = false;
+    const KisPageDomainByteDelta empty;
+    for (size_t i = 0; i < budgetClassCount; ++i) {
+        const auto &applied = installed ? installed->buckets[i] : empty;
+        const auto &kept = retained ? retained->buckets[i] : empty;
+        if (!slot->aggregateBytes[i] && !hasDomainDelta(slot->delta.buckets[i])
+            && !hasDomainDelta(applied) && !hasDomainDelta(kept)) continue;
+        m_fittingBudgetClasses &= ~(quint32(1) << i);
+        if (i != metadata && applied.ssd) m_nonMetadataLiveSsdValid = false;
+        Q_ASSERT(m_reservedAggregateBytes[i] >= slot->aggregateBytes[i]);
+        m_reservedAggregateBytes[i] -= slot->aggregateBytes[i];
+        quint64 retainedAggregate = 0;
+        auto &usage = m_usage.buckets[i];
+        auto live = components(usage.live);
+        auto peak = components(usage.peak);
+        auto reserved = components(usage.reserved);
+        const auto prepared = components(slot->delta.buckets[i]);
+        const auto keep = components(kept);
+        const auto commit = components(applied);
         for (size_t domain = 0; domain < prepared.size(); ++domain) {
-            Q_ASSERT(prepared[domain] >= 0 && keep[domain] >= 0
-                     && keep[domain] <= prepared[domain]);
+            Q_ASSERT(prepared[domain] >= 0 && keep[domain] >= 0 && keep[domain] <= prepared[domain]);
             reserved[domain] -= quint64(prepared[domain] - keep[domain]);
             if (commit[domain] < 0) {
                 const quint64 removal = quint64(-commit[domain]);
@@ -1563,59 +1664,43 @@ bool KisBackingBudgetController::commitRetaining(
                 live[domain] = saturatedAdd(live[domain], quint64(commit[domain]));
                 peak[domain] = std::max(peak[domain], live[domain]);
             }
+            if (retained && keep[domain] > 0) {
+                retainedAggregate = saturatedAdd(retainedAggregate, quint64(keep[domain]));
+                retainedReservation = true;
+            }
         }
-        m_usage.buckets[bucketIndex].live = fromComponents(live);
-        m_usage.buckets[bucketIndex].peak = fromComponents(peak);
-        m_usage.buckets[bucketIndex].reserved = fromComponents(reserved);
+        usage.live = fromComponents(live);
+        usage.peak = fromComponents(peak);
+        usage.reserved = fromComponents(reserved);
+        if (retained) {
+            slot->aggregateBytes[i] = retainedAggregate;
+            m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], retainedAggregate);
+            if (kept.ssd > 0) retainedDurable = saturatedAdd(retainedDurable, quint64(kept.ssd));
+        }
     }
     if (sharedUsage) {
-        const size_t metadata = size_t(KisBackingBudgetClass::MetadataArena);
-        quint64 retainedBytes = 0;
-        for (qint64 value : components(retained.buckets[metadata])) {
-            if (value > 0)
-                retainedBytes = saturatedAdd(retainedBytes, quint64(value));
-        }
-        const quint64 preparedBytes = slot->aggregateBytes[metadata];
-        Q_ASSERT(preparedBytes >= retainedBytes
-                 && sharedUsage->reservedBytes >= preparedBytes - retainedBytes);
+        const quint64 retainedBytes = retained ? slot->aggregateBytes[metadata] : 0;
+        Q_ASSERT(sharedPreparedBytes >= retainedBytes
+                 && sharedUsage->reservedBytes >= sharedPreparedBytes - retainedBytes);
         sharedUsage->reservedBytes -= std::min(
-            sharedUsage->reservedBytes, preparedBytes - retainedBytes);
-        for (qint64 value : components(installed.buckets[metadata])) {
+            sharedUsage->reservedBytes, sharedPreparedBytes - retainedBytes);
+        for (qint64 value : components(installed ? installed->buckets[metadata] : empty)) {
             if (value < 0) {
                 const quint64 removal = quint64(-value);
                 Q_ASSERT(sharedUsage->liveBytes >= removal);
                 sharedUsage->liveBytes = removal > sharedUsage->liveBytes
                     ? 0 : sharedUsage->liveBytes - removal;
             } else {
-                sharedUsage->liveBytes = saturatedAdd(
-                    sharedUsage->liveBytes, quint64(value));
+                sharedUsage->liveBytes = saturatedAdd(sharedUsage->liveBytes, quint64(value));
             }
         }
     }
-    slot->delta = retained;
-    slot->aggregateBytes = {};
-    slot->durableBytes = 0;
-    for (size_t i = 0; i < retained.buckets.size(); ++i) {
-        const auto &bucket = retained.buckets[i];
-        for (qint64 value : components(bucket)) {
-            if (value > 0) {
-                slot->aggregateBytes[i] = saturatedAdd(
-                    slot->aggregateBytes[i], quint64(value));
-            }
-        }
-        if (bucket.ssd > 0)
-            slot->durableBytes = saturatedAdd(
-                slot->durableBytes, quint64(bucket.ssd));
-        m_reservedAggregateBytes[i] = saturatedAdd(
-            m_reservedAggregateBytes[i], slot->aggregateBytes[i]);
-    }
-    m_reservedDurableBytes = saturatedAdd(
-        m_reservedDurableBytes, slot->durableBytes);
-    const bool retainedReservation = hasPositiveBytes(retained);
-    if (!retainedReservation) {
+    if (retainedReservation) {
+        slot->delta = *retained;
+        slot->durableBytes = retainedDurable;
+        m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, retainedDurable);
+    } else {
         slot->active = false;
-        slot->aggregateBytes = {};
-        slot->durableBytes = 0;
         slot->sharedChild = 0;
         if (slotIndex != std::numeric_limits<quint32>::max()) {
             slot->nextFree = m_firstFreeSlot;
@@ -1635,7 +1720,7 @@ void KisBackingBudgetController::moveRetirementHeadroom(
     const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
     Q_ASSERT(slot && slot->durableBytes == 0 && slot->aggregateBytes[debt] == bytes);
     if (!slot) return;
-    m_nonMetadataFitsValid = false;
+    m_fittingBudgetClasses &= ~(quint32(1) << debt);
     auto *before = kisPageDomainComponent(slot->delta.buckets[debt], source);
     auto *after = kisPageDomainComponent(slot->delta.buckets[debt], target);
     Q_ASSERT(before && after && before != after && *before == qint64(bytes) && *after == 0);
@@ -1653,7 +1738,7 @@ void KisBackingBudgetController::moveRetirementHeadroom(
 
 void KisBackingBudgetController::release(quint64 cookie) noexcept
 {
-    commitRetaining(cookie, {}, {});
+    settle(cookie, nullptr, nullptr);
 }
 
 size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept
@@ -2180,7 +2265,7 @@ KisMutationWriteSet::KisMutationWriteSet(KisMutationWriteSet &&other) noexcept
     , inlineIncarnation(std::exchange(other.inlineIncarnation, 0))
     , nextInlineIncarnation(std::exchange(other.nextInlineIncarnation, 0))
     , overflow(std::move(other.overflow))
-    , index(std::move(other.index)), budget(std::exchange(other.budget, nullptr))
+    , index(std::move(other.index)), budget(std::exchange(other.budget, nullptr)), indexSeed(other.indexSeed)
 {
     other.inlineEntry.reset();
     other.index.reset();
@@ -2195,6 +2280,7 @@ KisMutationWriteSet &KisMutationWriteSet::operator=(KisMutationWriteSet &&other)
         overflow = std::move(other.overflow);
         index = std::move(other.index);
         budget = std::exchange(other.budget, nullptr);
+        indexSeed = other.indexSeed;
         other.inlineEntry.reset();
         other.index.reset();
     }
@@ -2215,8 +2301,7 @@ const KisMutationPageEntry *KisMutationWriteSet::find(const KisPageKey &key) con
 KisMutationWriteSet::EntryIndex KisMutationWriteSet::findIndex(const KisPageKey &key) const
 {
     if (index) {
-        const auto found = index->find(key);
-        return found != index->end() && at(found->second) ? found->second.index : InvalidEntry;
+        return (*index)[indexBucket(*index, key)];
     }
     for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot)) {
         if (at(slot)->key() == key)
@@ -2236,12 +2321,12 @@ KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent 
     // All fallible index work precedes the noexcept entry construction. The
     // owner serializes preparation and installation; no candidate survives an
     // unlock or a second mutation of this set.
-    if (!index && size() >= 8) {
+    if ((!index && size() >= 8) || (index && size_t(size()) + 1 > index->size() / 2)) {
         auto prepared = prepareIndex(size() + 1);
-        prepared.emplace(intent.key, slot);
+        prepared[indexBucket(prepared, intent.key)] = slot.index;
         index.emplace(std::move(prepared));
     } else if (index) {
-        index->emplace(intent.key, slot);
+        (*index)[indexBucket(*index, intent.key)] = slot.index;
     }
     if (useInline) {
         inlineEntry.emplace(intent);
@@ -2313,7 +2398,7 @@ bool KisMutationWriteSet::erase(EntryHandle slot)
         || entry->initializationSource())
         return false;
     if (index)
-        index->erase(entry->key());
+        eraseIndex(entry->key());
     if (!slot.index) {
         inlineEntry.reset();
         inlineIncarnation = 0;
@@ -2329,12 +2414,8 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
     const qsizetype inlineCapacity = inlineEntry || nextInlineIncarnation ? 1 : 0;
     if (count > inlineCapacity)
         overflow.reserve(size_t(count - inlineCapacity));
-    if (count > 8) {
-        if (index)
-            index->reserve(size_t(count));
-        else
-            index.emplace(prepareIndex(count));
-    }
+    if (count > 8 && (!index || size_t(count) > index->size() / 2))
+        index.emplace(prepareIndex(count));
 }
 
 qsizetype KisMutationWriteSet::size() const
@@ -2342,13 +2423,42 @@ qsizetype KisMutationWriteSet::size() const
     return qsizetype(overflow.size()) + (inlineEntry ? 1 : 0);
 }
 
+size_t KisMutationWriteSet::indexBucket(const Index &table, const KisPageKey &key) const noexcept
+{
+    const size_t mask = table.size() - 1;
+    size_t bucket = qHash(key, indexSeed) & mask;
+    while (table[bucket] != InvalidEntry && !(at(table[bucket])->key() == key))
+        bucket = (bucket + 1) & mask;
+    return bucket;
+}
+
+void KisMutationWriteSet::eraseIndex(const KisPageKey &key) noexcept
+{
+    auto &table = *index;
+    const size_t mask = table.size() - 1;
+    size_t hole = indexBucket(table, key);
+    Q_ASSERT(table[hole] != InvalidEntry);
+    for (size_t next = (hole + 1) & mask; table[next] != InvalidEntry; next = (next + 1) & mask) {
+        const size_t home = qHash(at(table[next])->key(), indexSeed) & mask;
+        if (((next - home) & mask) >= ((hole - home) & mask)) {
+            table[hole] = table[next];
+            hole = next;
+        }
+    }
+    table[hole] = InvalidEntry;
+}
+
 KisMutationWriteSet::Index KisMutationWriteSet::prepareIndex(qsizetype count) const
 {
-    Index result(0, KeyHash{}, std::equal_to<KisPageKey>{},
-                 KisMutationStorageAllocator<std::pair<const KisPageKey, EntryHandle>>(budget));
-    result.reserve(size_t(count));
+    size_t buckets = 16;
+    while (buckets / 2 < size_t(count)) {
+        if (buckets > size_t(std::numeric_limits<qint64>::max()) / sizeof(EntryIndex) / 2)
+            throw std::bad_alloc();
+        buckets *= 2;
+    }
+    Index result(buckets, InvalidEntry, KisMutationStorageAllocator<EntryIndex>(budget));
     for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot))
-        result.emplace(at(slot)->key(), slot);
+        result[indexBucket(result, at(slot)->key())] = slot.index;
     return result;
 }
 
@@ -2395,27 +2505,6 @@ void KisPageWriteAdmission::ClaimSet::releaseImpl(bool lockOwner) noexcept
     owner = nullptr;
     writeSet = nullptr;
     token = 0;
-}
-
-void *KisPageStoreWriteReservation::operator new(size_t bytes, KisBackingBudgetController *budget,
-                                                void *owner, void (*retain)(void *), void (*release)(void *))
-{
-    if (bytes > size_t(std::numeric_limits<qint64>::max()) - sizeof(Allocation)) throw std::bad_alloc();
-    const size_t total = bytes + sizeof(Allocation);
-    auto *allocation = static_cast<Allocation *>(kisAllocateMutationStorage(budget, total, alignof(Allocation)));
-    new (allocation) Allocation{budget, owner, release};
-    retain(owner);
-    return allocation + 1;
-}
-
-void KisPageStoreWriteReservation::operator delete(void *data) noexcept
-{
-    if (!data) return;
-    auto *allocation = static_cast<Allocation *>(data) - 1;
-    const auto value = *allocation;
-    allocation->~Allocation();
-    kisFreeMutationStorage(value.budget, allocation, 0, alignof(Allocation));
-    value.release(value.owner);
 }
 
 KisPageWriteAdmission::KisPageWriteAdmission(QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
@@ -2624,21 +2713,6 @@ bool KisPageWriteAdmission::ownsClaimLocked(const ClaimSet &claims, const KisPag
     return found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token;
 }
 
-bool KisPageWriteAdmission::adoptReservationLocked(KisPageStoreWriteReservation &range,
-                                                  KisMutationWriteSet &writes, ClaimSet &claims) noexcept
-{
-    if (!range.admission.isValid() || range.admission.owner != this
-        || range.admission.writeSet != &range.writes || range.writes.size() == 0
-        || writes.size() != 0 || claims.isValid() || (m_operational && !*m_operational)) return false;
-    // A unique reservation is returned only after claimAll succeeds. Its
-    // private set cannot grow or release a key before this atomic transfer.
-    Q_ASSERT(ownsClaimSetLocked(range.admission));
-    writes = std::move(range.writes);
-    claims = std::move(range.admission);
-    claims.writeSet = &writes;
-    return true;
-}
-
 void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept
 {
     std::optional<QMutexLocker<QMutex>> lock;
@@ -2673,14 +2747,15 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     const KisPageTransaction &transaction, const KisPageWriteIntent &intent,
     KisPagePublicationCoordinator &publication, KisPageTransition *write,
     KisPageAllocationDescriptor *descriptor, QString *error,
-    KisReplicaHandle *recoverableBefore, std::shared_ptr<KisCpuResidentBinding> *binding)
+    KisReplicaHandle *recoverableBefore, std::shared_ptr<KisCpuResidentBinding> *binding,
+    std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout)
 {
     const auto fail = [&](const QString &reason) { KisPageStoreDetail::setError(error, reason); return false; };
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
     KisPageVersion baseVersion;
     if (!epoch->resolve(intent.key, overlay, &baseVersion))
         return fail(QStringLiteral("write base does not resolve"));
-    const auto sealed = publication.findPreparedProofLocked(transaction.id, intent.key).authority.version;
+    const auto sealed = publication.findPreparedVersionLocked(transaction.id, intent.key);
     const bool removed = (intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval))
         || publication.stagesRemovalLocked(transaction.id, intent.key);
     const bool discoverBefore = recoverableBefore && !removed;
@@ -2708,6 +2783,7 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
         *descriptor = surface.allocationDescriptor();
     } else if (!baseInfo.descriptor)
         return fail(QStringLiteral("write base descriptor is unavailable"));
+    else if (sharedLayout) *sharedLayout = std::move(baseInfo.descriptor);
     else *descriptor = *baseInfo.descriptor;
     if (recoverableBefore) *recoverableBefore = baseInfo.recoverableBefore;
     if (binding) *binding = std::move(baseInfo.binding);
@@ -2718,7 +2794,8 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     write->source = base.authority;
     write->transaction = transaction.id;
     write->writeMode = removed || baseVersion.isDefaultPixel() ? KisPageWriteMode::DiscardContents : intent.mode;
-    if (!descriptor->isValid() || !write->version.isValid())
+    const auto *layout = sharedLayout && *sharedLayout ? sharedLayout->get() : descriptor;
+    if (!layout->isValid() || !write->version.isValid())
         return fail(QStringLiteral("write identity or layout is unavailable"));
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -2757,12 +2834,12 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     KisPageStoreDiagnosticTimer &diagnostic, KisPagePrivateWrite *native)
 {
     const auto fallback = select(intent);
-    auto spare = publication.takeWorkingCapacityLocked(transaction.id, write.version.key);
+    auto spare = publication.takeIdleCapacityLocked(write.version.key);
     const auto retireUnused = qScopeGuard([&] {
         if (!spare.isValid()) return;
         // Give abandoned optional capacity its first retirement attempt
         // before Fresh admission. Otherwise this operation could be refused
-        // by its own spare's ActivePending charge. Physical refusal still
+        // by its own idle capacity's charge. Physical refusal still
         // transfers the original funded record to the existing retry queue.
         if (locker.isLocked()) locker.unlock();
         const auto restoreLock = qScopeGuard([&] { locker.relock(); });
@@ -2794,9 +2871,14 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         bool beforePinned = false;
         const void *sourceBytes = nullptr;
         KisBackingHandoffReservation accounting;
-        KisPageMetadataCoordinator::PreparedPublication metadata;
-        KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-        KisPagePublicationCoordinator::PreparedDescriptors descriptors;
+        struct Publication {
+            KisPageMetadataCoordinator::PreparedPublication metadata;
+            KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+            KisPagePublicationCoordinator::PreparedDescriptors descriptors;
+        };
+        // Native idle capacity goes straight into the original private result;
+        // it has no generic publication preparation or descriptor installation.
+        std::optional<Publication> publication;
         ~Prepared()
         {
             if (beforePinned) beforeBinding->releaseRead();
@@ -2849,31 +2931,34 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     }
     recoverable.target = physical.target();
     prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, recoverable.target);
-    if (prepared->accounting.isValid() && !privateCapacity)
-        prepared->metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, recoverable)
+    if (prepared->accounting.isValid() && !privateCapacity) {
+        auto &publicationPreparation = prepared->publication.emplace();
+        publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, recoverable)
             : metadata->prepareRecoverableWrite(transaction, recoverable, nullptr, native);
+    }
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepared, 1);
     locker.relock();
-    if (!prepared->accounting.isValid() || (!privateCapacity && !prepared->metadata.isValid())) return fallback;
+    if (!prepared->accounting.isValid()
+        || (!privateCapacity && !prepared->publication->metadata.isValid())) return fallback;
 
     // All fallible storage exists before taking the physical claim. Metadata
     // install strictly rechecks the page revision and exact recovery identity.
-    prepared->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
+    if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
     const auto plan = reuseCapacity ? KisPageWritePlanKind::ReuseWorkingCapacity : select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
     if (!physical.tryClaim()) return fallback;
     const bool installed = privateCapacity
         ? metadata->reservePrivateWrite(recoverable, native, transientLimit)
         : reuseCapacity
-        ? metadata->installLeaseWrite(std::move(prepared->metadata), transaction, nullptr, &prepared->cleanup)
-        : metadata->installRecoverableWrite(std::move(prepared->metadata), transaction, nullptr, &prepared->cleanup);
+        ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)
+        : metadata->installRecoverableWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup);
     if (!installed) return fallback;
     writable = physical.commit();
     const bool accounted = ownerLedger->commitBackingHandoff(std::move(prepared->accounting));
     Q_ASSERT(writable.isValid() && accounted);
     Q_UNUSED(accounted);
     spare = {}; // The original ledger now owns the target identity.
-    publication.installDescriptorAdditionsLocked(&prepared->descriptors);
+    if (!native) publication.installDescriptorAdditionsLocked(&prepared->publication->descriptors);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstalled, 1);
     // A discard guard without final input preserves the existing adapter
     // contract: untouched pixels start at the surface default. Complete input
@@ -2949,6 +3034,7 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
     // class while retaining only this Debt fallback.
     if (budgetClass != KisBackingBudgetClass::RetirementDebt
         && budgetClass != KisBackingBudgetClass::OptionalCache
+        && budgetClass != KisBackingBudgetClass::IdleCapacity
         && budgetClass != KisBackingBudgetClass::MetadataArena) {
         auto &debt = delta.buckets[static_cast<size_t>(KisBackingBudgetClass::RetirementDebt)];
         *kisPageDomainComponent(debt, domain) = qint64(bytes);

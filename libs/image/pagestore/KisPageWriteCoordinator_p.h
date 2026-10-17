@@ -45,7 +45,6 @@ class KisPageStoreDiagnosticTimer;
 class KisPageStore;
 class KisCpuWriteBindingReservation;
 class KisCpuResidentBinding;
-class KisPageStoreWriteReservation;
 struct KisPageTransition;
 struct KisPagePrivateWrite;
 enum class KisPageTransitionKind : quint8;
@@ -96,6 +95,7 @@ enum class KisBackingBudgetClass : quint8 {
     InFlight,
     RetirementDebt,
     OptionalCache,
+    IdleCapacity,
     MetadataArena,
     Count
 };
@@ -119,6 +119,9 @@ struct KisPageBackingLimits {
     quint64 inFlightReplicaBytes = std::numeric_limits<quint64>::max();
     quint64 retirementDebtBytes = std::numeric_limits<quint64>::max();
     quint64 optionalCacheBytes = std::numeric_limits<quint64>::max();
+    // Sub-limit of optionalCacheBytes; includes queued capacity until its
+    // original charge actually changes or is released.
+    quint64 idleCapacityBytes = 256 * 1024;
     quint64 metadataArenaBytes = std::numeric_limits<quint64>::max();
     quint64 durableStoreCapacity = std::numeric_limits<quint64>::max();
     quint32 maxTransientVersionsPerPage = std::numeric_limits<quint32>::max();
@@ -190,6 +193,8 @@ private:
     void commit(const KisBackingBudgetDelta &) noexcept;
     void commitRetaining(const KisBackingBudgetDelta &installed,
                          const KisBackingBudgetDelta &retained) noexcept;
+    void settle(const KisBackingBudgetDelta *installed,
+                const KisBackingBudgetDelta *retained) noexcept;
     bool retainOnly(const KisBackingBudgetDelta &retained) noexcept;
 
     KisBackingBudgetController *owner = nullptr;
@@ -243,6 +248,7 @@ public:
     // the caller must hold the original class/physical claim through commit.
     KisBackingBudgetReservation reserveChange(const KisBackingBudgetDelta &,
                                                QString *error);
+    quint64 idleCapacityAllowance() const;
     // Identity-only handoff still observes hard limits/process peaks, but
     // has no positive or retained fee and needs no reservation lifetime.
     bool admitUnchangedBacking(QString *error);
@@ -295,9 +301,8 @@ private:
         return const_cast<KisBackingBudgetController *>(this)->activeReservation(cookie);
     }
 
-    bool commitRetaining(quint64 cookie,
-                         const KisBackingBudgetDelta &installed,
-                         const KisBackingBudgetDelta &retained) noexcept;
+    bool settle(quint64 cookie, const KisBackingBudgetDelta *installed,
+                const KisBackingBudgetDelta *retained) noexcept;
     // OwnerLedger-only: headroom for reclassifying an already charged physical
     // backing. Moving it creates no payload or additional durable allocation.
     void moveRetirementHeadroom(quint64 cookie, KisPageAccessDomain source,
@@ -325,6 +330,7 @@ private:
         quint64 durableBytes, bool emptyUsage = false,
         quint64 irreducibleMetadataBytes = 0) const;
     bool fitsMetadataStorageLocked(quint64 bytes) const;
+    quint64 nonMetadataLiveSsdLocked() const;
     bool priorWaiterConflictsLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
         quint64 durableBytes, quint64 beforeSequence = std::numeric_limits<quint64>::max()) const;
@@ -372,13 +378,13 @@ private:
     SharedChildMap m_sharedChildren;
     quint64 m_nextSharedChild = 1;
     const bool m_processStorage;
-    // Under m_mutex: only the six non-metadata buckets' zero-delta policy is
-    // cached. Reservation/commit, non-metadata release, retirement-domain
-    // movement and limit configuration invalidate it. Metadata/process usage
-    // and the global durable reservation remain live inputs on every check.
+    // Derived under m_mutex, never a second balance. A bit proves the
+    // unchanged non-metadata class fits its current limits. Every writer of
+    // that class invalidates it; metadata/process and cross-class constraints
+    // are checked from live state on every admission.
     mutable quint64 m_nonMetadataLiveSsd = 0;
-    mutable bool m_nonMetadataFitsValid = false;
-    mutable bool m_nonMetadataFits = false;
+    mutable quint32 m_fittingBudgetClasses = 0;
+    mutable bool m_nonMetadataLiveSsdValid = false;
 
     friend class KisBackingBudgetReservation;
     friend class KisBackingBudgetWaiter;
@@ -482,13 +488,12 @@ public:
     qsizetype size() const;
 
 private:
-    struct KeyHash {
-        size_t seed = QHashSeed::globalSeed();
-        size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
-    };
-    using Index = std::unordered_map<KisPageKey, EntryHandle, KeyHash, std::equal_to<KisPageKey>,
-        KisMutationStorageAllocator<std::pair<const KisPageKey, EntryHandle>>>;
+    // Private locator only. Keys and incarnations stay on the original
+    // stable rows; no copied key or public capability lives in this index.
+    using Index = std::vector<EntryIndex, KisMutationStorageAllocator<EntryIndex>>;
     Index prepareIndex(qsizetype count) const;
+    size_t indexBucket(const Index &, const KisPageKey &) const noexcept;
+    void eraseIndex(const KisPageKey &) noexcept;
 
     std::optional<KisMutationPageEntry> inlineEntry;
     quint64 inlineIncarnation = 0;
@@ -496,6 +501,7 @@ private:
     KisMutationStorage<KisMutationPageEntry, 8> overflow;
     std::optional<Index> index;
     KisBackingBudgetController *budget = nullptr;
+    size_t indexSeed = QHashSeed::globalSeed();
 };
 
 class KRITAIMAGE_EXPORT KisPageWriteAdmission final
@@ -567,9 +573,6 @@ public:
                     QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;
     bool ownsClaimLocked(const ClaimSet &, const KisPageKey &) const;
-    // Only reserveManagedRange can populate a reservation's private claims.
-    // Transfer that complete acceptance without re-admitting its keys.
-    bool adoptReservationLocked(KisPageStoreWriteReservation &, KisMutationWriteSet &, ClaimSet &) noexcept;
 
 private:
     struct ActiveClaim {
@@ -586,32 +589,6 @@ private:
     const bool *m_operational = nullptr;
     quint64 m_nextClaimToken = 1;
     friend class KisPageStoreReferenceTest;
-};
-
-// An adapter owns its claimed write set until it transfers to a mutation
-// session or a semantic operation terminates. ClaimSet
-// references this stable heap object or the session set, never a copied key array.
-class KisPageStoreWriteReservation final
-{
-public:
-    explicit KisPageStoreWriteReservation(KisBackingBudgetController *budget) : writes(budget) {}
-    static void *operator new(size_t, KisBackingBudgetController *, void *owner,
-                              void (*retain)(void *), void (*release)(void *));
-    static void operator delete(void *) noexcept;
-    static void operator delete(void *data, KisBackingBudgetController *, void *,
-                                void (*)(void *), void (*)(void *)) noexcept { operator delete(data); }
-private:
-    struct alignas(std::max_align_t) Allocation {
-        KisBackingBudgetController *budget;
-        void *owner;
-        void (*release)(void *);
-    };
-    KisMutationWriteSet writes;
-    KisPageWriteAdmission::ClaimSet admission;
-
-    friend class KisPageStore;
-    friend class KisPageMutationSession;
-    friend class KisPageWriteAdmission;
 };
 
 class KRITAIMAGE_EXPORT KisPageWriteCoordinator final
@@ -635,7 +612,8 @@ public:
                                 KisPagePublicationCoordinator &, KisPageTransition *,
                                 KisPageAllocationDescriptor *, QString *error,
                                 KisReplicaHandle *recoverableBefore = nullptr,
-                                std::shared_ptr<KisCpuResidentBinding> *binding = nullptr);
+                                std::shared_ptr<KisCpuResidentBinding> *binding = nullptr,
+                                std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout = nullptr);
     KisPageMetadataTransitionResult acquireLeaseWrite(KisPageTransition &);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning

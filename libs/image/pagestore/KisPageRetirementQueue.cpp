@@ -38,7 +38,6 @@ struct KisPageRetirementWait
 {
     KisPageReadinessSubscription subscription;
     KisBackingBudgetWaiter budgetWaiter;
-    KisBackingBudgetReservation budgetGrant;
     KisPageRetirementRecords::iterator entry;
     bool queued = false;
     QAtomicInt notified{0};
@@ -251,10 +250,14 @@ void KisPageRetirementQueue::disarmLocked(KisPageRetirementRecord &record, bool 
 {
     if (!record.wait) return;
     if (takeGrant) {
-        record.wait->budgetGrant = record.wait->budgetWaiter.take();
-        if (record.wait->budgetGrant.isValid())
-            record.admissionReservation = std::move(record.wait->budgetGrant);
+        auto grant = record.wait->budgetWaiter.take();
+        if (grant.isValid()) record.admissionReservation = std::move(grant);
     }
+    // A producer may still hold the callback's storage before entering the
+    // dispatch gate. End its permission now; shared_ptr destruction is not a
+    // cancellation boundary and must not leave an invisible budget claimant.
+    record.wait->budgetWaiter.reset();
+    record.wait->subscription.reset();
     record.wait->queued = false;
     record.wait.reset();
 }
@@ -658,7 +661,9 @@ void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
 void KisPageRetirementQueue::acceptDetachedBacking(const KisReplicaHandle &replica) noexcept
 {
     const auto original = m_owner.backingClass(replica);
-    if (original != KisBackingBudgetClass::ActivePending && original != KisBackingBudgetClass::Current)
+    if (original != KisBackingBudgetClass::ActivePending && original != KisBackingBudgetClass::Current
+        && original != KisBackingBudgetClass::OptionalCache
+        && original != KisBackingBudgetClass::IdleCapacity)
         qFatal("Detached backing lost its original charge");
     m_metadata.removeCpuReadBinding(replica);
     auto record = m_owner.takeRetirementRecord(replica);

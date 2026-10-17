@@ -5,6 +5,7 @@
  */
 
 #include "KisPageStateMachine_p.h"
+#include "KisPageCommitPolicy_p.h"
 
 #include <algorithm>
 #include <limits>
@@ -655,42 +656,13 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         break;
     }
     case KisPageTransitionKind::CommitTransaction: {
-        if (!transition.transaction.isValid() || !transition.imageEpoch.isValid() ||
-            transition.imageEpoch.value <= result.next.publishedEpoch.value) {
-            return reject(QStringLiteral("transaction identity is invalid"));
-        }
-        Version *prepared = requireVersion(transition.version);
-        if (!prepared || prepared->publication != KisPagePublicationState::Prepared ||
-            !(prepared->preparedBy == transition.transaction)) {
-            return reject(QStringLiteral("transaction page is not prepared"));
-        }
-        for (const Version &candidate : result.next.versions) {
-            if (candidate.publication == KisPagePublicationState::Prepared &&
-                candidate.preparedBy == transition.transaction &&
-                candidate.version.generation.value >
-                    prepared->version.generation.value) {
-                return reject(QStringLiteral("transaction commit does not select its latest prepared generation"));
-            }
-        }
-        Version *published = result.next.publishedVersion();
-        if (!published || prepared->version.generation.value <=
-                              published->version.generation.value) {
-            return reject(QStringLiteral("transaction would not advance the published generation"));
-        }
-        setPublication(*published, KisPagePublicationState::Historical, published->preparedBy);
-        for (Version &candidate : result.next.versions) {
-            if (candidate.publication == KisPagePublicationState::Prepared &&
-                candidate.preparedBy == transition.transaction &&
-                !(candidate.version == prepared->version)) {
-                setPublication(candidate, KisPagePublicationState::Historical);
-            }
-        }
-        setPublication(*prepared, KisPagePublicationState::Published);
+        const auto failure = kisPageCommitPolicy(result.next.publishedEpoch, result.next.nativeGeneration, transition,
+            requireVersion(transition.version), result.next.publishedVersion(),
+            [&](auto visit) { for (auto &version : result.next.versions) visit(version); }, setPublication);
+        if (!failure.isEmpty()) return reject(failure);
         result.next.publishedEpoch = transition.imageEpoch;
-        result.next.publishedGeneration = prepared->version.generation;
-        result.next.publishedDefaultPixelRevision =
-            prepared->version.defaultPixelRevision;
-
+        result.next.publishedGeneration = transition.version.generation;
+        result.next.publishedDefaultPixelRevision = transition.version.defaultPixelRevision;
         break;
     }
     case KisPageTransitionKind::AttachHistoricalDefault: {

@@ -30,7 +30,6 @@ class KisTiledDataManager;
 class KisPageStoreIteratorReadScope;
 class KisPageStoreReadPage;
 class KisTile;
-class KisPageStoreWriteReservation;
 class KisTiledDataManagerIteratorWriteScope;
 
 /**
@@ -299,7 +298,11 @@ private:
     KisPageTransaction writableTransaction(bool *owned,
                                            QString *error = nullptr, bool requireIdle = false);
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-    prepareMutationBatch(QString *error, bool requireIdle = false);
+    prepareMutationBatch(QString *error, bool requireIdle = false,
+        KisPageMutationSession *reservation = nullptr, KisPageMutationExecution *execution = nullptr);
+    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> beginMutationBatchImpl(
+        QString *error, bool requireIdle, KisPageMutationSession *reservation,
+        KisPageMutationExecution *execution = nullptr);
     bool finishOwnedTransaction(KisPageMutationSession &mutation, bool publish,
                                 QString *error = nullptr);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);

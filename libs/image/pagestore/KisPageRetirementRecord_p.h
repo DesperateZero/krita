@@ -113,6 +113,9 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
     KisReplicaHandle replica;
     std::shared_ptr<KisPageReplicaProvider> provider;
+    // Valid only on the non-owning publication idle chain; the ledger owns
+    // this same record until checkout or original retirement handoff.
+    qint64 idleDeadline = 0;
     // Fixed at original retirement-owner admission; retries never re-query
     // provider code or maintain another wake-eligibility policy.
     bool backgroundRetirement = false;

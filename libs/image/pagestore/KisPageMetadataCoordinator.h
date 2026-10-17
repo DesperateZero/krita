@@ -23,6 +23,8 @@
 class KisCpuResidentBinding;
 struct KisPageNativeReadRef;
 struct KisPagePrivateWrite;
+struct KisPagePublicationChange;
+struct KisPageRetirementRecord;
 // A borrowed selection value, never another per-version allocation or owner.
 struct KisCpuReadBinding {
     KisReplicaHandle replica;
@@ -289,7 +291,10 @@ private:
     bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &);
     bool cancelPrivateResult(KisPagePrivateWrite *);
     KisPagePrivateWrite *nativeWrite(const KisPageVersion &) const;
+    KisPagePrivateWrite *nativeWriteForProof(const KisPreparedPageProof &) const;
     bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
+    KisPreparedPageProof cpuProof(const KisPageVersion &, KisPageTransactionId,
+                                  quint64 stamp, quint64 issuer, const KisReplicaHandle &) const;
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
     qsizetype cpuProofCount(quint64 issuer) const;
@@ -361,6 +366,9 @@ private:
     // under its registration gate around a whole-directory default/restore
     // plan; per-page revision claims alone cannot detect a newly added key.
     quint64 pageRegistrationCount() const;
+    // Store-gated, non-owning exact incarnation. Installation requires the
+    // original publication activity reservation; null only removes the index.
+    KisPageRetirementRecord *exchangeIdleCapacity(const KisPageKey &key, KisPageRetirementRecord *next);
     KisCpuReadBinding installCpuReadBinding(const KisReplicaHandle &replica,
                                            std::shared_ptr<KisCpuResidentBinding> binding);
     // A stale reader may only evict its own candidate. Retirement omits
@@ -409,6 +417,10 @@ private:
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr) const;
         bool hasDetachedBacking() const;
+        // Prepared semantic disposition, in original input coordinates. All
+        // selected releases must pass the joint install claim; late protection
+        // rejects the whole candidate before any modification.
+        void forEachCapacityRelease(void *context, void (*visit)(void *, size_t)) const;
 
     private:
         class Data;
@@ -434,7 +446,7 @@ private:
         DeferredPublicationCleanup(const DeferredPublicationCleanup &) = delete;
         DeferredPublicationCleanup &operator=(const DeferredPublicationCleanup &) = delete;
         bool isEmpty() const;
-        bool needsNativeCapacity() const;
+        bool needsCapacityReprepare() const;
         // One unit is one candidate page (or one empty-candidate terminal
         // payload). Actual candidate capacity remains charged until freed.
         // This is a cooperative destruction budget,
@@ -442,9 +454,7 @@ private:
         qsizetype pendingWorkUnits() const;
         qsizetype clearBatch(qsizetype maximumWorkUnits);
         void dispose(const std::shared_ptr<DeferredMetadataCleanupStatistics> &statistics);
-        // Installation result only. Original input ordinals survive shard
-        // ordering; the owner consumes them before handing cleanup to a worker.
-        void forEachReleasedMutation(void *context, void (*visit)(void *, size_t)) const;
+        // Installed canonical dispositions; no authority survives rejection.
         void forEachDetachedBacking(void *context, void (*visit)(void *, const KisReplicaHandle &)) const;
 
     private:
@@ -471,12 +481,6 @@ private:
                                            const KisPageVersion *versions, qsizetype count,
                                            QString *error = nullptr) const;
     enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite, PrivateWrite };
-    struct MutationDetachment {
-        KisPageVersion version;
-        size_t ownerIndex = 0;
-        bool releaseUnusedCapacity = false;
-        KisPagePrivateWrite *native = nullptr;
-    };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
                                                const KisPageTransition *transitions, qsizetype count,
@@ -485,7 +489,7 @@ private:
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
-                                               const MutationDetachment *detachments = nullptr,
+                                               const KisPagePublicationChange *operationRows = nullptr,
                                                KisPagePrivateWrite *privateResult = nullptr,
                                                bool detachUnprotectedCurrent = false) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
@@ -499,8 +503,14 @@ private:
                                         const KisPageVersion *versions, qsizetype count,
                                         QString *error = nullptr) const;
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
-                                        const MutationDetachment *versions, qsizetype count,
+                                        const KisPagePublicationChange *rows, qsizetype count,
                                         QString *error = nullptr) const;
+    // The original sealed result and sorted input span stay alive through this
+    // synchronous call. No candidate ownership or cached permission is created.
+    static bool canBorrowNativeMutation(const KisPageTransaction &, const KisPagePublicationChange *, qsizetype);
+    enum class NativeAcceptance { Accepted, NeedsCapacity, Rejected };
+    NativeAcceptance acceptNativeMutation(const KisPageTransaction &, const KisPagePublicationChange *, qsizetype,
+                                         QString *error);
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
                          QString *error = nullptr,

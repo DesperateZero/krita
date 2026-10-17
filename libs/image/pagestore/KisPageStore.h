@@ -31,7 +31,6 @@ class KisCapturedReadView;
 class KisTiles3PageReplicaProvider;
 class KisTiledDataManagerPageStoreBackend;
 class KisTiledDataManagerPageStoreWriteBatch;
-class KisPageStoreWriteReservation;
 struct KisPageMetadataMetrics;
 struct KisPageBackingLimits;
 struct KisPageBackingUsage;
@@ -147,6 +146,7 @@ private:
     class Private;
     std::shared_ptr<Private> d;
     friend class KisPageMutationSession;
+    friend class KisPageStore;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest;
     // Adapter-only result export into unique storage prepared before pixels.
@@ -274,10 +274,6 @@ private:
     // Freeze failed input before invoking adapters outside every session/
     // Store gate. The original entries/claims remain until cancel or release.
     bool visitAdapterPages(const std::function<void(const KisPageVersion &)> &visit);
-    // Adapter reservations claim their targets before capture or pixel
-    // exposure; adopting them does not create pending generations.
-    bool adoptReservation(std::unique_ptr<KisPageStoreWriteReservation> range,
-                           QString *error, KisPageMutationExecution *execution = nullptr);
     bool reserveLegacyMutationPage(const KisPageKey &key, QString *error, bool *present = nullptr);
     // Original parked target only; never selects current or prepares a page.
     KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
@@ -658,12 +654,14 @@ private:
     // no view/pin and never classifies unsealed pending bytes.
     bool resolvePagePresenceInto(KisSurfaceId, const QVector<KisLogicalPageId> &,
                                  const KisPageReadView &, quint8 *scratch, qsizetype capacity) const;
-    // Adapter-only: prepare the complete range in the store's sole admission
-    // before a transaction/session or captured input is exposed. The owned
-    // write set and claims move intact into the resulting mutation session.
-    std::unique_ptr<KisPageStoreWriteReservation> reserveManagedRange(
+    // Adapter-only: the original inert scope owns the whole range before
+    // selecting a transaction after any wait. Activation retains the same
+    // entries and claims; an inactive result exposes no write capability.
+    KisPageMutationSession reserveManagedRange(
         KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
         bool legacyIntent, bool *borrowed, QString *error);
+    KisPageMutationSession beginMutation(const KisPageTransaction &,
+        KisPageMutationSession reservation, KisPageMutationExecution *execution, QString *error);
     // Internal finite selection. It cannot be used as a whole-image snapshot.
     KisCapturedReadView captureReadRange(KisSurfaceId surface, const QRect &pages,
         const KisPageReadView &selector, QString *error,

@@ -64,7 +64,8 @@ RETIRED_WRITE_PROTOCOL_RE = re.compile(
     r"KisMaterializationKey|KisMaterializationReservation|KisPageCompletionEvent|"
     r"reserveMaterialization|bindMaterialization|rejectPlannedMaterialization|"
     r"queueMaterializationCompletion|activeMaterializationCount|"
-    r"KisMutationSourceSet|planEntry|DiscardSupersededPreparedVersions|"
+    r"KisMutationSourceSet|KisPageStoreWriteReservation|takeWorkingCapacityLocked|"
+    r"adoptReservationLocked|planEntry|DiscardSupersededPreparedVersions|"
     r"discardSupersededPreparedVersion|discardReadSuperseded|m_discardSuperseded)\b"
 )
 FIELD_RE = re.compile(
@@ -1149,7 +1150,11 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::unique_ptr<Data, DataDeleter> data",
             "using PreparedDescriptors = boost::container::small_vector",
             "struct KisPageOperationPublication",
-            "KisReplicaHandle spare",
+            "KisPagePublicationProof proof",
+            "boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity",
+            "static constexpr qint64 IdleCapacityAgeMs = 100",
+            "takeIdleCapacityLocked",
+            "expireIdleCapacityLocked",
             "using DefaultRevisionMap = std::map",
             "boost::intrusive::list<CommitPreparation> m_preparingCommits",
             "struct KisPagePublicationDelta",
@@ -1339,9 +1344,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "entry.shardOwner->setPublicationClaim(entry.key(), data.get())",
             "releaseActivities(first, end)",
             "entry.shardOwner->releasePublicationActivity(entry.key())",
-            "static_assert(sizeof(MetadataPage) <= 96)",
-            "static_assert(sizeof(MetadataPageActivity) <= 96)",
-            "MetadataMap<KisPageKey, MetadataPageActivity> activities",
+            "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
+            "MetadataPageActivityFacts activity",
+            "KisPageRetirementRecord *idleCapacity = nullptr",
+            "static_assert(sizeof(MetadataPage) == 136)",
+            "static_assert(sizeof(MetadataPageActivity) <= 104)",
+            "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
             "facts->nativeBinding",
             "struct MetadataMapAllocator : KisMutationStorageAllocator<T, false>",
@@ -1493,7 +1501,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::optional<KisMutationPageEntry> inlineEntry",
             "KisMutationStorage<KisMutationPageEntry, 8> overflow",
             "std::optional<Index> index",
-            "KisMutationStorageAllocator<std::pair<const KisPageKey, EntryHandle>>",
+            "using Index = std::vector<EntryIndex, KisMutationStorageAllocator<EntryIndex>>",
             "static_assert(sizeof(KisPageWriteIntent) <= 32)",
             "static_assert(sizeof(KisMutationPageEntry) <= 104)",
             "std::shared_ptr<const KisPageReplicaSource> initialization",

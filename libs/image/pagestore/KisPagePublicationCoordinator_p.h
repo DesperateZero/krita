@@ -13,6 +13,7 @@
 #include "KisPageOwnerLedger.h"
 #include "KisPageRetirementQueue_p.h"
 #include "KisPageStore.h"
+#include "KisPagePublicationInput_p.h"
 
 #include <QMutex>
 #include <QMutexLocker>
@@ -47,11 +48,7 @@ struct KisPagePublicationDelta {
         size_t seed = QHashSeed::globalSeed();
     };
     struct PageState {
-        KisPreparedPageProof proof;
-        // At most one logically detached, still charged ActivePending slot.
-        // The backing ledger retains its original retirement record. A new
-        // physical claim is mandatory before reusing this capacity.
-        KisReplicaHandle spare;
+        KisPagePublicationProof proof;
     };
     using ProofMap = std::unordered_map<KisPageKey, PageState, PageHash,
         std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, PageState>>>;
@@ -77,20 +74,6 @@ struct KisPagePublicationDelta {
     }
 };
 
-struct KisPagePublicationChange {
-    struct Input {
-        KisPageKey key;
-        KisPreparedPageProof proof;
-        bool removal = false;
-    } replacement;
-    KisPreparedPageProof superseded;
-    bool removalWasInBase = false;
-    bool wasRemoved = false;
-    bool releasedUnusedCapacity = false;
-};
-using KisPagePublicationChanges = std::vector<KisPagePublicationChange,
-    KisMutationStorageAllocator<KisPagePublicationChange>>;
-
 // A borrowed projection of the original operation's prepared rows. It owns
 // no proof nodes, transaction state or recovery responsibility. Both epoch
 // and publication preparation consume it while the original owner excludes
@@ -102,7 +85,7 @@ struct KisPageOperationPublication {
         struct Iterator {
             using iterator_category = std::forward_iterator_tag;
             using difference_type = std::ptrdiff_t;
-            using value_type = std::conditional_t<Proof, KisPreparedPageProof, KisPageKey>;
+            using value_type = std::conditional_t<Proof, KisPagePublicationChange::Replacement, KisPageKey>;
             using pointer = const value_type *;
             using reference = const value_type &;
             KisPagePublicationChanges::const_iterator current, last;
@@ -115,7 +98,7 @@ struct KisPageOperationPublication {
             bool operator!=(const Iterator &other) const { return current != other.current; }
             bool operator==(const Iterator &other) const { return current == other.current; }
             const auto &operator*() const {
-                if constexpr (Proof) return current->replacement.proof;
+                if constexpr (Proof) return current->replacement;
                 else return current->replacement.key;
             }
         };
@@ -188,13 +171,13 @@ public:
         // keys are unique. This does not export storage.
         bool forEachAdapterChange(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
         bool prepare(QString *error, bool *storageRefused = nullptr);
-        bool prepareNativeCapacityRetry(QString *error, bool *storageRefused);
         // Keep the owner gate from the latest surface preparation through
-        // acceptance. Surface storage is prepared before allocation-free install.
+        // acceptance. A late capacity conflict drops it for one conservative
+        // reprepare, then rechecks the original inputs and surface before install.
         bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);
         bool tryAcceptLocked(
             KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
-            QString *error);
+            QMutexLocker<QMutex> &ownerLock, QString *error, bool *storageRefused = nullptr);
         bool acceptsCanonical() const;
         bool tryAcceptCanonicalLocked(const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock);
         // Caller first relinquishes any accepted producer proofs. Keep its
@@ -204,6 +187,7 @@ public:
                             QMutexLocker<QMutex> &ownerLock);
 
     private:
+        bool installOverlayLocked(KisPageMetadataCoordinator::DeferredPublicationCleanup *, QString *);
         class Data;
         struct DataDeleter {
             KisMutationStorageAllocator<Data> storage;
@@ -293,8 +277,12 @@ public:
 
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
-    KisPreparedPageProof findPreparedProofLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
-    KisReplicaHandle takeWorkingCapacityLocked(KisPageTransactionId transaction, const KisPageKey &key);
+    KisPreparedPageProof projectProof(const KisPagePublicationProof &) const;
+    KisPreparedPageProof projectProof(const KisPagePublicationChange::Replacement &) const;
+    KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &) const;
+    KisReplicaHandle takeIdleCapacityLocked(const KisPageKey &key);
+    // Same original records and Store gate for H0, H1, expiry and close.
+    qint64 expireIdleCapacityLocked(qint64 now, bool all = false);
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;
     bool captureDeltaLocked(KisPageTransactionId transaction, KisPageCapturedRelease &capture,
                             size_t *versions, size_t *removals, size_t *surfaces) const;
@@ -318,6 +306,8 @@ public:
             error, storageRefused, canonical);
     }
 
+    void preparePrivateLayoutLocked(KisPagePrivateWrite &, const KisPageAllocationDescriptor &,
+                                    std::shared_ptr<const KisPageAllocationDescriptor>);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version,
         const KisPageAllocationDescriptor &descriptor, const KisPageVersion &base);
@@ -413,6 +403,12 @@ private:
     quint64 m_descriptorRevision = 1;
     KisPageStorePublicationStatistics m_statistics;
     quint64 m_committedTransactions = 0;
+    // Non-owning: the original ledger keeps each record. Its intrusive hook
+    // is unlinked before the retirement queue obtains ownership.
+    boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity;
+    static constexpr qint64 IdleCapacityAgeMs = 100;
+    void acceptCapacityLocked(const KisReplicaHandle &replica);
+    quint64 idleAllowanceLocked() const;
 
     quint64 currentDefaultRevisionLocked(KisSurfaceId surface) const;
     bool reserveDefaultRevisionLocked(KisSurfaceId surface, quint64 revision, QString *error);

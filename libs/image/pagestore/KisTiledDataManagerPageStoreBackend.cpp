@@ -964,14 +964,17 @@ KisTiles3PayloadWork KisTiledDataManagerPageStoreBackend::payloadWork() const
 }
 
 std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle)
+KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle,
+    KisPageMutationSession *reservation, KisPageMutationExecution *execution)
 {
     using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
     auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
     bool owned = false;
     batch->transaction = writableTransaction(&owned, error, requireIdle);
     if (!batch->transaction.isValid()) return {};
-    batch->mutation = d->store->beginMutation(batch->transaction, error);
+    batch->mutation = reservation
+        ? d->store->beginMutation(batch->transaction, std::move(*reservation), execution, error)
+        : d->store->beginMutation(batch->transaction, error);
     if (!batch->mutation.isActive()) {
         // A new private transaction has no accepted work or external reader.
         // Failed scope preparation already released its session activity.
@@ -985,7 +988,14 @@ KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool r
 }
 
 std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
-KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle) try
+KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle)
+{
+    return beginMutationBatchImpl(error, requireIdle, nullptr);
+}
+
+std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
+KisTiledDataManagerPageStoreBackend::beginMutationBatchImpl(QString *error, bool requireIdle,
+    KisPageMutationSession *reservation, KisPageMutationExecution *execution) try
 {
     {
         QMutexLocker lock(&d->mutex);
@@ -998,7 +1008,7 @@ KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool req
     preparedIndex.emplace(QThread::currentThreadId(), std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{});
     auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
         new KisTiledDataManagerPageStoreWriteBatch(std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{}));
-    batch->d = prepareMutationBatch(error, requireIdle);
+    batch->d = prepareMutationBatch(error, requireIdle, reservation, execution);
     if (!batch->d) return {};
     preparedIndex.begin()->second = batch->d;
     QMutexLocker lock(&d->mutex);
@@ -1967,9 +1977,9 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     // Acquire all claims before any page work, where no adapter gate is held;
     // the original batch then owns both semantic and writable page claims.
     auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
-    if (!range) return false;
-    auto batch = beginMutationBatch(error);
-    if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
+    if (!range.d) return false;
+    auto batch = beginMutationBatchImpl(error, false, &range);
+    if (!batch) return false;
     auto before = captureReadView(false, error);
     KisSurfaceEpochState surfaceState;
     if (!before.resolveSurfaceState(d->surface, &surfaceState) ||
@@ -2122,10 +2132,10 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         bool storeBorrowed = false;
         auto range = store()->reserveManagedRange(d->surface, targets, legacyIntent,
                                                   &storeBorrowed, error);
-        if (!range) return storeBorrowed ? Result::Borrowed : Result::Failed;
+        if (!range.d) return storeBorrowed ? Result::Borrowed : Result::Failed;
         phase.next(Phase::PixelOperationRangeReserved, quint64(targets.size()));
-        batch = beginMutationBatch(error);
-        if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error, &execution)) return Result::Failed;
+        batch = beginMutationBatchImpl(error, false, &range, &execution);
+        if (!batch) return Result::Failed;
         transaction = batch->d->transaction;
     }
     if (!execution.isActive()) return Result::Failed;
@@ -2397,7 +2407,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
              column <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++column)
             targets.append({qint32(column), qint32(row)});
     auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
-    if (!range) return false;
+    if (!range.d) return false;
     auto targetView = captureReadView(false, error);
     if (!targetView.resolveSurfaceState(surface(), &targetState) ||
         sourceState.format.pixelStride != targetState.format.pixelStride) return false;
@@ -2409,8 +2419,8 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
         KisPageStoreDetail::setError(error, QStringLiteral("copy target bounds changed before admission"));
         return false;
     }
-    auto batch = beginMutationBatch(error);
-    if (!batch || !batch->d->mutation.adoptReservation(std::move(range), error)) return false;
+    auto batch = beginMutationBatchImpl(error, false, &range);
+    if (!batch) return false;
     if (prepareAdapter && !prepareAdapter(sourceState.format.defaultPixel == targetState.format.defaultPixel, error)) return false;
     if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     const auto recordChange = [&](const KisLogicalPageId &page, bool present) {

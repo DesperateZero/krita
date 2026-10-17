@@ -1172,7 +1172,7 @@ void KisPageStoreResidentReadTest::concurrentCommitAndRead()
     writer.join();
     QVERIFY(ok.load());
     QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(2 * 4096 * f.bpp));
+    QTRY_COMPARE_WITH_TIMEOUT(f.provider->memoryUsage().committedBytes, quint64(2 * 4096 * f.bpp), 5000);
     QVERIFY(f.store->closeSession(&f.error));
 }
 

@@ -130,6 +130,7 @@ private Q_SLOTS:
     void backingHandoffAccountingGuards_data();
     void backingHandoffAccountingGuards();
     void backingHandoffAccountingAcrossIndexGrowth();
+    void backingHandoffReusesFundedPreparation_data();
     void backingHandoffReusesFundedPreparation();
     void handoffDebtFollowsTerminal_data();
     void handoffDebtFollowsTerminal();
@@ -151,6 +152,8 @@ private Q_SLOTS:
     }
     void sharedCacheClassificationAndDebt();
     void sharedOrphanRetainsOnlyDebt();
+    void optionalCapacityCheckout_data();
+    void optionalCapacityCheckout();
 };
 
 void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained_data()
@@ -614,7 +617,7 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge_data()
     QTest::addColumn<int>("bpp");
     QTest::addColumn<int>("classification");
     QTest::addColumn<bool>("close");
-    for (int bpp : {1, 4, 8, 16}) for (int classification = 0; classification < 3; ++classification)
+    for (int bpp : {1, 4, 8, 16}) for (int classification = 0; classification < 4; ++classification)
         for (bool close : {false, true})
             QTest::newRow(qPrintable(QString("bpp%1-class%2-close%3")
                 .arg(bpp).arg(classification).arg(close))) << bpp << classification << close;
@@ -626,7 +629,8 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge()
     Fixture f; QVERIFY(f.init(bpp));
     const quint64 bytes = f.replica.layout.byteSize;
     const auto original = classification == 0 ? KisBackingBudgetClass::Current
-        : classification == 1 ? KisBackingBudgetClass::ActivePending : KisBackingBudgetClass::OptionalCache;
+        : classification == 1 ? KisBackingBudgetClass::ActivePending
+        : classification == 2 ? KisBackingBudgetClass::OptionalCache : KisBackingBudgetClass::IdleCapacity;
     const auto debt = size_t(KisBackingBudgetClass::RetirementDebt);
     const auto metadataClass = size_t(KisBackingBudgetClass::MetadataArena);
     auto parent = std::make_shared<KisBackingBudgetController>();
@@ -636,12 +640,14 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge()
     KisPageOwnerLedger ledger;
     QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider));
+    auto terminalStorage = kisPreparePageRetirementRecord(&budget);
+    auto *originalRecord = terminalStorage.get();
     {
         KisBackingBudgetDelta initial;
         initial.buckets[size_t(original)].cpuRam = qint64(bytes);
         initial.buckets[debt].cpuRam = qint64(bytes);
         auto preparation = budget.reserve(initial, &f.error); QVERIFY(preparation.isValid());
-        QVERIFY(ledger.registerBacking(f.replica, preparation, original, &f.error));
+        QVERIFY(ledger.registerBacking(f.replica, preparation, original, &f.error, &terminalStorage));
         QVERIFY(preparation.isValid()); // Only provider/adoption failure is prepaid here.
     }
     QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, quint64(0));
@@ -652,7 +658,9 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge()
     KisPageRetirementQueue queue(ledger, metadata, budget, references, &references,
         [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
     queue.prepareTask();
+    std::shared_ptr<KisPageRetirementWait> delayedCallback;
     const auto cleanup = qScopeGuard([&] {
+        delayedCallback.reset();
         queue.beginClose(); queue.waitForIdle(); blocker.release();
         auto remaining = queue.takeForClose();
         for (auto &record : remaining) queue.retireRecord(record);
@@ -673,18 +681,26 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge()
     QCOMPARE(budget.usage().buckets[debt].live.cpuRam, quint64(0));
     QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, bytes); // The competing owner only.
     QCOMPARE(sharedPayloadCharge(), beforeShared);
-    if (original == KisBackingBudgetClass::OptionalCache) {
+    if ((original == KisBackingBudgetClass::OptionalCache || original == KisBackingBudgetClass::IdleCapacity)) {
         KisBackingBudgetDelta anotherCache; anotherCache.buckets[size_t(original)].cpuRam = qint64(bytes);
         QVERIFY(!budget.reserve(anotherCache, &f.error).isValid()); // Queued is still charged to Q.
     }
     if (close) {
+        // A producer may have locked the weak callback just before close
+        // stops dispatch. Storage may outlive disarm; its budget permission
+        // must not. Keep that exact original wait alive across the handoff.
+        delayedCallback = originalRecord->wait;
+        QVERIFY(delayedCallback);
         queue.beginClose(); queue.waitForIdle();
+        QCOMPARE(budget.usage().waitingRequests, quint32(0));
+        QCOMPARE(budget.usage().grantedRequests, quint32(0));
         auto records = queue.takeForClose(); QCOMPARE(records.size(), size_t(1));
         QVERIFY(!queue.retireRecord(records.front()));
         QCOMPARE(ledger.backingClass(f.replica), original);
         blocker.release();
         QVERIFY(queue.retireRecord(records.front()));
         records.clear_and_dispose(KisPageRetirementRecordDeleter{});
+        delayedCallback.reset();
     } else {
         blocker.release(); // Original budget notification progresses without another write.
         QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
@@ -693,7 +709,7 @@ void KisPageStorePhysicalClaimTest::unfundedRetirementPreservesCharge()
     QCOMPARE(budget.usage().buckets[size_t(original)].live.cpuRam, quint64(0));
     QCOMPARE(budget.usage().buckets[debt].live.cpuRam, quint64(0));
     QCOMPARE(budget.usage().buckets[debt].reserved.cpuRam, quint64(0));
-    QCOMPARE(sharedPayloadCharge(), beforeShared - (original == KisBackingBudgetClass::OptionalCache ? bytes : 0));
+    QCOMPARE(sharedPayloadCharge(), beforeShared - ((original == KisBackingBudgetClass::OptionalCache || original == KisBackingBudgetClass::IdleCapacity) ? bytes : 0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
@@ -799,6 +815,156 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     QCOMPARE(live(), baseline);
 }
 
+void KisPageStorePhysicalClaimTest::optionalCapacityCheckout_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("outcome");
+    for (int bpp : {1, 4, 8, 16}) for (int outcome = 0; outcome < 6; ++outcome)
+        QTest::newRow(qPrintable(QString("b%1-outcome%2").arg(bpp).arg(outcome))) << bpp << outcome;
+}
+
+void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
+{
+    QFETCH(int, bpp); QFETCH(int, outcome);
+    Fixture f; QVERIFY(f.init(bpp));
+    const quint64 bytes = f.replica.layout.byteSize;
+    const auto cache = KisBackingBudgetClass::OptionalCache;
+    const auto pending = KisBackingBudgetClass::ActivePending;
+    const auto debt = KisBackingBudgetClass::RetirementDebt;
+    const auto arena = KisBackingBudgetClass::MetadataArena;
+    KisPageBackingLimits parentLimits; parentLimits.metadataArenaBytes = 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(parentLimits);
+    {
+        std::array<KisBackingBudgetReservation, 8> slots;
+        for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    }
+    KisPageBackingLimits limits;
+    limits.optionalCacheBytes = limits.activePendingBytes = limits.retirementDebtBytes = bytes;
+    KisBackingBudgetController budget(limits), sibling;
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent));
+    QVERIFY(sibling.configureSharedNonPayloadBudget(parent));
+    // Prepare real sibling request storage before computing its pressure.
+    { auto a = sibling.reserve({}, nullptr), b = sibling.reserve({}, nullptr); QVERIFY(a.isValid() && b.isValid()); }
+    KisPageOwnerLedger ledger;
+    QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider));
+    KisBackingBudgetDelta initial; initial.buckets[size_t(cache)].cpuRam = bytes;
+    auto registration = budget.reserve(initial, &f.error);
+    QVERIFY(ledger.registerBacking(f.replica, registration, cache, &f.error));
+    registration.release();
+    KisBackingBudgetDelta debtDemand; debtDemand.buckets[size_t(debt)].cpuRam = bytes;
+    auto debtBlocker = budget.reserve(debtDemand, &f.error); QVERIFY(debtBlocker.isValid());
+    KisBackingBudgetReservation pressure;
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    QAtomicInt references{1};
+    KisPageRetirementQueue queue(ledger, metadata, budget, references, &references,
+        [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
+    queue.prepareTask();
+    auto current = f.replica;
+    bool pinned = false;
+    const auto cleanup = qScopeGuard([&] {
+        if (pinned) f.binding->releaseRead();
+        pressure.release(); debtBlocker.release();
+        queue.beginClose(); queue.waitForIdle();
+        auto remaining = queue.takeForClose();
+        if (remaining.empty() && ledger.backingClass(current) != KisBackingBudgetClass::Count) {
+            queue.retireOrDefer(current, f.provider, {}, {});
+            remaining = queue.takeForClose();
+        }
+        for (auto &record : remaining) queue.retireRecord(record);
+        remaining.clear_and_dispose(KisPageRetirementRecordDeleter{});
+        kisDrainPageStoreReclamation();
+    });
+    const auto live = [&](KisBackingBudgetClass c) { return budget.usage().buckets[size_t(c)].live.cpuRam; };
+    const auto sharedPayload = [&] {
+        return parent->usage().buckets[size_t(arena)].live.cpuRam
+            - live(arena) - sibling.usage().buckets[size_t(arena)].live.cpuRam;
+    };
+    // The parent's own request storage is still charged. Compare the actual
+    // payload delta without pretending all parent-only storage is payload.
+    const quint64 originalParent = sharedPayload();
+    QVERIFY(originalParent >= bytes);
+    const auto physicalIdentity = current.physicalSlotIdentity();
+    for (quint64 generation = 2; generation <= 17; ++generation) {
+        const auto old = current;
+        auto physical = KisCpuBackingHandoff::prepare(f.provider, old, {key(0), {generation}}, f.desc);
+        QVERIFY(physical.isValid());
+        auto prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+        QVERIFY2(prepared.isValid(), qPrintable(f.error));
+        QCOMPARE(live(cache), bytes); QCOMPARE(live(pending), quint64(0));
+        QCOMPARE(sharedPayload(), originalParent); // Negative parent fee is not yet consumed.
+        QCOMPARE(budget.usage().buckets[size_t(debt)].reserved.cpuRam, bytes); // Only blocker.
+        if (outcome == 1) {
+            prepared.release();
+            QCOMPARE(ledger.backingClass(old), cache);
+            QCOMPARE(budget.usage().buckets[size_t(pending)].reserved.cpuRam, quint64(0));
+            QVERIFY(f.provider->validate(old, f.desc));
+            prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+            QVERIFY2(prepared.isValid(), qPrintable(f.error));
+        }
+        if (outcome == 2) {
+            pinned = f.binding->acquireRead(old.allocationIdentity(), true) != nullptr;
+            QVERIFY(pinned); QVERIFY(!physical.tryClaim());
+            QCOMPARE(ledger.backingClass(old), cache);
+            QVERIFY(f.provider->validate(old, f.desc));
+            f.binding->releaseRead(); pinned = false;
+        }
+        QVERIFY(physical.tryClaim());
+        auto writer = physical.commit(); QVERIFY(writer.isValid());
+        QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
+        current = physical.target();
+        QVERIFY(current.physicalSlotIdentity() == physicalIdentity);
+        QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::Count);
+        QVERIFY(!f.provider->validate(old, f.desc));
+        QVERIFY(!ledger.prepareBackingHandoff(old, current).isValid());
+        ledger.releaseRetiredBacking(old); // Stale finalization cannot release the new incarnation.
+        QCOMPARE(ledger.backingClass(current), pending);
+        QCOMPARE(live(cache), quint64(0)); QCOMPARE(live(pending), bytes);
+        QCOMPARE(sharedPayload(), originalParent - bytes);
+        QCOMPARE(budget.usage().buckets[size_t(debt)].reserved.cpuRam, bytes);
+        auto *data = static_cast<quint8 *>(writer.pinResident()); QVERIFY(data);
+        data[0] = quint8(generation); data[bytes - 1] = quint8(generation + 1);
+        writer.reset(); physical.reset();
+        if (generation == 17 && outcome >= 3) {
+            if (outcome == 3) {
+                const auto usage = parent->usage().buckets[size_t(arena)];
+                KisBackingBudgetDelta demand;
+                demand.buckets[size_t(arena)].cpuRam = parentLimits.metadataArenaBytes
+                    - usage.live.cpuRam - usage.reserved.cpuRam - bytes + 1;
+                pressure = sibling.reserve(demand, &f.error); QVERIFY2(pressure.isValid(), qPrintable(f.error));
+            } else if (outcome == 4) {
+                pressure = budget.reserve(initial, &f.error); QVERIFY(pressure.isValid());
+            }
+            if (outcome != 5) QVERIFY(!ledger.reclassifyBacking(current, cache, &f.error));
+            QCOMPARE(ledger.backingClass(current), pending);
+            break; // Cancel/refused optional return keeps the actual Pending charge.
+        }
+        QVERIFY(ledger.reclassifyBacking(current, KisBackingBudgetClass::Current, &f.error));
+        QVERIFY(ledger.reclassifyBacking(current, cache, &f.error));
+        QCOMPARE(live(cache), bytes); QCOMPARE(sharedPayload(), originalParent);
+    }
+    auto read = f.provider->resolveAccess({300}, {301}, current, cpu, KisPageAccessMode::Read);
+    QVERIFY(read.isValid());
+    QCOMPARE(static_cast<const quint8 *>(read.cpuReadData)[0], quint8(17));
+    QCOMPARE(static_cast<const quint8 *>(read.cpuReadData)[bytes - 1], quint8(18));
+    f.provider->releaseAccess(std::move(read), {});
+    const auto lastClass = ledger.backingClass(current);
+    queue.retireOrDefer(current, f.provider, {}, {});
+    queue.waitForIdle();
+    QVERIFY(!queue.isDrained()); QCOMPARE(queue.snapshot().pendingBytes, bytes);
+    QCOMPARE(ledger.backingClass(current), lastClass); QCOMPARE(live(lastClass), bytes);
+    QCOMPARE(f.provider->memoryUsage().committedBytes, bytes);
+    pressure.release(); debtBlocker.release();
+    QTRY_VERIFY_WITH_TIMEOUT(queue.isDrained(), 5000);
+    queue.waitForIdle();
+    QCOMPARE(ledger.backingClass(current), KisBackingBudgetClass::Count);
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(sharedPayload(), originalParent - bytes);
+    for (auto c : {cache, pending, debt}) {
+        QCOMPARE(live(c), quint64(0));
+        QCOMPARE(budget.usage().buckets[size_t(c)].reserved.cpuRam, quint64(0));
+    }
+}
+
 void KisPageStorePhysicalClaimTest::backingHandoffAccounting_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("pending");
@@ -887,16 +1053,22 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
 void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<int>("guard");
+    QTest::addColumn<bool>("optional");
     const char *names[] = {"provider", "epoch", "slot", "generation", "logical-generation",
         "key", "layout", "domain", "invalid-source", "forged-source", "history-class",
         "pending-budget", "debt-budget", "class-claim", "swapped", "alias"};
-    for (int bpp : {1, 4, 8, 16}) for (int i = 0; i < int(std::size(names)); ++i)
-        QTest::newRow(qPrintable(QString("bpp%1-%2").arg(bpp).arg(names[i]))) << bpp << i;
+    for (int bpp : {1, 4, 8, 16}) for (int i = 0; i < int(std::size(names)); ++i) {
+        QTest::newRow(qPrintable(QString("bpp%1-%2").arg(bpp).arg(names[i]))) << bpp << i << false;
+        // History is still forbidden; Optional's debt independence is tested
+        // by the complete checkout/return/cancellation cases above.
+        if (i != 10 && i != 12)
+            QTest::newRow(qPrintable(QString("bpp%1-%2-optional").arg(bpp).arg(names[i]))) << bpp << i << true;
+    }
 }
 
 void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards()
 {
-    QFETCH(int, bpp); QFETCH(int, guard);
+    QFETCH(int, bpp); QFETCH(int, guard); QFETCH(bool, optional);
     Fixture f; QVERIFY(f.init(bpp));
     KisPageBackingLimits limits;
     if (guard == 11) limits.activePendingBytes = f.replica.layout.byteSize;
@@ -905,7 +1077,8 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards()
     KisPageOwnerLedger ledger;
     QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider));
-    auto initialClass = guard == 10 ? KisBackingBudgetClass::RetainedHistory : KisBackingBudgetClass::Current;
+    auto initialClass = guard == 10 ? KisBackingBudgetClass::RetainedHistory
+        : optional ? KisBackingBudgetClass::OptionalCache : KisBackingBudgetClass::Current;
     KisBackingBudgetDelta initial;
     initial.buckets[size_t(initialClass)].cpuRam = f.replica.layout.byteSize;
     auto backing = budget.reserve(initial, &f.error);
@@ -1038,8 +1211,16 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
     }
 }
 
+void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation_data()
+{
+    QTest::addColumn<bool>("idleCut");
+    QTest::newRow("handoff-only") << false;
+    QTest::newRow("interleaved-idle-classification") << true;
+}
+
 void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
 {
+    QFETCH(bool, idleCut);
     Fixture f; QVERIFY(f.init());
     KisPageBackingLimits limits;
     limits.metadataArenaBytes = 1024 * 1024;
@@ -1053,6 +1234,20 @@ void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
     QVERIFY(ledger.registerBacking(f.replica, backing, KisBackingBudgetClass::Current, &f.error));
     auto source = f.replica;
     for (quint64 generation = 2; generation <= 4; ++generation) {
+        if (idleCut && generation > 2) {
+            auto prepareIdle = [&] {
+                return ledger.prepareBackingChanges(
+                    {{source, KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::IdleCapacity}}, {}, &f.error);
+            };
+            auto idle = prepareIdle();
+            QVERIFY2(idle.isValid(), qPrintable(f.error));
+            idle.release();
+            QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::ActivePending);
+            idle = prepareIdle();
+            QVERIFY2(idle.isValid(), qPrintable(f.error));
+            ledger.commitBackingChanges(std::move(idle));
+            QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::IdleCapacity);
+        }
         auto physical = KisCpuBackingHandoff::prepare(f.provider, source, {key(0), {generation}}, f.desc);
         QVERIFY(physical.isValid());
         KisBackingBudgetReservation pressure;
@@ -1095,8 +1290,8 @@ void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
         writer.reset();
         pressure.release();
     }
-    // The same cold slot can next serve an ordinary class change and release
-    // the retained handoff storage at its original cleanup boundary.
+    // The same slot also serves ordinary classification. Its empty storage
+    // remains charged until the original ledger's final destruction.
     QVERIFY(ledger.reclassifyBacking(source, KisBackingBudgetClass::RetirementDebt, &f.error));
     QVERIFY(f.provider->retire({900}, source, {}).isValid());
     ledger.releaseRetiredBacking(source);
