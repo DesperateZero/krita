@@ -1962,7 +1962,7 @@
         "limits",
         "map"
       ],
-      "lines": 2487,
+      "lines": 2488,
       "member_fields": [
         "m_claims",
         "m_cookie",
@@ -1990,7 +1990,7 @@
         "Reservation",
         "SealedProofRecord"
       ],
-      "sha256": "9a32f885e841aa95492d9dd14fcd7234aee6cadbf28f16d2d413388e7e6b34e5",
+      "sha256": "cd80dca530069089814933591c539a67368ad671329d02c7036681a63217a602",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageOwnerLedger.h": {
@@ -3874,7 +3874,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 112,
+      "container_declarations": 113,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -3934,7 +3934,7 @@
         "utility",
         "vector"
       ],
-      "lines": 13583,
+      "lines": 13694,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -4000,7 +4000,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "c516f04c1fac797ebbbbf1974ce7989646d9f51cc318cd0fd9a3f6e1fe073644",
+      "sha256": "24cdc1ac109b93ed3ae6ab3cccf8e4f9dcf70f1750fcde92386899f34baf36d3",
       "synchronization_declarations": 12
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6103,7 +6103,7 @@
         "tiles_test_utils.h",
         "type_traits"
       ],
-      "lines": 9162,
+      "lines": 9176,
       "member_fields": [
         "m_accessRect",
         "m_index",
@@ -6142,7 +6142,7 @@
         "StreamingInput",
         "TestableTiledDataManager"
       ],
-      "sha256": "278d337e86492aeb483a85f33586c10eda9e090e9b369c4d07b0577eb2e73764",
+      "sha256": "937162e0657ec743c844ee5b1c1566790e811cc331c93e0b20b2ddf485b55d35",
       "synchronization_declarations": 9
     },
     "libs/image/tiles3/tests/kis_tiled_data_manager_test.h": {
@@ -6831,5 +6831,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "ab1bf42e184d3a210a525a78605585b51067f22a"
+  "working_tree_head": "498c3cb741122bfb3f3a8a236e212aa6d2c8140a"
 }

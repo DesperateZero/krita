@@ -8830,6 +8830,20 @@ void KisTiledDataManagerTest::stressTest()
              KisBackingBudgetClass::InFlight,
              KisBackingBudgetClass::RetirementDebt}) {
         const KisPageDomainBytes live = transientLive(kind);
+        if (live.cpuRam || live.umaShared || live.discreteVram || live.ssd) {
+            // Preserve the failed snapshot before collecting any later state.
+            // A later drain/pass must not turn this observation into success.
+            const auto after = store->sessionStats();
+            qInfo() << "BR1_TRANSIENT_LIVE" << "class" << int(kind)
+                    << "bytes" << live.cpuRam << live.umaShared << live.discreteVram << live.ssd
+                    << "settledRetired" << settled.pendingRetiredReplicas
+                    << "afterRetired" << after.pendingRetiredReplicas
+                    << "afterRetiredBytes" << after.pendingRetiredBytes
+                    << "afterJobs" << after.scheduledReclamationJobs
+                    << "afterDelayed" << after.delayedRetiredReplicas
+                    << "afterRetries" << after.scheduledRetirementRetries
+                    << "seed" << qEnvironmentVariable("KIS_BR1_SEED");
+        }
         QCOMPARE(live.cpuRam, quint64(0));
         QCOMPARE(live.umaShared, quint64(0));
         QCOMPARE(live.discreteVram, quint64(0));

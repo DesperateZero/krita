@@ -1312,6 +1312,8 @@ private Q_SLOTS:
     void mutationActivityAdmissionPreservesExisting();
     void freshWriteSelectorAndBackingBudgetAreBounded();
     void backingBatchMatchesFlatPhysicalAccounting();
+    void retirementAliasesExposeRetainedCharge_data();
+    void retirementAliasesExposeRetainedCharge();
     void backingClaimsPreserveSelectedAliases();
     void emptyBackingChangesNeedNoEntityStorage();
     void referenceOnlyChangesNeedNoFeeSlot();
@@ -9164,11 +9166,113 @@ void KisPageStoreReferenceTest::backingClaimsPreserveSelectedAliases()
         QCOMPARE(budget.usage().buckets[size_t(c)].live.cpuRam, quint64(0));
 }
 
+void KisPageStoreReferenceTest::retirementAliasesExposeRetainedCharge_data()
+{
+    QTest::addColumn<int>("survivorClass");
+    QTest::addColumn<bool>("batch");
+    QTest::addColumn<bool>("capacityAvailable");
+    for (auto kind : {KisBackingBudgetClass::OptionalCache, KisBackingBudgetClass::IdleCapacity})
+        for (bool batch : {false, true})
+            for (bool available : {false, true})
+                QTest::newRow(qPrintable(QStringLiteral("class%1-batch%2-room%3")
+                    .arg(int(kind)).arg(batch).arg(available)))
+                    << int(kind) << batch << available;
+}
+
+void KisPageStoreReferenceTest::retirementAliasesExposeRetainedCharge()
+{
+    QFETCH(int, survivorClass);
+    QFETCH(bool, batch);
+    QFETCH(bool, capacityAvailable);
+    using Class = KisBackingBudgetClass;
+    const auto retainedClass = Class(survivorClass);
+    KisPageBackingLimits limits;
+    limits.optionalCacheBytes = capacityAvailable ? 4096 : 0;
+    limits.idleCapacityBytes = capacityAvailable ? 4096 : 0;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger owner;
+    owner.attachBackingBudget(budget);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {1}; config.providerEpoch = {1}; config.budgetBytes = 8192;
+    QString error;
+    QVERIFY(owner.configure(completions, &error));
+    QVERIFY(provider->configure(config, completions, &error));
+    QVERIFY(owner.registerProvider(provider, &error));
+    const auto departing = replica(pageVersion(0, 1), 1, 1, 1, 1);
+    const auto survivor = replica(pageVersion(1, 1), 1, 1, 1, 2);
+    for (const auto &handle : {departing, survivor}) {
+        const auto kind = handle == departing ? Class::Current : Class::ActivePending;
+        KisBackingBudgetDelta initial;
+        initial.buckets[size_t(kind)].cpuRam = 4096;
+        auto reservation = budget.reserve(initial, &error);
+        QVERIFY2(reservation.isValid(), qPrintable(error));
+        QVERIFY2(owner.registerBacking(handle, reservation, kind, &error), qPrintable(error));
+    }
+    // Current still pays for this shared physical page. Retaining its alias
+    // changes only the logical reference, even with zero optional headroom.
+    QVERIFY(owner.reclassifyBacking(survivor, retainedClass, &error));
+    const auto live = [&](Class kind) { return budget.usage().buckets[size_t(kind)].live.cpuRam; };
+    QCOMPARE(live(Class::Current), quint64(4096));
+    QCOMPARE(live(retainedClass), quint64(0));
+    bool admitted;
+    if (batch) {
+        auto changes = owner.prepareBackingChanges(
+            {{departing, Class::Current, Class::RetirementDebt}}, {}, &error);
+        admitted = changes.isValid();
+        if (admitted) {
+            // Cancel releases the physical claim and the newly exposed fee.
+            changes.release();
+            QCOMPARE(live(Class::Current), quint64(4096));
+            QCOMPARE(budget.usage().buckets[size_t(retainedClass)].reserved.cpuRam, quint64(0));
+            changes = owner.prepareBackingChanges(
+                {{departing, Class::Current, Class::RetirementDebt}}, {}, &error);
+            QVERIFY(changes.isValid());
+            owner.commitBackingChanges(std::move(changes));
+        }
+    } else {
+        admitted = owner.reclassifyBacking(departing, Class::RetirementDebt, &error);
+    }
+    QCOMPARE(admitted, capacityAvailable);
+    if (capacityAvailable) {
+        QCOMPARE(live(Class::Current), quint64(0));
+        QCOMPARE(live(retainedClass), quint64(4096));
+        QCOMPARE(live(Class::RetirementDebt), quint64(0));
+        // This is the asynchronous completion cut: the retained allocation
+        // remains live, and dropping the terminal alias cannot change its fee.
+        owner.releaseRetiredBacking(departing);
+        QCOMPARE(owner.backingClass(survivor), retainedClass);
+        QCOMPARE(live(retainedClass), quint64(4096));
+        QCOMPARE(live(Class::RetirementDebt), quint64(0));
+        QVERIFY(owner.reclassifyBacking(survivor, Class::RetirementDebt, &error));
+        QCOMPARE(live(retainedClass), quint64(0));
+        QCOMPARE(live(Class::RetirementDebt), quint64(4096));
+        owner.releaseRetiredBacking(survivor);
+    } else {
+        // A masked optional reference cannot bypass its limit when Current
+        // departs. Preserve ownership, then retire both aliases together.
+        QCOMPARE(owner.backingClass(departing), Class::Current);
+        QCOMPARE(live(Class::Current), quint64(4096));
+        auto both = owner.prepareBackingChanges(
+            {{departing, Class::Current, Class::RetirementDebt},
+             {survivor, retainedClass, Class::RetirementDebt}}, {}, &error);
+        QVERIFY2(both.isValid(), qPrintable(error));
+        owner.commitBackingChanges(std::move(both));
+        owner.releaseRetiredBacking(departing);
+        owner.releaseRetiredBacking(survivor);
+    }
+    for (auto kind : {Class::Current, Class::ActivePending, Class::RetirementDebt, retainedClass}) {
+        QCOMPARE(live(kind), quint64(0));
+        QCOMPARE(budget.usage().buckets[size_t(kind)].reserved.cpuRam, quint64(0));
+    }
+}
+
 void KisPageStoreReferenceTest::backingBatchMatchesFlatPhysicalAccounting()
 {
     using Class = KisBackingBudgetClass;
     const std::array<Class, 6> priority{Class::Current, Class::ActivePending, Class::InFlight,
-                                     Class::RetainedHistory, Class::RetirementDebt, Class::OptionalCache};
+                                     Class::RetainedHistory, Class::OptionalCache, Class::RetirementDebt};
     for (unsigned seed = 0; seed < 8; ++seed) {
         KisPageBackingLimits limits;
         limits.metadataArenaBytes = 4 * 1024 * 1024;
@@ -9250,6 +9354,13 @@ void KisPageStoreReferenceTest::backingBatchMatchesFlatPhysicalAccounting()
             QCOMPARE(installed.buckets[size_t(c)].live.cpuRam, expected[size_t(c)]);
             QCOMPARE(installed.buckets[size_t(c)].reserved.cpuRam, quint64(0));
         }
+        QVector<KisBackingClassChange> retiring;
+        for (size_t i = 0; i < replicas.size(); ++i)
+            if (after[i] != Class::RetirementDebt)
+                retiring.push_back({replicas[i], after[i], Class::RetirementDebt});
+        auto terminal = owner.prepareBackingChanges(retiring, {}, &error);
+        QVERIFY2(terminal.isValid(), qPrintable(error));
+        owner.commitBackingChanges(std::move(terminal));
         for (const auto &handle : replicas) owner.releaseRetiredBacking(handle);
         for (Class c : priority) QCOMPARE(budget.usage().buckets[size_t(c)].live.cpuRam, quint64(0));
     }

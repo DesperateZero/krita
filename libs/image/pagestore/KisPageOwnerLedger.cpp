@@ -169,17 +169,18 @@ using PhysicalBackingIndex = KisPagePhysicalBackingIndex;
 
 KisBackingBudgetClass chargedBackingClass(const PhysicalBackingRecord &record)
 {
-    // Physical bytes are charged once. Prefer the class that must remain live
-    // for foreground correctness over rebuildable/history/debt ownership.
+    // Physical bytes are charged once, to a surviving use before terminal
+    // aliases. Expose that use at fallible admission, not after the provider
+    // has destroyed the last Debt alias and can no longer reject a new fee.
     constexpr std::array<KisBackingBudgetClass, 8> priority{
         KisBackingBudgetClass::Current,
         KisBackingBudgetClass::ActivePending,
         KisBackingBudgetClass::InFlight,
         KisBackingBudgetClass::RetainedHistory,
-        KisBackingBudgetClass::RetirementDebt,
         KisBackingBudgetClass::OptionalCache,
         KisBackingBudgetClass::IdleCapacity,
-        KisBackingBudgetClass::MetadataArena};
+        KisBackingBudgetClass::MetadataArena,
+        KisBackingBudgetClass::RetirementDebt};
     for (const KisBackingBudgetClass budgetClass : priority) {
         if (record.references[static_cast<size_t>(budgetClass)] != 0)
             return budgetClass;
