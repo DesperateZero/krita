@@ -8303,24 +8303,26 @@ void KisPageStoreCpuMutationTest::sharedIdleWarmQuantities()
 
 void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement_data()
 {
-    QTest::addColumn<int>("reader");
-    for (int reader = 0; reader < 5; ++reader)
-        QTest::newRow(qPrintable(QStringLiteral("late-reader-%1").arg(reader))) << reader;
+    QTest::addColumn<int>("reader"); QTest::addColumn<int>("pages");
+    for (int pages : {2, 16}) for (int reader = 0; reader < 5; ++reader)
+        QTest::newRow(qPrintable(QStringLiteral("pages-%1-late-reader-%2").arg(pages).arg(reader))) << reader << pages;
 }
 
 void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
 {
-    QFETCH(int, reader);
+    QFETCH(int, reader); QFETCH(int, pages);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     const auto tx = f.store->beginCurrentTransaction();
     const auto overlay = KisPageReadView::transactionOverlay(tx.id);
     const auto prepare = [&](auto &segment, char value) {
-        auto execution = segment.borrowExecution({1}, {{0,0}, {1,0}}, &f.error);
+        KisPageSnapshotArray<KisLogicalPageId> range;
+        for (int x = 0; x < pages; ++x) range.append({x, 0});
+        auto execution = segment.borrowExecution({1}, range, &f.error);
         const QByteArray bytes(64 * 64 * f.bpp, value);
-        return execution.isActive()
-            && execution.writeFinalRect(key(), {}, {bytes.constData(), 64*f.bpp, bytes.size()}, &f.error)
-            && execution.writeFinalRect(key(1), {}, {bytes.constData(), 64*f.bpp, bytes.size()}, &f.error)
-            && execution.finish(&f.error);
+        if (!execution.isActive()) return false;
+        for (int x = 0; x < pages; ++x)
+            if (!execution.writeFinalRect(key(x), {}, {bytes.constData(), 64*f.bpp, bytes.size()}, &f.error)) return false;
+        return execution.finish(&f.error);
     };
     auto first = f.begin(tx);
     QVERIFY2(prepare(first, 0x51), qPrintable(f.error));
@@ -8345,14 +8347,14 @@ void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
     QVERIFY2(second.seal(&f.error), qPrintable(f.error));
     QVERIFY(visited);
     const auto after = kisPageStoreMetadataMetrics(*f.store);
-    // Direct original rows freeze a conditional whole-D release.
-    // A surviving old reader rejects the entire direct claim; a reader gone
-    // before that claim does not require a historical output or a retry.
+    // A late reader rejects the joint claim before any edit, but only its
+    // actual protected rows need new capacity. Other rows keep their slots.
     const bool retry = reader == 1 || reader == 2 || reader == 3;
-    QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, quint64(retry ? 0 : 2));
+    const int protectedPages = reader == 2 ? pages : retry ? 1 : 0;
+    QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, quint64(pages - protectedPages));
     QCOMPARE(after.nativeCapacityRetries - before.nativeCapacityRetries, quint64(retry));
     QCOMPARE(after.publicationHistoryNodesTransferred - before.publicationHistoryNodesTransferred,
-             quint64(retry ? 2 : 0));
+             quint64(protectedPages));
     QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages, payload.payloadInitializedPages);
     if (reader && reader != 4) {
         QVERIFY(late.isValid());
@@ -8415,7 +8417,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionLateProtection()
     // still reject atomically before either page is edited on a late reader.
     QCOMPARE(after.rejectedMutationInstalls - before.rejectedMutationInstalls, quint64(reader ? 1 : 0));
     QCOMPARE(after.publicationHistoryNodesTransferred - before.publicationHistoryNodesTransferred,
-             quint64(reader ? 2 : 0));
+             quint64(reader == 2 ? 2 : reader ? 1 : 0));
     QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages, payload.payloadInitializedPages);
     if (reader == 1 || reader == 2) {
         QVERIFY(late.isValid()); auto old = late.readResidentPage(key(1)); QVERIFY(old.isValid());

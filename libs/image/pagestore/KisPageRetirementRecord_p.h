@@ -128,6 +128,8 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     // Rare provider-result rejection: keep the preallocation reservation
     // charged until an unregistered physical replica reaches terminal retire.
     KisBackingBudgetReservation orphanReservation;
+    // Funded once for this retirement lifetime. The queue distinguishes a
+    // cached state from its currently armed subscription/permission.
     std::shared_ptr<KisPageRetirementWait> wait;
     KisBackingBudgetReservation admissionReservation;
     bool readinessRechecked = false;

@@ -1082,6 +1082,7 @@ private Q_SLOTS:
     void preparedReclamationRunsAtCapacity();
     void preparedReadinessAtCapacity();
     void readinessRetainsOriginalPayer();
+    void readinessReusesDirectoryAtCapacity();
     void retainedDeadlineInFlightAfterController();
     void preparedDeadlineRearmsAtCapacity();
     void preparedDeadlineRejectsCancelledGeneration();
@@ -4779,6 +4780,41 @@ void KisPageStoreReferenceTest::readinessRetainsOriginalPayer()
         QVERIFY(live() < afterComplete);
     }
     QCOMPARE(live(), baseline);
+}
+
+void KisPageStoreReferenceTest::readinessReusesDirectoryAtCapacity()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisBackingBudgetController budget(limits);
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    auto warm1 = budget.reserve({}, nullptr), warm2 = budget.reserve({}, nullptr);
+    QVERIFY(warm1.isValid() && warm2.isValid()); warm1.release(); warm2.release();
+    KisCompletionRegistry registry;
+    const auto source = registry.registerSource(KisCompletionDomain::HostLogical);
+    const auto ticket = registry.allocatePending(source);
+    int calls = 0;
+    KisPageReadinessCallback notify([&] { ++calls; }, &budget);
+    KisPageReadinessSubscription first, second;
+    QCOMPARE(registry.watchTerminal(ticket, notify, &first), KisPageReadinessStatus::Waiting);
+    const auto before = live();
+    quint64 subscriberBytes;
+    {
+        KisPageReadinessSubscription admitted(notify);
+        subscriberBytes = live() - before;
+        QVERIFY(subscriberBytes > 0);
+    }
+    QCOMPARE(live(), before);
+    const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - subscriberBytes);
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
+    QCOMPARE(live() + subscriberBytes, limits.metadataArenaBytes);
+    // Only the real subscriber fits. A speculative replacement directory
+    // node would reject a watch on an existing live signal.
+    QCOMPARE(registry.watchTerminal(ticket, notify, &second), KisPageReadinessStatus::Waiting);
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    QVERIFY(registry.complete(ticket, KisCompletionStatus::Succeeded));
+    QCOMPARE(calls, 2);
+    QCOMPARE(registry.sourceStatistics(source).readinessCapacity, quint64(0));
 }
 
 void KisPageStoreReferenceTest::retainedDeadlineInFlightAfterController()

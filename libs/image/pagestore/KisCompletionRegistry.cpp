@@ -317,6 +317,12 @@ KisPageReadinessStatus KisCompletionRegistry::watchTerminal(const KisCompletionT
     try {
         const auto storage = ready.storageAllocator<std::byte>();
         prepared = KisPageReadinessSubscription(std::move(ready));
+        const auto prepareRecord = [&] {
+            auto allocator = KisMutationStorageAllocator<CompletionReadinessRecord>(storage);
+            auto *node = allocator.allocate(1);
+            try { record.reset(::new (node) CompletionReadinessRecord(ticket.value(), signal, allocator)); }
+            catch (...) { allocator.deallocate(node, 1); throw; }
+        };
         if (!signal) {
             auto emptied = KisPageReadinessCallback::prepare(
                 [owner = std::weak_ptr<Private>(d), sourceId = ticket.source(), value = ticket.value()]
@@ -326,36 +332,39 @@ KisPageReadinessStatus KisCompletionRegistry::watchTerminal(const KisCompletionT
                 }, storage);
             signal = std::allocate_shared<KisPageReadinessSignal>(
                 KisMutationStorageAllocator<KisPageReadinessSignal>(storage), std::move(emptied), storage);
+            prepareRecord();
         }
-        // The observed record can be removed by a last cancellation while the
-        // owner gate is dropped. Prepare a replacement before revalidation.
-        auto allocator = KisMutationStorageAllocator<CompletionReadinessRecord>(storage);
-        auto *node = allocator.allocate(1);
-        try { record.reset(::new (node) CompletionReadinessRecord(ticket.value(), signal, allocator)); }
-        catch (...) { allocator.deallocate(node, 1); throw; }
+        for (;;) {
+            lock.relock();
+            // Cold preparation cannot publish a waiter after completion. The
+            // winning original record retains its payer, even if another
+            // subscriber replaced the signal while this owner gate was open.
+            source = d->sources.find(ticket.source());
+            if (source == d->sources.end() || ticket.domain() != source->second.domain)
+                return KisPageReadinessStatus::Unavailable;
+            status = source->second.status(ticket.value());
+            if (status == KisCompletionStatus::Unknown) return KisPageReadinessStatus::Unavailable;
+            if (status != KisCompletionStatus::Pending) return KisPageReadinessStatus::Ready;
+            const auto winner = source->second.readiness.find(ticket.value());
+            if (winner != source->second.readiness.end()) {
+                if (!winner->signal->subscribeRetained(prepared)) return KisPageReadinessStatus::Unavailable;
+            } else if (record) {
+                if (!signal->subscribeRetained(prepared)) return KisPageReadinessStatus::Unavailable;
+                source->second.readiness.insert(*record);
+                record.release();
+            } else {
+                // Last cancellation removed the observed record. Only this
+                // actual absence needs replacement storage and another check.
+                lock.unlock();
+                prepareRecord();
+                continue;
+            }
+            *subscription = std::move(prepared);
+            return KisPageReadinessStatus::Waiting;
+        }
     } catch (const std::bad_alloc &) {
         return KisPageReadinessStatus::Unavailable;
     }
-    lock.relock();
-    // Cold preparation cannot publish a waiter for a ticket that completed
-    // in the meantime; attach only to the winning original registry record.
-    source = d->sources.find(ticket.source());
-    if (source == d->sources.end() || ticket.domain() != source->second.domain)
-        return KisPageReadinessStatus::Unavailable;
-    status = source->second.status(ticket.value());
-    if (status == KisCompletionStatus::Unknown) return KisPageReadinessStatus::Unavailable;
-    if (status != KisCompletionStatus::Pending) return KisPageReadinessStatus::Ready;
-    const auto winner = source->second.readiness.find(ticket.value());
-    if (winner != source->second.readiness.end()) {
-        // Use a separate local so replacement destruction is outside the gate.
-        if (!winner->signal->subscribeRetained(prepared)) return KisPageReadinessStatus::Unavailable;
-    } else {
-        if (!signal->subscribeRetained(prepared)) return KisPageReadinessStatus::Unavailable;
-        source->second.readiness.insert(*record);
-        record.release();
-    }
-    *subscription = std::move(prepared);
-    return KisPageReadinessStatus::Waiting;
 }
 
 KisCompletionStatus KisCompletionRegistry::status(const KisCompletionTicket &ticket) const

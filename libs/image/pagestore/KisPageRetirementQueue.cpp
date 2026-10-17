@@ -31,8 +31,9 @@ KisPageRetirementRecordPointer kisPreparePageRetirementRecord(KisBackingBudgetCo
     catch (...) { storage.deallocate(raw, 1); throw; }
 }
 
-// These are notification identities only. All fields of a wait are protected
-// by the queue gate, except the early notification atomic. The iterator is
+// These are notification identities only. The queue gate protects membership;
+// an unqueued record owns preparation. The wake-context gate protects in-flight
+// dispatch, and the early notification atomic bridges registration. The iterator is
 // usable only while queued is true.
 struct KisPageRetirementWait
 {
@@ -40,6 +41,9 @@ struct KisPageRetirementWait
     KisBackingBudgetWaiter budgetWaiter;
     KisPageRetirementRecords::iterator entry;
     bool queued = false;
+    bool armed = false;
+    KisPageReadinessCallback scheduleReady;
+    bool redispatch = false; // wake-context mutex; a callback during this task
     QAtomicInt notified{0};
     bool retryPass = false;
     std::weak_ptr<KisPageRetirementWakeContext> context;
@@ -100,7 +104,11 @@ void KisPageRetirementQueue::dispatchReady(
     if (!context) return;
     QMutexLocker lifetimeLock(&context->mutex);
     auto *queue = context->queue;
-    if (!queue || !context->accepting || wait->inFlight) return;
+    if (!queue || !context->accepting) return;
+    if (wait->inFlight) {
+        wait->redispatch = true;
+        return;
+    }
     // A dormant waiter must not retain the composition root. Acquisition is
     // synchronized with queue destruction and cannot resurrect a zero count.
     auto &references = queue->m_ownerLifetimeReferences;
@@ -165,11 +173,13 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
         {
             QMutexLocker lock(&context->mutex);
             pin = std::move(wait->inFlight);
-            // A new arm can fire before this reusable task finishes. Retain
-            // the original activity pin and coalesce that event into the next
-            // invocation, which still validates the current timer generation.
-            if (wait->retryPass && context->queue == queue && context->accepting &&
-                wait->notified.fetchAndStoreOrdered(0)) {
+            // A new subscription or timer arm can fire before this reusable
+            // task finishes. Coalesce dispatch separately from the readiness
+            // bit: a callback before queue insertion must remain visible to
+            // enqueuePendingLocked even if its task has already run.
+            const bool again = wait->retryPass ? wait->notified.fetchAndStoreOrdered(0)
+                                               : std::exchange(wait->redispatch, false);
+            if (context->queue == queue && context->accepting && again) {
                 wait->inFlight = std::move(pin);
                 if (kisEnqueuePageStoreReclamation(wait->task.get())) return;
                 pin = std::move(wait->inFlight);
@@ -206,11 +216,19 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
     }
     Q_ASSERT(context); // Cold composition admitted the fallback before any backing.
     if (!context) return;
-    auto wait = prepareWaitState(context);
-    const KisPageReadinessCallback scheduleReady([context = std::weak_ptr<KisPageRetirementWakeContext>(context),
-                               weakWait = std::weak_ptr<KisPageRetirementWait>(wait)] {
-        dispatchReady(context, weakWait);
-    }, &m_budget);
+    auto wait = record.wait;
+    if (!wait) {
+        wait = prepareWaitState(context);
+        wait->scheduleReady = KisPageReadinessCallback(
+            [context = std::weak_ptr<KisPageRetirementWakeContext>(context),
+             weakWait = std::weak_ptr<KisPageRetirementWait>(wait)] {
+                dispatchReady(context, weakWait);
+            }, &m_budget);
+        record.wait = wait;
+    }
+    Q_ASSERT(!wait->armed && !wait->queued);
+    wait->notified.storeRelease(0);
+    const auto &scheduleReady = wait->scheduleReady;
     auto status = KisPageReadinessStatus::Unavailable;
     if (needsBudget) {
         status = m_owner.watchRetirementBudget(record.replica, scheduleReady, &wait->budgetWaiter);
@@ -237,13 +255,14 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
     } else {
         return;
     }
-    record.wait = std::move(wait);
+    wait->armed = true;
 }
 catch (const std::bad_alloc &) {
     // The sole retirement record is still owned by the caller/queue. Failed
     // notification preparation cannot drop its physical debt or fabricate a
     // ready grant. The cold-prepared retry resumes the same debt automatically.
-    record.wait.reset();
+    // Preserve any successfully admitted state for the same original record.
+    // A failed first preparation leaves no cached state and uses timer retry.
 }
 
 void KisPageRetirementQueue::disarmLocked(KisPageRetirementRecord &record, bool takeGrant)
@@ -259,7 +278,7 @@ void KisPageRetirementQueue::disarmLocked(KisPageRetirementRecord &record, bool 
     record.wait->budgetWaiter.reset();
     record.wait->subscription.reset();
     record.wait->queued = false;
-    record.wait.reset();
+    record.wait->armed = false;
 }
 
 void KisPageRetirementQueue::enqueuePendingLocked(
@@ -267,16 +286,16 @@ void KisPageRetirementQueue::enqueuePendingLocked(
 {
     auto &record = *entry;
     if (m_closing || m_automaticWakeupsStopped) disarmLocked(record);
-    if (record.wait && record.wait->notified.loadAcquire()) {
+    if (record.wait && record.wait->armed && record.wait->notified.loadAcquire()) {
         disarmLocked(record, true);
         m_ready.splice(m_ready.end(), source, entry);
         schedulePassLocked();
-    } else if (!record.wait && record.backgroundRetirement) {
+    } else if ((!record.wait || !record.wait->armed) && record.backgroundRetirement) {
         m_retryPending.splice(m_retryPending.end(), source, entry);
         scheduleRetryLocked();
     } else {
         m_pending.splice(m_pending.end(), source, entry);
-        if (record.wait) {
+        if (record.wait && record.wait->armed) {
             record.wait->entry = entry;
             record.wait->queued = true;
         }

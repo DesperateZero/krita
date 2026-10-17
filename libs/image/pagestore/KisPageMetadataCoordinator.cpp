@@ -2257,6 +2257,7 @@ public:
         size_t shardIndex = 0;
         bool activityReservation = false;
         bool releaseUnusedCapacity = false;
+        bool capacityInvalidated = false;
         KisPagePrivateWrite *native = nullptr;
         quint64 expectedStamp = 0;
         const KisReplicaHandle *expectedAuthority = nullptr;
@@ -2696,6 +2697,14 @@ void KisPageMetadataCoordinator::PreparedPublication::forEachCapacityRelease(
         if (entry.releaseUnusedCapacity) visit(context, entry.inputOrdinal);
 }
 
+void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachCapacityInvalidation(
+    void *context, void (*visit)(void *, size_t)) const
+{
+    if (!data || !data->retryCapacityPlan) return;
+    for (const auto &entry : data->entries)
+        if (entry.capacityInvalidated) visit(context, entry.inputOrdinal);
+}
+
 void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachDetachedBacking(
     void *context, void (*visit)(void *, const KisReplicaHandle &)) const
 {
@@ -2751,15 +2760,17 @@ KisPageMetadataCoordinator::NativeAcceptance KisPageMetadataCoordinator::acceptN
             || !(native->proof.transaction == transaction.id)
             || !shard->records.isPreparedBy(version, transaction.id,
                                            input.expectedStamp(), input.expectedAuthority())) break;
-        if (!shard->records.canReplaceUnused(version)
-            || shard->activities.find(version.key) != shard->activities.end()) {
+        const bool reusable = shard->records.canReplaceUnused(version);
+        if (!reusable || shard->activities.find(version.key) != shard->activities.end()) {
+            if (!needsCapacity) ++shard->nativeCapacityRetries;
             needsCapacity = true;
-            ++shard->nativeCapacityRetries;
-            break;
+            // A generic activity needs prepared acceptance, but only actual
+            // old-version protection requires additional version capacity.
+            if (!reusable) input.replacement.native->freshMetadataRequired = true;
         }
         page->second.activity.publicationClaim = inputs;
     }
-    if (claimed != count) {
+    if (claimed != count || needsCapacity) {
         for (qsizetype i = 0; i < claimed; ++i) {
             if (!inputs[i].hasMutation()) continue;
             const auto &key = inputs[i].mutationVersion().key;
@@ -2767,9 +2778,6 @@ KisPageMetadataCoordinator::NativeAcceptance KisPageMetadataCoordinator::acceptN
             QMutexLocker lock(&shard->mutex);
             shard->setPublicationClaim(key, nullptr);
         }
-        if (needsCapacity)
-            for (qsizetype i = 0; i < count; ++i)
-                if (inputs[i].hasMutation()) inputs[i].replacement.native->freshMetadataRequired = true;
         const auto *first = std::find_if(inputs, inputs + count,
             [](const auto &input) { return input.hasMutation(); });
         if (auto *shard = Private::shardFor(d, first->mutationVersion().key)) {
@@ -2777,7 +2785,7 @@ KisPageMetadataCoordinator::NativeAcceptance KisPageMetadataCoordinator::acceptN
             ++shard->rejectedMutationInstalls;
         }
         KisPageStoreDetail::setError(error, QStringLiteral("native acceptance requires current facts or prepared capacity"));
-        return needsCapacity ? NativeAcceptance::NeedsCapacity : NativeAcceptance::Rejected;
+        return claimed == count && needsCapacity ? NativeAcceptance::NeedsCapacity : NativeAcceptance::Rejected;
     }
     for (qsizetype i = 0; i < count; ++i) {
         const auto &input = inputs[i];
@@ -3503,9 +3511,11 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
                     ? entry.shardOwner->records.canReplaceUnused(entry.version)
                     : !entry.releaseUnusedCapacity || entry.shardOwner->records.canDetachPrepared(entry.version);
                 if (!capacityAvailable) {
+                    if (!data->retryCapacityPlan && entry.reuseNativeSlots)
+                        ++entry.shardOwner->nativeCapacityRetries;
                     data->retryCapacityPlan = true;
-                    if (entry.reuseNativeSlots) ++entry.shardOwner->nativeCapacityRetries;
-                    break;
+                    entry.capacityInvalidated = true;
+                    if (entry.native) entry.native->freshMetadataRequired = true;
                 }
             } else if (page->second.revision != entry.revision)
                 break;
@@ -3520,12 +3530,10 @@ bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&pr
         if (claimed != qsizetype(end)) break;
         first = end;
     }
-    if (claimed != qsizetype(data->entries.size())) {
-        // The original mutation retains the completed pixels. One late reader
-        // switches the whole D to prepaid additions for its one cold retry.
-        if (data->retryCapacityPlan)
-            for (auto &entry : data->entries)
-                if (entry.native) entry.native->freshMetadataRequired = true;
+    if (claimed != qsizetype(data->entries.size()) || data->retryCapacityPlan) {
+        // No page was edited. Retain only the observed invalidation set for
+        // the cold retry; unrelated rows keep their original release plan.
+        if (claimed != qsizetype(data->entries.size())) data->retryCapacityPlan = false;
         for (size_t first = 0; first < size_t(claimed);) {
             const size_t end = data->batchEnd(first, size_t(claimed));
             QMutexLocker locker(&data->entries[first].shardOwner->mutex);

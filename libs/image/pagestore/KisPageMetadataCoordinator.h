@@ -447,6 +447,9 @@ private:
         DeferredPublicationCleanup &operator=(const DeferredPublicationCleanup &) = delete;
         bool isEmpty() const;
         bool needsCapacityReprepare() const;
+        // Failed all-D claim, in original input coordinates. Only these rows
+        // lost their prepared release permission; no authority is granted.
+        void forEachCapacityInvalidation(void *context, void (*visit)(void *, size_t)) const;
         // One unit is one candidate page (or one empty-candidate terminal
         // payload). Actual candidate capacity remains charged until freed.
         // This is a cooperative destruction budget,

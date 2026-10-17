@@ -298,7 +298,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepare(
             error, QStringLiteral("overlay update cannot be prepared"));
         return false;
     }
-    data->nativeRows = data->mutationCount && KisPageMetadataCoordinator::canBorrowNativeMutation(
+    data->nativeRows = !data->retryNativeCapacity && data->mutationCount && KisPageMetadataCoordinator::canBorrowNativeMutation(
         data->transaction, data->changes.data(), qsizetype(data->changes.size()));
     if (data->mutationCount && !data->nativeRows) {
         data->metadata = data->owner->m_metadata.prepareMutation(
@@ -323,20 +323,21 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::tryAcceptLocked(
 {
     if (installOverlayLocked(cleanup, error)) return true;
     if (!cleanup || (!cleanup->needsCapacityReprepare() && !data->retryNativeCapacity)) return false;
-    // One common cold downgrade for native seal, generic publication and
-    // semantic removal. Keep pixels, proofs, admission and adapter preparation.
-    // The rejected candidate performed no edits. Its former fee/storage plan
-    // must be destroyed before preparing the conservative whole-D disposition.
+    // One common retry for native seal, generic publication and removal.
+    // Keep pixels, proofs and unaffected release permissions. Full-D claims
+    // are repeated, but only invalidated rows need additional capacity.
     bool prepared = false;
     ownerLock.unlock();
     {
         const auto relock = qScopeGuard([&] { ownerLock.relock(); });
+        cleanup->forEachCapacityInvalidation(data.get(), [](void *context, size_t i) {
+            static_cast<Data *>(context)->changes.at(i).releasesCapacity = false;
+        });
         *cleanup = {};
-        for (auto &change : data->changes) change.releasesCapacity = false;
-        data->retryNativeCapacity = false;
         data->prepared = false;
         data->surfacePrepared = false;
         prepared = prepare(error, storageRefused);
+        data->retryNativeCapacity = false;
     }
     return prepared && prepareSurfaceLocked(error, storageRefused) && installOverlayLocked(cleanup, error);
 }
