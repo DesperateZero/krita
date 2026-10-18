@@ -6977,6 +6977,14 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     QVERIFY(coordinator->registerPage(page));
     auto candidate = coordinator->preparePublication(tx, {2}, {transition});
     QVERIFY(candidate.isValid());
+    // The prepared candidate retains one original page location across
+    // directory growth, late revision changes and coordinator destruction.
+    // Unrelated insertions must neither invalidate it nor join its activity.
+    for (int i = 0; i < 33; ++i) {
+        const auto version = pageVersion(200 + i, 1);
+        QVERIFY(coordinator->registerPage(initialPageState(version,
+            replica(version, 1, 1, quint64(100000 + i)))));
+    }
     if (reject) {
         const KisPageVersion current{page.key, page.publishedGeneration, page.publishedDefaultPixelRevision};
         const KisPageVersionStateSnapshot *published = nullptr;

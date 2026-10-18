@@ -1750,7 +1750,7 @@
         "utility",
         "vector"
       ],
-      "lines": 5758,
+      "lines": 5739,
       "member_fields": [
         "m_capacity",
         "m_mutex",
@@ -1788,7 +1788,7 @@
         "ShardArenaGrowth",
         "ShardRecordStore"
       ],
-      "sha256": "b586784c4c99e7bac15f9349f4602f5e0bc65a62f9f12960ee17fe22d1b3b676",
+      "sha256": "48ada6fe5edfa49caebd53bb825707e684abcbf32268893bf185d0729a8de63f",
       "synchronization_declarations": 3
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -3948,7 +3948,7 @@
         "utility",
         "vector"
       ],
-      "lines": 13818,
+      "lines": 13826,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -4014,7 +4014,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "74f779ebf6341b60181c6e7e443cde5b3834a6cc324bcd5cf810cb569df9ee20",
+      "sha256": "74e0fcf22de0a1cf17c1eb393eee0c6a7e576881ca0d19ec203f5b6b4ad7ac5f",
       "synchronization_declarations": 12
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -6845,5 +6845,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "4506ea1e1b253165621acd77c884ba303dfdefb6"
+  "working_tree_head": "de3f38b74e700fcc5a2b90fc350b9600b8dafe86"
 }

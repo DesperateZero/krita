@@ -1341,12 +1341,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "preparedPublications",
             "reservePublicationActivity",
             "releasePublicationActivity",
-            "entry.acceptedPage = page",
+            "entry.originalPage = page",
             "page->second.activity.publicationClaim = data.get()",
             "page->second.activity.publicationClaim = rows",
             "shard->installDetachment(*page, version, native",
             "releaseActivities(first, end)",
-            "entry.shardOwner->releasePublicationActivity(entry.key())",
+            "entry.shardOwner->releasePublicationActivity(entry.key(), entry.originalPage->second)",
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
@@ -1385,6 +1385,17 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         if install_begin < 0 or install_end < 0:
             errors.append("R2/M2 publication install boundary is missing")
         install_text = metadata_text[install_begin:install_end]
+        # Prepared rows retain their shard and the append-only page node.
+        # Revisions/claims remain dynamic; recovering the key is not another
+        # validity check. Changing directory lifetime requires a new proof.
+        if re.search(r"\bpages\s*\.\s*(?:erase|clear|extract|swap)\s*\(|\bpages\s*=(?!=)", metadata_text):
+            errors.append("metadata original-page lifetime lost its append-only directory")
+        for obsolete in ("bool hasWriter(const KisPageKey &", "publicationClaim(const KisPageKey &",
+                         "setPublicationClaim(", "acceptedPage", "pages.find(entry.key())"):
+            if obsolete in metadata_text:
+                errors.append(f"metadata restored an obsolete key lookup: {obsolete}")
+        if "pages.find(" in install_text:
+            errors.append("metadata prepared installation re-resolves its protected page")
         for forbidden in ("consumePublicationActivity", "activityReservation = false",
                           "releaseActivities(", "releasePublicationActivity("):
             if forbidden in install_text:
