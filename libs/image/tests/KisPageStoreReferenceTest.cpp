@@ -8490,6 +8490,40 @@ void KisPageStoreReferenceTest::mutationStorageReclaimsBlocksAndRejectsABA()
 
 void KisPageStoreReferenceTest::mutationStorageIncarnationExhaustion()
 {
+    // A known phase shares one physical allocation without moving its rows.
+    // Erasing one block cannot refund bytes still held by another live block;
+    // after the last erase, even the otherwise warm empty block must release.
+    {
+        KisBackingBudgetController budget;
+        const auto live = [&] { return budget.usage().buckets[
+            size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+        auto warm = budget.reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
+        const auto baseline = live();
+        {
+            KisMutationStorage<int, 2> phase(&budget);
+            phase.reserveTogether(6);
+            std::array<KisMutationSlotHandle, 6> ids;
+            for (size_t i = 0; i < ids.size(); ++i) {
+                ids[i] = phase.prepareSlot();
+                QVERIFY(phase.emplacePrepared(ids[i], int(i)));
+            }
+            auto *last = phase.at(ids.back());
+            const auto full = live();
+            QVERIFY(phase.erase(ids[0])); QVERIFY(phase.erase(ids[1]));
+            phase.takeReleasedBlocks().reset();
+            QCOMPARE(live(), full);
+            QCOMPARE(phase.at(ids.back()), last);
+            for (size_t i = 2; i < ids.size(); ++i) QVERIFY(phase.erase(ids[i]));
+            QCOMPARE(live(), full);
+            phase.takeReleasedBlocks().reset();
+            QVERIFY(live() < full);
+            const auto next = phase.prepareSlot();
+            QVERIFY(next.incarnation != ids[0].incarnation);
+            QVERIFY(phase.emplacePrepared(next, 42));
+            QVERIFY(!phase.at(ids[0]));
+        }
+        QCOMPARE(live(), baseline);
+    }
     KisMutationStorage<int, 2, quint8> storage;
     KisMutationSlotHandle first;
     for (int i = 1; i <= 255; ++i) {

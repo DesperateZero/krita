@@ -99,7 +99,7 @@ struct KisPageOperationPublication {
             bool operator==(const Iterator &other) const { return current == other.current; }
             const auto &operator*() const {
                 if constexpr (Proof) return current->replacement;
-                else return current->replacement.key;
+                else return current->replacement.key();
             }
         };
         Iterator begin() const { Iterator it{rows.begin(), rows.end()}; it.skip(); return it; }
@@ -107,11 +107,11 @@ struct KisPageOperationPublication {
         size_t size() const { return length; }
         bool count(const KisPageKey &key) const {
             const auto found = std::lower_bound(rows.begin(), rows.end(), key, [](const auto &a, const auto &b) {
-                const auto &key = a.replacement.key;
+                const auto &key = a.replacement.key();
                 return std::tie(key.surface.value, key.page.row, key.page.column)
                     < std::tie(b.surface.value, b.page.row, b.page.column);
             });
-            return found != rows.end() && found->replacement.key == key && !found->replacement.removal;
+            return found != rows.end() && found->replacement.key() == key && !found->replacement.removal;
         }
     };
     struct Surfaces {
@@ -188,12 +188,48 @@ public:
 
     private:
         bool installOverlayLocked(KisPageMetadataCoordinator::DeferredPublicationCleanup *, QString *);
-        class Data;
-        struct DataDeleter {
-            KisMutationStorageAllocator<Data> storage;
-            void operator()(Data *) const noexcept;
+        // This preparation belongs to the original call/handle. Only actual
+        // row and installation capacity allocates; the header has no separate
+        // charged object or allocator-retention lifetime.
+        struct Data {
+            using Change = KisPagePublicationChange;
+            explicit Data(const KisMutationStorageAllocator<char> &storage)
+                : changes(storage)
+                , proofNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+                , removalNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
+                , oldProofNodes(storage), oldRemovalNodes(storage) {}
+            Data(Data &&) noexcept = default;
+            Data &operator=(Data &&) noexcept = default;
+            ~Data() { releaseCapacity(); }
+            const Change *findChange(const KisPageKey &) const;
+            void releaseCapacity() noexcept
+            {
+                // A moved-from header no longer owns the reservation.
+                if (!state) return;
+                if (proofInsertions) state->proofInsertions.fetch_sub(std::exchange(proofInsertions, 0));
+                if (removalInsertions) state->removalInsertions.fetch_sub(std::exchange(removalInsertions, 0));
+            }
+            KisPagePublicationCoordinator *owner = nullptr;
+            KisPageTransaction transaction;
+            KisPagePublicationChanges changes;
+            size_t mutationCount = 0;
+            std::shared_ptr<KisPagePublicationDelta> state;
+            ProofMap proofNodes;
+            RemovalSet removalNodes;
+            std::vector<ProofMap::node_type, KisMutationStorageAllocator<ProofMap::node_type>> oldProofNodes;
+            std::vector<RemovalSet::node_type, KisMutationStorageAllocator<RemovalSet::node_type>> oldRemovalNodes;
+            size_t proofInsertions = 0;
+            size_t removalInsertions = 0;
+            KisPageMetadataCoordinator::PreparedPublication metadata;
+            KisSurfaceEpochChange surfaceChange;
+            qsizetype surfaceIndex = -1;
+            bool surfacePrepared = false;
+            bool prepared = false;
+            bool installed = false;
+            bool canonical = false;
+            bool retryMutationCapacity = false;
         };
-        std::unique_ptr<Data, DataDeleter> data;
+        std::optional<Data> data;
         void cancel() noexcept;
         friend class KisPagePublicationCoordinator;
     };

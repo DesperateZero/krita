@@ -389,18 +389,31 @@ class KisMutationStorage
         quint32 previous = Invalid;
         quint32 next = Invalid;
     };
+    struct Group {
+        std::atomic<size_t> remaining;
+        size_t units;
+    };
     struct Block {
         std::array<Slot, BlockElements> slots;
         Block *nextReleased = nullptr;
+        Group *group = nullptr;
         quint32 live = 0;
     };
+    struct alignas(Block) AllocationUnit { std::byte bytes[alignof(Block)]; };
     struct DeleteBlock {
         KisBackingBudgetController *budget = nullptr;
         void operator()(Block *block) const noexcept
         {
             if (!block) return;
+            auto *group = block->group;
             block->~Block();
-            KisMutationStorageAllocator<Block>(budget).deallocate(block, 1);
+            if (!group) KisMutationStorageAllocator<Block>(budget).deallocate(block, 1);
+            else if (group->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                const size_t units = group->units;
+                group->~Group();
+                KisMutationStorageAllocator<AllocationUnit>(budget).deallocate(
+                    reinterpret_cast<AllocationUnit *>(group), units);
+            }
         }
     };
     using OwnedBlock = std::unique_ptr<Block, DeleteBlock>;
@@ -464,6 +477,36 @@ public:
     }
     KisMutationStorage(const KisMutationStorage &) = delete;
     KisMutationStorage &operator=(const KisMutationStorage &) = delete;
+
+    // An already known, immediately admitted range has one storage phase.
+    // Group only a fresh directory; never relocate live rows or grow a group
+    // behind a borrowed address. Streaming growth keeps independent blocks.
+    void reserveTogether(size_t count)
+    {
+        if (m_attached || !m_blocks.empty() || count <= BlockElements) { reserve(count); return; }
+        if (count > Invalid - 1u) throw std::bad_alloc();
+        const size_t blocks = (count + BlockElements - 1) / BlockElements;
+        if (blocks > (Invalid - 1u) / BlockElements) throw std::bad_alloc();
+        constexpr size_t offset = (sizeof(Group) + alignof(Block) - 1) / alignof(Block) * alignof(Block);
+        static_assert(alignof(Group) <= alignof(Block));
+        static_assert(std::is_nothrow_default_constructible_v<Block>);
+        if (blocks > (size_t(std::numeric_limits<qint64>::max()) - offset) / sizeof(Block)) throw std::bad_alloc();
+        const size_t units = (offset + blocks * sizeof(Block) + sizeof(AllocationUnit) - 1) / sizeof(AllocationUnit);
+        m_blocks.reserve(blocks);
+        auto *budget = m_blocks.get_allocator().budget;
+        auto *raw = KisMutationStorageAllocator<AllocationUnit>(budget).allocate(units);
+        auto *group = new (raw) Group{{blocks}, units};
+        auto *storage = reinterpret_cast<std::byte *>(raw) + offset;
+        for (size_t b = 0; b < blocks; ++b) {
+            auto *block = new (storage + b * sizeof(Block)) Block();
+            block->group = group;
+            m_blocks.emplace_back();
+            m_blocks.back().block = OwnedBlock(block, DeleteBlock{budget});
+            ++m_attached;
+            for (size_t i = 0; i < BlockElements; ++i)
+                appendLink(quint32(b * BlockElements + i), m_freeHead, m_freeTail);
+        }
+    }
 
     void reserve(size_t count)
     {
@@ -547,7 +590,10 @@ public:
         --block->live;
         // Prefer a just-released slot while keeping untouched reserves ordered.
         prependFree(handle.index);
-        if (!block->live && m_attached > 1) detachEmptyBlock(handle.index / BlockElements);
+        // A grouped phase must not keep its entire allocation alive merely to
+        // cache the final empty block. Individual streaming blocks retain the
+        // existing one-block warm policy.
+        if (!block->live && (m_attached > 1 || block->group)) detachEmptyBlock(handle.index / BlockElements);
         return true;
     }
     bool erase(size_t index) { return erase(handleAt(index)); }

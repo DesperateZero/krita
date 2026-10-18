@@ -10,6 +10,7 @@
 #include <map>
 #include <tuple>
 struct KisPageRetirementWait;
+struct KisPagePreparedBackingChange;
 
 struct KisPageBackingRecord
 {
@@ -28,7 +29,7 @@ struct KisPagePhysicalBackingRecord
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 domainRevision = 0;
     quint64 domainClaim = 0;
-    quint64 classClaim = 0;
+    const KisPagePreparedBackingChange *classClaim = nullptr;
     std::array<quint32, static_cast<size_t>(KisBackingBudgetClass::Count)> references{};
     KisBackingBudgetClass chargedClass = KisBackingBudgetClass::Count;
     KisPageBackingRecord *members = nullptr;
@@ -73,6 +74,23 @@ using KisPageBackingIndex = std::map<KisReplicaAllocationIdentity, KisPageBackin
 using KisPagePhysicalBackingIndex = std::map<KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord,
     KisPageBackingIdentityLess,
     KisMutationStorageAllocator<std::pair<const KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord>>>;
+
+// Transient ledger preparation in the caller's frozen publication row. The
+// physical claim protects these locations; no copied replica or second input
+// owns the operation. Generic independent preparations use the same row.
+struct KisPagePreparedBackingChange
+{
+    KisPageBackingIndex::iterator backing;
+    KisPagePhysicalBackingRecord *physical = nullptr;
+    size_t order = 0;
+    KisBackingBudgetClass after = KisBackingBudgetClass::Count;
+    KisBackingBudgetClass chargedAfter = KisBackingBudgetClass::Count;
+    KisPageRetirementRecord **idleResult = nullptr;
+    const void *claim = nullptr;
+    const KisPagePreparedBackingChange *next = nullptr;
+    KisPageBackingRecord *credit = nullptr;
+    KisBackingBudgetClass creditBefore = KisBackingBudgetClass::Count;
+};
 
 struct KisPageProviderOperationRecord
 {

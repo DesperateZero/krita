@@ -8353,6 +8353,9 @@ void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
     const int protectedPages = reader == 2 ? pages : retry ? 1 : 0;
     QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, quint64(pages - protectedPages));
     QCOMPARE(after.nativeCapacityRetries - before.nativeCapacityRetries, quint64(retry));
+    // A local late reader must prepare only its own added record. The other
+    // rows continue borrowing their original results through the joint claim.
+    QCOMPARE(after.preparedMutationPages - before.preparedMutationPages, quint64(protectedPages));
     QCOMPARE(after.publicationHistoryNodesTransferred - before.publicationHistoryNodesTransferred,
              quint64(protectedPages));
     QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages, payload.payloadInitializedPages);

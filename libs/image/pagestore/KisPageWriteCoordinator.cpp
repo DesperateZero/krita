@@ -2470,7 +2470,7 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
         throw std::bad_alloc();
     const qsizetype inlineCapacity = inlineEntry || nextInlineIncarnation ? 1 : 0;
     if (count > inlineCapacity)
-        overflow.reserve(size_t(count - inlineCapacity));
+        overflow.reserveTogether(size_t(count - inlineCapacity));
     if (count > 8 && (!index || size_t(count) > index->size() / 2))
         index.emplace(prepareIndex(count));
 }

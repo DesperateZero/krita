@@ -1653,6 +1653,9 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
     });
     // Only structure/cold preparation uses this gate. Bound entries stay at
     // their original addresses across unrelated directory/index growth.
+    // The complete set is already known here. Prepare its directory and hot
+    // index once; no private result or payload capacity is admitted early.
+    if (!d->writes.size()) d->writes.reserveKnownTargetCount(pages.size());
     size_t i = 0;
     for (const auto &page : std::as_const(pages)) {
         KisPageWriteIntent intent; intent.key = {surface, page};
@@ -2833,10 +2836,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
             if (!success) break;
             // Proof is still private; no writer may survive its publication.
             page->writable.reset();
-            changes.push_back({{entry->key(),
-                {page->target.version, page->proof.transaction, page->proof.providerValidationStamp, true,
-                    page->target.allocationIdentity()},
-                false, page}, {}, false, false, false, {}});
+            changes.push_back({KisPagePublicationChange::Replacement(page), {}, false, false, false, {}});
         }
     } catch (const std::bad_alloc &) {
         success = false;

@@ -8,7 +8,10 @@
 
 #include "KisPageStoreTypes.h"
 #include "KisMutationStorage_p.h"
+#include "KisPageMetadataCoordinator_p.h"
+#include "KisPageRetirementRecord_p.h"
 #include <vector>
+#include <boost/iterator/iterator_facade.hpp>
 
 struct KisPagePrivateWrite;
 struct KisPageRetirementRecord;
@@ -44,11 +47,45 @@ struct KisPagePublicationChange {
         bool removal = false;
     };
     struct Replacement {
-        KisPageKey key;
-        KisPagePublicationProof proof;
+        struct Owned {
+            KisPageKey key;
+            KisPagePublicationProof proof;
+        };
+        // CPU publication borrows the original frozen result. Only a removal
+        // or an independently owned external input constructs the value form.
+        union Payload {
+            Owned owned;
+            Payload() {}
+        } payload;
         bool removal = false;
         KisPagePrivateWrite *native = nullptr;
+        bool borrowed = false;
+        Replacement() { new (&payload.owned) Owned{}; }
+        Replacement(const KisPageKey &key, const KisPagePublicationProof &proof,
+                    bool removed = false, KisPagePrivateWrite *result = nullptr)
+            : removal(removed), native(result)
+        { new (&payload.owned) Owned{key, proof}; }
+        explicit Replacement(KisPagePrivateWrite *result) : native(result), borrowed(true)
+        { Q_ASSERT(result); }
+        const KisPageKey &key() const { return borrowed ? native->target.version.key : payload.owned.key; }
+        const KisPageVersion &version() const { return borrowed ? native->target.version : payload.owned.proof.version; }
+        KisPageTransactionId transaction() const
+        { return borrowed ? native->proof.transaction : payload.owned.proof.transaction; }
+        bool hasProof() const
+        { return borrowed ? native->proof.isValid() && native->target.version.isValid() : payload.owned.proof.isValid(); }
+        bool nativeProof() const { return borrowed || payload.owned.proof.native; }
+        KisPagePublicationProof proofValue() const
+        {
+            return borrowed ? KisPagePublicationProof{native->target.version, native->proof.transaction,
+                native->proof.providerValidationStamp, true, native->target.allocationIdentity()} : payload.owned.proof;
+        }
     } replacement;
+    KisPagePublicationChange() = default;
+    KisPagePublicationChange(Replacement replacement, KisPagePublicationProof superseded = {},
+        bool removalWasInBase = false, bool wasRemoved = false, bool releasesCapacity = false,
+        KisReplicaHandle supersededAuthority = {})
+        : replacement(std::move(replacement)), superseded(superseded), removalWasInBase(removalWasInBase),
+          wasRemoved(wasRemoved), releasesCapacity(releasesCapacity), supersededAuthority(supersededAuthority) {}
     KisPagePublicationProof superseded;
     bool removalWasInBase = false;
     bool wasRemoved = false;
@@ -59,16 +96,47 @@ struct KisPagePublicationChange {
     // Borrowed only inside installOverlayLocked's uninterrupted owner gate.
     // Revalidation overwrites it on every attempt; it is never an authority.
     KisPagePublicationProof *acceptedOverlayProof = nullptr;
+    KisPagePreparedBackingChange backingPreparation;
+    struct MetadataAcceptance {
+        KisPagePublicationChange *input = nullptr;
+        void *shard = nullptr;
+        void *page = nullptr;
+        void *prepared = nullptr;
+        KisVersionSlotId replacementSlot;
+        size_t shardIndex = 0;
+    } metadataAcceptance;
+    bool borrowedMutation = false;
+    bool needsOwnedMutation = false;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }
     const KisPageVersion &mutationVersion() const
-    { return superseded.isValid() ? superseded.version : replacement.proof.version; }
+    { return superseded.isValid() ? superseded.version : replacement.version(); }
     quint64 expectedStamp() const { return superseded.native ? superseded.stamp : 0; }
     const KisReplicaHandle *expectedAuthority() const
     { return superseded.native ? &supersededAuthority : nullptr; }
 };
 using KisPagePublicationChanges = std::vector<KisPagePublicationChange,
     KisMutationStorageAllocator<KisPagePublicationChange>>;
+
+// Sort only a phase's adjunct fields. The original D and all result pointers
+// remain fixed; this view has neither storage nor ownership.
+template<class T, T KisPagePublicationChange::*Member>
+class KisPublicationMemberIterator : public boost::iterator_facade<KisPublicationMemberIterator<T, Member>,
+    T, boost::random_access_traversal_tag>
+{
+public:
+    KisPublicationMemberIterator() = default;
+    explicit KisPublicationMemberIterator(KisPagePublicationChange *row) : row(row) {}
+private:
+    T &dereference() const { return row->*Member; }
+    bool equal(const KisPublicationMemberIterator &other) const { return row == other.row; }
+    void increment() { ++row; }
+    void decrement() { --row; }
+    void advance(ptrdiff_t n) { row += n; }
+    ptrdiff_t distance_to(const KisPublicationMemberIterator &other) const { return other.row - row; }
+    KisPagePublicationChange *row = nullptr;
+    friend class boost::iterator_core_access;
+};
 
 #endif

@@ -430,6 +430,10 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
+        KisPagePublicationChange *m_rows = nullptr;
+        size_t m_count = 0;
+        KisPageTransaction m_transaction;
+        std::shared_ptr<const quint8> m_owner;
         enum class Failure : quint8 { None, Conflict, Storage };
         Failure m_failure = Failure::None;
         friend class KisPageMetadataCoordinator;
@@ -508,18 +512,13 @@ private:
                                         const KisPageVersion *versions, qsizetype count,
                                         QString *error = nullptr) const;
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
-                                        const KisPagePublicationChange *rows, qsizetype count,
+                                        KisPagePublicationChange *rows, qsizetype count,
                                         QString *error = nullptr) const;
-    // The original sealed result and sorted input span stay alive through this
-    // synchronous call. No candidate ownership or cached permission is created.
-    static bool canBorrowNativeMutation(const KisPageTransaction &, const KisPagePublicationChange *, qsizetype);
-    enum class NativeAcceptance { Accepted, NeedsCapacity, Rejected };
-    NativeAcceptance acceptNativeMutation(const KisPageTransaction &, const KisPagePublicationChange *, qsizetype,
-                                         QString *error);
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
                          QString *error = nullptr,
-                         DeferredPublicationCleanup *deferredCleanup = nullptr);
+                         DeferredPublicationCleanup *deferredCleanup = nullptr,
+                         bool *retryCapacity = nullptr);
     // Logical half only. The write coordinator must independently retain the
     // exact before, prepare provider retag/descriptor/budget/terminal storage,
     // and acquire physical claims before installation. Rejection consumes the

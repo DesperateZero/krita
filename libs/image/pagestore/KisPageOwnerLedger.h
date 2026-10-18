@@ -61,6 +61,9 @@ private:
     KisBackingClassChangeReservation(KisPageOwnerLedger *owner, quint64 cookie);
     KisPageOwnerLedger *m_owner = nullptr;
     quint64 m_cookie = 0;
+    KisPagePublicationChange *m_rows = nullptr;
+    size_t m_count = 0;
+    KisBackingBudgetReservation m_budget;
 
     friend class KisPageOwnerLedger;
 };
@@ -257,6 +260,7 @@ private:
                                QString *error);
     void commitPreparedBackingChanges(quint64 cookie) noexcept;
     void cancelPreparedBackingChanges(quint64 cookie) noexcept;
+    void finishBorrowedBackingChanges(KisBackingClassChangeReservation &, bool commit) noexcept;
     explicit KisPageOwnerLedger(const KisMutationStorageAllocator<KisPageOwnerLedger> &storage);
     class Private;
     struct PrivateReleaser { static void cleanup(Private *); };

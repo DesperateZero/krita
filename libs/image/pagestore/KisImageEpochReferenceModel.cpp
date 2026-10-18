@@ -754,7 +754,7 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
 }
 
 static const KisPageVersion &epochPreparedVersion(const KisPreparedPageProof &proof) { return proof.authority.version; }
-static const KisPageVersion &epochPreparedVersion(const KisPagePublicationChange::Replacement &entry) { return entry.proof.version; }
+static const KisPageVersion &epochPreparedVersion(const KisPagePublicationChange::Replacement &entry) { return entry.version(); }
 static const KisPageVersion &epochPreparedVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
 {
     return entry.second.proof.version;
