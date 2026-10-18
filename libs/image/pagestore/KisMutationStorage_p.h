@@ -26,6 +26,7 @@
 
 class KisBackingBudgetController;
 class KisMutationStorageOwner;
+struct KisSharedNonPayloadUsage;
 enum class KisBackingBudgetClass : quint8;
 KRITAIMAGE_EXPORT KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
 
@@ -57,13 +58,15 @@ public:
 private:
     explicit KisMutationStorageOwner(KisBackingBudgetController *controller)
         : m_controller(controller), m_bytes(kisPageStorageBytes(this, alignof(KisMutationStorageOwner))) {}
-    void detach(const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child) noexcept;
+    void detach(const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child,
+                KisSharedNonPayloadUsage *usage) noexcept;
     void stopAllocations() noexcept;
     std::atomic<quint32> m_references{0};
     QMutex m_gate;
     KisBackingBudgetController *m_controller;
     std::shared_ptr<KisBackingBudgetController> m_parent;
     quint64 m_child = 0;
+    KisSharedNonPayloadUsage *m_childUsage = nullptr;
     quint64 m_bytes;
     bool m_accepting = true;
     friend class KisBackingBudgetController;

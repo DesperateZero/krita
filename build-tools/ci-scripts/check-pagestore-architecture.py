@@ -1544,6 +1544,24 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         write_source = code_only(write_coordinator_source.read_text(
             encoding="utf-8", errors="replace"
         ))
+        for obsolete in ("slot->delta", "m_sharedChildren.find(sharedChild)",
+                         "m_sharedChildren.find(registration)",
+                         "m_sharedChildren.find(slot->sharedChild)"):
+            if obsolete in write_source:
+                errors.append(f"budget restored redundant projection/registration: {obsolete}")
+        if ("changedComponents" not in write_header or "slot->bucket(" not in write_source
+                or "std::is_trivially_copyable_v<ReservationSlot>" not in write_source
+                or "std::memcpy(candidate.get(), m_slots.get()," not in write_source):
+            errors.append("budget selected-component storage lost safe masked consumption/growth")
+        activation = write_source[write_source.find("void KisBackingBudgetController::activateReservationLocked("):
+                                  write_source.find("bool KisBackingBudgetController::reservationCovers(")]
+        if "m_fittingBudgetClasses &=" in activation:
+            errors.append("budget invalidates fit after same-gate admitted activation")
+        owner_source = code_only((page_store_source.parent / "KisPageOwnerLedger.cpp").read_text())
+        if "nextProviderInCut" in owner_source:
+            errors.append("provider traversal restored one registration lookup per provider")
+        if "(complete && native != complete)" not in metadata_text:
+            errors.append("combined CPU completion no longer requires the original result")
         selector_begin = write_source.find("KisPageWritePlanKind KisPageWriteCoordinator::select")
         selector_end = write_source.find(
             "void KisPageWriteCoordinator::recordPrepared",
@@ -1566,6 +1584,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if forbidden in selector_text:
                 errors.append(f"R3/M5A opened handoff before M6/M7: {forbidden}")
     if page_store_source.is_file():
+        final_input = store_text[store_text.find("bool KisPageMutationExecution::writeFinalRect("):
+                                 store_text.find("KisPageMutationSession::~KisPageMutationSession()")]
+        if "completePrivateWrite(" in final_input:
+            errors.append("controlled final input restored completion before its metadata consumer")
+        if "if (finalPayload) owner->metadata.completePrivateWrite(page)" in store_text:
+            errors.append("fresh final payload restored premature metadata completion")
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
         if "KisMutationStorage<Page, 2> overflow" not in store_text:

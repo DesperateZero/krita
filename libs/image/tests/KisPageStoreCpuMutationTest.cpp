@@ -3392,17 +3392,23 @@ void KisPageStoreCpuMutationTest::restorationUsesActualRootDifference()
     const auto after = f.store->captureRetainedEpoch(); QVERIFY(after.isValid());
     KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
     const auto transitions = [&] {
-        return recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::RestoreTransitionPreflight)].workItems;
+        return recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::RestoreTransitionPreflight)];
     };
-    quint64 prior = 0;
     auto previousContent = after.snapshot.epoch;
     for (bool restoreBefore : {true, false, false, true}) {
         const auto target = restoreBefore ? before : after;
+        const auto prior = transitions();
+        const auto retries = f.store->publicationStatistics().restoreMetadataRepreparations;
         QVERIFY(f.store->restoreRetainedEpoch(target).isValid());
         // The repeated after restore has identical content under a new epoch.
+        // Background metadata cleanup may invalidate an unlocked preparation.
+        // Charge every registered retry, but require the exact root difference
+        // on every attempt; a full-directory scan still fails this assertion.
         const bool repeated = previousContent == target.snapshot.epoch;
-        QCOMPARE(transitions() - prior, repeated ? quint64(0) : difference);
-        prior = transitions();
+        const auto measured = transitions();
+        const quint64 attempts = 1 + f.store->publicationStatistics().restoreMetadataRepreparations - retries;
+        QCOMPARE(measured.intervals - prior.intervals, attempts);
+        QCOMPARE(measured.workItems - prior.workItems, repeated ? quint64(0) : difference * attempts);
         previousContent = target.snapshot.epoch;
         for (int i = 0; i < pages; ++i) {
             const quint8 value = restoreBefore ? 0x31 : i % 4 == 0 ? 0x2a : i % 5 == 0 ? 0x71 : 0x31;

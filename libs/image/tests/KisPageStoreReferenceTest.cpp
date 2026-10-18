@@ -320,12 +320,16 @@ enum class FakeFailurePoint : quint8 {
 class FakeCpuReplicaProvider final : public KisPageReplicaProvider
 {
 public:
-    explicit FakeCpuReplicaProvider(const std::shared_ptr<KisCompletionRegistry> &completions)
-        : m_completions(completions)
+    explicit FakeCpuReplicaProvider(const std::shared_ptr<KisCompletionRegistry> &completions, quint64 identity = 17)
+        : m_completions(completions), m_identity(identity)
     {
         const KisCompletionDomain source = KisCompletionDomain::CpuJob;
         m_completionSource = m_completions ? m_completions->registerSource(source) : 0;
     }
+
+    mutable std::atomic<unsigned> domainHintCalls{0};
+    bool mayHaveBackingDomainChanges() const noexcept override
+    { ++domainHintCalls; return false; } // This test provider has fixed domains.
 
     QString name() const override
     {
@@ -334,7 +338,7 @@ public:
 
     KisReplicaProviderId providerId() const override
     {
-        return KisReplicaProviderId{17};
+        return KisReplicaProviderId{m_identity};
     }
 
     KisReplicaProviderEpoch providerEpoch() const override
@@ -652,6 +656,7 @@ private:
     }
 
     std::shared_ptr<KisCompletionRegistry> m_completions;
+    const quint64 m_identity;
     quint64 m_completionSource = 0;
     mutable QMutex m_mutex;
     quint64 m_epoch = 1;
@@ -1350,6 +1355,7 @@ private Q_SLOTS:
     void ownerLedgerSealsPreparedPageBeforeEpochCommit();
     void ownerLedgerSeparatesDetachedRetirement();
     void ownerLedgerVerifiesTerminalProviderIdentity();
+    void providerCutVisitsEveryAcceptedProvider();
     void pageStoreCpuFacadeCommitsCowWithoutMixedEpoch();
     void pageStoreChainsRepeatedWritesWithinTransaction();
     void pageStoreLeaseOutlivesOwnerSafely();
@@ -5034,6 +5040,14 @@ void KisPageStoreReferenceTest::retainedStorageConcurrentTeardown()
             auto storage = KisMutationStorageAllocator<Block>::retained(child.get());
             Block *data = storage.allocate(4);
             QVERIFY(reinterpret_cast<quintptr>(data) % alignof(Block) == 0);
+            // Other registrations may grow/rebalance the parent directory;
+            // the original charge receipt also survives controller teardown.
+            std::vector<std::unique_ptr<KisBackingBudgetController>> peers;
+            if (round == 0) for (int i = 0; i < 33; ++i) {
+                auto peer = std::make_unique<KisBackingBudgetController>();
+                QVERIFY(peer->configureSharedNonPayloadBudget(parent));
+                peers.push_back(std::move(peer));
+            }
             QSemaphore start;
             std::thread release([&] { start.acquire(); storage.deallocate(data, 4); });
             start.release();
@@ -6567,6 +6581,24 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
     QVERIFY(!actual.findVersion(write.version));
     QCOMPARE(actual.versions.first().authority, write.source);
     QCOMPARE(actual.nextGeneration.value, quint64(3));
+    if (variant == 3) {
+        KisCompletionRegistry registry;
+        const auto source = registry.registerSource(KisCompletionDomain::HostLogical);
+        const auto completion = registry.allocatePending(source);
+        QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
+        QVERIFY(metadata.bindCpuProofIssuer(1, completion));
+        KisPreparedPageProof proof;
+        proof.authority = result.target; proof.transaction = write.transaction;
+        proof.producerCompletion = completion; proof.providerValidationStamp = 1;
+        // Completion capability must name the original registered result;
+        // neither a copied result nor the ordinary seal may complete it.
+        QVERIFY(!metadata.sealCpuProof(proof, 1, nullptr, &foreign));
+        QVERIFY(!result.completed);
+        QVERIFY(!metadata.sealCpuProof(proof, 1));
+        QVERIFY(metadata.sealCpuProof(proof, 1, nullptr, &result));
+        QVERIFY(result.completed);
+        QVERIFY(!metadata.sealCpuProof(proof, 1, nullptr, &result));
+    }
     if (result.reserved) QVERIFY(metadata.cancelPrivateResult(&result));
 }
 
@@ -9496,6 +9528,42 @@ void KisPageStoreReferenceTest::backingReservationReuseDoesNotCarryOldCharges()
                 }
         }
     }
+    // Fill every component, install only half, then reuse the released slot.
+    // Unused cells and aggregate reservations must not leak across reuse.
+    KisBackingBudgetDelta all, half;
+    for (size_t c = 0; c < size_t(KisBackingBudgetClass::Count); ++c)
+        for (auto domain : domains) {
+            *kisPageDomainComponent(all.buckets[c], domain) = 64;
+            *kisPageDomainComponent(half.buckets[c], domain) = 32;
+        }
+    auto mixed = budget.reserve(all, nullptr);
+    QVERIFY(mixed.isValid());
+    budget.commitReservation(std::move(mixed), half);
+    QVERIFY(!mixed.isValid());
+    const auto retained = budget.usage();
+    for (size_t c = 0; c < size_t(KisBackingBudgetClass::Count); ++c)
+        for (auto domain : domains) {
+            QCOMPARE(*kisPageDomainComponent(retained.buckets[c].live, domain),
+                     *kisPageDomainComponent(baseline.buckets[c].live, domain) + 32);
+            QCOMPARE(*kisPageDomainComponent(retained.buckets[c].reserved, domain), quint64(0));
+        }
+    auto remainder = budget.reserve(half, nullptr);
+    QVERIFY(remainder.isValid());
+    budget.commitReservation(std::move(remainder), half);
+    for (size_t c = 0; c < size_t(KisBackingBudgetClass::Count); ++c)
+        for (auto domain : domains)
+            budget.releaseLive(KisBackingBudgetClass(c), domain, 64);
+    auto recycled = budget.reserve({}, nullptr);
+    QVERIFY(recycled.isValid());
+    recycled.release();
+    const auto after = budget.usage();
+    for (size_t c = 0; c < size_t(KisBackingBudgetClass::Count); ++c)
+        for (auto domain : domains) {
+            QCOMPARE(*kisPageDomainComponent(after.buckets[c].live, domain),
+                     *kisPageDomainComponent(baseline.buckets[c].live, domain));
+            QCOMPARE(*kisPageDomainComponent(after.buckets[c].reserved, domain), quint64(0));
+        }
+
 }
 
 void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
@@ -11194,6 +11262,29 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     QCOMPARE(owner.providerOperationCount(), qsizetype(0));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(0));
     QCOMPARE(provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreReferenceTest::providerCutVisitsEveryAcceptedProvider()
+{
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    KisBackingBudgetController budget;
+    KisPageOwnerLedger owner;
+    QVERIFY(owner.configure(completions));
+    owner.attachBackingBudget(budget);
+    std::vector<std::shared_ptr<FakeCpuReplicaProvider>> providers;
+    for (quint64 i = 0; i < 33; ++i) {
+        auto provider = std::make_shared<FakeCpuReplicaProvider>(completions, 200 + i);
+        QVERIFY(owner.registerProvider(provider));
+        providers.push_back(std::move(provider));
+    }
+    QVERIFY(owner.synchronizeBackingDomains());
+    for (const auto &provider : providers) QCOMPARE(provider->domainHintCalls.load(), 1u);
+    auto late = std::make_shared<FakeCpuReplicaProvider>(completions, 300);
+    QVERIFY(owner.registerProvider(late));
+    QVERIFY(owner.synchronizeBackingDomains());
+    for (const auto &provider : providers) QCOMPARE(provider->domainHintCalls.load(), 2u);
+    QCOMPARE(late->domainHintCalls.load(), 1u);
+    QVERIFY(!owner.providerFor({KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}));
 }
 
 void KisPageStoreReferenceTest::ownerLedgerSealsPreparedPageBeforeEpochCommit()

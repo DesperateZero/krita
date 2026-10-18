@@ -539,7 +539,7 @@ KisBackingBudgetController::~KisBackingBudgetController()
     }
     if (m_storageOwner) {
         m_storageOwner->detach(m_sharedNonPayloadBudget,
-                              m_sharedNonPayloadChild);
+                              m_sharedNonPayloadChild, m_sharedNonPayloadUsage);
         m_sharedNonPayloadChild = 0;
         m_storageOwner.reset();
     } else if (m_sharedNonPayloadBudget && m_sharedNonPayloadChild) {
@@ -1048,7 +1048,7 @@ void KisBackingBudgetReservation::settle(const KisBackingBudgetDelta *installed,
             Q_ASSERT(amounts[domain] <= 0);
             if (amounts[domain] < 0)
                 local->m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
-                    local->m_sharedNonPayloadChild, domains[domain], quint64(-amounts[domain]));
+                    local->m_sharedNonPayloadUsage, domains[domain], quint64(-amounts[domain]));
         }
     }
 }
@@ -1145,7 +1145,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
         sharedChange = sharedDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         if (hasPositiveBytes(sharedDelta)) {
             sharedReservation = m_sharedNonPayloadBudget->reserveSharedNonPayload(
-                m_sharedNonPayloadChild, sharedDelta, error);
+                m_sharedNonPayloadUsage, sharedDelta, error);
             if (!sharedReservation.isValid()) {
                 QMutexLocker lock(&m_mutex);
                 ++m_usage.backpressureCount;
@@ -1218,7 +1218,7 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
     KisBackingBudgetReservation shared;
     if (m_sharedNonPayloadBudget) {
         shared = m_sharedNonPayloadBudget->reserveSharedNonPayload(
-            m_sharedNonPayloadChild, storageDelta, error);
+            m_sharedNonPayloadUsage, storageDelta, error);
         if (!shared.isValid()) {
             lock.relock();
             return m_firstFreeSlot != std::numeric_limits<quint32>::max()
@@ -1265,8 +1265,11 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
     lock.relock();
     // Growth owns no payload or callbacks; these trivial records may be moved
     // under the gate without allocation or destruction. Cookies stay stable.
-    static_assert(std::is_trivially_destructible_v<ReservationSlot>);
-    if (m_slotCount) std::copy_n(m_slots.get(), m_slotCount, candidate.get());
+    static_assert(std::is_trivially_copyable_v<ReservationSlot>);
+    // Unselected scalar cells are deliberately indeterminate. Copy the
+    // object representation, never evaluate those cells as scalar values.
+    if (m_slotCount) std::memcpy(candidate.get(), m_slots.get(),
+                               m_slotCount * sizeof(ReservationSlot));
     m_slots.swap(candidate);
     m_slotCapacity = capacity;
     lock.unlock();
@@ -1282,7 +1285,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveLocked(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
     quint64 durableBytes,
-    quint64 sharedChild, const KisBackingBudgetDelta *signedChange,
+    SharedChildUsage *sharedChild, const KisBackingBudgetDelta *signedChange,
     const KisPageDomainByteDelta *sharedChange)
 {
     quint32 slotIndex = 0;
@@ -1312,65 +1315,49 @@ void KisBackingBudgetController::activateReservationLocked(
     quint64 cookie, const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
     quint64 durableBytes,
-    quint64 sharedChild, const KisBackingBudgetDelta *signedChange,
+    SharedChildUsage *sharedChild, const KisBackingBudgetDelta *signedChange,
     const KisPageDomainByteDelta *sharedChange)
 {
     auto *slot = activeReservation(cookie);
     Q_ASSERT(slot);
-    // Inactive slot contents have no consumers. Activation overwrites the
-    // original storage once; completion need not reconstruct an empty delta.
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
     const auto &accepted = signedChange ? *signedChange : delta;
     slot->sharedChange = sharedChange ? *sharedChange : KisPageDomainByteDelta{};
     slot->durableBytes = durableBytes;
     slot->sharedChild = sharedChild;
-    slot->active = true;
-    quint32 changed = 0;
+    slot->changedComponents = 0;
+    slot->changedClasses = 0;
     for (size_t i = 0; i < budgetClassCount; ++i) {
-        const quint32 bit = quint32(1) << i;
-        if (aggregateBytes[i] || hasDomainDelta(accepted.buckets[i])) {
-            changed |= bit;
-            slot->delta.buckets[i] = accepted.buckets[i];
-            slot->aggregateBytes[i] = aggregateBytes[i];
-            m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], aggregateBytes[i]);
-        } else if (slot->changedClasses & bit) {
-            // Recycled slots must not expose a previous class through covers,
-            // a later exact commit, or an embedded storage reservation.
-            slot->delta.buckets[i] = {};
-            slot->aggregateBytes[i] = 0;
-        }
-    }
-    slot->changedClasses = quint8(changed);
-    m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, durableBytes);
-    if (sharedChild) {
-        auto child = m_sharedChildren.find(sharedChild);
-        Q_ASSERT(child != m_sharedChildren.end());
-        if (child != m_sharedChildren.end()) {
-            child->second.reservedBytes = saturatedAdd(
-                child->second.reservedBytes,
-                aggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)]);
-        }
-    }
-
-    for (quint32 pending = changed | (quint32(1) << size_t(KisBackingBudgetClass::MetadataArena));
-         pending; pending &= pending - 1) {
-        const auto bucketIndex = size_t(qCountTrailingZeroBits(pending));
-        const bool changed = hasDomainDelta(delta.buckets[bucketIndex]) || aggregateBytes[bucketIndex];
-        if (changed) m_fittingBudgetClasses &= ~(quint32(1) << bucketIndex);
-        if (!changed && bucketIndex != size_t(KisBackingBudgetClass::MetadataArena)) continue;
-        auto reserved = components(m_usage.buckets[bucketIndex].reserved);
-        auto peak = components(m_usage.buckets[bucketIndex].peak);
-        const auto live = components(m_usage.buckets[bucketIndex].live);
-        const auto requested = components(delta.buckets[bucketIndex]);
+        if (!aggregateBytes[i] && !hasDomainDelta(accepted.buckets[i])) continue;
+        slot->setBucket(i, accepted.buckets[i]);
+        slot->aggregateBytes[i] = aggregateBytes[i];
+        slot->changedClasses |= quint8(quint32(1) << i);
+        m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], aggregateBytes[i]);
+        auto &usage = m_usage.buckets[i];
+        auto reserved = components(usage.reserved);
+        auto peak = components(usage.peak);
+        const auto live = components(usage.live);
+        const auto requested = components(delta.buckets[i]);
         for (size_t domain = 0; domain < requested.size(); ++domain) {
+            if (!requested[domain]) continue;
             reserved[domain] += quint64(requested[domain]);
             auto total = saturatedAdd(live[domain], reserved[domain]);
-            if (m_processStorage && bucketIndex == size_t(KisBackingBudgetClass::MetadataArena) && domain == 0)
+            if (m_processStorage && i == size_t(KisBackingBudgetClass::MetadataArena) && domain == 0)
                 total = saturatedAdd(total, processBytes);
             peak[domain] = std::max(peak[domain], total);
         }
-        m_usage.buckets[bucketIndex].reserved = fromComponents(reserved);
-        m_usage.buckets[bucketIndex].peak = fromComponents(peak);
+        usage.reserved = fromComponents(reserved);
+        usage.peak = fromComponents(peak);
+    }
+    // fitsLocked proved the proposed domain and aggregate totals under this
+    // same gate. Installing that exact reservation preserves the fit facts.
+    m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, durableBytes);
+    if (sharedChild) sharedChild->reservedBytes = saturatedAdd(sharedChild->reservedBytes,
+        aggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)]);
+    if (m_processStorage) {
+        auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
+            saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), processBytes));
     }
 }
 
@@ -1413,8 +1400,8 @@ bool KisBackingBudgetController::reservationCovers(quint64 cookie,
     const ReservationSlot *slot = activeReservation(cookie);
     if (classIndex >= budgetClassCount || !slot)
         return false;
-    const qint64 *reserved = kisPageDomainComponent(
-        slot->delta.buckets[classIndex], domain);
+    const auto bucket = slot->bucket(classIndex);
+    const qint64 *reserved = kisPageDomainComponent(bucket, domain);
     return reserved && std::max(qint64(0), *reserved) >= qint64(bytes);
 }
 
@@ -1425,7 +1412,7 @@ bool KisBackingBudgetController::reservationCovers(
     const ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return false;
     for (size_t i = 0; i < budgetClassCount; ++i) {
-        const auto reserved = components(slot->delta.buckets[i]);
+        const auto reserved = components(slot->bucket(i));
         const auto requested = components(needed.buckets[i]);
         for (size_t domain = 0; domain < requested.size(); ++domain)
             if (requested[domain] < 0 || requested[domain] > std::max(qint64(0), reserved[domain])) return false;
@@ -1479,15 +1466,17 @@ bool KisBackingBudgetController::configureSharedNonPayloadBudget(
             return false;
         }
     }
-    const quint64 child = parent->registerSharedNonPayloadChild(error);
+    SharedChildUsage *usage = nullptr;
+    const quint64 child = parent->registerSharedNonPayloadChild(&usage, error);
     if (!child) return false;
     m_sharedNonPayloadBudget = parent;
     m_sharedNonPayloadChild = child;
+    m_sharedNonPayloadUsage = usage;
     KisPageStoreDetail::setError(error, {});
     return true;
 }
 
-quint64 KisBackingBudgetController::registerSharedNonPayloadChild(QString *error)
+quint64 KisBackingBudgetController::registerSharedNonPayloadChild(SharedChildUsage **usage, QString *error)
 {
     SharedChildMap prepared(std::less<quint64>{}, SharedChildAllocator(this));
     try {
@@ -1516,6 +1505,7 @@ quint64 KisBackingBudgetController::registerSharedNonPayloadChild(QString *error
             error, QStringLiteral("shared non-payload store identity is exhausted"));
         return 0;
     }
+    *usage = &installed.position->second;
     KisPageStoreDetail::setError(error, {});
     return child;
 }
@@ -1535,7 +1525,7 @@ void KisBackingBudgetController::unregisterSharedNonPayloadChild(quint64 child) 
 }
 
 KisBackingBudgetReservation KisBackingBudgetController::reserveSharedNonPayload(
-    quint64 child,
+    SharedChildUsage *child,
     const KisBackingBudgetDelta &delta,
     QString *error)
 {
@@ -1550,8 +1540,7 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveSharedNonPayload(
         KisPageStoreDetail::setError(error, message);
         return KisBackingBudgetReservation{};
     };
-    const auto found = m_sharedChildren.find(child);
-    if (!child || found == m_sharedChildren.end())
+    if (!child)
         return reject(QStringLiteral("shared non-payload store registration is absent"));
     for (;;) {
         if (priorWaiterConflictsLocked(prepared, aggregateBytes, durableBytes))
@@ -1632,21 +1621,19 @@ void KisBackingBudgetController::releaseLive(KisBackingBudgetClass budgetClass,
             || budgetClass == KisBackingBudgetClass::OptionalCache
             || budgetClass == KisBackingBudgetClass::IdleCapacity)) {
         m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
-            m_sharedNonPayloadChild, domain, bytes);
+            m_sharedNonPayloadUsage, domain, bytes);
     }
 }
 
 void KisBackingBudgetController::releaseSharedNonPayloadLive(
-    quint64 child,
+    SharedChildUsage *child,
     KisPageAccessDomain domain,
     quint64 bytes) noexcept
 {
     QMutexLocker lock(&m_mutex);
-    auto found = m_sharedChildren.find(child);
-    Q_ASSERT(found != m_sharedChildren.end() && found->second.liveBytes >= bytes);
-    if (found == m_sharedChildren.end()) return;
-    found->second.liveBytes = bytes > found->second.liveBytes
-        ? 0 : found->second.liveBytes - bytes;
+    Q_ASSERT(child && child->liveBytes >= bytes);
+    if (!child) return;
+    child->liveBytes = bytes > child->liveBytes ? 0 : child->liveBytes - bytes;
     quint64 *live = kisPageDomainComponent(
         m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)].live, domain);
     if (!live) return;
@@ -1665,104 +1652,104 @@ bool KisBackingBudgetController::settle(quint64 cookie,
     ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return false;
     constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
-    if (acceptPrepared) {
-        installed = &slot->delta;
-        if (sharedInstalled) sharedInstalled->buckets[metadata] = slot->sharedChange;
-    }
-    SharedChildUsage *sharedUsage = nullptr;
-    if (slot->sharedChild) {
-        auto child = m_sharedChildren.find(slot->sharedChild);
-        Q_ASSERT(child != m_sharedChildren.end());
-        if (child != m_sharedChildren.end()) sharedUsage = &child->second;
-    }
-    const quint64 sharedPreparedBytes = slot->aggregateBytes[metadata];
+    if (acceptPrepared && sharedInstalled) sharedInstalled->buckets[metadata] = slot->sharedChange;
+    auto *sharedUsage = slot->sharedChild;
+    const quint64 sharedPreparedBytes = slot->aggregate(metadata);
     Q_ASSERT(m_reservedDurableBytes >= slot->durableBytes);
     m_reservedDurableBytes -= slot->durableBytes;
     quint64 retainedDurable = 0;
-    bool retainedReservation = false;
+    quint64 sharedRetainedBytes = 0;
+    quint8 retainedClasses = 0;
+    KisPageDomainByteDelta sharedApplied;
     const KisPageDomainByteDelta empty;
     quint32 affected = slot->changedClasses;
     if (installed && !acceptPrepared) affected |= changedBudgetClasses(*installed);
     if (retained) affected |= changedBudgetClasses(*retained);
     for (; affected; affected &= affected - 1) {
         const auto i = size_t(qCountTrailingZeroBits(affected));
-        const auto &applied = installed ? installed->buckets[i] : empty;
+        const auto original = slot->bucket(i);
+        const auto &applied = acceptPrepared ? original : installed ? installed->buckets[i] : empty;
         const auto &kept = retained ? retained->buckets[i] : empty;
-        if (!slot->aggregateBytes[i] && !hasDomainDelta(slot->delta.buckets[i])
-            && !hasDomainDelta(applied) && !hasDomainDelta(kept)) continue;
-        // Cancellation only releases reserved load. An installed transition
-        // still invalidates this class; its aggregate/domain effects can differ.
-        if (installed) m_fittingBudgetClasses &= ~(quint32(1) << i);
+        const auto aggregate = slot->aggregate(i);
         if (i != metadata && applied.ssd) m_nonMetadataLiveSsdValid = false;
-        Q_ASSERT(m_reservedAggregateBytes[i] >= slot->aggregateBytes[i]);
-        m_reservedAggregateBytes[i] -= slot->aggregateBytes[i];
-        quint64 retainedAggregate = 0;
         auto &usage = m_usage.buckets[i];
         auto live = components(usage.live);
         auto peak = components(usage.peak);
         auto reserved = components(usage.reserved);
-        auto prepared = components(slot->delta.buckets[i]);
+        const auto originalAggregate = saturatedAdd(sumComponents(live), m_reservedAggregateBytes[i]);
+        Q_ASSERT(m_reservedAggregateBytes[i] >= aggregate);
+        m_reservedAggregateBytes[i] -= aggregate;
+        quint64 retainedAggregate = 0;
+        const auto prepared = components(original);
         const auto keep = components(kept);
         auto commit = components(applied);
+        bool increased = false;
         for (size_t domain = 0; domain < prepared.size(); ++domain) {
-            prepared[domain] = std::max(qint64(0), prepared[domain]);
+            if (!prepared[domain] && !keep[domain] && !commit[domain]) continue;
+            const auto held = std::max(qint64(0), prepared[domain]);
             if (acceptPrepared) commit[domain] -= keep[domain];
-            Q_ASSERT(prepared[domain] >= 0 && keep[domain] >= 0 && keep[domain] <= prepared[domain]);
-            reserved[domain] -= quint64(prepared[domain] - keep[domain]);
+            Q_ASSERT(keep[domain] >= 0 && keep[domain] <= held);
+            const auto returned = quint64(held - keep[domain]);
+            Q_ASSERT(reserved[domain] >= returned);
+            reserved[domain] -= returned;
             if (commit[domain] < 0) {
-                const quint64 removal = quint64(-commit[domain]);
+                const quint64 removal = quint64(-(commit[domain] + 1)) + 1;
                 Q_ASSERT(live[domain] >= removal);
                 live[domain] = removal > live[domain] ? 0 : live[domain] - removal;
             } else {
+                increased |= quint64(commit[domain]) > returned;
                 live[domain] = saturatedAdd(live[domain], quint64(commit[domain]));
                 peak[domain] = std::max(peak[domain], live[domain]);
             }
-            if (retained && keep[domain] > 0) {
-                retainedAggregate = saturatedAdd(retainedAggregate, quint64(keep[domain]));
-                retainedReservation = true;
-            }
+            retainedAggregate = saturatedAdd(retainedAggregate, quint64(keep[domain]));
         }
         usage.live = fromComponents(live);
         usage.peak = fromComponents(peak);
         usage.reserved = fromComponents(reserved);
-        if (retained) {
+        if (retainedAggregate) {
+            retainedClasses |= quint8(quint32(1) << i);
             slot->aggregateBytes[i] = retainedAggregate;
             m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], retainedAggregate);
             if (kept.ssd > 0) retainedDurable = saturatedAdd(retainedDurable, quint64(kept.ssd));
         }
-    }
-    if (sharedUsage) {
-        const quint64 retainedBytes = retained ? slot->aggregateBytes[metadata] : 0;
-        Q_ASSERT(sharedPreparedBytes >= retainedBytes
-                 && sharedUsage->reservedBytes >= sharedPreparedBytes - retainedBytes);
-        sharedUsage->reservedBytes -= std::min(
-            sharedUsage->reservedBytes, sharedPreparedBytes - retainedBytes);
-        for (qint64 value : components(installed ? installed->buckets[metadata] : empty)) {
-            if (value < 0) {
-                const quint64 removal = quint64(-value);
-                Q_ASSERT(sharedUsage->liveBytes >= removal);
-                sharedUsage->liveBytes = removal > sharedUsage->liveBytes
-                    ? 0 : sharedUsage->liveBytes - removal;
-            } else {
-                sharedUsage->liveBytes = saturatedAdd(sharedUsage->liveBytes, quint64(value));
-            }
+        if (retained) slot->setBucket(i, kept);
+        // Replacing already reserved load by no greater live/retained load
+        // preserves every class limit. General partial installation can still
+        // increase a domain or the aggregate, so evaluate those real changes.
+        if (increased || saturatedAdd(sumComponents(live), m_reservedAggregateBytes[i]) > originalAggregate)
+            m_fittingBudgetClasses &= ~(quint32(1) << i);
+        if (i == metadata) {
+            sharedApplied = {commit[0], commit[1], commit[2], commit[3]};
+            sharedRetainedBytes = retainedAggregate;
         }
     }
-    if (retainedReservation) {
-        slot->delta = *retained;
-        slot->changedClasses = quint8(changedBudgetClasses(*retained));
+    if (sharedUsage) {
+        Q_ASSERT(sharedPreparedBytes >= sharedRetainedBytes
+                 && sharedUsage->reservedBytes >= sharedPreparedBytes - sharedRetainedBytes);
+        sharedUsage->reservedBytes -= std::min(sharedUsage->reservedBytes,
+            sharedPreparedBytes - sharedRetainedBytes);
+        for (qint64 value : components(sharedApplied)) {
+            if (value < 0) {
+                const quint64 removal = quint64(-(value + 1)) + 1;
+                Q_ASSERT(sharedUsage->liveBytes >= removal);
+                sharedUsage->liveBytes = removal > sharedUsage->liveBytes ? 0 : sharedUsage->liveBytes - removal;
+            } else sharedUsage->liveBytes = saturatedAdd(sharedUsage->liveBytes, quint64(value));
+        }
+    }
+    if (retainedClasses) {
+        slot->changedClasses = retainedClasses;
         slot->durableBytes = retainedDurable;
         m_reservedDurableBytes = saturatedAdd(m_reservedDurableBytes, retainedDurable);
     } else {
         slot->active = false;
-        slot->sharedChild = 0;
+        slot->sharedChild = nullptr;
         if (slotIndex != std::numeric_limits<quint32>::max()) {
             slot->nextFree = m_firstFreeSlot;
             m_firstFreeSlot = slotIndex;
         }
     }
     notifyWaitersLocked();
-    return retainedReservation;
+    return retainedClasses != 0;
 }
 
 void KisBackingBudgetController::moveRetirementHeadroom(
@@ -1772,14 +1759,16 @@ void KisBackingBudgetController::moveRetirementHeadroom(
     QMutexLocker lock(&m_mutex);
     auto *slot = activeReservation(cookie);
     const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
-    Q_ASSERT(slot && slot->durableBytes == 0 && slot->aggregateBytes[debt] == bytes);
+    Q_ASSERT(slot && slot->durableBytes == 0 && slot->aggregate(debt) == bytes);
     if (!slot) return;
     m_fittingBudgetClasses &= ~(quint32(1) << debt);
-    auto *before = kisPageDomainComponent(slot->delta.buckets[debt], source);
-    auto *after = kisPageDomainComponent(slot->delta.buckets[debt], target);
+    auto delta = slot->bucket(debt);
+    auto *before = kisPageDomainComponent(delta, source);
+    auto *after = kisPageDomainComponent(delta, target);
     Q_ASSERT(before && after && before != after && *before == qint64(bytes) && *after == 0);
     *before = 0;
     *after = qint64(bytes);
+    slot->setBucket(debt, delta);
     auto &usage = m_usage.buckets[debt];
     *kisPageDomainComponent(usage.reserved, source) -= bytes;
     auto *reserved = kisPageDomainComponent(usage.reserved, target);
@@ -2184,17 +2173,19 @@ void KisMutationStorageOwner::releaseLiveCharge(quint64 bytes, KisBackingBudgetC
             m_controller->releaseLive(budgetClass,
                                       KisPageAccessDomain::CpuRam, bytes);
         else if (m_parent)
-            m_parent->releaseSharedNonPayloadLive(m_child, KisPageAccessDomain::CpuRam, bytes);
+            m_parent->releaseSharedNonPayloadLive(m_childUsage, KisPageAccessDomain::CpuRam, bytes);
     }
 }
 
 void KisMutationStorageOwner::detach(
-    const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child) noexcept
+    const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child,
+    KisSharedNonPayloadUsage *usage) noexcept
 {
     QMutexLocker lock(&m_gate);
     m_controller = nullptr;
     m_parent = parent;
     m_child = child;
+    m_childUsage = usage;
 }
 
 void KisMutationStorageOwner::stopAllocations() noexcept
@@ -2210,10 +2201,11 @@ void KisMutationStorageOwner::deref() noexcept
     Q_ASSERT(!m_controller && m_bytes == capacity);
     auto parent = std::move(m_parent);
     const quint64 child = m_child;
+    auto *usage = m_childUsage;
     this->~KisMutationStorageOwner();
     kisFreePageStorage(this, alignof(KisMutationStorageOwner));
     if (parent) {
-        parent->releaseSharedNonPayloadLive(child, KisPageAccessDomain::CpuRam,
+        parent->releaseSharedNonPayloadLive(usage, KisPageAccessDomain::CpuRam,
                                           capacity);
         parent->unregisterSharedNonPayloadChild(child);
     }
@@ -2223,43 +2215,38 @@ void *kisAllocateMutationStorage(KisBackingBudgetController *budget, size_t byte
 {
     if (!budget) return kisAllocatePageProcessStorage(bytes, alignment);
     const size_t capacity = kisPageStorageAllocationBytes(bytes, alignment);
-    if (capacity > size_t(std::numeric_limits<qint64>::max()))
-        throw std::bad_alloc();
-    KisBackingBudgetDelta delta;
-    delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
-    std::array<quint64, budgetClassCount> aggregate{};
-    aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = capacity;
+    if (capacity > size_t(std::numeric_limits<qint64>::max())) throw std::bad_alloc();
     auto *parent = budget->m_sharedNonPayloadBudget.get();
-    const quint64 child = budget->m_sharedNonPayloadChild;
-    // The allocator alone owns this preparation until it either returns real
-    // storage or throws. Its stack already retains the exact bytes and both
-    // owners; no transferable slot/cookie or waiter grant is needed here.
-    const auto prepare = [&](KisBackingBudgetController *owner, quint64 registration) {
+    auto *shared = budget->m_sharedNonPayloadUsage;
+    // The original child registration outlives this stack preparation and all
+    // returned storage. Consume it directly; do not rediscover it at settle.
+    // A normal allocation has one CPU metadata amount, not a general delta.
+    const auto prepare = [&](KisBackingBudgetController *owner, KisSharedNonPayloadUsage *child) {
         QMutexLocker lock(&owner->m_mutex);
-        KisBackingBudgetController::SharedChildUsage *shared = nullptr;
-        if (owner == parent) {
-            const auto found = owner->m_sharedChildren.find(registration);
-            if (!registration || found == owner->m_sharedChildren.end()) {
+        if (owner->m_usage.waitingRequests) {
+            KisBackingBudgetDelta delta;
+            delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
+            std::array<quint64, budgetClassCount> aggregate{};
+            aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = capacity;
+            if (owner->priorWaiterConflictsLocked(delta, aggregate, 0)) {
                 ++owner->m_usage.backpressureCount;
                 return false;
             }
-            shared = &found->second;
         }
-        if (owner->priorWaiterConflictsLocked(delta, aggregate, 0)
-            || !owner->fitsMetadataStorageLocked(capacity)) {
+        if (!owner->fitsMetadataStorageLocked(capacity)) {
             ++owner->m_usage.backpressureCount;
             return false;
         }
         auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         metadata.reserved.cpuRam += capacity;
         owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)] += capacity;
-        if (shared) shared->reservedBytes += capacity;
+        if (child) child->reservedBytes += capacity;
         auto total = saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam);
         if (owner->m_processStorage) total = saturatedAdd(total, processStorageSnapshot().total);
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam, total);
         return true;
     };
-    const auto settle = [&](KisBackingBudgetController *owner, quint64 registration, bool installed) noexcept {
+    const auto settle = [&](KisBackingBudgetController *owner, KisSharedNonPayloadUsage *child, bool installed) noexcept {
         QMutexLocker lock(&owner->m_mutex);
         auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         auto &reserved = owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)];
@@ -2267,35 +2254,34 @@ void *kisAllocateMutationStorage(KisBackingBudgetController *budget, size_t byte
         metadata.reserved.cpuRam -= capacity;
         reserved -= capacity;
         if (installed) metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, capacity);
-        if (owner == parent) {
-            const auto found = owner->m_sharedChildren.find(registration);
-            Q_ASSERT(found != owner->m_sharedChildren.end() && found->second.reservedBytes >= capacity);
-            auto &shared = found->second;
-            shared.reservedBytes -= capacity;
-            if (installed) shared.liveBytes = saturatedAdd(shared.liveBytes, capacity);
+        if (child) {
+            Q_ASSERT(child->reservedBytes >= capacity);
+            child->reservedBytes -= capacity;
+            if (installed) child->liveBytes = saturatedAdd(child->liveBytes, capacity);
         }
         owner->notifyWaitersLocked();
     };
     bool localPrepared = false;
     bool parentPrepared = false;
     const auto cleanup = qScopeGuard([&] {
-        if (localPrepared) settle(budget, 0, false);
-        if (parentPrepared) settle(parent, child, false);
+        if (localPrepared) settle(budget, nullptr, false);
+        if (parentPrepared) settle(parent, shared, false);
     });
     if (parent) {
-        if (!prepare(parent, child)) {
+        Q_ASSERT(shared);
+        if (!prepare(parent, shared)) {
             QMutexLocker lock(&budget->m_mutex);
             ++budget->m_usage.backpressureCount;
             throw std::bad_alloc();
         }
         parentPrepared = true;
     }
-    if (!prepare(budget, 0)) throw std::bad_alloc();
+    if (!prepare(budget, nullptr)) throw std::bad_alloc();
     localPrepared = true;
     void *result = kisAllocatePageStorage(bytes, alignment, capacity);
-    settle(budget, 0, true);
+    settle(budget, nullptr, true);
     localPrepared = false;
-    if (parentPrepared) settle(parent, child, true);
+    if (parentPrepared) settle(parent, shared, true);
     parentPrepared = false;
     return result;
 }

@@ -215,7 +215,7 @@ public:
     bool sealCpuPreparedPage(KisPagePrivateWrite &result,
                             KisPageTransactionId transaction,
                             const KisCompletionTicket &producerCompletion,
-                            QString *error = nullptr);
+                            QString *error = nullptr, bool complete = false);
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger

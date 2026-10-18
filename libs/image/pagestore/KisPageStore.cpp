@@ -1493,7 +1493,8 @@ KisPageMutationSession::Private::prepareTarget(
             rejectAllocation();
             return {};
         }
-        if (finalPayload) owner->metadata.completePrivateWrite(page);
+        // Direct payload initialization consumes no metadata completion here.
+        // The original entry prevents further input; alias/seal completes it.
         finalAccepted = finalPayload;
         page->binding = binding;
         result.payloadInitialized = directPayload;
@@ -2022,10 +2023,9 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         }
         page->writable.unpin();
         ++d->counters.pinsReleased;
-        if (!scope->owner->metadata.completePrivateWrite(page)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("CPU private result lost its reservation"));
-            return fail();
-        }
+        // Controlled input is now immutable in the original entry. Its
+        // unpublished result has no metadata consumer until alias preparation
+        // or sealing; that consumer registers completion under its own gate.
         scope->owner->writeCoordinator.recordPrivateCompletion(*entry);
     }
     entry->setInitializationSource({});
@@ -2786,10 +2786,10 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     validateClaims(initialClaimsHeld);
     const auto completePrivate = [&](quint32 index, Private::Page *page) {
         auto *entry = d->writes.at(index);
-        if (entry->hasPrivateResult()) return;
+        if (page->completed) return;
         success = owner->metadata.completePrivateWrite(page);
-        if (success) owner->writeCoordinator.recordPrivateCompletion(*entry);
-        else failure = QStringLiteral("CPU private result lost its reservation");
+        if (!success) failure = QStringLiteral("CPU private result lost its reservation");
+        else if (!entry->hasPrivateResult()) owner->writeCoordinator.recordPrivateCompletion(*entry);
     };
     // Alias preparation consumes completed private sources. With no sources,
     // completion and proof production share the single output traversal.
@@ -2825,15 +2825,16 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
             }
             auto *page = d->pageAtEntry(slot.index);
             if (!page) continue;
-            if (!sealedSources) completePrivate(slot.index, page);
-            if (!success) break;
+            const bool completeAtSeal = !sealedSources;
             if (page->proof.isValid()) {
                 success = owner->owner.ownsPreparedPageProof(page->proofValue(completion));
                 if (!success) failure = QStringLiteral("mutation prepared proof lost its owner");
             } else {
-                success = owner->owner.sealCpuPreparedPage(*page, d->transaction.id, completion, &failure);
+                success = owner->owner.sealCpuPreparedPage(*page, d->transaction.id, completion, &failure, completeAtSeal);
             }
             if (!success) break;
+            if (completeAtSeal && !entry->hasPrivateResult())
+                owner->writeCoordinator.recordPrivateCompletion(*d->writes.at(slot.index));
             // Proof is still private; no writer may survive its publication.
             page->writable.reset();
             changes.push_back({KisPagePublicationChange::Replacement(page), {}, false, false, false, {}});

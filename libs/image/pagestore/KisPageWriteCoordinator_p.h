@@ -236,6 +236,14 @@ private:
     friend class KisBackingBudgetController;
 };
 
+// The parent's stable registration is retained by the child, then by its
+// original inert storage owner until the last actual free. It is never a
+// second account; every access still holds the parent's accounting gate.
+struct KisSharedNonPayloadUsage {
+    quint64 liveBytes = 0;
+    quint64 reservedBytes = 0;
+};
+
 class KRITAIMAGE_EXPORT KisBackingBudgetController final
 {
 public:
@@ -271,26 +279,47 @@ public:
 
 private:
     struct ReservationSlot {
+        static_assert(static_cast<size_t>(KisBackingBudgetClass::Count) == 8);
         // Accepted signed change; only its positive components are reserved.
         // Partial consumers still supply installed/retained facts to settle.
-        KisBackingBudgetDelta delta;
+        // Fixed capacity supports the complete public delta without another
+        // allocation. Only mask-selected components are initialized/consumed;
+        // recycling never clears or copies an unrelated class/domain.
+        std::array<qint64, 32> values;
         KisPageDomainByteDelta sharedChange;
         std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
-            aggregateBytes{};
+            aggregateBytes;
         quint64 durableBytes = 0;
-        quint64 sharedChild = 0;
+        KisSharedNonPayloadUsage *sharedChild = nullptr;
         quint32 generation = 0;
         quint32 nextFree = std::numeric_limits<quint32>::max();
+        quint32 changedComponents = 0;
         bool active = false;
-        // Nonzero signed changes/aggregate reservations in the original slot.
-        // Unlisted buckets remain zero, including after reuse and retention.
         quint8 changedClasses = 0;
+        ReservationSlot() noexcept {} // Unselected capacity is not initialized.
+        KisPageDomainByteDelta bucket(size_t i) const noexcept
+        {
+            const auto first = i * 4;
+            const auto value = [&](size_t n) {
+                return changedComponents & (quint32(1) << (first + n)) ? values[first + n] : qint64(0);
+            };
+            return {value(0), value(1), value(2), value(3)};
+        }
+        void setBucket(size_t i, const KisPageDomainByteDelta &delta) noexcept
+        {
+            const qint64 input[]{delta.cpuRam, delta.umaShared, delta.discreteVram, delta.ssd};
+            const auto first = i * 4;
+            changedComponents &= ~(quint32(15) << first);
+            for (size_t n = 0; n < 4; ++n) if (input[n]) {
+                values[first + n] = input[n];
+                changedComponents |= quint32(1) << (first + n);
+            }
+        }
+        quint64 aggregate(size_t i) const noexcept
+        { return changedClasses & (quint32(1) << i) ? aggregateBytes[i] : 0; }
     };
-
-    struct SharedChildUsage {
-        quint64 liveBytes = 0;
-        quint64 reservedBytes = 0;
-    };
+    static_assert(sizeof(ReservationSlot) <= 384);
+    using SharedChildUsage = KisSharedNonPayloadUsage;
     using SharedChildAllocator = KisMutationStorageAllocator<
         std::pair<const quint64, SharedChildUsage>>;
     using SharedChildMap = std::map<quint64, SharedChildUsage,
@@ -328,10 +357,10 @@ private:
                                              QString *error,
                                              const KisBackingBudgetDelta *signedChange = nullptr);
     KisBackingBudgetReservation reserveSharedNonPayload(
-        quint64 child, const KisBackingBudgetDelta &, QString *error);
-    quint64 registerSharedNonPayloadChild(QString *error);
+        SharedChildUsage *child, const KisBackingBudgetDelta &, QString *error);
+    quint64 registerSharedNonPayloadChild(SharedChildUsage **usage, QString *error);
     void unregisterSharedNonPayloadChild(quint64 child) noexcept;
-    void releaseSharedNonPayloadLive(quint64 child,
+    void releaseSharedNonPayloadLive(SharedChildUsage *child,
                                      KisPageAccessDomain domain,
                                      quint64 bytes) noexcept;
 
@@ -346,12 +375,12 @@ private:
         quint64 durableBytes, quint64 beforeSequence = std::numeric_limits<quint64>::max()) const;
     KisBackingBudgetReservation reserveLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
-        quint64, quint64 sharedChild = 0, const KisBackingBudgetDelta *signedChange = nullptr,
+        quint64, SharedChildUsage *sharedChild = nullptr, const KisBackingBudgetDelta *signedChange = nullptr,
         const KisPageDomainByteDelta *sharedChange = nullptr);
     bool prepareReservationSlot(QString *error);
     void activateReservationLocked(quint64 cookie, const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
-        quint64, quint64 sharedChild = 0, const KisBackingBudgetDelta *signedChange = nullptr,
+        quint64, SharedChildUsage *sharedChild = nullptr, const KisBackingBudgetDelta *signedChange = nullptr,
         const KisPageDomainByteDelta *sharedChange = nullptr);
     using WaitCallbacks = std::array<KisPageReadinessCallback, 32>;
     WaitCallbacks dispatchWaiters();
@@ -364,6 +393,7 @@ private:
     QMutex m_storageOwnerMutex;
     std::shared_ptr<KisBackingBudgetController> m_sharedNonPayloadBudget;
     quint64 m_sharedNonPayloadChild = 0;
+    SharedChildUsage *m_sharedNonPayloadUsage = nullptr;
 
     mutable QMutex m_mutex;
     KisPageBackingLimits m_limits;

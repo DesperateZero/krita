@@ -17,6 +17,7 @@
 #include "KisPageWaitCondition_p.h"
 
 #include <boost/intrusive/set.hpp>
+#include <boost/container/static_vector.hpp>
 
 #include <algorithm>
 #include <array>
@@ -296,14 +297,23 @@ public:
         return providerRevision;
     }
 
-    std::shared_ptr<KisPageReplicaProvider> nextProviderInCut(quint64 cut, ProviderKey *cursor) const
+    struct ProviderBatch {
+        boost::container::static_vector<std::shared_ptr<KisPageReplicaProvider>, 16> providers;
+        bool more = false;
+    };
+    ProviderBatch providersInCut(quint64 cut, ProviderKey *cursor) const
     {
+        ProviderBatch result;
         QMutexLocker lock(&mutex);
-        for (auto next = providers.upper_bound(*cursor, ProviderLess{}); next != providers.end(); ++next) {
+        auto next = *cursor == ProviderKey{} ? providers.begin() : providers.upper_bound(*cursor, ProviderLess{});
+        while (next != providers.end() && result.providers.size() < result.providers.capacity()) {
             *cursor = next->key;
-            if (next->acceptedRevision && next->acceptedRevision <= cut) return next->provider;
+            if (next->acceptedRevision && next->acceptedRevision <= cut)
+                result.providers.push_back(next->provider);
+            ++next;
         }
-        return {};
+        result.more = next != providers.end();
+        return result;
     }
 
     bool acceptsProviderResultLocked(KisPageOperationId operation,
@@ -1480,12 +1490,23 @@ try
     ChargedVector<Probe> probes{KisMutationStorageAllocator<Probe>(budget)};
 
     ProviderKey cursor{};
-    while (const auto provider = d->nextProviderInCut(cut, &cursor)) {
-        if (!provider->mayHaveBackingDomainChanges()) continue;
-        const auto changes = provider->backingDomainChanges(budget);
-        probes.reserve(probes.size() + changes.size());
-        for (const auto &change : changes)
-            probes.push_back({provider, change});
+    bool more = true;
+    while (more) {
+        auto batch = d->providersInCut(cut, &cursor);
+        more = batch.more;
+        for (size_t i = 0; i < batch.providers.size(); ++i) {
+            const auto &provider = batch.providers[i];
+            if (!provider->mayHaveBackingDomainChanges()) continue;
+            const auto changes = provider->backingDomainChanges(budget);
+            probes.reserve(probes.size() + changes.size());
+            for (const auto &change : changes) probes.push_back({provider, change});
+        }
+    }
+    // No journal work was observed in this cut. There is no state to apply or
+    // acknowledge; the ledger's attached budget is immutable for its lifetime.
+    if (probes.empty()) {
+        KisPageStoreDetail::setError(error, {});
+        return true;
     }
 
     QMutexLocker locker(&d->mutex);
@@ -2063,15 +2084,19 @@ std::shared_ptr<KisPageReplicaProvider> KisPageOwnerLedger::providerFor(
     const auto cut = d->providerCut();
     ProviderKey cursor{};
     std::shared_ptr<KisPageReplicaProvider> selected;
-    while (const auto candidate = d->nextProviderInCut(cut, &cursor)) {
-        if (!candidate->capabilities().supports(access)) continue;
-        if (selected) {
-            // Route selection must be explicit when more than one provider
-            // advertises the same consumer access requirement.
-            return {};
+    bool more = true;
+    while (more) {
+        auto batch = d->providersInCut(cut, &cursor);
+        more = batch.more;
+        for (size_t i = 0; i < batch.providers.size(); ++i) {
+            const auto &candidate = batch.providers[i];
+            if (!candidate->capabilities().supports(access)) continue;
+            // Route selection remains ambiguous with two suitable providers.
+            if (selected) return {};
+            selected = candidate;
         }
-        selected = candidate;
     }
+
     return selected;
 }
 
@@ -2337,22 +2362,20 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
 }
 
 bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
-    KisPageTransactionId transaction, const KisCompletionTicket &producerCompletion, QString *error)
+    KisPageTransactionId transaction, const KisCompletionTicket &producerCompletion, QString *error,
+    bool complete)
 {
-    // The caller retains its scope/claims and has joined every mutable guard.
-    // The fixed successful CPU ticket was verified when binding this issuer;
-    // sealCpuProof checks that exact ticket and the original reservation.
-    const auto authorityProvider = provider(result.target.provider, result.target.providerEpoch);
-    if (!result.reserved || !result.completed || !result.descriptor || !authorityProvider
-        || !authorityProvider->validate(result.target, *result.descriptor)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
-        return false;
-    }
+    // One owner visit obtains the immutable provider/issuer and issues the
+    // stamp. Validation remains outside this gate; metadata consumes the same
+    // result at the real completion/seal boundary, including its late checks.
+    std::shared_ptr<KisPageReplicaProvider> authorityProvider;
     KisPageMetadataCoordinator *metadata;
     KisPreparedPageProof sealed;
     quint64 issuer;
     {
         QMutexLocker locker(&d->mutex);
+        const auto registered = d->registeredProvider(providerKey(result.target.provider, result.target.providerEpoch));
+        if (registered) authorityProvider = registered->provider;
         metadata = d->cpuMetadata;
         issuer = d->cpuProofIssuer;
         if (!metadata || !d->nextValidationStamp
@@ -2362,7 +2385,12 @@ bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
         sealed.producerCompletion = producerCompletion;
         sealed.providerValidationStamp = d->nextValidationStamp++;
     }
-    if (!metadata->sealCpuProof(sealed, issuer)) {
+    if (!result.reserved || (!result.completed && !complete) || !result.descriptor || !authorityProvider
+        || !authorityProvider->validate(result.target, *result.descriptor)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
+        return false;
+    }
+    if (!metadata->sealCpuProof(sealed, issuer, nullptr, complete ? &result : nullptr)) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU result changed or already has a capability"));
         return false;
     }

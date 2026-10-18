@@ -284,7 +284,8 @@ private:
     const KisPageAllocationDescriptor *borrowVersionDescriptor(const KisPageVersion &) const;
     bool exchangeVersionDescriptor(const KisPageVersion &,
         std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
-    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer, KisPreparedPageProof *destination = nullptr);
+    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer, KisPreparedPageProof *destination = nullptr,
+                      KisPagePrivateWrite *complete = nullptr);
     bool reservePrivateWrite(const KisPageTransition &, KisPagePrivateWrite *, quint32 limit,
                             QString *error = nullptr);
     bool completePrivateWrite(KisPagePrivateWrite *);

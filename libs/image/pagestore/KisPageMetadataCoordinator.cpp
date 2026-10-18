@@ -4493,7 +4493,7 @@ bool KisPageMetadataCoordinator::cancelPrivateResult(KisPagePrivateWrite *native
 }
 
 bool KisPageMetadataCoordinator::sealCpuProof(const KisPreparedPageProof &proof, quint64 issuer,
-    KisPreparedPageProof *destination)
+    KisPreparedPageProof *destination, KisPagePrivateWrite *complete)
 {
     auto *d = m_core.load(std::memory_order_acquire);
     auto *shard = Private::shardFor(d, proof.authority.version.key);
@@ -4501,9 +4501,11 @@ bool KisPageMetadataCoordinator::sealCpuProof(const KisPreparedPageProof &proof,
     QMutexLocker lock(&shard->mutex);
     const auto *activity = shard->activity(proof.authority.version.key);
     auto *native = activity ? activity->nativeWrite : nullptr;
-    if (!native || !native->completed || native->proof.isValid()
+    if (!native || !native->reserved || (!native->completed && native != complete)
+        || (complete && native != complete) || native->proof.isValid()
         || !(activity->writerTransaction == proof.transaction) || !(native->target == proof.authority)
         || !(d->cpuCompletion == proof.producerCompletion)) return false;
+    native->completed = true;
     native->proof = {proof.transaction, proof.providerValidationStamp};
     if (destination) *destination = proof;
     ++shard->arenas.cpuProofs;
