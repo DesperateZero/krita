@@ -2392,15 +2392,50 @@ KisPreparedPageProof KisPageOwnerLedger::projectPreparedPage(const KisPageVersio
         return proof.authority.version == version && proof.transaction == transaction
             && proof.authority.allocationIdentity() == allocation ? proof : KisPreparedPageProof{};
     }
-    const auto backing = d->backings.find(allocation);
-    if (backing == d->backings.end() || !(backing->second.replica.version == version)) return {};
-    // This registration's handle is immutable until its exact allocation key
-    // is removed/rekeyed. Budget/domain facts have separate mutable owners.
-    const auto authority = backing->second.replica;
     auto *metadata = d->cpuMetadata;
     const auto issuer = d->cpuProofIssuer;
     lock.unlock();
-    return metadata ? metadata->cpuProof(version, transaction, stamp, issuer, authority) : KisPreparedPageProof{};
+    // Metadata owns the exact CPU authority and its stamp. Resolve both there
+    // instead of reconstructing a capability through physical registration.
+    return metadata ? metadata->cpuProof({version, transaction, stamp, true, allocation}, issuer)
+                    : KisPreparedPageProof{};
+}
+
+bool KisPageOwnerLedger::validatePublicationProof(const KisPageMetadataCoordinator &metadata,
+    const KisPagePublicationProof &identity) const
+try
+{
+    if (!identity.native) {
+        const auto proof = projectPreparedPage(identity.version, identity.transaction, identity.stamp, identity.allocation);
+        auto descriptor = metadata.versionDescriptor(identity.version);
+        return descriptor && validatePreparedPage(metadata, proof, *descriptor);
+    }
+    quint64 issuer;
+    {
+        QMutexLocker lock(&d->mutex);
+        if (d->cpuMetadata != &metadata) return false;
+        issuer = d->cpuProofIssuer;
+    }
+    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+    const auto proof = metadata.cpuProof(identity, issuer, &descriptor);
+    if (!proof.isValid() || !descriptor || !descriptor->isValid()
+        || !proof.authority.layout.matches(*descriptor)) return false;
+    // The CPU completion was verified once at issuer binding and is immutable.
+    // Dynamic provider state still requires this unlocked callback every time.
+    const auto authorityProvider = provider(proof.authority.provider, proof.authority.providerEpoch);
+    return authorityProvider && authorityProvider->validate(proof.authority, *descriptor);
+}
+catch (const std::bad_alloc &) { return false; }
+
+bool KisPageOwnerLedger::revokePublicationProof(const KisPagePublicationProof &identity)
+{
+    if (!identity.native)
+        return revokePreparedPage(projectPreparedPage(identity.version, identity.transaction, identity.stamp, identity.allocation));
+    QMutexLocker lock(&d->mutex);
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    lock.unlock();
+    return metadata && metadata->revokeCpuProof(identity, issuer);
 }
 
 bool KisPageOwnerLedger::ownsPreparedPageProof(

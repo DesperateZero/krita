@@ -351,7 +351,6 @@ public:
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
     KisPreparedPageProof projectProof(const KisPagePublicationProof &) const;
-    KisPreparedPageProof projectProof(const KisPagePublicationChange::Replacement &) const;
     KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &) const;
     KisReplicaHandle takeIdleCapacityLocked(const KisPageKey &key);
     // Same original records and Store gate for H0, H1, expiry and close.
@@ -406,7 +405,7 @@ private:
     KisImageEpochCommitTicket commitInputLocked(const KisPageTransaction &transaction, const Input &input,
         KisRetainedImageEpochSnapshot *retainedAfter, const KisPageStore *diagnosticOwner,
         QMutexLocker<QMutex> &ownerLock);
-    void finishAbortedProofLocked(const KisPreparedPageProof &proof) noexcept;
+    void finishAbortedProofLocked(const KisPagePublicationProof &proof) noexcept;
     std::shared_ptr<KisPagePublicationDelta> preparedStateLocked(KisPageTransactionId transaction);
     const ProofMap *findProofsLocked(KisPageTransactionId transaction) const;
 

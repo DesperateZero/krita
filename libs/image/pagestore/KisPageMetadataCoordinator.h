@@ -24,6 +24,7 @@ class KisCpuResidentBinding;
 struct KisPageNativeReadRef;
 struct KisPagePrivateWrite;
 struct KisPagePublicationChange;
+struct KisPagePublicationProof;
 struct KisPageRetirementRecord;
 // A borrowed selection value, never another per-version allocation or owner.
 struct KisCpuReadBinding {
@@ -294,10 +295,13 @@ private:
     KisPagePrivateWrite *nativeWrite(const KisPageVersion &) const;
     KisPagePrivateWrite *nativeWriteForProof(const KisPreparedPageProof &) const;
     bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
-    KisPreparedPageProof cpuProof(const KisPageVersion &, KisPageTransactionId,
-                                  quint64 stamp, quint64 issuer, const KisReplicaHandle &) const;
+    // Internal identity is resolved once by its original metadata owner. When
+    // requested, the descriptor is returned only for a still-Prepared result.
+    KisPreparedPageProof cpuProof(const KisPagePublicationProof &, quint64 issuer,
+        std::shared_ptr<const KisPageAllocationDescriptor> *preparedDescriptor = nullptr) const;
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
+    bool revokeCpuProof(const KisPagePublicationProof &, quint64 issuer);
     qsizetype cpuProofCount(quint64 issuer) const;
     struct MutationBaseInfo {
         bool baseExists = false;

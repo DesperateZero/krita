@@ -6572,6 +6572,31 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         proof.authority = result.target; proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         QVERIFY(metadata.sealCpuProof(proof, 1));
+        const KisPagePublicationProof identity(proof);
+        QCOMPARE(metadata.cpuProof(identity, 1), proof);
+        QVERIFY(metadata.ownsCpuProof(proof, 1));
+        for (int field = 0; field < 5; ++field) {
+            auto forged = proof;
+            if (field == 0) ++forged.authority.version.generation.value;
+            if (field == 1) ++forged.transaction.value;
+            if (field == 2) ++forged.providerValidationStamp;
+            if (field == 3) ++forged.authority.allocation.generation;
+            if (field == 4) ++forged.authority.layout.rowStride;
+            QVERIFY(!metadata.ownsCpuProof(forged, 1));
+            QVERIFY(!metadata.revokeCpuProof(forged, 1));
+            if (field != 4) {
+                QVERIFY(!metadata.cpuProof(KisPagePublicationProof(forged), 1).isValid());
+                QVERIFY(!metadata.revokeCpuProof(KisPagePublicationProof(forged), 1));
+            }
+            QCOMPARE(metadata.cpuProofCount(1), qsizetype(1));
+        }
+        const auto pending = registry.allocatePending(source);
+        auto forged = proof; forged.producerCompletion = pending;
+        QVERIFY(!metadata.ownsCpuProof(forged, 1));
+        QVERIFY(!metadata.revokeCpuProof(forged, 1));
+        QVERIFY(!metadata.cpuProof(identity, 2).isValid());
+        QVERIFY(!metadata.revokeCpuProof(identity, 2));
+        QCOMPARE(metadata.cpuProof(identity, 1), proof);
     }
     QCOMPARE(metadata.replacePrivateWrite(selected, replacement), variant == 0);
     QCOMPARE(result.target, variant == 0 ? replacement : write.target);

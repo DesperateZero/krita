@@ -4529,65 +4529,86 @@ bool KisPageMetadataCoordinator::sealCpuProof(const KisPreparedPageProof &proof,
     return true;
 }
 
-KisPreparedPageProof KisPageMetadataCoordinator::cpuProof(const KisPageVersion &version,
-    KisPageTransactionId transaction, quint64 stamp, quint64 issuer, const KisReplicaHandle &authority) const
+namespace {
+// All CPU proof consumers use the same original fact and one shard window.
+// This is a synchronous visit, not a retained location or validation cache.
+template<class Core, class Visit>
+bool visitCpuProof(Core *d, const KisPagePublicationProof &proof, quint64 issuer, Visit visit)
+{
+    auto *shard = Core::shardFor(d, proof.version.key);
+    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
+    QMutexLocker lock(&shard->mutex);
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(proof.version, &slot)) {
+        const auto *activity = shard->activity(proof.version.key);
+        auto *native = activity ? activity->nativeWrite : nullptr;
+        if (!native || !native->reserved || !native->completed
+            || !(native->target.version == proof.version)
+            || native->proof.providerValidationStamp != proof.stamp
+            || !(native->proof.transaction == proof.transaction)
+            || !(native->target.allocationIdentity() == proof.allocation)) return false;
+        return visit(native->target, native->descriptor, true,
+            native->proof.providerValidationStamp, native->proof.transaction, shard->arenas.cpuProofs);
+    }
+    const auto *record = shard->records.version(slot);
+    const auto *authority = shard->records.replica(record->authorityReplica);
+    auto *facts = shard->arenas.facts.get(record->facts);
+    if (!facts || facts->stamp != proof.stamp || !(facts->transaction == proof.transaction)
+        || !authority || !(authority->identity == proof.allocation)) return false;
+    return visit(replicaHandle(*authority, record->version), facts->descriptor,
+        record->publication == KisPagePublicationState::Prepared && record->preparedBy == proof.transaction,
+        facts->stamp, facts->transaction, shard->arenas.cpuProofs);
+}
+}
+
+KisPreparedPageProof KisPageMetadataCoordinator::cpuProof(const KisPagePublicationProof &proof,
+    quint64 issuer, std::shared_ptr<const KisPageAllocationDescriptor> *preparedDescriptor) const
 {
     auto *d = m_core.load(std::memory_order_acquire);
-    if (!d || !issuer || d->cpuProofIssuer.load() != issuer || !stamp
-        || !(authority.version == version)) return {};
     KisPreparedPageProof result;
-    result.authority = authority; result.transaction = transaction;
-    result.providerValidationStamp = stamp; result.producerCompletion = d->cpuCompletion;
-    // The immutable authority comes from its original ledger registration,
-    // never from whatever authority metadata happens to expose now.
-    return ownsCpuProof(result, issuer) ? result : KisPreparedPageProof{};
+    if (preparedDescriptor) preparedDescriptor->reset();
+    visitCpuProof(d, proof, issuer, [&](const auto &authority, const auto &descriptor,
+                                      bool prepared, auto &, auto &, auto &) {
+        if (preparedDescriptor && (!prepared || !descriptor)) return false;
+        result.authority = authority;
+        result.transaction = proof.transaction;
+        result.providerValidationStamp = proof.stamp;
+        result.producerCompletion = d->cpuCompletion;
+        if (preparedDescriptor) *preparedDescriptor = descriptor;
+        return true;
+    });
+    return result;
 }
 
 bool KisPageMetadataCoordinator::ownsCpuProof(const KisPreparedPageProof &proof, quint64 issuer) const
 {
     auto *d = m_core.load(std::memory_order_acquire);
-    const auto *shard = Private::shardFor(d, proof.authority.version.key);
-    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
-    QMutexLocker lock(&shard->mutex);
-    KisVersionSlotId slot;
-    if (!shard->records.findVersion(proof.authority.version, &slot)) {
-        const auto *activity = shard->activity(proof.authority.version.key);
-        const auto *native = activity ? activity->nativeWrite : nullptr;
-        return native && native->completed && native->matchesProof(proof, d->cpuCompletion);
-    }
-    const auto *record = shard->records.version(slot);
-    const auto *authority = shard->records.replica(record->authorityReplica);
-    const auto *facts = shard->arenas.facts.get(record->facts);
-    return facts->stamp == proof.providerValidationStamp && facts->transaction == proof.transaction
-        && d->cpuCompletion == proof.producerCompletion && authority
-        && replicaHandle(*authority, record->version) == proof.authority;
+    if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
+    return visitCpuProof(d, KisPagePublicationProof(proof), issuer,
+        [&](const auto &authority, const auto &, bool, auto &, auto &, auto &) {
+            return authority == proof.authority;
+        });
 }
 
 bool KisPageMetadataCoordinator::revokeCpuProof(const KisPreparedPageProof &proof, quint64 issuer)
 {
     auto *d = m_core.load(std::memory_order_acquire);
-    auto *shard = Private::shardFor(d, proof.authority.version.key);
-    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
-    QMutexLocker lock(&shard->mutex);
-    KisVersionSlotId slot;
-    if (!shard->records.findVersion(proof.authority.version, &slot)) {
-        const auto *activity = shard->activity(proof.authority.version.key);
-        auto *native = activity ? activity->nativeWrite : nullptr;
-        if (!native || !(native->matchesProof(proof, d->cpuCompletion))) return false;
-        native->proof = {};
-        --shard->arenas.cpuProofs;
-        return true;
-    }
-    const auto *record = shard->records.version(slot);
-    const auto *authority = shard->records.replica(record->authorityReplica);
-    auto *facts = shard->arenas.facts.get(record->facts);
-    if (facts->stamp != proof.providerValidationStamp || !(facts->transaction == proof.transaction)
-        || !(d->cpuCompletion == proof.producerCompletion) || !authority
-        || !(replicaHandle(*authority, record->version) == proof.authority)) return false;
-    facts->stamp = 0;
-    --shard->arenas.cpuProofs;
-    facts->transaction = {};
-    return true;
+    if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
+    return visitCpuProof(d, KisPagePublicationProof(proof), issuer,
+        [&](const auto &authority, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
+            if (!(authority == proof.authority)) return false;
+            stamp = 0; transaction = {}; --count;
+            return true;
+        });
+}
+
+bool KisPageMetadataCoordinator::revokeCpuProof(const KisPagePublicationProof &proof, quint64 issuer)
+{
+    return visitCpuProof(m_core.load(std::memory_order_acquire), proof, issuer,
+        [](const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
+            stamp = 0; transaction = {}; --count;
+            return true;
+        });
 }
 
 qsizetype KisPageMetadataCoordinator::cpuProofCount(quint64 issuer) const

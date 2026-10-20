@@ -1083,7 +1083,7 @@ private Q_SLOTS:
     {
         QTest::addColumn<bool>("late");
         QTest::addColumn<bool>("advance");
-        QTest::newRow("descriptor-reference-array") << false << false;
+        QTest::newRow("root-preparation-at-capacity") << false << false;
         QTest::newRow("prepaid-fees-at-capacity") << true << false;
         QTest::newRow("continue-after-refusal") << false << true;
     }
@@ -3254,6 +3254,9 @@ void KisPageStoreCpuMutationTest::commitValidatesOriginalDelta()
     supplied.proofs[1] = supplied.proofs[0]; reject(supplied);
     supplied = original; supplied.proofs.removeLast(); reject(supplied);
     supplied = original; ++supplied.proofs[0].providerValidationStamp; reject(supplied);
+    supplied = original; ++supplied.proofs[0].authority.allocation.generation; reject(supplied);
+    supplied = original; ++supplied.proofs[0].authority.layout.rowStride; reject(supplied);
+    supplied = original; supplied.proofs[0].producerCompletion = {}; reject(supplied);
     supplied = original; supplied.surfaceChanges.append(original.surfaceChanges.first()); reject(supplied);
     supplied = original; supplied.surfaceChanges.clear(); reject(supplied);
     supplied = original;
@@ -3305,6 +3308,8 @@ void KisPageStoreCpuMutationTest::publicationInputRefusalKeepsOriginalTransactio
     };
     if (!late) fillCapacity();
     bool validated = false;
+    int providerValidations = 0;
+    f.provider->beforeValidate = [&] { ++providerValidations; };
     KisPageStoreDiagnosticRecorder recorder(true, f.store.get());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         validated |= phase == KisPageStoreDiagnosticPhase::CommitProviderValidation;
@@ -3315,7 +3320,11 @@ void KisPageStoreCpuMutationTest::publicationInputRefusalKeepsOriginalTransactio
         const auto freeFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
         const auto result = f.store->commit(tx, original);
         QCOMPARE(result.isValid(), late);
-        QCOMPARE(validated, late);
+        // Validation no longer allocates a descriptor-reference array. Even
+        // at capacity it runs; the real root/workspace preparation still
+        // refuses without consuming any of the original publication facts.
+        QVERIFY(validated);
+        QCOMPARE(providerValidations, 2);
         QVERIFY(filler);
         if (late) {
             // The original candidate owns all fee projection rows. Pressure
@@ -3331,6 +3340,7 @@ void KisPageStoreCpuMutationTest::publicationInputRefusalKeepsOriginalTransactio
             QCOMPARE(live(), limits.metadataArenaBytes);
         }
     }
+    f.provider->beforeValidate = {};
     if (late) {
         QCOMPARE(quint8(f.pixel({}, 0)[0]), quint8(0x72));
         QCOMPARE(f.pixel({}, 1), QByteArray(f.bpp, char(0x44)));
@@ -6415,6 +6425,15 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
         QVERIFY2(f.metadata.registerPage(page, &f.error), qPrintable(f.error));
         QVERIFY2(f.owner.sealPreparedPage(f.metadata, version, tx.id, surface.allocationDescriptor(),
             result.completion, &proofs[i], &f.error), qPrintable(f.error));
+        // Exported producers do not have to bind the native CPU issuer. The
+        // unified consumer must retain their independent metadata/ledger path.
+        std::shared_ptr<const KisPageAllocationDescriptor> descriptor =
+            std::make_shared<KisPageAllocationDescriptor>(surface.allocationDescriptor());
+        QVERIFY(f.metadata.exchangeVersionDescriptor(version, &descriptor));
+        QVERIFY(f.owner.validatePublicationProof(f.metadata, KisPagePublicationProof(proofs[i])));
+        f.physical.provider->validationsUntilFailure = 0;
+        QVERIFY(!f.owner.validatePublicationProof(f.metadata, KisPagePublicationProof(proofs[i])));
+        f.physical.provider->validationsUntilFailure = -1;
     }
     using Overlay = KisPagePublicationCoordinator::KisPreparedPagePublication;
     using Change = KisPagePublicationCoordinator::OverlayChange;

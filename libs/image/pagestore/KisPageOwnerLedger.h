@@ -239,6 +239,10 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
+    // Publication retains the original transaction/key claims. These consume
+    // its compact identity directly; exported capabilities keep their checks.
+    bool validatePublicationProof(const KisPageMetadataCoordinator &, const KisPagePublicationProof &) const;
+    bool revokePublicationProof(const KisPagePublicationProof &);
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Synchronously read immutable publication facts into the caller's original
