@@ -368,7 +368,8 @@ private:
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
         quint64 durableBytes, bool emptyUsage = false,
         quint64 irreducibleMetadataBytes = 0) const;
-    bool fitsMetadataStorageLocked(quint64 bytes) const;
+    bool fitsMetadataStorageLocked(quint64 bytes, quint64 *processBytes = nullptr) const;
+    void *allocateStorage(const KisPageStorageLayout &layout);
     quint64 nonMetadataLiveSsdLocked() const;
     bool priorWaiterConflictsLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
@@ -482,8 +483,8 @@ public:
         const quint8 flag = quint8(KisPageWriteIntentFlag::SemanticRemoval);
         removed ? intent.flags |= flag : intent.flags &= ~flag;
     }
-    quint32 coldPage() const { return coldPageIndex; }
-    void setColdPage(quint32 index) { coldPageIndex = index; }
+    KisPagePrivateWrite *coldPage() const { return coldPageStorage; }
+    void setColdPage(KisPagePrivateWrite *page) { coldPageStorage = page; }
 
 private:
     KisPageWriteIntent intent;
@@ -492,7 +493,7 @@ private:
     KisPageOperationId operation;
     KisPageWriterToken writer;
     std::shared_ptr<const KisPageReplicaSource> initialization;
-    quint32 coldPageIndex = std::numeric_limits<quint32>::max();
+    KisPagePrivateWrite *coldPageStorage = nullptr;
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
 
     friend class KisPageWriteCoordinator;
@@ -740,6 +741,7 @@ private:
 static_assert(sizeof(KisPageWriteIntent) <= 32);
 static_assert(sizeof(KisPageWriteAdmission::ClaimSet) <= 40);
 static_assert(sizeof(KisBackingBudgetReservation) <= 40);
-static_assert(sizeof(KisMutationPageEntry) <= 104);
+// Direct cold borrow replaces the separately allocated slot directory.
+static_assert(sizeof(KisMutationPageEntry) <= 112);
 
 #endif // KIS_PAGE_WRITE_COORDINATOR_P_H

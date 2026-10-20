@@ -19,6 +19,7 @@
 void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record) const noexcept
 {
     if (!record) return;
+    Q_ASSERT(!record->backingNode.is_linked() && !record->operationNode.is_linked());
     auto storage = std::move(record->storage);
     std::destroy_at(record);
     storage.deallocate(record, 1);

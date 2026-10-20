@@ -123,8 +123,9 @@ private:
 
         static void *operator new(size_t bytes)
         {
-            return kisAllocatePageStorage(bytes, alignof(Block),
-                kisPageStorageAllocationBytes(bytes, alignof(Block)));
+            Q_ASSERT(bytes == sizeof(Block));
+            Q_UNUSED(bytes);
+            return kisAllocatePageStorage(blockLayout());
         }
         static void operator delete(void *data) noexcept
         { kisFreePageStorage(data, alignof(Block)); }
@@ -138,6 +139,14 @@ private:
     };
 
     static_assert(sizeof(Block) <= size_t(BlockBytes));
+
+    static const KisPageStorageLayout &blockLayout()
+    {
+        // Immutable geometry is shared by reservation, allocation and release
+        // accounting. It owns no capacity and cannot outlive a payer's bytes.
+        static const KisPageStorageLayout layout(sizeof(Block), alignof(Block));
+        return layout;
+    }
 
     enum class DirectoryState : quint8 {
         Active,
@@ -247,10 +256,7 @@ public:
         }
         quint64 byteSize() const
         {
-            quint64 bytes = 0;
-            for (const Block *block = m_blocks.get(); block; block = block->nextReleased.get())
-                bytes += kisPageStorageBytes(block, alignof(Block));
-            return bytes;
+            return quint64(m_blockCount) * blockByteSize();
         }
 
         void append(ReleasedBlocks &&other) noexcept
@@ -310,7 +316,7 @@ public:
     {
         // Slot geometry stays fixed. The original reservation also funds the
         // retained prefix and allocator capacity before constructing a block.
-        return kisPageStorageAllocationBytes(sizeof(Block), alignof(Block));
+        return blockLayout().capacity();
     }
 
     bool canAttachBlocks(quint64 count) const
@@ -392,7 +398,7 @@ public:
     bool attachPreparedBlock(PreparedBlock *prepared)
     {
         const quint64 bytes = prepared && prepared->m_block
-            ? kisPageStorageBytes(prepared->m_block.get(), alignof(Block)) : 0;
+            ? blockByteSize() : 0;
         if (!bytes || m_closed || bytes > m_maximumBytes
             || m_statistics.allocatedBytes > m_maximumBytes - bytes) {
             ++m_statistics.rejectedBlockAttaches;
@@ -678,7 +684,7 @@ private:
     void detachEntry(DirectoryEntry &entry, ReleasedBlocks *released)
     {
         Q_ASSERT(released && entry.state == DirectoryState::Active && entry.usedSlots == 0);
-        const size_t bytes = kisPageStorageBytes(entry.block.get(), alignof(Block));
+        const size_t bytes = blockByteSize();
         if (released->isEmpty()) released->m_tail = entry.block.get();
         entry.block->nextReleased = std::move(released->m_blocks);
         released->m_blocks = std::move(entry.block);

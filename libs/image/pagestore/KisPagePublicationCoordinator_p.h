@@ -22,6 +22,7 @@
 #include <boost/container/small_vector.hpp>
 
 #include <memory>
+#include <optional>
 #include <map>
 #include <atomic>
 #include <algorithm>
@@ -145,8 +146,44 @@ class KisPagePublicationCoordinator final
     // Installation storage only; the original metadata version owns layout.
     // A single target stays inline instead of allocating a replacement node.
     using DescriptorEntry = std::pair<KisPageVersion, std::shared_ptr<const KisPageAllocationDescriptor>>;
-    using PreparedDescriptors = boost::container::small_vector<DescriptorEntry, 1,
-        KisMutationStorageAllocator<DescriptorEntry>>;
+    class PreparedDescriptors final
+    {
+        using Entries = boost::container::small_vector<DescriptorEntry, 1,
+            KisMutationStorageAllocator<DescriptorEntry>>;
+    public:
+        using allocator_type = Entries::allocator_type;
+        PreparedDescriptors() = default;
+        explicit PreparedDescriptors(const allocator_type &allocator)
+            : entries(std::in_place, allocator) {}
+        PreparedDescriptors(PreparedDescriptors &&other)
+        { *this = std::move(other); }
+        PreparedDescriptors &operator=(PreparedDescriptors &&other)
+        {
+            if (this == &other) return *this;
+            // Moving a preparation transfers the complete producer carrier.
+            // Never assign its buffer through a different allocator domain.
+            entries.reset();
+            if (other.entries) entries.emplace(std::move(*other.entries));
+            other.entries.reset();
+            return *this;
+        }
+        bool hasStorage() const noexcept { return entries.has_value(); }
+        bool empty() const noexcept { return !entries || entries->empty(); }
+        size_t capacity() const noexcept { return entries ? entries->capacity() : 0; }
+        static size_t internal_capacity() { return Entries::internal_capacity(); }
+        void reserve(size_t count) { Q_ASSERT(entries); entries->reserve(count); }
+        void emplace_back(KisPageVersion version, std::shared_ptr<const KisPageAllocationDescriptor> value)
+        { Q_ASSERT(entries); entries->emplace_back(version, std::move(value)); }
+        DescriptorEntry &front() { Q_ASSERT(entries && !entries->empty()); return entries->front(); }
+        auto begin() { return entries ? entries->begin() : Entries::iterator{}; }
+        auto end() { return entries ? entries->end() : Entries::iterator{}; }
+        auto cbegin() const { return entries ? entries->cbegin() : Entries::const_iterator{}; }
+        auto cend() const { return entries ? entries->cend() : Entries::const_iterator{}; }
+        void clear() noexcept { if (entries) entries->clear(); }
+        void reset() noexcept { entries.reset(); }
+    private:
+        std::optional<Entries> entries;
+    };
     struct PreparedDescriptorChange {
         KisPageVersion version;
         KisPageAllocationDescriptor descriptor;
@@ -378,29 +415,7 @@ private:
      * their own authoritative storage; this facade owns descriptor changes,
      * backing admission and completion needed during installation.
      */
-    class KisPreparedMutationCommit final
-    {
-    public:
-        KisPreparedMutationCommit();
-        KRITAIMAGE_EXPORT explicit KisPreparedMutationCommit(KisBackingBudgetController &budget);
-        KRITAIMAGE_EXPORT ~KisPreparedMutationCommit();
-        KisPreparedMutationCommit(KisPreparedMutationCommit &&) noexcept;
-        KisPreparedMutationCommit &operator=(KisPreparedMutationCommit &&) noexcept;
-        KisPreparedMutationCommit(const KisPreparedMutationCommit &) = delete;
-        KisPreparedMutationCommit &operator=(const KisPreparedMutationCommit &) = delete;
-        bool isValid() const;
-        bool tryInstall(KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
-
-    private:
-        class Data;
-        struct DataDeleter {
-            KisMutationStorageAllocator<Data> storage;
-            void operator()(Data *) const noexcept;
-        };
-        std::unique_ptr<Data, DataDeleter> data;
-        void cancel() noexcept;
-        friend class KisPagePublicationCoordinator;
-    };
+    class KisPreparedMutationCommit;
 
     KisImageEpochReferenceModel &m_epochs;
     KisPageMetadataCoordinator &m_metadata;

@@ -498,7 +498,7 @@
       ],
       "fact": "prepared publication delta and publication orchestration",
       "id": "BR1-OWN-PREPARED-PUBLICATION",
-      "lock-or-claim": "store owner mutex plus original transaction mutation/commit-preparation claims; KisPreparedPagePublication owns real missing nodes, concurrent bucket reservations and deferred old nodes; KisPreparedMutationCommit owns metadata/epoch/capacity candidates during install",
+      "lock-or-claim": "store owner mutex plus original transaction mutation/commit-preparation claims; KisPreparedPagePublication owns real missing nodes, concurrent bucket reservations and deferred old nodes; stack KisPreparedMutationCommit owns one synchronous phased workspace through retries; independently retained metadata/epoch/descriptor outputs own their original tails",
       "read-only-observers": [
         "KisCapturedReadView",
         "KisPageMutationSession",

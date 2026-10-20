@@ -198,6 +198,11 @@ public:
                                            &Private::cancelRetirementDebt);
     }
 
+    ~Private()
+    {
+        owner.detachRetirementIndexesForDestruction();
+    }
+
     static void destroy(Private *owner) noexcept
     {
         auto allocator = owner->storage;
@@ -614,40 +619,6 @@ public:
         return true;
     }
 
-    // Allocator copies retain the original controller through the final
-    // control-block deallocation, including capabilities outliving the facade.
-    struct MutationLifetime {
-        explicit MutationLifetime(Private *value) : owner(value) { owner->lifetimeReferences.ref(); }
-        MutationLifetime(const MutationLifetime &other) : MutationLifetime(other.owner) {}
-        MutationLifetime &operator=(const MutationLifetime &other)
-        {
-            if (owner != other.owner) {
-                other.owner->lifetimeReferences.ref();
-                auto *previous = std::exchange(owner, other.owner);
-                KisPageStore::PrivateReleaser::cleanup(previous);
-            }
-            return *this;
-        }
-        ~MutationLifetime() { KisPageStore::PrivateReleaser::cleanup(owner); }
-        Private *owner;
-    };
-    template<class T> struct MutationAllocator : KisMutationStorageAllocator<T> {
-        // Control-block rebind must keep MutationLifetime, not inherit the
-        // base allocator's rebind and discard the original Store protection.
-        template<class U> struct rebind { using other = MutationAllocator<U>; };
-        explicit MutationAllocator(Private *owner)
-            : KisMutationStorageAllocator<T>(&owner->backingBudget), lifetime(owner) {}
-        template<class U> MutationAllocator(const MutationAllocator<U> &other)
-            : KisMutationStorageAllocator<T>(other.budget), lifetime(other.lifetime) {}
-        template<class U> bool operator==(const MutationAllocator<U> &other) const noexcept
-        { return lifetime.owner == other.lifetime.owner; }
-        template<class U> bool operator!=(const MutationAllocator<U> &other) const noexcept
-        { return !(*this == other); }
-        MutationLifetime lifetime;
-    };
-    static_assert(std::is_same_v<std::allocator_traits<MutationAllocator<char>>::rebind_alloc<int>,
-                                 MutationAllocator<int>>);
-
     Storage storage;
     mutable QMutex mutex;
     KisPageWaitCondition writeAdmissionChanged;
@@ -704,49 +675,113 @@ class KisPageMutationSession::Private
 {
 public:
     explicit Private(KisBackingBudgetController *budget) : writes(budget), coldPages(budget) {}
+    struct ColdPageBlock;
     struct Page : KisPagePrivateWrite {
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
+        ColdPageBlock *block = nullptr;
     };
     static_assert(sizeof(Page) <= 512);
+    struct ColdPageBlock {
+        std::optional<Page> pages[2];
+        ColdPageBlock *previous = nullptr;
+        ColdPageBlock *next = nullptr;
+        ColdPageBlock *availablePrevious = nullptr;
+        ColdPageBlock *availableNext = nullptr;
+        ColdPageBlock *releasedNext = nullptr;
+        unsigned used = 0;
+    };
     struct ColdPageSet {
-        std::optional<Page> inlinePage;
-        KisMutationStorage<Page, 2> overflow;
-        explicit ColdPageSet(KisBackingBudgetController *budget = nullptr) : overflow(budget) {}
-
-        Page *at(KisMutationWriteSet::EntryIndex index)
-        {
-            if (index == KisMutationWriteSet::InvalidEntry)
-                return nullptr;
-            if (index == 0)
-                return inlinePage ? &*inlinePage : nullptr;
-            return overflow.at(size_t(index - 1));
-        }
-        const Page *at(KisMutationWriteSet::EntryIndex index) const
-        {
-            return const_cast<ColdPageSet *>(this)->at(index);
-        }
-        quint32 create()
-        {
-            if (!inlinePage) {
-                inlinePage.emplace();
-                return 0;
+        struct ReleasedBlocks {
+            ColdPageBlock *head = nullptr;
+            KisBackingBudgetController *budget = nullptr;
+            ReleasedBlocks(ColdPageBlock *value, KisBackingBudgetController *payer)
+                : head(value), budget(payer) {}
+            ReleasedBlocks(ReleasedBlocks &&other) noexcept
+                : head(std::exchange(other.head, nullptr)), budget(other.budget) {}
+            ~ReleasedBlocks() { reset(); }
+            void reset() noexcept {
+                while (head) {
+                    auto *block = head; head = block->releasedNext;
+                    std::destroy_at(block);
+                    KisMutationStorageAllocator<ColdPageBlock>(budget).deallocate(block, 1);
+                }
             }
-            const auto slot = overflow.prepareSlot();
-            auto *page = overflow.emplacePrepared(slot);
-            Q_ASSERT(page);
-            return slot.index + 1;
+            bool isEmpty() const { return !head; }
+        };
+        std::optional<Page> inlinePage;
+        ColdPageBlock *head = nullptr;
+        ColdPageBlock *available = nullptr;
+        ColdPageBlock *released = nullptr;
+        size_t blocks = 0;
+        KisBackingBudgetController *budget = nullptr;
+        explicit ColdPageSet(KisBackingBudgetController *payer = nullptr) : budget(payer) {}
+        ColdPageSet(ColdPageSet &&other) noexcept
+            : inlinePage(std::move(other.inlinePage)), head(std::exchange(other.head, nullptr))
+            , available(std::exchange(other.available, nullptr))
+            , released(std::exchange(other.released, nullptr))
+            , blocks(std::exchange(other.blocks, 0)), budget(other.budget)
+        { other.inlinePage.reset(); }
+        ColdPageSet &operator=(ColdPageSet &&other) noexcept {
+            if (this != &other) { this->~ColdPageSet(); new (this) ColdPageSet(std::move(other)); }
+            return *this;
         }
-        void erase(KisMutationWriteSet::EntryIndex index)
-        {
-            if (index == 0)
-                inlinePage.reset();
-            else if (index != KisMutationWriteSet::InvalidEntry)
-                overflow.erase(size_t(index - 1));
+        ~ColdPageSet() {
+            while (head) {
+                auto *block = head; head = block->next;
+                block->releasedNext = released; released = block;
+            }
+            auto cleanup = takeReleasedBlocks();
         }
+        void makeAvailable(ColdPageBlock *block) noexcept {
+            block->availablePrevious = nullptr; block->availableNext = available;
+            if (available) available->availablePrevious = block;
+            available = block;
+        }
+        void removeAvailable(ColdPageBlock *block) noexcept {
+            if (block->availablePrevious) block->availablePrevious->availableNext = block->availableNext;
+            else available = block->availableNext;
+            if (block->availableNext) block->availableNext->availablePrevious = block->availablePrevious;
+            block->availablePrevious = block->availableNext = nullptr;
+        }
+        Page *create() {
+            if (!inlinePage) return &inlinePage.emplace();
+            if (!available) {
+                KisMutationStorageAllocator<ColdPageBlock> allocator(budget);
+                auto *block = allocator.allocate(1);
+                new (block) ColdPageBlock();
+                block->next = head;
+                if (head) head->previous = block;
+                head = block; ++blocks; makeAvailable(block);
+            }
+            auto *block = available;
+            auto &slot = block->pages[block->pages[0] ? 1 : 0];
+            auto *page = &slot.emplace(); page->block = block;
+            if (++block->used == 2) removeAvailable(block);
+            return page;
+        }
+        void erase(Page *page) noexcept {
+            if (!page) return;
+            auto *block = page->block;
+            if (!block) { Q_ASSERT(inlinePage && &*inlinePage == page); inlinePage.reset(); return; }
+            if (block->used == 2) makeAvailable(block);
+            auto &slot = block->pages[block->pages[0] && &*block->pages[0] == page ? 0 : 1];
+            Q_ASSERT(slot && &*slot == page); slot.reset(); --block->used;
+            // Same one-empty-block policy as streaming mutation storage.
+            if (!block->used && blocks > 1) {
+                removeAvailable(block);
+                if (block->previous) block->previous->next = block->next;
+                else head = block->next;
+                if (block->next) block->next->previous = block->previous;
+                --blocks; block->releasedNext = released; released = block;
+            }
+        }
+        ReleasedBlocks takeReleasedBlocks() noexcept
+        { return {std::exchange(released, nullptr), budget}; }
     };
     ~Private() { Q_ASSERT(state == State::Detached); }
-    static std::shared_ptr<Private> create(KisPageStore::Private *owner)
+    std::atomic<quint32> references{0};
+    static boost::intrusive_ptr<Private> create(KisPageStore::Private *owner)
     {
         KisMutationStorageAllocator<Private> allocator(&owner->backingBudget);
         Private *scope = allocator.allocate(1);
@@ -754,8 +789,7 @@ public:
         catch (...) { allocator.deallocate(scope, 1); throw; }
         scope->owner = owner;
         owner->lifetimeReferences.ref();
-        return std::shared_ptr<Private>(scope, &Private::releaseOrRetain,
-            KisPageStore::Private::MutationAllocator<Private>(owner));
+        return boost::intrusive_ptr<Private>(scope);
     }
     static void destroy(Private *scope) noexcept
     {
@@ -926,7 +960,7 @@ public:
                               std::shared_ptr<const KisPageReplicaSource> source = {})
     {
         auto hot = writes.takeReleasedBlocks();
-        auto cold = coldPages.overflow.takeReleasedBlocks();
+        auto cold = coldPages.takeReleasedBlocks();
         if (hot.isEmpty() && cold.isEmpty() && !source)
             return;
         ++owner->activeProviderCalls;
@@ -1008,11 +1042,11 @@ public:
     KisPageWriteAdmission::ClaimSet admission;
     Page *ensurePage(KisMutationPageEntry &entry) try
     {
-        if (auto *page = coldPages.at(entry.coldPage()))
+        if (auto *page = static_cast<Page *>(entry.coldPage()))
             return page;
-        const auto slot = coldPages.create();
-        entry.setColdPage(slot);
-        return coldPages.at(slot);
+        auto *page = coldPages.create();
+        entry.setColdPage(page);
+        return page;
     } catch (const std::bad_alloc &) {
         return nullptr;
     }
@@ -1023,14 +1057,15 @@ public:
     const Page *pageAtEntry(KisMutationWriteSet::EntryIndex index) const
     {
         const auto *entry = writes.at(index);
-        const auto *page = entry ? coldPages.at(entry->coldPage()) : nullptr;
+        const auto *page = entry ? static_cast<Page *>(entry->coldPage()) : nullptr;
         return page && page->target.isValid() ? page : nullptr;
     }
     void erasePage(KisMutationPageEntry &value)
     {
         auto *entry = &value;
-        coldPages.erase(entry->coldPage());
-        entry->setColdPage(KisMutationWriteSet::InvalidEntry);
+        auto *page = static_cast<Page *>(entry->coldPage());
+        entry->setColdPage(nullptr);
+        coldPages.erase(page);
     }
     void clearSources()
     {
@@ -1360,7 +1395,7 @@ KisPageMutationSession::Private::prepareTarget(
     std::shared_ptr<const KisPageAllocationDescriptor> selectedOwner)
 {
     auto *entry = &value;
-    Q_ASSERT(!coldPages.at(entry->coldPage()));
+    Q_ASSERT(!static_cast<Page *>(entry->coldPage()));
     auto initialization = entry->initializationSource();
     if (initialization && intent.mode == KisPageWriteMode::DiscardContents) {
         entry->setInitializationSource({});
@@ -1518,6 +1553,14 @@ void KisPageStore::Private::collectAbandonedMutations(void *context)
     KisPageMutationSession::Private::retryOrphans(static_cast<Private *>(context));
 }
 
+void intrusive_ptr_add_ref(KisPageMutationSession::Private *scope) noexcept
+{ scope->references.fetch_add(1, std::memory_order_relaxed); }
+void intrusive_ptr_release(KisPageMutationSession::Private *scope) noexcept
+{
+    if (scope->references.fetch_sub(1, std::memory_order_acq_rel) == 1)
+        KisPageMutationSession::Private::releaseOrRetain(scope);
+}
+
 class KisPageMutationExecution::Private
 {
 public:
@@ -1529,12 +1572,25 @@ public:
         KisPageMutationSession::Private::Page *page = nullptr;
     };
     static_assert(sizeof(BoundEntry) <= 16);
-    Private(const std::shared_ptr<KisPageMutationSession::Private> &owner, size_t size)
-        : scope(owner), overflow(KisMutationStorageAllocator<BoundEntry>(&owner->owner->backingBudget)), count(size),
-          touchedOverflow(KisMutationStorageAllocator<quint64>(&owner->owner->backingBudget))
+    Private(const boost::intrusive_ptr<KisPageMutationSession::Private> &owner, size_t size)
+        : scope(owner), count(size) {}
+    static boost::intrusive_ptr<Private> create(
+        const boost::intrusive_ptr<KisPageMutationSession::Private> &scope, size_t count)
     {
-        if (count > 1) overflow.resize(count);
-        if (count > 64) touchedOverflow.resize(2 * ((count + 63) / 64));
+        static_assert(alignof(Private) >= alignof(BoundEntry));
+        static_assert(alignof(Private) >= alignof(quint64));
+        const size_t maximum = size_t(std::numeric_limits<qint64>::max());
+        const size_t words = count / 64 + bool(count % 64);
+        if (!count || count > (maximum - sizeof(Private)) / (sizeof(BoundEntry) + sizeof(quint64)))
+            throw std::bad_alloc();
+        const size_t entryBytes = count > 1 ? count * sizeof(BoundEntry) : 0;
+        const size_t bytes = sizeof(Private) + entryBytes + (count > 64 ? 2 * words * sizeof(quint64) : 0);
+        auto *budget = &scope->owner->backingBudget;
+        void *raw = kisAllocateMutationStorage(budget, bytes, alignof(Private));
+        Private *value = new (raw) Private(scope, count);
+        if (count > 1) std::uninitialized_value_construct_n(value->entries(), count);
+        if (count > 64) std::uninitialized_value_construct_n(value->touched(), 2 * words);
+        return boost::intrusive_ptr<Private>(value);
     }
     ~Private()
     {
@@ -1546,8 +1602,8 @@ public:
         if (previous) previous->next = next;
         else scope->executions = next;
         if (next) next->previous = previous;
-        // Storage and original control block free after leaving the gate.
-        // scope is declared first and released last.
+        // The last reference frees this whole workspace outside the gate;
+        // its scope remains pinned through the actual capacity refund.
     }
     static auto order(const KisPageKey &key)
     { return std::make_tuple(key.surface.value, key.page.row, key.page.column); }
@@ -1558,11 +1614,12 @@ public:
         scope->executions = this;
         linked = true;
     }
-    BoundEntry *entries() { return count == 1 ? &inlineEntry : overflow.data(); }
-    quint64 *touched() { return count <= 64 ? &inlineTouched : touchedOverflow.data(); }
+    BoundEntry *entries() { return count == 1 ? &inlineEntry : reinterpret_cast<BoundEntry *>(this + 1); }
+    quint64 *touched()
+    { return count <= 64 ? &inlineTouched : reinterpret_cast<quint64 *>(entries() + count); }
     quint64 *prepared()
     {
-        return count <= 64 ? &inlinePrepared : touchedOverflow.data() + (count + 63) / 64;
+        return count <= 64 ? &inlinePrepared : touched() + (count + 63) / 64;
     }
     void markPrepared(size_t index) noexcept
     { prepared()[index / 64] |= quint64(1) << (index % 64); }
@@ -1580,18 +1637,17 @@ public:
             [](const BoundEntry &entry, const KisPageKey &key) { return order(entry.entry->key()) < order(key); });
         return found != first + count && found->entry->key() == key ? found : nullptr;
     }
-    std::shared_ptr<KisPageMutationSession::Private> scope;
+    boost::intrusive_ptr<KisPageMutationSession::Private> scope;
+    std::atomic<quint32> references{0};
     QMutex mutex; // one execution, independent of structural growth/cold work
     BoundEntry inlineEntry;
-    std::vector<BoundEntry, KisMutationStorageAllocator<BoundEntry>> overflow;
     size_t count = 0;
     // One bit per original BoundEntry, not a duplicate page-key index. The
-    // execution's original control block/controller also own this storage.
+    // execution's original allocation also owns this storage.
     quint64 inlineTouched = 0;
     // Temporary ownership only: pages prepared for this execution but never
     // exposed by its callback are cancelled before result export.
     quint64 inlinePrepared = 0;
-    std::vector<quint64, KisMutationStorageAllocator<quint64>> touchedOverflow;
     qsizetype touchedCount = 0;
     Qt::HANDLE thread = QThread::currentThreadId();
     Private *previous = nullptr;
@@ -1600,6 +1656,18 @@ public:
     bool linked = false;
     bool finished = false;
 };
+
+void intrusive_ptr_add_ref(KisPageMutationExecution::Private *execution) noexcept
+{ execution->references.fetch_add(1, std::memory_order_relaxed); }
+void intrusive_ptr_release(KisPageMutationExecution::Private *execution) noexcept
+{
+    if (execution->references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    // The original scope protects the controller through destruction AND free.
+    auto scope = execution->scope;
+    auto *budget = &scope->owner->backingBudget;
+    execution->~Private();
+    kisFreeMutationStorage(budget, execution, 0, alignof(KisPageMutationExecution::Private));
+}
 
 KisPageMutationExecution KisPageMutationSession::borrowExecution(
     KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &inputPages, QString *error) try
@@ -1620,16 +1688,11 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
         std::sort(pages.begin(), pages.end(), less);
         pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
     }
-    // Actual record, control block and range storage precede any authority.
-    auto candidate = std::allocate_shared<KisPageMutationExecution::Private>(
-        KisPageStore::Private::MutationAllocator<KisPageMutationExecution::Private>(d->owner), d, size_t(pages.size()));
-    // Only original entry/cold-page bindings survive admission. Rollback uses
-    // a transient charged bitmap, not another persistent PageKey/slot index.
-    quint64 inlineCreated = 0;
-    std::vector<quint64, KisMutationStorageAllocator<quint64>> createdOverflow{
-        KisMutationStorageAllocator<quint64>(&d->owner->backingBudget)};
-    if (pages.size() > 64) createdOverflow.resize((size_t(pages.size()) + 63) / 64);
-    auto *created = pages.size() <= 64 ? &inlineCreated : createdOverflow.data();
+    // One paid workspace holds the original record, bindings and bitmaps.
+    // Before admission, the prepared bitmap records newly created slots;
+    // after acceptance it returns to its ordinary preparation purpose.
+    auto candidate = KisPageMutationExecution::Private::create(d, size_t(pages.size()));
+    auto *created = candidate->prepared();
     QMutexLocker scopeLock(&d->mutex);
     if (d->state != Private::State::Active || (!d->executions && d->counters.activePins)) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation cannot lend execution"));
@@ -1662,7 +1725,7 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
         KisPageWriteIntent intent; intent.key = {surface, page};
         bool newEntry = false;
         auto &entry = d->writes.getOrCreate(intent, &newEntry);
-        auto *cold = d->coldPages.at(entry.coldPage());
+        auto *cold = static_cast<Private::Page *>(entry.coldPage());
         range[i] = {&entry, cold && cold->target.isValid() ? cold : nullptr};
         if (newEntry) created[i / 64] |= quint64(1) << (i % 64);
         ++i;
@@ -1680,6 +1743,7 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
     if (!d->admission.isValid()) d->admission = d->owner->writeAdmission.beginClaimSet(d->writes);
     if (!d->owner->writeAdmission.claimRange(d->admission, surface, pages, ownerLock, error))
         return result;
+    std::fill_n(created, (candidate->count + 63) / 64, quint64(0));
     candidate->link();
     accepted = true;
     result.d = std::move(candidate);
@@ -1741,8 +1805,8 @@ qsizetype KisPageMutationExecution::finishPreparedWrites(
             if (!page)
                 continue;
             scope->cancelPageLocked(*bound.entry, *page);
-            scope->erasePage(*bound.entry);
             bound.page = nullptr;
+            scope->erasePage(*bound.entry);
         }
     }
 
@@ -1875,13 +1939,13 @@ KisCpuWriteGuard KisPageMutationExecution::beginWrite(const KisPageKey &key, QSt
 KisCpuWriteGuard KisPageMutationExecution::beginWrite(const KisPageKey &key, KisPageWriteMode mode, QString *error)
 {
     KisPageMutationSession session;
-    if (d) session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
+    if (d) session.d = d->scope;
     return session.beginWriteImpl(key, mode, nullptr, error, d);
 }
 bool KisPageMutationExecution::overwritePage(const KisPageKey &key, const KisCpuPagePayload &payload, QString *error)
 {
     KisPageMutationSession session;
-    if (d) session.d = std::shared_ptr<KisPageMutationSession::Private>(d, d->scope.get());
+    if (d) session.d = d->scope;
     return session.beginWriteImpl(key, KisPageWriteMode::DiscardContents, &payload, error, d).isValid();
 }
 
@@ -2071,7 +2135,7 @@ KisCpuWriteGuard &KisCpuWriteGuard::operator=(KisCpuWriteGuard &&other) noexcept
     if (this != &other) {
         reset();
         m_scope = std::move(other.m_scope);
-        m_execution = std::exchange(other.m_execution, nullptr);
+        m_execution = std::move(other.m_execution);
         m_entry = std::exchange(other.m_entry, KisMutationWriteSet::InvalidEntry);
         m_entryIncarnation = std::exchange(other.m_entryIncarnation, 0);
         m_data = std::exchange(other.m_data, nullptr);
@@ -2080,21 +2144,24 @@ KisCpuWriteGuard &KisCpuWriteGuard::operator=(KisCpuWriteGuard &&other) noexcept
     }
     return *this;
 }
+KisPageMutationSession::Private *KisCpuWriteGuard::scope() const noexcept
+{ return m_execution ? m_execution->scope.get() : m_scope.get(); }
 void KisCpuWriteGuard::reset()
 {
-    if (m_scope && m_data) {
-        QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+    auto *owner = scope();
+    if (owner && m_data) {
+        QMutexLocker lock(m_execution ? &m_execution->mutex : &owner->mutex);
         auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
-        auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
+        auto *entry = bound ? bound->entry : owner->writes.at({m_entry, m_entryIncarnation});
         Q_ASSERT(entry && entry->isExposed());
-        auto *page = bound ? bound->page : entry && entry->isExposed() ? m_scope->pageAtEntry(m_entry) : nullptr;
+        auto *page = bound ? bound->page : entry && entry->isExposed() ? owner->pageAtEntry(m_entry) : nullptr;
         Q_ASSERT(page);
         if (page) {
             // Drop only pixel residency, not the unpublished writer token.
             // The next guard must re-pin; no parked Page retains a pointer.
             page->writable.unpin();
-            m_scope->owner->writeCoordinator.recordExposure(*entry, false);
-            auto &counters = m_execution ? m_execution->counters : m_scope->counters;
+            owner->owner->writeCoordinator.recordExposure(*entry, false);
+            auto &counters = m_execution ? m_execution->counters : owner->counters;
             ++counters.guardsReleased;
             ++counters.pinsReleased;
             Q_ASSERT(counters.activePins);
@@ -2112,24 +2179,26 @@ void KisCpuWriteGuard::reset()
 
 KisPageVersion KisCpuWriteGuard::version() const
 {
-    if (!m_scope || !m_data)
+    auto *owner = scope();
+    if (!owner || !m_data)
         return {};
-    QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+    QMutexLocker lock(m_execution ? &m_execution->mutex : &owner->mutex);
     const auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
-    const auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
+    const auto *entry = bound ? bound->entry : owner->writes.at({m_entry, m_entryIncarnation});
     return entry ? entry->preparedTargetVersion() : KisPageVersion{};
 }
 
 bool KisCpuWriteGuard::providerBacking(KisReplicaHandle *replica) const
 {
+    auto *owner = scope();
     if (replica)
         *replica = {};
-    if (!m_scope || !m_data || !replica)
+    if (!owner || !m_data || !replica)
         return false;
-    QMutexLocker lock(m_execution ? &m_execution->mutex : &m_scope->mutex);
+    QMutexLocker lock(m_execution ? &m_execution->mutex : &owner->mutex);
     const auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
-    const auto *entry = bound ? bound->entry : m_scope->writes.at({m_entry, m_entryIncarnation});
-    const auto *page = bound ? bound->page : entry ? m_scope->pageAtEntry(m_entry) : nullptr;
+    const auto *entry = bound ? bound->entry : owner->writes.at({m_entry, m_entryIncarnation});
+    const auto *page = bound ? bound->page : entry ? owner->pageAtEntry(m_entry) : nullptr;
     if (!page || !entry->isExposed() || !page->target.isValid()
         || !page->writable.isValid())
         return false;
@@ -2177,9 +2246,8 @@ KisPageMutationSession KisPageStore::beginMutation(const KisPageTransaction &tra
     lock.unlock();
     using Scope = KisPageMutationSession::Private;
     if (!candidate) candidate = Scope::create(d.data());
-    auto bound = execution ? std::allocate_shared<KisPageMutationExecution::Private>(
-        Private::MutationAllocator<KisPageMutationExecution::Private>(d.data()), candidate,
-        size_t(candidate->writes.size())) : std::shared_ptr<KisPageMutationExecution::Private>{};
+    auto bound = execution ? KisPageMutationExecution::Private::create(candidate,
+        size_t(candidate->writes.size())) : boost::intrusive_ptr<KisPageMutationExecution::Private>{};
     lock.relock();
     if (!available()) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation transaction changed during preparation"));
@@ -2236,7 +2304,7 @@ KisPageMutationSession KisPageStore::reserveManagedRange(
         return std::make_tuple(a.row, a.column) < std::make_tuple(b.row, b.column);
     }));
     Q_ASSERT(std::adjacent_find(targets.cbegin(), targets.cend()) == targets.cend());
-    std::shared_ptr<KisPageMutationSession::Private> range;
+    boost::intrusive_ptr<KisPageMutationSession::Private> range;
     QMutexLocker lock(&d->mutex);
     ++d->activeProviderCalls;
     const auto preparation = qScopeGuard([&] {
@@ -2433,7 +2501,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
                                                         KisPageWriteMode mode,
                                                         const KisCpuPagePayload *payload,
                                                         QString *error,
-                                                        const std::shared_ptr<KisPageMutationExecution::Private> &execution)
+                                                        const boost::intrusive_ptr<KisPageMutationExecution::Private> &execution)
 {
     KisCpuWriteGuard result;
     if (!d) {
@@ -2578,8 +2646,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     ++counters.pinsAcquired;
     counters.maximumPins = qMax(counters.maximumPins, ++counters.activePins);
     if (bound) bound->page = page;
-    result.m_scope = execution ? std::shared_ptr<Private>(execution, d.get()) : d;
-    result.m_execution = execution.get();
+    if (execution) result.m_execution = execution;
+    else result.m_scope = d;
     result.m_entry = bound ? quint32(bound - execution->entries()) : entryIndex;
     result.m_entryIncarnation = bound ? 0 : d->writes.handleAt(entryIndex).incarnation;
     result.m_data = data;

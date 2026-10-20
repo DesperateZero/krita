@@ -8,9 +8,11 @@
 #include "KisPageReplicaProvider.h"
 #include <boost/intrusive/list.hpp>
 #include <map>
+#include <boost/intrusive/set.hpp>
 #include <tuple>
 struct KisPageRetirementWait;
 struct KisPagePreparedBackingChange;
+struct KisPagePhysicalBackingRecord;
 
 struct KisPageBackingRecord
 {
@@ -18,7 +20,9 @@ struct KisPageBackingRecord
     KisBackingBudgetClass budgetClass = KisBackingBudgetClass::ActivePending;
     KisReplicaPhysicalSlotIdentity physical;
     KisBackingBudgetReservation retirementHeadroom;
-    KisPageRetirementRecordPointer retirement;
+    // Non-null only while the ledger owns the enclosing retirement record.
+    KisPageRetirementRecord *retirement = nullptr;
+    KisPagePhysicalBackingRecord *physicalRecord = nullptr;
     KisPageBackingRecord *previous = nullptr;
     KisPageBackingRecord *next = nullptr;
 };
@@ -40,6 +44,8 @@ struct KisPagePhysicalBackingRecord
     // gate. Budget projections copy this view without editing any links.
     void link(KisPageBackingRecord &record) noexcept
     {
+        Q_ASSERT(!record.physicalRecord);
+        record.physicalRecord = this;
         record.next = members;
         if (members) members->previous = &record;
         members = &record;
@@ -50,6 +56,7 @@ struct KisPagePhysicalBackingRecord
         else members = record.next;
         if (record.next) record.next->previous = record.previous;
         record.previous = record.next = nullptr;
+        record.physicalRecord = nullptr;
     }
 };
 
@@ -68,9 +75,17 @@ struct KisPageBackingIdentityLess
             < std::tie(b.provider.value, b.providerEpoch.value, b.slot);
     }
 };
-using KisPageBackingIndex = std::map<KisReplicaAllocationIdentity, KisPageBackingRecord,
-    KisPageBackingIdentityLess,
-    KisMutationStorageAllocator<std::pair<const KisReplicaAllocationIdentity, KisPageBackingRecord>>>;
+struct KisPageBackingNode : boost::intrusive::set_base_hook<> {
+    KisReplicaAllocationIdentity first;
+    KisPageBackingRecord second;
+    struct Key {
+        using type = KisReplicaAllocationIdentity;
+        const type &operator()(const KisPageBackingNode &node) const { return node.first; }
+    };
+};
+using KisPageBackingIndex = boost::intrusive::set<KisPageBackingNode,
+    boost::intrusive::key_of_value<KisPageBackingNode::Key>,
+    boost::intrusive::compare<KisPageBackingIdentityLess>>;
 using KisPagePhysicalBackingIndex = std::map<KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord,
     KisPageBackingIdentityLess,
     KisMutationStorageAllocator<std::pair<const KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord>>>;
@@ -97,30 +112,29 @@ struct KisPageProviderOperationRecord
     KisCompletionTicket completion;
     KisPageRetirementRecord *retirement = nullptr;
 };
-using KisPageProviderOperationIndex = std::map<quint64, KisPageProviderOperationRecord,
-    std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, KisPageProviderOperationRecord>>>;
+struct KisPageProviderOperationNode : boost::intrusive::set_base_hook<> {
+    quint64 first = 0;
+    KisPageProviderOperationRecord second;
+    struct Key {
+        using type = quint64;
+        const quint64 &operator()(const KisPageProviderOperationNode &node) const { return node.first; }
+    };
+};
+using KisPageProviderOperationIndex = boost::intrusive::set<KisPageProviderOperationNode,
+    boost::intrusive::key_of_value<KisPageProviderOperationNode::Key>>;
 
 struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
 {
     explicit KisPageRetirementRecord(KisMutationStorageAllocator<KisPageRetirementRecord> allocator)
         : storage(std::move(allocator))
     {
-        KisPageProviderOperationIndex prepared(std::less<quint64>{},
-            KisMutationStorageAllocator<std::pair<const quint64, KisPageProviderOperationRecord>>(storage));
-        prepared.emplace(0, KisPageProviderOperationRecord{{}, this});
-        operationStorage = prepared.extract(0);
-        prepareBackingStorage();
+        operationNode.second.retirement = this;
+        preparePhysicalStorage();
     }
-    void prepareBackingStorage()
+    void preparePhysicalStorage()
     {
-        // Prepare real installation nodes before a provider can create pixels.
-        // Ordered indexes transfer these exact nodes without bucket growth.
-        KisPageBackingIndex backing(KisPageBackingIdentityLess{},
-            KisMutationStorageAllocator<std::pair<const KisReplicaAllocationIdentity, KisPageBackingRecord>>(storage));
-        if (backingStorage.empty()) {
-            backing.emplace(KisReplicaAllocationIdentity{}, KisPageBackingRecord{});
-            backingStorage = backing.extract(backing.begin());
-        }
+        // Physical aliases have an independent last consumer. Only this node
+        // needs separate storage; logical and operation indexes borrow us.
         KisPagePhysicalBackingIndex physical(KisPageBackingIdentityLess{},
             KisMutationStorageAllocator<std::pair<const KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord>>(storage));
         if (physicalStorage.empty()) {
@@ -140,8 +154,8 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KisCompletionTicket lastUse;
     KisPageOperationId retirementOperation;
     KisReplicaOperation retirementResult;
-    KisPageProviderOperationIndex::node_type operationStorage;
-    KisPageBackingIndex::node_type backingStorage;
+    KisPageProviderOperationNode operationNode;
+    KisPageBackingNode backingNode;
     KisPagePhysicalBackingIndex::node_type physicalStorage;
     // Rare provider-result rejection: keep the preallocation reservation
     // charged until an unregistered physical replica reaches terminal retire.

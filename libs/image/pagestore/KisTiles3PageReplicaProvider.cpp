@@ -251,6 +251,7 @@ public:
             quint64 transition = 0;
             quint64 logicalReferences = 1;
             boost::intrusive::set_member_hook<> slotIndex;
+            KisTileDataStore::ResidencyObserverRegistration registration;
         };
         using PayloadMap = std::map<KisTileData *, Payload, std::less<KisTileData *>,
             KisMutationStorageAllocator<std::pair<KisTileData *const, Payload>>>;
@@ -695,7 +696,8 @@ public:
         prepared.allocation = scratch.extract(prepared.handle.allocation.slot);
         if (!existing) {
             prepared.physical = residencyObserver->preparePayload(nextPhysicalSlot, bytes);
-            prepared.registration = KisTileDataStore::instance()->prepareResidencyObserver(residencyObserver);
+            prepared.registration = KisTileDataStore::instance()->prepareResidencyObserver(
+                residencyObserver, &prepared.physical.payload.mapped().registration);
         }
         // Prepare the original binding and actual shared control block before
         // pixel allocation/copy or physical adoption. A refused candidate owns

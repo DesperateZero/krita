@@ -63,8 +63,9 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::createRead
     KisBackingBudgetDelta requested;
     const size_t alignment = std::max(
         size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
-    const size_t capacity = kisPageStorageAllocationBytes(size_t(stride * height), alignment);
-    if (capacity > size_t(std::numeric_limits<qint64>::max())) return {};
+    const KisPageStorageLayout layout(size_t(stride * height), alignment);
+    if (!layout.isValid()) return {};
+    const size_t capacity = layout.capacity();
     requested.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = qint64(capacity);
     auto reservation = budget.reserve(requested, nullptr);
     if (!reservation.isValid()) return {};
@@ -77,7 +78,7 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::createRead
     result->alignment = alignment;
     result->statistics = statistics;
     result->storageOwner.reset(kisMutationStorageOwner(&budget));
-    result->data = kisAllocatePageStorage(size_t(result->byteSize), result->alignment, capacity);
+    result->data = kisAllocatePageStorage(layout);
 
     reservation.commit(requested);
     result->storageOwner->retainLiveCharge(result->allocationBytes);

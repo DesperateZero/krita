@@ -232,9 +232,32 @@ public:
     // Sparse observers are installed only for PageStore-owned physical
     // payloads. Swap work reports the exact changed tile after releasing its
     // storage lock; ordinary tiles pay no per-object state cost.
+    // A stable member may borrow its owner's storage. Unregister before that
+    // owner is destroyed; transition snapshots retain observers, never members.
+    struct ResidencyObserverRegistration : boost::intrusive::list_base_hook<> {
+        ResidencyObserverRegistration() = default;
+    private:
+        friend class KisTileDataStore;
+        std::shared_ptr<KisTileDataResidencyObserver> observer;
+        bool ownsStorage = false;
+        explicit ResidencyObserverRegistration(std::shared_ptr<KisTileDataResidencyObserver> value)
+            : observer(std::move(value)), ownsStorage(true) {}
+        static void dispose(ResidencyObserverRegistration *value) noexcept {
+            if (!value->ownsStorage) {
+                value->observer.reset();
+                return;
+            }
+            auto storage = value->observer;
+            std::destroy_at(value);
+            storage->deallocate(value, sizeof(*value), alignof(ResidencyObserverRegistration));
+        }
+    };
     using PreparedResidencyObserver = boost::intrusive_ptr<ResidencyObservers>;
     PreparedResidencyObserver prepareResidencyObserver(
         const std::shared_ptr<KisTileDataResidencyObserver> &observer);
+    PreparedResidencyObserver prepareResidencyObserver(
+        const std::shared_ptr<KisTileDataResidencyObserver> &observer,
+        ResidencyObserverRegistration *member);
     bool registerResidencyObserver(
         KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer,
         KisTileDataResidencyState *initialState = nullptr,
@@ -243,16 +266,6 @@ public:
         KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer);
 
 private:
-    struct ResidencyObserverRegistration : boost::intrusive::list_base_hook<> {
-        std::shared_ptr<KisTileDataResidencyObserver> observer;
-        explicit ResidencyObserverRegistration(std::shared_ptr<KisTileDataResidencyObserver> value)
-            : observer(std::move(value)) {}
-        static void dispose(ResidencyObserverRegistration *value) noexcept {
-            auto storage = value->observer;
-            std::destroy_at(value);
-            storage->deallocate(value, sizeof(*value), alignof(ResidencyObserverRegistration));
-        }
-    };
     struct ResidencyObservers : boost::intrusive::set_base_hook<> {
         KisTileData *tile;
         std::shared_ptr<KisTileDataResidencyObserver> storageOwner;

@@ -35,7 +35,25 @@ KRITAIMAGE_EXPORT KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBud
 // their release facts; the fallback carries a prefix. Fund the complete
 // allocationBytes() before physical allocation.
 KRITAIMAGE_EXPORT size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept;
-KRITAIMAGE_EXPORT void *kisAllocatePageStorage(size_t bytes, size_t alignment, size_t capacity);
+// Prepare the physical layout once, before admission. Its immutable capacity
+// is the same fact consumed by the payer and the physical allocator.
+class KisPageStorageLayout final
+{
+public:
+    KisPageStorageLayout(size_t bytes, size_t alignment) noexcept
+        : m_bytes(bytes), m_alignment(alignment)
+        , m_capacity(kisPageStorageAllocationBytes(bytes, alignment)) {}
+    size_t bytes() const noexcept { return m_bytes; }
+    size_t alignment() const noexcept { return m_alignment; }
+    size_t capacity() const noexcept { return m_capacity; }
+    bool isValid() const noexcept
+    { return m_capacity <= size_t(std::numeric_limits<qint64>::max()); }
+private:
+    const size_t m_bytes;
+    const size_t m_alignment;
+    const size_t m_capacity;
+};
+KRITAIMAGE_EXPORT void *kisAllocatePageStorage(const KisPageStorageLayout &layout);
 KRITAIMAGE_EXPORT size_t kisPageStorageBytes(const void *data, size_t alignment) noexcept;
 KRITAIMAGE_EXPORT size_t kisFreePageStorage(void *data, size_t alignment) noexcept;
 
@@ -166,6 +184,81 @@ private:
 
 struct KisPageKey;
 using KisPageKeyStorage = std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>>;
+
+// Synchronous work owned by an already live operation. Only growth/free
+// enters accounting; typed views construct actual values in this one block.
+// Views must be empty before reserve/reset, and may never escape the owner.
+class KisMutationWorkspace
+{
+public:
+    explicit KisMutationWorkspace(KisBackingBudgetController *budget) : m_budget(budget) {}
+    ~KisMutationWorkspace() { reset(); }
+    KisMutationWorkspace(const KisMutationWorkspace &) = delete;
+    KisMutationWorkspace &operator=(const KisMutationWorkspace &) = delete;
+    template<class T> static size_t append(size_t &bytes, size_t count)
+    {
+        static_assert(alignof(T) <= alignof(std::max_align_t));
+        const auto maximum = size_t(std::numeric_limits<qint64>::max());
+        if (bytes > maximum - (alignof(T) - 1)) throw std::bad_alloc();
+        const size_t offset = (bytes + alignof(T) - 1) / alignof(T) * alignof(T);
+        if (count > (maximum - offset) / sizeof(T)) throw std::bad_alloc();
+        bytes = offset + count * sizeof(T);
+        return offset;
+    }
+    void reserve(size_t bytes)
+    {
+        if (bytes <= m_capacity) return;
+        // No live values remain. Do not charge an unnecessary old/new peak.
+        reset();
+        m_data = kisAllocateMutationStorage(m_budget, bytes, alignof(std::max_align_t));
+        m_capacity = bytes;
+    }
+    void reset() noexcept
+    {
+        if (m_data) kisFreeMutationStorage(m_budget, m_data, m_capacity, alignof(std::max_align_t));
+        m_data = nullptr;
+        m_capacity = 0;
+    }
+    template<class T> T *at(size_t offset) const noexcept
+    { return m_data ? reinterpret_cast<T *>(static_cast<char *>(m_data) + offset) : nullptr; }
+
+    template<class T> class Array
+    {
+    public:
+        Array() = default;
+        ~Array() { clear(); }
+        Array(const Array &) = delete;
+        Array &operator=(const Array &) = delete;
+        void bind(T *values, size_t capacity) noexcept
+        { Q_ASSERT(!m_size); m_data = values; m_capacity = capacity; }
+        void push_back(T value)
+        {
+            if (m_size == m_capacity) throw std::bad_alloc();
+            new (m_data + m_size) T(std::move(value));
+            ++m_size;
+        }
+        void clear() noexcept { while (m_size) m_data[--m_size].~T(); }
+        T *data() { return m_data; }
+        const T *data() const { return m_data; }
+        T *begin() { return m_data; }
+        T *end() { return m_size ? m_data + m_size : m_data; }
+        const T *begin() const { return m_data; }
+        const T *end() const { return m_size ? m_data + m_size : m_data; }
+        const T *cbegin() const { return begin(); }
+        const T *cend() const { return end(); }
+        size_t size() const { return m_size; }
+        bool empty() const { return !m_size; }
+        T &at(size_t index) { Q_ASSERT(index < m_size); return m_data[index]; }
+    private:
+        T *m_data = nullptr;
+        size_t m_size = 0;
+        size_t m_capacity = 0;
+    };
+private:
+    KisBackingBudgetController *m_budget;
+    void *m_data = nullptr;
+    size_t m_capacity = 0;
+};
 
 // The original admission/activity owner supplies synchronization. Every bucket
 // is an actual, constructed record: insert/erase never allocate nodes. Growth

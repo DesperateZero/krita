@@ -61,7 +61,8 @@ private:
     KisBackingClassChangeReservation(KisPageOwnerLedger *owner, quint64 cookie);
     KisPageOwnerLedger *m_owner = nullptr;
     quint64 m_cookie = 0;
-    KisPagePublicationChange *m_rows = nullptr;
+    KisPagePreparedBackingChange *m_rows = nullptr;
+    size_t m_stride = 0;
     size_t m_count = 0;
     KisBackingBudgetReservation m_budget;
 
@@ -103,6 +104,9 @@ class KRITAIMAGE_EXPORT KisPageOwnerLedger
 public:
     KisPageOwnerLedger();
     ~KisPageOwnerLedger();
+    // Terminal root destruction only. Queue records can still hold rejected
+    // provider results, so their embedded index members must be detached first.
+    void detachRetirementIndexesForDestruction() noexcept;
 
     bool configure(const std::shared_ptr<KisCompletionRegistry> &completions,
                    QString *error = nullptr);
@@ -237,11 +241,14 @@ public:
 private:
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
     KisPageRetirementRecords takeShutdownRetirementRecords();
-    // Original publication storage moves into the prepared ledger slot. The
-    // allocator must belong to this ledger's backing budget.
+    // Synchronously read immutable publication facts into the caller's original
+    // workspace. Reader: 1 = change, 0 = end, -1 = invalid input. It must not
+    // acquire an owner/metadata/provider lock while the ledger gate is held.
+    // Prepared rows outlive the reservation; input facts need only this call.
     KisBackingClassChangeReservation prepareBackingChanges(
-        BackingChanges changes, const KisPageTransitionEffect *effects,
-        qsizetype count, QString *error = nullptr);
+        KisPagePreparedBackingChange *rows, size_t capacity, void *context,
+        int (*read)(void *, KisBackingClassChange *), QString *error = nullptr,
+        size_t stride = sizeof(KisPagePreparedBackingChange));
     // Read the original frozen release rows; no intermediate class-change array.
     // Uses the same claims, accounting policy and terminal as generic changes.
     KisBackingClassChangeReservation prepareIdleCapacity(

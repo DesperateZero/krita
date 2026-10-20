@@ -1146,9 +1146,10 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         ))
         required_contracts = (
             "class KisPagePublicationCoordinator final",
-            "class KisPreparedMutationCommit final",
-            "std::unique_ptr<Data, DataDeleter> data",
-            "using PreparedDescriptors = boost::container::small_vector",
+            "class KisPreparedMutationCommit;",
+            "class PreparedDescriptors final",
+            "std::optional<Entries> entries",
+            "entries.emplace(std::move(*other.entries))",
             "struct KisPageOperationPublication",
             "KisPagePublicationProof proof",
             "boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity",
@@ -1172,6 +1173,18 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for contract in required_contracts:
             if contract not in header_text:
                 errors.append(f"R1 PublicationCoordinator contract is missing: {contract}")
+        source_text = code_only(publication_coordinator_source.read_text(encoding="utf-8"))
+        for contract in ("class KisPagePublicationCoordinator::KisPreparedMutationCommit final",
+                         "KisMutationWorkspace workspace", "preparedCommit.prepareChanges",
+                         "preparedCommit.beginBackingChanges", "preparedCommit.release",
+                         "publicationBackingReader", "KisPagePreparedBackingChange", "preparedCommit.prepareFees"):
+            if contract not in source_text:
+                errors.append(f"Publication synchronous workspace contract is missing: {contract}")
+        for retired in ("KisPreparedMutationCommit::Data", "preparedCommit.data",
+                        "std::move(backingChanges)", "appendPublicationBackingChanges",
+                        "Array<KisBackingClassChange>", "KisPreparedMutationCommit::cancel"):
+            if retired in source_text:
+                errors.append(f"Publication retains replaced storage protocol: {retired}")
         if "QObject" in header_text:
             errors.append("R1 PublicationCoordinator must not inherit or own QObject behavior")
         if "DescriptorMap" in header_text:
@@ -1195,7 +1208,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisImageEpochReferenceModel::PreparedCommit epoch",
             "KisImageEpochReferenceModel::PreparedRootReservation restoreEpoch",
             "KisPagePublicationCoordinator::KisPreparedMutationCommit::isValid() const",
-            "KisPagePublicationCoordinator::KisPreparedMutationCommit::cancel() noexcept",
+            "KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept",
             "preparedCommit.tryInstall",
         ):
             if contract not in publication_text:
@@ -1517,8 +1530,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::optional<Index> index",
             "using Index = std::vector<EntryIndex, KisMutationStorageAllocator<EntryIndex>>",
             "static_assert(sizeof(KisPageWriteIntent) <= 32)",
-            "static_assert(sizeof(KisMutationPageEntry) <= 104)",
+            "static_assert(sizeof(KisMutationPageEntry) <= 112)",
             "std::shared_ptr<const KisPageReplicaSource> initialization",
+            "KisPagePrivateWrite *coldPageStorage = nullptr",
         ):
             if contract not in write_header:
                 errors.append(f"BR1 converged write schema is missing: {contract}")
@@ -1592,8 +1606,15 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             errors.append("fresh final payload restored premature metadata completion")
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
-        if "KisMutationStorage<Page, 2> overflow" not in store_text:
-            errors.append("mutation cold resources lost stable budgeted storage")
+        for contract in ("struct ColdPageBlock", "std::optional<Page> pages[2]",
+                         "KisMutationStorageAllocator<ColdPageBlock>", "ColdPageBlock *available",
+                         "coldPages.takeReleasedBlocks()", "entry.setColdPage(page)"):
+            if contract not in store_text:
+                errors.append(f"mutation cold resources lost stable budgeted storage: {contract}")
+        if "coldPageIndex" in store_text or "KisMutationStorage<Page, 2>" in store_text:
+            errors.append("retired cold directory returned")
+        if "owner.detachRetirementIndexesForDestruction()" not in store_text:
+            errors.append("root teardown lost retirement index detachment")
         cold_page = store_text[page_begin:page_end]
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:

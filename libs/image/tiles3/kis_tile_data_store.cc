@@ -421,12 +421,24 @@ void KisTileDataStore::freeTileData(KisTileData *td)
 KisTileDataStore::PreparedResidencyObserver KisTileDataStore::prepareResidencyObserver(
     const std::shared_ptr<KisTileDataResidencyObserver> &observer)
 {
+    return prepareResidencyObserver(observer, nullptr);
+}
+
+KisTileDataStore::PreparedResidencyObserver KisTileDataStore::prepareResidencyObserver(
+    const std::shared_ptr<KisTileDataResidencyObserver> &observer,
+    ResidencyObserverRegistration *member)
+{
     if (!observer) return {};
+    Q_ASSERT(!member || (!member->is_linked() && !member->observer && !member->ownsStorage));
     void *raw = observer->allocate(sizeof(ResidencyObservers), alignof(ResidencyObservers));
     PreparedResidencyObserver candidate(::new (raw) ResidencyObservers(nullptr, observer), false);
-    raw = observer->allocate(sizeof(ResidencyObserverRegistration), alignof(ResidencyObserverRegistration));
-    auto *registration = ::new (raw) ResidencyObserverRegistration(observer);
-    candidate->observers.push_back(*registration);
+    if (!member) {
+        raw = observer->allocate(sizeof(ResidencyObserverRegistration), alignof(ResidencyObserverRegistration));
+        member = ::new (raw) ResidencyObserverRegistration(observer);
+    } else {
+        member->observer = observer;
+    }
+    candidate->observers.push_back(*member);
     return candidate;
 }
 

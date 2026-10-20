@@ -2271,10 +2271,12 @@ public:
     qsizetype clearBatch(qsizetype maximumWorkUnits);
 
     struct Entry {
+        // One strong pin per sorted shard run. Its first row (destroyed last)
+        // retains it until an arena reservation takes that same pin. All other
+        // rows use an empty-owner alias to the original shard: no ref traffic.
         std::shared_ptr<MetadataShard> shardOwner;
-        // The page directory is append-only for a shard's lifetime, retained
-        // by shardOwner. Keep its original location through prepare, claim,
-        // install and deferred release; revalidate mutable facts under mutex.
+        // The directory is append-only through that group's pin. Keep the
+        // original location; revalidate mutable facts under the shard mutex.
         MetadataMap<KisPageKey, MetadataPage>::iterator originalPage;
         KisVersionSlotId replacementSlot;
         quint64 revision = 0;
@@ -2335,9 +2337,15 @@ public:
         auto &entry = entries[i];
         if (arenaGrowth.empty() || arenaGrowth.back().shardOwner != entry.shardOwner) {
             ShardArenaGrowth growth(storage.borrowed());
-            growth.shardOwner = entry.shardOwner;
             growth.firstEntry = i;
             arenaGrowth.push_back(std::move(growth));
+            size_t first = i;
+            while (first && entries[first - 1].shardOwner == entry.shardOwner) --first;
+            auto &pin = entries[first].shardOwner;
+            auto *shard = pin.get();
+            Q_ASSERT(pin.use_count() > 0);
+            arenaGrowth.back().shardOwner = std::move(pin);
+            pin = std::shared_ptr<MetadataShard>(std::shared_ptr<MetadataShard>{}, shard);
         }
         auto &growth = arenaGrowth.back();
         // Zero-demand native entries between additions need no reservation,
@@ -2385,12 +2393,13 @@ public:
     PreparationKind kind = PreparationKind::Publication;
     bool retryCapacityPlan = false;
     bool installed = false;
+    // Reservations own their shard until every borrowing entry/payload dies.
+    Payload<ShardArenaGrowth> arenaGrowth;
     Payload<Entry> entries;
     // Publication images belong only to publication/recoverable candidates.
     // Detachment retains the same claims and terminal policy in entries.
     Payload<Publication> publications;
     Payload<GenericPublication> genericPublications;
-    Payload<ShardArenaGrowth> arenaGrowth;
     void popPublication()
     {
         if (publications.empty()) return;
@@ -2416,9 +2425,9 @@ private:
          Publication *publicationData, size_t publicationCount,
          GenericPublication *genericData, size_t genericCount,
          ShardArenaGrowth *growthData, size_t growthCount)
-        : storage(allocator), allocationUnits(units), entries(entryData, entryCount)
-        , publications(publicationData, publicationCount), genericPublications(genericData, genericCount)
-        , arenaGrowth(growthData, growthCount)
+        : storage(allocator), allocationUnits(units), arenaGrowth(growthData, growthCount)
+        , entries(entryData, entryCount), publications(publicationData, publicationCount)
+        , genericPublications(genericData, genericCount)
         , backingAuthorities(storage.borrowed()) {}
 
     template<class T> static size_t appendPayload(size_t &bytes, size_t count)
@@ -3078,11 +3087,12 @@ try {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata publication transition is invalid or repeated"));
             return result;
         }
-        std::shared_ptr<MetadataShard> shardOwner = Private::sharedShardFor(d, transition.version.key);
-        if (!shardOwner)
-            return result;
+        auto *shard = Private::shardFor(d, transition.version.key);
+        if (!shard) return result;
         PreparedPublication::Data::Entry entry;
-        entry.shardOwner = std::move(shardOwner);
+        // No activity or external call occurs before sorting and pinning the
+        // groups below. The coordinator still owns its original directory.
+        entry.shardOwner = std::shared_ptr<MetadataShard>(std::shared_ptr<MetadataShard>{}, shard);
         entry.version = transition.version;
         entry.inputOrdinal = size_t(i);
         entry.releaseUnusedCapacity = operationRows && operationRows[i].releasesCapacity;
@@ -3105,6 +3115,13 @@ try {
             KisPageStoreDetail::setError(error, QStringLiteral("metadata publication transition is invalid or repeated"));
             return result;
         }
+    }
+    for (size_t first = 0; first < data->entries.size();) {
+        auto &pin = data->entries[first].shardOwner;
+        pin = Private::sharedShardFor(d, data->entries[first].key());
+        size_t end = first + 1;
+        while (end < data->entries.size() && data->entries[end].shardOwner == pin) ++end;
+        first = end;
     }
     const auto rollbackPreparationCounts = qScopeGuard([&] {
         if (!data) return;

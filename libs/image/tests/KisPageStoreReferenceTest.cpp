@@ -7120,7 +7120,8 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
 {
     const KisPageTransaction tx{{74}, {1}};
     for (int shards : {1, 4}) {
-        KisPageMetadataCoordinator metadata;
+        auto coordinator = std::make_unique<KisPageMetadataCoordinator>();
+        auto &metadata = *coordinator;
         QVERIFY(metadata.configure(shards));
         QVector<KisPageStateSnapshot> expected;
         QVector<KisPageTransition> transitions;
@@ -7171,7 +7172,8 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
         QCOMPARE(metadata.footprint().pageActivities, quint64(0));
         auto candidate = metadata.preparePublication(tx, {2}, transitions);
         QVERIFY(candidate.isValid());
-        QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}));
+        KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+        QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup));
         for (int i = 0; i < transitions.size(); ++i) {
             const auto oracle = KisPageStateMachine().apply(expected[i], transitions[i]);
             QVERIFY(oracle.accepted);
@@ -7179,7 +7181,13 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
             QVERIFY(metadata.pageSnapshot(transitions[i].version.key, &actual));
             comparePageRecords(actual, oracle.next);
         }
-        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+        QCOMPARE(metadata.footprint().pageActivities, quint64(33));
+        QCOMPARE(cleanup.clearBatch(17), qsizetype(17));
+        QCOMPARE(metadata.footprint().pageActivities, quint64(16));
+        coordinator.reset(); // Group pins survive both partial cleanup and original owner.
+        qsizetype remaining = 0;
+        while (!cleanup.isEmpty()) remaining += cleanup.clearBatch(1);
+        QCOMPARE(remaining, qsizetype(16));
     }
 }
 
@@ -8653,9 +8661,10 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     coordinator.recordExposure(entry, true);
     QVERIFY(!writes.erase(slot));
     coordinator.recordExposure(entry, false);
-    entry.setColdPage(7);
+    KisPagePrivateWrite cold;
+    entry.setColdPage(&cold);
     QVERIFY(!writes.erase(slot));
-    entry.setColdPage(KisMutationWriteSet::InvalidEntry);
+    entry.setColdPage(nullptr);
     struct Source final : KisPageReplicaSource {
         Source() : KisPageReplicaSource({1}, {1}, allocationDescriptor()) {}
     };
@@ -9130,8 +9139,18 @@ void KisPageStoreReferenceTest::referenceOnlyChangesNeedNoFeeSlot()
         QVERIFY(!budget.reserve({}, &error).isValid()); // No slot can be created.
         QVERIFY2(owner.reclassifyBacking(alias, Class::RetainedHistory, &error), qPrintable(error));
         QCOMPARE(owner.backingClass(alias), Class::RetainedHistory);
-        auto restore = owner.prepareBackingChanges(std::move(restoreRows), nullptr, 0, &error);
+        KisPagePreparedBackingChange preparedRow;
+        auto readRestore = [position = restoreRows.cbegin(), end = restoreRows.cend()]
+                           (KisBackingClassChange *change) mutable -> int {
+            if (position == end) return 0;
+            *change = *position++;
+            return 1;
+        };
+        auto restore = owner.prepareBackingChanges(&preparedRow, 1, &readRestore,
+            [](void *context, KisBackingClassChange *change) { return (*static_cast<decltype(readRestore) *>(context))(change); },
+            &error);
         QVERIFY2(restore.isValid(), qPrintable(error));
+        restoreRows = decltype(restoreRows){restoreRows.get_allocator()};
         QVERIFY(!owner.reclassifyBacking(alias, Class::Current, &error)); // Logical claim still exists.
         owner.commitBackingChanges(std::move(restore));
         QCOMPARE(owner.backingClass(alias), Class::Current);
@@ -9170,6 +9189,26 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
         auto fee = budget.reserve(delta, &error);
         QVERIFY(fee.isValid());
         QVERIFY(owner.registerBacking(row.supersededAuthority, fee, Class::ActivePending, &error));
+    }
+    // A stream can reject after accepting a prefix, or exceed its advertised
+    // workspace. Neither failure may leave a claim/fee or publish an idle row.
+    for (const bool invalidTail : {true, false}) {
+        KisPagePreparedBackingChange prepared;
+        auto read = [&, index = size_t(0)](KisBackingClassChange *change) mutable -> int {
+            if (index == rows.size()) return 0;
+            if (invalidTail && index == 1) return -1;
+            auto &row = rows[index++];
+            *change = {row.supersededAuthority, Class::ActivePending, Class::IdleCapacity, &row.acceptedIdle};
+            return 1;
+        };
+        QVERIFY(!owner.prepareBackingChanges(&prepared, 1, &read,
+            [](void *context, KisBackingClassChange *change) { return (*static_cast<decltype(read) *>(context))(change); },
+            &error).isValid());
+        for (const auto &row : rows) {
+            QVERIFY(!row.acceptedIdle);
+            QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
+        }
+        QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].reserved.cpuRam, quint64(0));
     }
     auto partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
@@ -9707,10 +9746,20 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     const auto inputBytes = originalChanges.capacity() * sizeof(KisBackingClassChange);
     const auto withInput = metadataLive();
     originalChanges.push_back({pending, KisBackingBudgetClass::Current, KisBackingBudgetClass::OptionalCache});
-    auto nativeReservation = owner.prepareBackingChanges(std::move(originalChanges), nullptr, 0, &error);
+    KisPagePreparedBackingChange preparedRow;
+    auto readOriginal = [position = originalChanges.cbegin(), end = originalChanges.cend()]
+                        (KisBackingClassChange *change) mutable -> int {
+        if (position == end) return 0;
+        *change = *position++;
+        return 1;
+    };
+    auto nativeReservation = owner.prepareBackingChanges(&preparedRow, 1, &readOriginal,
+        [](void *context, KisBackingClassChange *change) { return (*static_cast<decltype(readOriginal) *>(context))(change); },
+        &error);
     QVERIFY2(nativeReservation.isValid(), qPrintable(error));
+    originalChanges = decltype(originalChanges){originalChanges.get_allocator()};
     // Only the actual change survives preparation. The oversized caller
-    // carrier is returned, while the original slot pays for its located row.
+    // carrier can be returned immediately; the caller's prepared row retains the claim.
     QVERIFY(metadataLive() + inputBytes / 2 < withInput);
     const auto fillerBytes = size_t(limits.metadataArenaBytes - metadataLive());
     void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
@@ -11253,7 +11302,7 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(1));
     QVERIFY(provider->complete(retirement, true));
     QVERIFY(queue.retireRecord(*record));
-    QVERIFY(!record->operationStorage.empty());
+    QVERIFY(!record->operationNode.is_linked());
     QVERIFY(!owner.releaseTerminalProviderOperation(retirement));
     QCOMPARE(owner.providerOperationCount(), qsizetype(1));
     QCOMPARE(owner.publicationBlockingOperationCount(), qsizetype(1));

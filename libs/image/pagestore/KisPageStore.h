@@ -144,7 +144,9 @@ private:
     PreparationResult prepareWrites(QString *error);
     void abandon();
     class Private;
-    std::shared_ptr<Private> d;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
+    boost::intrusive_ptr<Private> d;
     friend class KisPageMutationSession;
     friend class KisPageStore;
     friend class KisTiledDataManagerPageStoreBackend;
@@ -279,12 +281,14 @@ private:
     KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
     KisCpuWriteGuard
     beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error,
-                   const std::shared_ptr<KisPageMutationExecution::Private> &execution = {});
+                   const boost::intrusive_ptr<KisPageMutationExecution::Private> &execution = {});
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     class Private;
-    std::shared_ptr<Private> d;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
+    boost::intrusive_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuWriteGuard;
     friend class KisPageMutationExecution;
@@ -301,7 +305,7 @@ public:
     KisCpuWriteGuard &operator=(const KisCpuWriteGuard &) = delete;
     bool isValid() const
     {
-        return m_scope && m_data;
+        return (m_scope || m_execution) && m_data;
     }
     void *data() const
     {
@@ -320,8 +324,10 @@ public:
 private:
     void reset();
     bool providerBacking(KisReplicaHandle *) const;
-    std::shared_ptr<KisPageMutationSession::Private> m_scope;
-    KisPageMutationExecution::Private *m_execution = nullptr; // kept by aliasing m_scope
+    // Exactly one owner is retained: direct scope or its execution.
+    boost::intrusive_ptr<KisPageMutationSession::Private> m_scope;
+    boost::intrusive_ptr<KisPageMutationExecution::Private> m_execution;
+    KisPageMutationSession::Private *scope() const noexcept;
     // Borrow: immutable range position. Direct session: original slot handle.
     quint32 m_entry = std::numeric_limits<quint32>::max();
     quint64 m_entryIncarnation = 0;

@@ -461,6 +461,11 @@ void KisTiledDataManagerTest::testPageStoreCancelledIteratorAdapters()
         }
     }
     scope.reset(); // Abandonment or real refusal cancels the original private delta.
+    // Under hard pressure the original scope may transfer refused cleanup
+    // to its existing orphan task. Require automatic progress after relief,
+    // before any retry operation can accidentally drive that cleanup for it.
+    if (pressure)
+        QTRY_COMPARE_WITH_TIMEOUT(backend->store()->sessionStats().activeCpuWritePages, qsizetype(0), 5000);
     const QRect cancelledExtent = dm.extent();
     QByteArray actual(bpp, 0); dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1);
     const QByteArray cancelledPixel = actual;
@@ -763,7 +768,14 @@ void KisTiledDataManagerTest::testPageStoreDisjointOwnerPublication()
     if (ending != 1) {
         // The finished facade can remain alive without retaining the original
         // page admission or blocking the next operation on that page.
-        QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+        if (ending == 2) {
+            // Hard pressure can refuse the original cancellation's working
+            // storage. After relief its existing orphan task must finish,
+            // without destroying this facade or starting another operation.
+            QTRY_COMPARE_WITH_TIMEOUT(store->sessionStats().activeCpuWritePages, qsizetype(0), 5000);
+        } else {
+            QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+        }
         auto next = dm.beginIteratorWriteScope(); QVERIFY(next);
         auto again = dm.getTile(0, 0, true); QVERIFY(again && again->lockForWrite());
         again->unlockForWrite(); next.reset();
@@ -861,6 +873,11 @@ void KisTiledDataManagerTest::testPageStoreUnpublishedReadRefusal()
     KisPageStoreDiagnosticRecorder recorder(true, store);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         if (phase == KisPageStoreDiagnosticPhase::MutationSealCleanup) {
+            // Publication preparation has already refused. Release injected
+            // pressure before admitting a NEW read capability: its storage
+            // must not depend on how much commit scratch was just freed.
+            // The transaction is still unpublished and rollback has not run.
+            if (filler) freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
             std::thread reader([&] {
                 auto tile = dm.getTile(0, 0, false);
                 if (!tile || !tile->lockForRead()) return;
@@ -7389,6 +7406,10 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
     bool publicationBlocked = false, publicationCoherent = false;
     QSemaphore publicationReady, publicationDone;
     std::thread publicationReader;
+    const auto joinPublication = qScopeGuard([&] {
+        if (publicationReader.joinable()) publicationReader.join();
+    });
+    bool publicationAccepted = false;
     KisPageStoreDiagnosticRecorder recorder(true, backend->store());
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         if (phase == KisPageStoreDiagnosticPhase::MutationPresenceResolve) ++presenceResolutions;
@@ -7396,7 +7417,11 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
             ++sealed;
             observe(warm ? old : blank, warm);
         }
-        if (phase == KisPageStoreDiagnosticPhase::CommitCleanup) {
+        if (phase == KisPageStoreDiagnosticPhase::CommitRootPublication) publicationAccepted = true;
+        // Cleanup also runs for a rejected/rebased attempt. Only an accepted
+        // publication crosses the canonical/adapter visibility boundary.
+        if (phase == KisPageStoreDiagnosticPhase::CommitCleanup && publicationAccepted) {
+            publicationAccepted = false;
             ++committed;
             publicationReader = std::thread([&] {
                 const auto view = backend->captureReadView();
