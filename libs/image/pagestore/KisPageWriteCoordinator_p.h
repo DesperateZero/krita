@@ -34,6 +34,7 @@
 #include <vector>
 
 struct KisPageBackingPreparation;
+struct KisPageIdleCapacity;
 class KisImageEpochReferenceModel;
 class KisPageMetadataCoordinator;
 class KisPageOwnerLedger;
@@ -312,9 +313,8 @@ public:
     KisPageWritePlanKind prepareWritePlanLocked(
         const KisPageTransaction &, const KisPageWriteIntent &,
         const std::shared_ptr<KisPageReplicaProvider> &, KisPageAccessRequirement,
-        const KisPageAllocationDescriptor &,
-        KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
-        KisReplicaHandle idleCapacity,
+        KisPageWriteSelection &, KisPagePublicationCoordinator &,
+        KisPageIdleCapacity idleCapacity,
         QMutexLocker<QMutex> &,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
         KisPagePrivateWrite *native = nullptr);

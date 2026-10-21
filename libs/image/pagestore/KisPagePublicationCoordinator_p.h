@@ -39,6 +39,7 @@ struct KisPagePublicationCoordinatorSnapshot {
 
 class KisPageReadCleanup;
 struct KisPageCapturedRelease;
+struct KisPageIdleCapacity;
 
 // The publication owner's original mutable delta. Epoch preparation borrows
 // these containers only while the owner's CommitPreparation excludes edits;
@@ -359,7 +360,7 @@ public:
     KisPreparedPageProof projectProof(const KisPagePublicationProof &) const;
     KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &,
                                             KisVersionSlotId *slot = nullptr) const;
-    KisReplicaHandle takeIdleCapacityLocked(const KisPageKey &key);
+    KisPageIdleCapacity takeIdleCapacityLocked(const KisPageKey &key);
     // Same original records and Store gate for H0, H1, expiry and close.
     qint64 expireIdleCapacityLocked(qint64 now, bool all = false);
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;

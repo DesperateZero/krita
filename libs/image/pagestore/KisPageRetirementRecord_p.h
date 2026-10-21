@@ -13,7 +13,14 @@
 struct KisPageRetirementWait;
 struct KisPagePreparedBackingChange;
 struct KisPagePhysicalBackingRecord;
-struct KisPagePrivateWrite;
+class KisCpuResidentBinding;
+
+// Original idle ownership plus its stable physical binding. The binding still
+// checks the exact generation and live reader/writer state before handoff.
+struct KisPageIdleCapacity {
+    KisReplicaHandle replica;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+};
 
 struct KisPageBackingRecord
 {
@@ -26,10 +33,9 @@ struct KisPageBackingRecord
     KisPagePhysicalBackingRecord *physicalRecord = nullptr;
     KisPageBackingRecord *previous = nullptr;
     KisPageBackingRecord *next = nullptr;
-    // Empty native edit capacity follows this actual backing lifetime. It is
-    // checked out exclusively, carries no live authority while parked, and
-    // is destroyed with this original retirement record after real release.
-    std::shared_ptr<KisPagePrivateWrite> nativeWriteStorage;
+    // The provider's stable allocation record follows this original backing,
+    // including idle/handoff and rejected retirement. No D workspace survives.
+    std::shared_ptr<KisCpuResidentBinding> nativeBinding;
 };
 
 struct KisPagePhysicalBackingRecord

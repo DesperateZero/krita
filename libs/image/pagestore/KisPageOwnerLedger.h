@@ -153,7 +153,8 @@ public:
     // allocation. Keeps any admitted debt headroom until ordinary publication
     // or retirement consumes it; callers must not own a second terminal token.
     bool commitBackingHandoff(
-        KisBackingHandoffReservation &&reservation) noexcept;
+        KisBackingHandoffReservation &&reservation,
+        const std::shared_ptr<KisCpuResidentBinding> &binding = {}) noexcept;
     /**
      * Pre-admit every replica emitted by a local metadata transition to
      * RetirementDebt. The returned cookie freezes the exact backing classes;
@@ -240,10 +241,6 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
-    // Only the native session may create/consume this erased derived storage.
-    // It is empty capacity, charged until its original backing record exits.
-    std::shared_ptr<KisPagePrivateWrite> takeNativeWriteStorage(const KisReplicaHandle &);
-    void returnNativeWriteStorage(const KisReplicaHandle &, std::shared_ptr<KisPagePrivateWrite>);
     // Publication retains the original transaction/key claims. These consume
     // its compact identity directly; exported capabilities keep their checks.
     bool validatePublicationProof(const KisPageMetadataCoordinator &, const KisPagePublicationProof &) const;

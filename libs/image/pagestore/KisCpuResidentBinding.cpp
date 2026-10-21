@@ -91,11 +91,12 @@ KisCpuBackingHandoff &KisCpuBackingHandoff::operator=(KisCpuBackingHandoff &&oth
 }
 KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
     const std::shared_ptr<KisPageReplicaProvider> &provider, const KisReplicaHandle &source,
-    const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor)
+    const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
+    std::shared_ptr<KisCpuResidentBinding> binding)
 {
     KisCpuBackingHandoff result;
     if (!provider) return result;
-    auto binding = provider->cpuResidentBinding(source);
+    if (!binding) binding = provider->cpuResidentBinding(source);
     if (!binding || !binding->prepareHandoff(source, target, descriptor, &result.m_target)) return result;
     result.m_provider = provider;
     result.m_binding = std::move(binding);

@@ -987,7 +987,10 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     const quint64 bytes = f.replica.layout.byteSize;
     KisBackingBudgetDelta initial; initial.buckets[size_t(initialClass)].cpuRam = bytes;
     auto backing = budget.reserve(initial, &f.error);
-    QVERIFY(ledger.registerBacking(f.replica, backing, initialClass, &f.error));
+    auto terminal = kisPreparePageRetirementRecord(&budget);
+    auto *original = terminal.get();
+    QVERIFY(ledger.registerBacking(f.replica, backing, initialClass, &f.error, &terminal));
+    QVERIFY(!original->backingNode.second.nativeBinding); // Generic registration owns no CPU capability yet.
     auto physical = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
     QVERIFY(physical.isValid()); const auto target = physical.target();
     {
@@ -1009,7 +1012,9 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, bytes);
     QVERIFY(physical.tryClaim());
     auto writer = physical.commit(); QVERIFY(writer.isValid());
-    QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
+    QVERIFY(!original->backingNode.second.nativeBinding); // Cancelled preparations did not install it.
+    QVERIFY(ledger.commitBackingHandoff(std::move(prepared), writer.binding()));
+    QCOMPARE(original->backingNode.second.nativeBinding, f.binding);
     QVERIFY(!prepared.isValid());
     QVERIFY(!ledger.commitBackingHandoff(std::move(prepared)));
     QCOMPARE(ledger.backingClass(f.replica), KisBackingBudgetClass::Count);

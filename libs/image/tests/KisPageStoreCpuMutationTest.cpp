@@ -732,6 +732,8 @@ private Q_SLOTS:
     void abandonedMutationsReleaseWithFacade();
     void mutationStorageGrowthKeepsGuards_data() { pixelRows(); }
     void mutationStorageGrowthKeepsGuards();
+    void idleBindingFollowsOriginalCapacity_data() { pixelRows(); }
+    void idleBindingFollowsOriginalCapacity();
     void mutationColdHolesAreReusedDuringSeal_data() { pixelRows(); }
     void mutationColdHolesAreReusedDuringSeal();
     void cancelAndClaims();
@@ -9840,6 +9842,71 @@ void KisPageStoreCpuMutationTest::mutationColdHolesAreReusedDuringSeal()
     QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(0x31));
     source.reset(); read = {}; before = {};
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+}
+
+void KisPageStoreCpuMutationTest::idleBindingFollowsOriginalCapacity()
+{
+    QFETCH(int, bpp);
+    Fixture f; QVERIFY(f.init(bpp, 1));
+    // Failure after a real physical allocation must retain the original
+    // terminal record until its last charge/reference is released.
+    const auto originalBytes = f.provider->memoryUsage().committedBytes;
+    {
+        const auto failedTransaction = f.store->beginCurrentTransaction();
+        auto failedMutation = f.begin(failedTransaction);
+        bool injected = false, threw = false;
+        const auto freshBefore = f.provider->freshRequests.load();
+        f.provider->beforeBinding = [&](const KisReplicaHandle &replica) {
+            if (replica.version == f.initialReplicas.first().version) return;
+            injected = true;
+            throw std::bad_alloc();
+        };
+        KisCpuWriteGuard failed;
+        try { failed = failedMutation.beginWrite(key(), &f.error); }
+        catch (const std::bad_alloc &) { threw = true; }
+        f.provider->beforeBinding = {};
+        QVERIFY(injected); QVERIFY(!threw); QVERIFY(!failed.isValid());
+        QCOMPARE(f.provider->freshRequests.load(), freshBefore + 1);
+        QVERIFY(failedMutation.cancel());
+        QVERIFY(f.store->abort(failedTransaction));
+        QVERIFY(f.store->waitForRetirementIdle());
+        QCOMPARE(f.provider->memoryUsage().committedBytes, originalBytes);
+        QCOMPARE(f.pixel(), QByteArray(bpp, char(0x31)));
+    }
+    const auto tx = f.store->beginCurrentTransaction();
+    KisReplicaHandle first;
+    for (int cut = 0; cut < 5; ++cut) {
+        int queries = 0;
+        f.provider->beforeBinding = [&](const KisReplicaHandle &) { ++queries; };
+        // Both private physical capacities exist after the first two cuts.
+        // Their stable capabilities survive removal of the cold query service.
+        const bool bound = cut >= 2;
+        f.provider->rejectNativeBinding = bound;
+        f.provider->rejectWrite = cut >= 2;
+        auto mutation = f.begin(tx);
+        auto guard = mutation.beginWrite(key(), KisPageWriteMode::PreserveContents, &f.error);
+        QVERIFY2(guard.isValid(), qPrintable(QStringLiteral("cut %1, queries %2, fresh %3: %4").arg(cut).arg(queries).arg(f.provider->freshRequests.load()).arg(f.error)));
+        QCOMPARE(static_cast<const quint8 *>(guard.data())[0], quint8(cut ? 0x60 + cut - 1 : 0x31));
+        std::memset(guard.data(), 0x60 + cut, size_t(guard.byteSize()));
+        guard = {};
+        QVERIFY2(mutation.seal(&f.error), qPrintable(f.error));
+        f.provider->beforeBinding = {};
+        if (bound) QCOMPARE(queries, 0);
+        f.provider->rejectNativeBinding = false;
+        const auto current = f.store->preparedPages(tx).proofs.first().authority;
+        if (!cut) first = current;
+        if (cut == 2) {
+            QCOMPARE(current.physicalSlotIdentity(), first.physicalSlotIdentity());
+            QCOMPARE(current.allocation.generation, first.allocation.generation + 1);
+            QVERIFY(!f.provider->validate(first, f.importedDescriptor));
+        }
+        QCOMPARE(f.pixel(KisPageReadView::transactionOverlay(tx.id)), QByteArray(bpp, char(0x60 + cut)));
+        QCOMPARE(f.pixel(), QByteArray(bpp, char(0x31)));
+    }
+    f.provider->rejectWrite = false;
+    QVERIFY(f.store->commitPreparedTransaction(tx));
+    QVERIFY(f.store->closeSession(&f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::mutationStorageGrowthKeepsGuards()

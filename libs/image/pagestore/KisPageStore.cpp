@@ -676,100 +676,118 @@ class KisPageMutationSession::Private
 public:
     explicit Private(KisPageStore::Private *owner)
         : writes(&owner->backingBudget), coldPages(owner) {}
+    struct PageSlot;
     struct Page : KisPagePrivateWrite {
         KisPagePublicationChange publicationRow;
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
-        std::shared_ptr<Page> next;
-        Page *previous = nullptr;
-        void resetProducer() noexcept
-        {
-            // Publication scratch owns nothing. Each attempt overwrites its
-            // inputs/acceptance fields before use; do not zero that workspace
-            // again when returning actual native capacity to its backing.
-            static_assert(std::is_trivially_destructible_v<KisPagePublicationChange>);
-            static_cast<KisPagePrivateWrite &>(*this) = KisPagePrivateWrite{};
-            writable = {}; resetPixel.clear(); next.reset(); previous = nullptr;
-        }
+        PageSlot *storage = nullptr;
+        ~Page() { Q_ASSERT(!reserved); }
     };
-    static_assert(sizeof(Page) <= 976);
+    static_assert(sizeof(Page) <= 784);
+    struct PageSlot {
+        PageSlot() noexcept : next(nullptr) {}
+        std::optional<Page> page;
+        PageSlot *next;
+    };
+    static_assert(std::is_nothrow_default_constructible_v<PageSlot>);
     struct ColdPageSet {
-        KisPageStore::Private *owner = nullptr;
-        std::shared_ptr<Page> head;
-        // First checkout uses pairs, just as the bounded cold storage did.
-        // Aliasing ownership lets each empty row follow its own backing while
-        // the shared allocation stays charged until the last row exits.
-        std::shared_ptr<Page> spare;
-        // Cancelled rows leave the active chain immediately; their actual
-        // storage and last references are released in the original unlocked
-        // cleanup window. No separately allocated list node is needed.
-        std::shared_ptr<Page> released;
-        explicit ColdPageSet(KisPageStore::Private *value = nullptr) : owner(value) {}
-        ColdPageSet(ColdPageSet &&) noexcept = default;
+        // This is the original D's workspace, never a backing cache. Only
+        // actual writes construct rows; untouched claims carry no Page.
+        struct alignas(PageSlot) Block {
+            Block *next = nullptr;
+            size_t count = 0;
+            PageSlot *slots() { return reinterpret_cast<PageSlot *>(this + 1); }
+            size_t bytes() const { return sizeof(Block) + count * sizeof(PageSlot); }
+        };
+        KisBackingBudgetController *budget = nullptr;
+        Block *blocks = nullptr;
+        PageSlot *free = nullptr;
+        PageSlot *released = nullptr;
+        size_t live = 0;
+        explicit ColdPageSet(KisPageStore::Private *owner = nullptr)
+            : budget(owner ? &owner->backingBudget : nullptr) {}
+        ColdPageSet(ColdPageSet &&other) noexcept { *this = std::move(other); }
         ColdPageSet &operator=(ColdPageSet &&other) noexcept {
-            if (this != &other) { clear(); owner = other.owner;
-                head = std::move(other.head); spare = std::move(other.spare);
-                released = std::move(other.released); }
+            if (this != &other) {
+                clear(); budget = other.budget;
+                blocks = std::exchange(other.blocks, nullptr);
+                free = std::exchange(other.free, nullptr);
+                released = std::exchange(other.released, nullptr);
+                live = std::exchange(other.live, 0);
+            }
             return *this;
         }
         ColdPageSet(const ColdPageSet &) = delete;
         ColdPageSet &operator=(const ColdPageSet &) = delete;
         ~ColdPageSet() { clear(); }
-        static void release(std::shared_ptr<Page> pages, KisPageStore::Private *owner) noexcept {
-            while (pages) {
-                auto page = std::move(pages);
-                pages = std::move(page->next);
-                const auto target = page->target;
-                const bool accepted = page->acceptedSlot.isValid();
-                Q_ASSERT(!page->reserved);
-                // Reuse empty capacity only. Neither old identities nor
-                // provider/layout references survive this producer lifetime.
-                page->resetProducer();
-                if (accepted && owner)
-                    owner->owner.returnNativeWriteStorage(target, std::move(page));
-            }
-        }
         void clear() noexcept {
-            spare.reset();
-            release(std::move(released), owner);
-            release(std::move(head), owner);
+            while (blocks) {
+                auto *block = blocks;
+                blocks = block->next;
+                const size_t bytes = block->bytes();
+                std::destroy_n(block->slots(), block->count);
+                block->~Block();
+                kisFreeMutationStorage(budget, block, bytes, alignof(Block));
+            }
+            free = released = nullptr;
+            live = 0;
         }
         struct ReleasedBlocks {
-            std::shared_ptr<Page> head;
-            KisPageStore::Private *owner;
+            ColdPageSet *owner;
+            PageSlot *head;
+            ReleasedBlocks(ColdPageSet *owner, PageSlot *head) : owner(owner), head(head) {}
+            ReleasedBlocks(const ReleasedBlocks &) = delete;
             ~ReleasedBlocks() { reset(); }
             bool isEmpty() const { return !head; }
-            void reset() noexcept { release(std::move(head), owner); }
+            void reset() noexcept {
+                // The scope gate excludes reuse until this unlocked cleanup
+                // returns. No provider/binding destructor runs under its gate.
+                while (head) {
+                    auto *slot = head;
+                    head = slot->next;
+                    slot->page.reset();
+                    slot->next = owner->free;
+                    owner->free = slot;
+                    --owner->live;
+                }
+            }
         };
         ReleasedBlocks takeReleasedBlocks() noexcept
-        { return {std::move(released), owner}; }
-        Page *create(const KisReplicaHandle &idle = {}) {
-            auto page = std::static_pointer_cast<Page>(owner->owner.takeNativeWriteStorage(idle));
-            if (!page) {
-                if (!spare) {
-                    using Pair = std::array<Page, 2>;
-                    auto pair = std::allocate_shared<Pair>(
-                        KisMutationStorageAllocator<Pair>::retained(&owner->backingBudget));
-                    page = {pair, &(*pair)[0]};
-                    spare = {pair, &(*pair)[1]};
-                } else page = std::move(spare);
+        { return {this, std::exchange(released, nullptr)}; }
+        Page *create(size_t admitted) {
+            if (!free) {
+                // Start small for sparse/no-op ranges. Once that actual work
+                // fills, group the remaining admitted rows up to one bounded
+                // block; their addresses never move during acceptance/retry.
+                const size_t count = blocks ? std::min(size_t(16), std::max(size_t(2), admitted > live ? admitted - live : 0)) : 2;
+                const size_t bytes = sizeof(Block) + count * sizeof(PageSlot);
+                auto *block = new (kisAllocateMutationStorage(budget, bytes, alignof(Block))) Block;
+                block->count = count;
+                // Empty optionals need no initialization of the absent Page.
+                std::uninitialized_default_construct_n(block->slots(), count);
+                block->next = blocks;
+                blocks = block;
+                for (size_t i = count; i > 0; --i) {
+                    auto *slot = block->slots() + i - 1;
+                    slot->next = free;
+                    free = slot;
+                }
             }
-            Q_ASSERT(!page->reserved && !page->target.isValid() && !page->next && !page->previous);
-            page->next = std::move(head);
-            if (page->next) page->next->previous = page.get();
-            head = std::move(page);
-            return head.get();
+            auto *slot = free;
+            auto *page = &slot->page.emplace();
+            free = slot->next;
+            slot->next = nullptr;
+            page->storage = slot;
+            ++live;
+            return page;
         }
         void erase(Page *page) noexcept {
             if (!page) return;
-            auto &link = page->previous ? page->previous->next : head;
-            Q_ASSERT(link.get() == page);
-            auto removed = std::move(link);
-            link = std::move(removed->next);
-            if (link) link->previous = removed->previous;
-            removed->previous = nullptr;
-            removed->next = std::move(released);
-            released = std::move(removed);
+            auto *slot = page->storage;
+            Q_ASSERT(slot && slot->page && &*slot->page == page);
+            slot->next = released;
+            released = slot;
         }
     };
     ~Private() { Q_ASSERT(state == State::Detached); }
@@ -1033,11 +1051,11 @@ public:
     KisMutationWriteSet writes;
     ColdPageSet coldPages;
     KisPageWriteAdmission::ClaimSet admission;
-    Page *ensurePage(KisMutationPageEntry &entry, const KisReplicaHandle &idle = {}) try
+    Page *ensurePage(KisMutationPageEntry &entry) try
     {
         if (auto *page = static_cast<Page *>(entry.coldPage()))
             return page;
-        auto *page = coldPages.create(idle);
+        auto *page = coldPages.create(writes.size());
         entry.setColdPage(page);
         entry.publicationRow = &page->publicationRow;
         return page;
@@ -1240,14 +1258,18 @@ public:
             lock.unlock(); backing.retirement.reset(); lock.relock();
         });
         KisReplicaOperation allocation;
-        const auto spare = owner->publicationCoordinator.takeIdleCapacityLocked(key);
+        auto spare = owner->publicationCoordinator.takeIdleCapacityLocked(key);
         {
             ++owner->activeProviderCalls;
             lock.unlock();
-            const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
-            if (spare.isValid()) {
-                const auto originalProvider = owner->owner.provider(spare.provider, spare.providerEpoch);
-                owner->retirementQueue.retireOrDefer(spare, originalProvider, {}, {});
+            const auto done = qScopeGuard([&] {
+                spare.binding.reset();
+                lock.relock();
+                --owner->activeProviderCalls;
+            });
+            if (spare.replica.isValid()) {
+                const auto originalProvider = owner->owner.provider(spare.replica.provider, spare.replica.providerEpoch);
+                owner->retirementQueue.retireOrDefer(spare.replica, originalProvider, {}, {});
             }
             backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
                 KisBackingBudgetClass::ActivePending, error, adoption.version);
@@ -1274,14 +1296,28 @@ public:
             allocation.replica.physicalSlotIdentity() == page->target.physicalSlotIdentity();
         const bool ours = ownsPreparedReplica(allocation.replica, adoption.version, *producer)
             && !reusesPendingSlot; // a rejected reused slot is still owned by the old private target
-        const bool backingOwned = ours && owner->owner.registerBacking(
-            allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
         const auto reject = [&] {
             if (!ours)
                 return;
             owner->retireRejectedReplicaLocked(allocation.replica, producer, std::move(backing), lock);
         };
         auto rollbackAllocation = qScopeGuard(reject);
+        if (!ours) return false;
+        std::shared_ptr<KisCpuResidentBinding> binding;
+        {
+            ++owner->activeProviderCalls;
+            lock.unlock();
+            const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
+            try { binding = producer->cpuResidentBinding(allocation.replica); }
+            catch (const std::bad_alloc &) {
+                if (storageRefused) *storageRefused = true;
+                KisPageStoreDetail::setError(error, QStringLiteral("alias binding storage was refused"));
+                return false;
+            }
+        }
+        backing.retirement->backingNode.second.nativeBinding = binding;
+        const bool backingOwned = ours && owner->owner.registerBacking(
+            allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
         if (!backingOwned || allocation.status != KisPageRequestStatus::Ready
             || allocation.replica.domain != KisPageAccessDomain::CpuRam
             || !allocation.replica.layout.matches(descriptor)
@@ -1289,18 +1325,6 @@ public:
             return false;
         }
         adoption.target = allocation.replica;
-        std::shared_ptr<KisCpuResidentBinding> binding;
-        {
-            ++owner->activeProviderCalls;
-            lock.unlock();
-            const auto done = qScopeGuard([&] { lock.relock(); --owner->activeProviderCalls; });
-            try { binding = producer->cpuResidentBinding(adoption.target); }
-            catch (const std::bad_alloc &) {
-                if (storageRefused) *storageRefused = true;
-                KisPageStoreDetail::setError(error, QStringLiteral("alias binding storage was refused"));
-                return false;
-            }
-        }
         const auto oldTarget = page ? page->target : KisReplicaHandle{};
         const bool accepted = page ? owner->metadata.replacePrivateWrite(page, adoption.target)
             : owner->metadata.reservePrivateWrite(adoption, resources,
@@ -1431,13 +1455,16 @@ KisPageMutationSession::Private::prepareTarget(
     if (initialization) intent.flags |= quint8(KisPageWriteIntentFlag::SourceInitialization);
     auto idle = owner->publicationCoordinator.takeIdleCapacityLocked(intent.key);
     const auto releaseUnusedIdle = qScopeGuard([&] {
-        if (!idle.isValid()) return;
+        if (!idle.replica.isValid()) return;
         if (lock.isLocked()) lock.unlock();
-        owner->retirementQueue.retireOrDefer(idle,
-            owner->owner.provider(idle.provider, idle.providerEpoch), {}, {});
-        lock.relock();
+        const auto relock = qScopeGuard([&] {
+            idle.binding.reset();
+            lock.relock();
+        });
+        owner->retirementQueue.retireOrDefer(idle.replica,
+            owner->owner.provider(idle.replica.provider, idle.replica.providerEpoch), {}, {});
     });
-    auto *page = ensurePage(*entry, idle);
+    auto *page = ensurePage(*entry);
     if (!page) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation cold storage is unavailable"));
         return {};
@@ -1459,8 +1486,8 @@ KisPageMutationSession::Private::prepareTarget(
         owner->publicationCoordinator.preparePrivateLayoutLocked(*page, descriptor, selected->layout);
         plan = owner->writeCoordinator.prepareWritePlanLocked(
             transaction, intent, provider,
-            {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, descriptor,
-            owner->publicationCoordinator, acquire, selected->recoverableBefore, std::exchange(idle, {}), lock, writable, diagnostic,
+            {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, *selected,
+            owner->publicationCoordinator, std::exchange(idle, {}), lock, writable, diagnostic,
             page);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation write plan storage is unavailable"));
@@ -1494,11 +1521,17 @@ KisPageMutationSession::Private::prepareTarget(
             return {};
         }
         const bool ownsNewTarget = ownsPreparedReplica(allocation.replica, target, *provider, source);
+        std::shared_ptr<KisCpuResidentBinding> binding;
+        try { if (ownsNewTarget) binding = provider->cpuResidentBinding(allocation.replica); }
+        catch (const std::bad_alloc &) {
+            owner->retirementQueue.retireOrDefer(allocation.replica, provider, {}, std::move(backing));
+            KisPageStoreDetail::setError(error, QStringLiteral("CPU binding storage is unavailable"));
+            return {};
+        }
+        backing.retirement->backingNode.second.nativeBinding = binding;
         const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
             allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
         const bool finalPayload = intent.inputKind == KisPageWriteInputKind::FinalPayload && directPayload;
-        const auto binding = backingOwned ? provider->cpuResidentBinding(allocation.replica)
-                                           : std::shared_ptr<KisCpuResidentBinding>{};
         if (!finalPayload) {
             writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
             result.data = pinWritable(writable, local);
@@ -4601,8 +4634,8 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     KisPageWritePlanKind plan;
     try {
         plan = d->writeCoordinator.prepareWritePlanLocked(
-            transaction, writeIntent, provider, access, descriptor,
-            d->publicationCoordinator, transition, selection.recoverableBefore,
+            transaction, writeIntent, provider, access, selection,
+            d->publicationCoordinator,
             d->publicationCoordinator.takeIdleCapacityLocked(transition.version.key), locker, writable, diagnostic);
     } catch (const std::bad_alloc &) {
         // The common plan restores this gate and destroys prepared candidates

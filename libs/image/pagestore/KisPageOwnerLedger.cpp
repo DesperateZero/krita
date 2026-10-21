@@ -1129,28 +1129,6 @@ KisReplicaBackingFootprint KisPageOwnerLedger::observeBackingFootprint(
                            : KisReplicaBackingFootprint{};
 }
 
-std::shared_ptr<KisPagePrivateWrite> KisPageOwnerLedger::takeNativeWriteStorage(const KisReplicaHandle &replica)
-{
-    if (!replica.isValid()) return {};
-    QMutexLocker lock(&d->mutex);
-    const auto found = d->backings.find(replica.allocationIdentity());
-    if (found == d->backings.end() || !(found->second.replica == replica)) return {};
-    return std::move(found->second.nativeWriteStorage);
-}
-
-void KisPageOwnerLedger::returnNativeWriteStorage(const KisReplicaHandle &replica,
-    std::shared_ptr<KisPagePrivateWrite> storage)
-{
-    Q_ASSERT(storage && !storage->reserved && !storage->target.isValid()
-        && !storage->descriptor && !storage->binding && !storage->proof.isValid());
-    QMutexLocker lock(&d->mutex);
-    const auto found = d->backings.find(replica.allocationIdentity());
-    if (found != d->backings.end() && found->second.replica == replica
-        && !found->second.nativeWriteStorage)
-        found->second.nativeWriteStorage = std::move(storage);
-    // Rejected capacity is destroyed after dropping the ledger gate.
-}
-
 bool KisPageOwnerLedger::registerBacking(const KisReplicaHandle &replica,
                                          KisBackingBudgetReservation &reservation,
                                          KisBackingBudgetClass budgetClass,
@@ -1896,7 +1874,8 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
 }
 
 bool KisPageOwnerLedger::commitBackingHandoff(
-    KisBackingHandoffReservation &&reservation) noexcept
+    KisBackingHandoffReservation &&reservation,
+    const std::shared_ptr<KisCpuResidentBinding> &binding) noexcept
 {
     QMutexLocker locker(&d->mutex);
     if (reservation.m_owner != this) return false;
@@ -1927,6 +1906,9 @@ bool KisPageOwnerLedger::commitBackingHandoff(
         || KisPageBackingIdentityLess{}(target.allocationIdentity(), std::next(found)->first));
     found->first = target.allocationIdentity();
     source->replica = target;
+    // Generic/imported capacity may acquire its first native capability here.
+    // Keep that original binding through later idle cycles as on native Fresh.
+    if (!source->nativeBinding) source->nativeBinding = binding;
     Q_ASSERT(physical->classClaim == HandoffClaim);
     physical->representative = target;
 

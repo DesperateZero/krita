@@ -334,7 +334,8 @@ public:
     KisCpuBackingHandoff &operator=(const KisCpuBackingHandoff &) = delete;
     static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
                                         const KisReplicaHandle &source, const KisPageVersion &target,
-                                        const KisPageAllocationDescriptor &descriptor);
+                                        const KisPageAllocationDescriptor &descriptor,
+                                        std::shared_ptr<KisCpuResidentBinding> binding = {});
     bool isValid() const { return bool(m_binding); }
     bool isClaimed() const { return m_claimed; }
     const KisReplicaHandle &target() const { return m_target; }

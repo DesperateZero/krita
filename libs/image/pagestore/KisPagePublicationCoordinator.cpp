@@ -1738,7 +1738,7 @@ KisPagePublicationCoordinator::transactionDeltaLocked(KisPageTransactionId trans
     return result;
 }
 
-KisReplicaHandle KisPagePublicationCoordinator::takeIdleCapacityLocked(const KisPageKey &key)
+KisPageIdleCapacity KisPagePublicationCoordinator::takeIdleCapacityLocked(const KisPageKey &key)
 {
     const qint64 now = QDeadlineTimer::current().deadline();
     expireIdleCapacityLocked(now);
@@ -1747,7 +1747,8 @@ KisReplicaHandle KisPagePublicationCoordinator::takeIdleCapacityLocked(const Kis
     Q_ASSERT(record->is_linked());
     m_idleCapacity.erase(m_idleCapacity.iterator_to(*record));
     record->idleDeadline = 0;
-    return record->replica; // Ledger retains the record until retag or retirement.
+    return {record->replica, record->backingNode.second.nativeBinding};
+    // Ledger retains the original record until retag or retirement.
 }
 
 qint64 KisPagePublicationCoordinator::expireIdleCapacityLocked(qint64 now, bool all)
