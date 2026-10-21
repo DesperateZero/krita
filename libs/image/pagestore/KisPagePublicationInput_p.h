@@ -84,14 +84,17 @@ struct KisPagePublicationChange {
     KisPagePublicationChange() = default;
     KisPagePublicationChange(Replacement replacement, KisPagePublicationProof superseded = {},
         bool removalWasInBase = false, bool wasRemoved = false, bool releasesCapacity = false,
-        KisReplicaHandle supersededAuthority = {})
+        const KisReplicaHandle *supersededAuthority = nullptr)
         : replacement(std::move(replacement)), superseded(superseded), removalWasInBase(removalWasInBase),
           wasRemoved(wasRemoved), releasesCapacity(releasesCapacity), supersededAuthority(supersededAuthority) {}
     KisPagePublicationProof superseded;
     bool removalWasInBase = false;
     bool wasRemoved = false;
     bool releasesCapacity = false;
-    KisReplicaHandle supersededAuthority;
+    // Native publication borrows its frozen producer's original source.
+    // Only a removal/foreign source needs a value in the preparation owner's
+    // authority storage. All consumers finish before either source dies.
+    const KisReplicaHandle *supersededAuthority = nullptr;
     // Commit output, borrowed until immediate handover under Store admission.
     KisPageRetirementRecord *acceptedIdle = nullptr;
     // Borrowed only inside installOverlayLocked's uninterrupted owner gate.
@@ -115,7 +118,7 @@ struct KisPagePublicationChange {
     { return superseded.isValid() ? superseded.version : replacement.version(); }
     quint64 expectedStamp() const { return superseded.native ? superseded.stamp : 0; }
     const KisReplicaHandle *expectedAuthority() const
-    { return superseded.native ? &supersededAuthority : nullptr; }
+    { return superseded.native ? supersededAuthority : nullptr; }
 };
 using KisPagePublicationChanges = std::vector<KisPagePublicationChange,
     KisMutationStorageAllocator<KisPagePublicationChange>>;

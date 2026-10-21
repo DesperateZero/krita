@@ -1705,9 +1705,11 @@ KisBackingClassChangeReservation KisPageOwnerLedger::prepareIdleCapacity(
     auto next = [rows, count, index = size_t(0), allowance](KisBackingClassChange *change) mutable -> int {
         while (index < count) {
             auto &row = rows[index++];
-            if (!row.releasesCapacity || row.supersededAuthority.layout.byteSize > allowance) continue;
-            allowance -= row.supersededAuthority.layout.byteSize;
-            *change = {row.supersededAuthority, KisBackingBudgetClass::ActivePending,
+            if (!row.releasesCapacity) continue;
+            if (!row.supersededAuthority) return -1;
+            if (row.supersededAuthority->layout.byteSize > allowance) continue;
+            allowance -= row.supersededAuthority->layout.byteSize;
+            *change = {*row.supersededAuthority, KisBackingBudgetClass::ActivePending,
                        KisBackingBudgetClass::IdleCapacity, &row.acceptedIdle};
             return 1;
         }
@@ -1912,20 +1914,24 @@ bool KisPageOwnerLedger::commitBackingHandoff(
         physical->chargedClass = KisBackingBudgetClass::ActivePending;
     }
 
-    // Rekey the same stable node: its physical membership and retirement
-    // storage stay attached, with no allocation or new identity placeholder.
-    const auto successor = std::next(found);
-    auto &node = *found;
-    d->backings.erase(found);
-    node.first = target.allocationIdentity();
-    node.second.replica = target;
-    const auto inserted = d->backings.insert(successor, node);
+    // Only the final lexicographic component changes, by exactly one. The
+    // target was absent at preparation and isHandoffTarget() excludes its
+    // registration while this claim is live. No key can lie between these
+    // two integers, so every predecessor/successor relation stays intact.
+    // Intrusive storage permits this order-preserving key update: keep the
+    // original node, iterator and physical membership instead of erasing and
+    // reinserting a resource merely because its permission generation changed.
+    Q_ASSERT(target.allocation.generation == found->first.allocation.generation + 1);
+    Q_ASSERT(std::next(found) == d->backings.end()
+        || KisPageBackingIdentityLess{}(target.allocationIdentity(), std::next(found)->first));
+    found->first = target.allocationIdentity();
+    source->replica = target;
     Q_ASSERT(physical->classClaim == HandoffClaim);
     physical->representative = target;
 
     // Detached optional capacity has no visible value to recover. A failed
     // private write returns to the original funded retirement endpoint.
-    if (inserted->second.retirementHeadroom.isValid()
+    if (source->retirementHeadroom.isValid()
         || before == KisBackingBudgetClass::OptionalCache
         || before == KisBackingBudgetClass::IdleCapacity) {
         if (reservation.m_budget.isValid()) reservation.m_budget.commitPrepared();
@@ -1934,7 +1940,7 @@ bool KisPageOwnerLedger::commitBackingHandoff(
         addBackingDelta(&retained, KisBackingBudgetClass::RetirementDebt,
                          physical->domain, qint64(physical->byteSize()));
         reservation.m_budget.commitPrepared(&retained);
-        inserted->second.retirementHeadroom = std::move(reservation.m_budget);
+        source->retirementHeadroom = std::move(reservation.m_budget);
     }
     physical->classClaim = 0;
     --d->activeHandoffs;

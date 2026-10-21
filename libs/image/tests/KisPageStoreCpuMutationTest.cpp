@@ -2766,7 +2766,7 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
 {
     QFETCH(int, exit);
     ReadTerminalFixture f;
-    auto release = KisPageCapturedRelease::prepare(f.budget);
+    auto release = KisPageCapturedRelease::prepare(f.budget, 1, 0, 0, 1);
     QVERIFY2(f.init(release.get()), qPrintable(f.error));
     size_t next = release->next;
     release->retained = f.metadata.retainNativeReads(release->nativeRefs.data(), next, 1, &f.replica.version,
@@ -2774,9 +2774,7 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
             *out = *static_cast<KisPageVersion *>(context); return true;
         });
     QCOMPARE(release->retained, size_t(1));
-    const quint64 storageBytes = kisPageStorageBytes(release.get(), alignof(KisPageCapturedRelease))
-        + kisPageStorageBytes(release->versions.data(), alignof(KisPageVersion))
-        + kisPageStorageBytes(release->nativeRefs.data(), alignof(KisPageNativeReadRef));
+    const quint64 storageBytes = kisPageStorageBytes(release.get(), alignof(KisPageCapturedRelease));
     const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());
     void *filler = allocateTestStoragePressure(&f.budget, fillerBytes, 1);
     const auto free = qScopeGuard([&] { freeTestStoragePressure(&f.budget, filler, fillerBytes, 1); });

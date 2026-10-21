@@ -39,18 +39,18 @@ struct KisPageCapturedReleaseDeleter
 using KisPageCapturedReleasePointer = std::unique_ptr<KisPageCapturedRelease, KisPageCapturedReleaseDeleter>;
 struct KisPageCapturedRelease
 {
-    explicit KisPageCapturedRelease(KisBackingBudgetController &budget)
-        : versions(KisMutationStorageAllocator<KisPageVersion>(&budget))
-        , removedPages(KisMutationStorageAllocator<KisPageKey>(&budget))
-        , stagedSurfaces(KisMutationStorageAllocator<KisSurfaceEpochState>(&budget))
-        , nativeRefs(KisMutationStorageAllocator<KisPageNativeReadRef>(&budget)) {}
-    KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget);
+    // All capture facts share this original release lifetime, including a
+    // blocked asynchronous release. They are constructed in its one funded
+    // allocation before any protection is acquired; no per-array payer or
+    // independent reallocation exists after capture starts.
+    KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget,
+        size_t versions = 0, size_t removals = 0, size_t surfaces = 0, size_t references = 0);
     KRITAIMAGE_EXPORT void groupNativeRefs(qsizetype shardCount);
     KisImageEpochSnapshotToken token;
-    std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> versions;
-    std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removedPages;
-    std::vector<KisSurfaceEpochState, KisMutationStorageAllocator<KisSurfaceEpochState>> stagedSurfaces;
-    std::vector<KisPageNativeReadRef, KisMutationStorageAllocator<KisPageNativeReadRef>> nativeRefs;
+    KisMutationWorkspace::Array<KisPageVersion> versions;
+    KisMutationWorkspace::Array<KisPageKey> removedPages;
+    KisMutationWorkspace::Array<KisSurfaceEpochState> stagedSurfaces;
+    KisMutationWorkspace::Array<KisPageNativeReadRef> nativeRefs;
     size_t retained = 0;
     size_t next = 0;
     bool capturedScope = false;

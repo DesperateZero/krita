@@ -515,7 +515,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     for (const Data::Change &change : std::as_const(data->changes)) {
         const auto &key = change.replacement.key();
         if (change.releasesCapacity)
-            owner.acceptCapacityLocked(change.supersededAuthority, change.acceptedIdle);
+            owner.acceptCapacityLocked(*change.supersededAuthority, change.acceptedIdle);
         if (change.replacement.removal) {
             if (change.superseded.isValid())
                 data->oldProofNodes.push_back(state.proofs.extract(key));
@@ -1883,14 +1883,23 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             if (superseded.isValid()) {
                 // The original result already retains its exact source. A
                 // foreign/generic source projects at its real boundary.
-                entry.supersededAuthority = native && native->source.version == superseded.version
-                    && native->source.allocationIdentity() == superseded.allocation
-                    ? native->source : projectProof(superseded).authority;
+                if (native && native->source.version == superseded.version
+                    && native->source.allocationIdentity() == superseded.allocation) {
+                    entry.supersededAuthority = &native->source;
+                } else {
+                    // This is the actual independent input, not a second
+                    // copy for every native row. Reserve once so earlier
+                    // borrowed addresses remain stable through whole-D retry.
+                    if (candidate->ownedAuthorities.empty())
+                        candidate->ownedAuthorities.reserve(candidate->changes.size());
+                    candidate->ownedAuthorities.push_back(projectProof(superseded).authority);
+                    entry.supersededAuthority = &candidate->ownedAuthorities.back();
+                }
             }
             if (!canonical && (superseded.isValid() || native)) {
                 ++candidate->mutationCount;
                 entry.releasesCapacity = superseded.isValid()
-                    && m_owner.backingClass(entry.supersededAuthority) == KisBackingBudgetClass::ActivePending;
+                    && m_owner.backingClass(*entry.supersededAuthority) == KisBackingBudgetClass::ActivePending;
             }
             const bool removalWasInBase = change.removal && base.containsPage(change.key());
             const bool wasRemoved = state && state->removals.count(change.key()) != 0;

@@ -7605,8 +7605,8 @@ void KisPageStoreReferenceTest::nativeShardChainPartialCapture()
         KisPageMetadataCoordinator metadata;
         QVERIFY(metadata.configure(shards)); QVERIFY(metadata.registerPage(page));
         KisBackingBudgetController budget;
-        auto release = KisPageCapturedRelease::prepare(budget);
         constexpr size_t count = 131;
+        auto release = KisPageCapturedRelease::prepare(budget, 0, 0, 0, count);
         release->nativeRefs.resize(count);
         std::array<KisPageVersion, count> selected;
         for (size_t i = 0; i < count; ++i) {
@@ -9221,16 +9221,18 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     QVERIFY(owner.configure(completions, &error));
     QVERIFY(provider->configure(config, completions, &error));
     QVERIFY(owner.registerProvider(provider, &error));
+    std::array<KisReplicaHandle, 3> authorities;
     std::array<KisPagePublicationChange, 3> rows;
     for (size_t i = 0; i < rows.size(); ++i) {
         auto &row = rows[i];
         row.releasesCapacity = true;
-        row.supersededAuthority = replica(pageVersion(qint32(i), 1), 1, 1, i + 1);
+        authorities[i] = replica(pageVersion(qint32(i), 1), 1, 1, i + 1);
+        row.supersededAuthority = &authorities[i];
         KisBackingBudgetDelta delta;
         delta.buckets[size_t(Class::ActivePending)].cpuRam = 4096;
         auto fee = budget.reserve(delta, &error);
         QVERIFY(fee.isValid());
-        QVERIFY(owner.registerBacking(row.supersededAuthority, fee, Class::ActivePending, &error));
+        QVERIFY(owner.registerBacking(*row.supersededAuthority, fee, Class::ActivePending, &error));
     }
     // A stream can reject after accepting a prefix, or exceed its advertised
     // workspace. Neither failure may leave a claim/fee or publish an idle row.
@@ -9240,7 +9242,7 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
             if (index == rows.size()) return 0;
             if (invalidTail && index == 1) return -1;
             auto &row = rows[index++];
-            *change = {row.supersededAuthority, Class::ActivePending, Class::IdleCapacity, &row.acceptedIdle};
+            *change = {*row.supersededAuthority, Class::ActivePending, Class::IdleCapacity, &row.acceptedIdle};
             return 1;
         };
         QVERIFY(!owner.prepareBackingChanges(&prepared, 1, &read,
@@ -9248,7 +9250,7 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
             &error).isValid());
         for (const auto &row : rows) {
             QVERIFY(!row.acceptedIdle);
-            QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
+            QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
         }
         QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].reserved.cpuRam, quint64(0));
     }
@@ -9258,39 +9260,41 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     partial.release();
     for (const auto &row : rows) {
         QVERIFY(!row.acceptedIdle);
-        QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
+        QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
     }
     std::array<KisPagePublicationChange, 2> duplicate{rows[0], rows[0]};
     QVERIFY(!owner.prepareIdleCapacity(duplicate.data(), duplicate.size(), 8192, &error).isValid());
     QVERIFY(error.contains(QStringLiteral("more than once")));
     auto invalid = rows;
-    invalid[2].supersededAuthority.allocation.slot = 9999;
+    auto invalidAuthority = authorities[2];
+    invalidAuthority.allocation.slot = 9999;
+    invalid[2].supersededAuthority = &invalidAuthority;
     QVERIFY(!owner.prepareIdleCapacity(invalid.data(), invalid.size(), 12288, &error).isValid());
     for (const auto &row : invalid) QVERIFY(!row.acceptedIdle);
-    for (const auto &row : rows) QVERIFY(owner.reclassifyBacking(row.supersededAuthority, Class::ActivePending, &error));
+    for (const auto &row : rows) QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
     rows[0].releasesCapacity = false;
     partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
     owner.commitBackingChanges(std::move(partial));
     QVERIFY(!rows[0].acceptedIdle);
     QVERIFY(rows[1].acceptedIdle);
-    QCOMPARE(rows[1].acceptedIdle->replica, rows[1].supersededAuthority);
+    QCOMPARE(rows[1].acceptedIdle->replica, *rows[1].supersededAuthority);
     QVERIFY(!rows[1].acceptedIdle->is_linked());
     QVERIFY(!rows[2].acceptedIdle);
-    QCOMPARE(owner.backingClass(rows[0].supersededAuthority), Class::ActivePending);
-    QCOMPARE(owner.backingClass(rows[1].supersededAuthority), Class::IdleCapacity);
-    QCOMPARE(owner.backingClass(rows[2].supersededAuthority), Class::ActivePending);
+    QCOMPARE(owner.backingClass(*rows[0].supersededAuthority), Class::ActivePending);
+    QCOMPARE(owner.backingClass(*rows[1].supersededAuthority), Class::IdleCapacity);
+    QCOMPARE(owner.backingClass(*rows[2].supersededAuthority), Class::ActivePending);
     QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].live.cpuRam, quint64(4096));
     // Filtered retirement effects must also finish without another empty claim.
-    QVERIFY(owner.reclassifyBacking(rows[1].supersededAuthority, Class::RetirementDebt, &error));
-    const KisPageTransitionEffect effect{rows[1].supersededAuthority, {}};
+    QVERIFY(owner.reclassifyBacking(*rows[1].supersededAuthority, Class::RetirementDebt, &error));
+    const KisPageTransitionEffect effect{*rows[1].supersededAuthority, {}};
     quint64 cookie = 99;
     const auto before = budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam;
     QVERIFY(owner.prepareRetirementDebt(&effect, 1, &cookie, &error));
     QCOMPARE(cookie, quint64(0));
     QCOMPARE(budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam, before);
     owner.commitRetirementDebt(cookie);
-    for (const auto &row : rows) owner.releaseRetiredBacking(row.supersededAuthority);
+    for (const auto &row : rows) owner.releaseRetiredBacking(*row.supersededAuthority);
 }
 
 void KisPageStoreReferenceTest::backingClaimsPreserveSelectedAliases()

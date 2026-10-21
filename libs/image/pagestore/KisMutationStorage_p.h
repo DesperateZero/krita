@@ -238,6 +238,12 @@ public:
             ++m_size;
         }
         void clear() noexcept { while (m_size) m_data[--m_size].~T(); }
+        void resize(size_t size)
+        {
+            if (size > m_capacity) throw std::bad_alloc();
+            while (m_size > size) m_data[--m_size].~T();
+            while (m_size < size) { new (m_data + m_size) T(); ++m_size; }
+        }
         T *data() { return m_data; }
         const T *data() const { return m_data; }
         T *begin() { return m_data; }
@@ -247,8 +253,13 @@ public:
         const T *cbegin() const { return begin(); }
         const T *cend() const { return end(); }
         size_t size() const { return m_size; }
+        size_t capacity() const { return m_capacity; }
         bool empty() const { return !m_size; }
         T &at(size_t index) { Q_ASSERT(index < m_size); return m_data[index]; }
+        T &operator[](size_t index) { Q_ASSERT(index < m_size); return m_data[index]; }
+        const T &operator[](size_t index) const { Q_ASSERT(index < m_size); return m_data[index]; }
+        T &front() { return (*this)[0]; }
+        const T &front() const { return (*this)[0]; }
     private:
         T *m_data = nullptr;
         size_t m_size = 0;

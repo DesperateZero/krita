@@ -3478,7 +3478,8 @@ try
     KisCapturedReadView result;
     result.d = std::allocate_shared<KisCapturedReadView::Private>(
         KisMutationStorageAllocator<KisCapturedReadView::Private>::retained(&d->backingBudget), d->backingBudget);
-    result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
+    result.d->release = KisPageCapturedRelease::prepare(d->backingBudget, 0, 0, 1,
+        size_t(pages.width()) * size_t(pages.height()));
     auto &release = *result.d->release;
     release.nativeRange = true;
     release.nativeRefs.resize(size_t(pages.width()) * size_t(pages.height()));
@@ -3554,7 +3555,8 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         result.d = std::allocate_shared<KisCapturedReadView::Private>(
             KisMutationStorageAllocator<KisCapturedReadView::Private>::retained(&d->backingBudget),
             d->backingBudget);
-        result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
+        if (selector.kind != KisPageReadViewKind::TransactionOverlay)
+            result.d->release = KisPageCapturedRelease::prepare(d->backingBudget);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope storage is unavailable"));
         return {};
@@ -3593,10 +3595,12 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         }
         if (selector.kind != KisPageReadViewKind::TransactionOverlay) break;
         size_t versions = 0, removals = 0, surfaces = 0;
-        const bool captured = d->publicationCoordinator.captureDeltaLocked(selector.transaction, *result.d->release,
+        KisPageCapturedRelease empty;
+        auto &candidate = result.d->release ? *result.d->release : empty;
+        const bool captured = d->publicationCoordinator.captureDeltaLocked(selector.transaction, candidate,
                                                                            &versions, &removals, &surfaces);
-        if (captured && result.d->release->nativeRefs.capacity() >= result.d->release->versions.size()) break;
-        versions = qMax(versions, result.d->release->versions.size());
+        if (result.d->release && captured && candidate.nativeRefs.capacity() >= candidate.versions.size()) break;
+        versions = qMax(versions, candidate.versions.size());
         if (versions > KisPageNativeReadRef::End) {
             KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
             return {};
@@ -3604,10 +3608,12 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         ++d->activeProviderCalls;
         locker.unlock();
         try {
-            result.d->release->versions.reserve(versions);
-            result.d->release->removedPages.reserve(removals);
-            result.d->release->stagedSurfaces.reserve(surfaces);
-            result.d->release->nativeRefs.reserve(versions);
+            // Nothing is protected yet. Dispose the obsolete whole capacity
+            // before preparing the exact next cut, then reselect under the
+            // owner gate. This preserves the original late-growth retry.
+            result.d->release.reset();
+            result.d->release = KisPageCapturedRelease::prepare(d->backingBudget,
+                versions, removals, surfaces, versions);
         } catch (const std::bad_alloc &) {
             locker.relock(); --d->activeProviderCalls;
             KisPageStoreDetail::setError(error, QStringLiteral("read scope version storage is unavailable"));

@@ -246,7 +246,7 @@ public:
                 : changes(storage)
                 , proofNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
                 , removalNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
-                , oldProofNodes(storage), oldRemovalNodes(storage) {}
+                , oldProofNodes(storage), oldRemovalNodes(storage), ownedAuthorities(storage) {}
             Data(Data &&) noexcept = default;
             Data &operator=(Data &&) noexcept = default;
             ~Data() { releaseCapacity(); }
@@ -267,6 +267,7 @@ public:
             RemovalSet removalNodes;
             std::vector<ProofMap::node_type, KisMutationStorageAllocator<ProofMap::node_type>> oldProofNodes;
             std::vector<RemovalSet::node_type, KisMutationStorageAllocator<RemovalSet::node_type>> oldRemovalNodes;
+            std::vector<KisReplicaHandle, KisMutationStorageAllocator<KisReplicaHandle>> ownedAuthorities;
             size_t proofInsertions = 0;
             size_t removalInsertions = 0;
             KisPageMetadataCoordinator::PreparedPublication metadata;

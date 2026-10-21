@@ -949,13 +949,28 @@ void KisPageCapturedReleaseDeleter::operator()(KisPageCapturedRelease *record) c
 {
     if (!record) return;
     std::destroy_at(record);
-    KisMutationStorageAllocator<KisPageCapturedRelease>(budget).deallocate(record, 1);
+    kisFreeMutationStorage(budget, record, 0, alignof(KisPageCapturedRelease));
 }
 
-KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget)
+KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget,
+    size_t versions, size_t removals, size_t surfaces, size_t references)
 {
-    auto *record = KisMutationStorageAllocator<KisPageCapturedRelease>(&budget).allocate(1);
-    return {new (record) KisPageCapturedRelease(budget), KisPageCapturedReleaseDeleter{&budget}};
+    static_assert(alignof(KisPageCapturedRelease) >= alignof(KisPageVersion)
+        && alignof(KisPageCapturedRelease) >= alignof(KisPageKey)
+        && alignof(KisPageCapturedRelease) >= alignof(KisSurfaceEpochState)
+        && alignof(KisPageCapturedRelease) >= alignof(KisPageNativeReadRef));
+    size_t bytes = sizeof(KisPageCapturedRelease);
+    const auto v = KisMutationWorkspace::append<KisPageVersion>(bytes, versions);
+    const auto r = KisMutationWorkspace::append<KisPageKey>(bytes, removals);
+    const auto s = KisMutationWorkspace::append<KisSurfaceEpochState>(bytes, surfaces);
+    const auto n = KisMutationWorkspace::append<KisPageNativeReadRef>(bytes, references);
+    auto *storage = static_cast<char *>(kisAllocateMutationStorage(&budget, bytes, alignof(KisPageCapturedRelease)));
+    KisPageCapturedReleasePointer record(new (storage) KisPageCapturedRelease, KisPageCapturedReleaseDeleter{&budget});
+    record->versions.bind(reinterpret_cast<KisPageVersion *>(storage + v), versions);
+    record->removedPages.bind(reinterpret_cast<KisPageKey *>(storage + r), removals);
+    record->stagedSurfaces.bind(reinterpret_cast<KisSurfaceEpochState *>(storage + s), surfaces);
+    record->nativeRefs.bind(reinterpret_cast<KisPageNativeReadRef *>(storage + n), references);
+    return record;
 }
 
 void KisPageCapturedRelease::groupNativeRefs(qsizetype shardCount)
