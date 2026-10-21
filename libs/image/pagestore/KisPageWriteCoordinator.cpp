@@ -2810,27 +2810,30 @@ KisPageWriteCoordinator::KisPageWriteCoordinator(KisPageMetadataCoordinator &met
 
 bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     const KisPageTransaction &transaction, const KisPageWriteIntent &intent,
-    KisPagePublicationCoordinator &publication, KisPageTransition *write,
-    KisPageAllocationDescriptor *descriptor, QString *error,
-    KisReplicaHandle *recoverableBefore, std::shared_ptr<KisCpuResidentBinding> *binding,
-    std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout)
+    KisPagePublicationCoordinator &publication, KisPageWriteSelection *selection, QString *error)
 {
+    Q_ASSERT(selection);
+    auto *write = &selection->write;
     const auto fail = [&](const QString &reason) { KisPageStoreDetail::setError(error, reason); return false; };
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
-    KisPageVersion baseVersion;
-    if (!epoch->resolve(intent.key, overlay, &baseVersion))
+    KisVersionSlotId selectedSlot;
+    const auto sealed = publication.findPreparedVersionLocked(transaction.id, intent.key, &selectedSlot);
+    KisPageVersion baseVersion = sealed;
+    // The active transaction and key claim already retain the root. A sealed
+    // overlay is the selected base; resolving its superseded root again adds
+    // no fact consumed by acquisition or comparison.
+    if (!sealed.isValid() && !epoch->resolve(intent.key, overlay, &baseVersion))
         return fail(QStringLiteral("write base does not resolve"));
-    const auto sealed = publication.findPreparedVersionLocked(transaction.id, intent.key);
     const bool removed = (intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval))
         || publication.stagesRemovalLocked(transaction.id, intent.key);
-    const bool discoverBefore = recoverableBefore && !removed;
+    const bool discoverBefore = !removed && intent.inputKind != KisPageWriteInputKind::Semantic;
     KisPageMetadataCoordinator::MutationBaseInfo baseInfo;
-    if (!metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo)
+    if (!metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo, &selectedSlot)
         || !baseInfo.baseExists) {
         KisSurfaceEpochState before;
         if (!epoch->surfaceState(intent.key.surface, overlay, &before)
             || !publication.ensureVirtualDefaultLocked(baseVersion, before, error)
-            || !metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo))
+            || !metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo, &selectedSlot))
             return false;
     }
     if (baseInfo.hasWriter)
@@ -2845,13 +2848,12 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
         KisSurfaceEpochState surface;
         if (!publication.resolveSurfaceLocked(intent.key.surface, overlay, &surface))
             return fail(QStringLiteral("write surface does not resolve"));
-        *descriptor = surface.allocationDescriptor();
+        selection->surfaceLayout = surface.allocationDescriptor();
     } else if (!baseInfo.descriptor)
         return fail(QStringLiteral("write base descriptor is unavailable"));
-    else if (sharedLayout) *sharedLayout = std::move(baseInfo.descriptor);
-    else *descriptor = *baseInfo.descriptor;
-    if (recoverableBefore) *recoverableBefore = baseInfo.recoverableBefore;
-    if (binding) *binding = std::move(baseInfo.binding);
+    else selection->layout = std::move(baseInfo.descriptor);
+    selection->recoverableBefore = baseInfo.recoverableBefore;
+    selection->binding = std::move(baseInfo.binding);
     *write = {};
     write->kind = KisPageTransitionKind::AcquireWrite;
     write->baseVersion = baseVersion;
@@ -2859,8 +2861,7 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     write->source = base.authority;
     write->transaction = transaction.id;
     write->writeMode = removed || baseVersion.isDefaultPixel() ? KisPageWriteMode::DiscardContents : intent.mode;
-    const auto *layout = sharedLayout && *sharedLayout ? sharedLayout->get() : descriptor;
-    if (!layout->isValid() || !write->version.isValid())
+    if (!selection->descriptor().isValid() || !write->version.isValid())
         return fail(QStringLiteral("write identity or layout is unavailable"));
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -2894,12 +2895,11 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     const KisPageTransaction &transaction, const KisPageWriteIntent &intent,
     const std::shared_ptr<KisPageReplicaProvider> &provider, KisPageAccessRequirement access,
     const KisPageAllocationDescriptor &descriptor, KisPagePublicationCoordinator &publication,
-    KisPageTransition &write, const KisReplicaHandle &before,
+    KisPageTransition &write, const KisReplicaHandle &before, KisReplicaHandle spare,
     QMutexLocker<QMutex> &locker, KisCpuWriteBindingReservation &writable,
     KisPageStoreDiagnosticTimer &diagnostic, KisPagePrivateWrite *native)
 {
     const auto fallback = select(intent);
-    auto spare = publication.takeIdleCapacityLocked(write.version.key);
     const auto retireUnused = qScopeGuard([&] {
         if (!spare.isValid()) return;
         // Give abandoned optional capacity its first retirement attempt

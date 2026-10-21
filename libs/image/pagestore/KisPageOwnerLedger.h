@@ -239,6 +239,10 @@ public:
     bool revokePreparedPage(const KisPreparedPageProof &proof);
 
 private:
+    // Only the native session may create/consume this erased derived storage.
+    // It is empty capacity, charged until its original backing record exits.
+    std::shared_ptr<KisPagePrivateWrite> takeNativeWriteStorage(const KisReplicaHandle &);
+    void returnNativeWriteStorage(const KisReplicaHandle &, std::shared_ptr<KisPagePrivateWrite>);
     // Publication retains the original transaction/key claims. These consume
     // its compact identity directly; exported capabilities keep their checks.
     bool validatePublicationProof(const KisPageMetadataCoordinator &, const KisPagePublicationProof &) const;
@@ -277,6 +281,7 @@ private:
     struct PrivateReleaser { static void cleanup(Private *); };
     QScopedPointer<Private, PrivateReleaser> d;
     friend class KisPageStore;
+    friend class KisPageMutationSession;
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageOwnerDomainAdmission;
     friend class KisBackingClassChangeReservation;

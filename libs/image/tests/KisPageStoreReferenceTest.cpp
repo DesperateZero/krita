@@ -7628,7 +7628,7 @@ void KisPageStoreReferenceTest::nativeShardChainPartialCapture()
         size_t next = release->next;
         while (release->retained < count) {
             const auto n = metadata.retainNativeReads(release->nativeRefs.data(), next, count - release->retained,
-                &select, [](void *context, quint32 ordinal, KisPageVersion *out) {
+                &select, [](void *context, quint32 ordinal, KisPageVersion *out, KisVersionSlotId *) {
                     return (*static_cast<decltype(select) *>(context))(ordinal, out);
                 });
             QVERIFY(n <= 16);
@@ -7665,13 +7665,30 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     KisPageNativeReadRef a, b;
     a.shard = b.shard = quint32(metadata.shardFor(identity.key));
     auto selected = identity;
-    const auto select = +[](void *context, quint32, KisPageVersion *version) {
+    const auto select = +[](void *context, quint32, KisPageVersion *version, KisVersionSlotId *) {
         *version = *static_cast<KisPageVersion *>(context); return true;
     };
     size_t next = 0;
     QCOMPARE(metadata.retainNativeReads(&a, next, 1, &selected, select), size_t(1));
+    // A locator is only an acceleration of an exact version selection. It
+    // must not let a stale generation or a different version acquire a pin.
+    struct Located { KisPageVersion version; KisVersionSlotId slot; } located{identity, a.version};
+    const auto selectLocated = +[](void *context, quint32, KisPageVersion *version, KisVersionSlotId *slot) {
+        const auto &input = *static_cast<Located *>(context);
+        *version = input.version; *slot = input.slot; return true;
+    };
+    KisPageNativeReadRef rejected;
+    rejected.shard = a.shard;
+    ++located.slot.generation;
     next = 0;
-    QCOMPARE(metadata.retainNativeReads(&b, next, 1, &selected, select), size_t(1));
+    QCOMPARE(metadata.retainNativeReads(&rejected, next, 1, &located, selectLocated), size_t(0));
+    located.slot = a.version;
+    located.version = page.versions.first().version;
+    next = 0;
+    QCOMPARE(metadata.retainNativeReads(&rejected, next, 1, &located, selectLocated), size_t(0));
+    located.version = identity;
+    next = 0;
+    QCOMPARE(metadata.retainNativeReads(&b, next, 1, &located, selectLocated), size_t(1));
     QCOMPARE(metadata.nativeReadVersion(a), identity);
     KisPageStateSnapshot actual;
     QVERIFY(metadata.pageSnapshot(page.key, &actual));

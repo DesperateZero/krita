@@ -23,14 +23,15 @@ struct KisPagePublicationProof {
     KisPageTransactionId transaction;
     quint64 stamp = 0;
     KisReplicaAllocationIdentity allocation;
+    KisVersionSlotId metadataSlot;
     bool native = false;
     KisPagePublicationProof() = default;
     KisPagePublicationProof(const KisPreparedPageProof &proof)
         : version(proof.authority.version), transaction(proof.transaction), stamp(proof.providerValidationStamp),
           allocation(proof.authority.allocationIdentity()) {}
     KisPagePublicationProof(const KisPageVersion &v, KisPageTransactionId t, quint64 s, bool n,
-                            const KisReplicaAllocationIdentity &a)
-        : version(v), transaction(t), stamp(s), allocation(a), native(n) {}
+                            const KisReplicaAllocationIdentity &a, KisVersionSlotId slot = {})
+        : version(v), transaction(t), stamp(s), allocation(a), metadataSlot(slot), native(n) {}
     bool isValid() const { return version.isValid() && transaction.isValid() && stamp; }
     bool matches(const KisPreparedPageProof &proof) const
     { return version == proof.authority.version && transaction == proof.transaction && stamp == proof.providerValidationStamp
@@ -77,7 +78,7 @@ struct KisPagePublicationChange {
         KisPagePublicationProof proofValue() const
         {
             return borrowed ? KisPagePublicationProof{native->target.version, native->proof.transaction,
-                native->proof.providerValidationStamp, true, native->target.allocationIdentity()} : payload.owned.proof;
+                native->proof.providerValidationStamp, true, native->target.allocationIdentity(), native->acceptedSlot} : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;

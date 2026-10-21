@@ -13,6 +13,19 @@
 
 class KisCpuResidentBinding;
 
+// One selected input, retained by the original operation through comparison,
+// resource checkout and acquisition. Layout is either the selected immutable
+// version's layout or the actual surface value for a default/semantic input.
+struct KisPageWriteSelection {
+    KisPageTransition write;
+    KisReplicaHandle recoverableBefore;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+    std::shared_ptr<const KisPageAllocationDescriptor> layout;
+    KisPageAllocationDescriptor surfaceLayout;
+    const KisPageAllocationDescriptor &descriptor() const
+    { return layout ? *layout : surfaceLayout; }
+};
+
 // Lives in the original mutation's stable cold page. The shard activity only
 // borrows it while reserved; it is not a readable version until acceptance.
 struct KisPagePrivateWrite {
@@ -46,6 +59,26 @@ struct KisPagePrivateWrite {
     // destruction at the original unlocked scope exit. Identity stays intact.
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
     std::shared_ptr<KisCpuResidentBinding> binding;
+    // The original page activity retains this directory node until cancel or
+    // acceptance. Consumers still take its shard gate and validate the active
+    // result; they do not rediscover the node by key inside that same lifetime.
+    struct Location {
+        void *shard = nullptr;
+        void *page = nullptr;
+        Location() = default;
+        Location(void *s, void *p) : shard(s), page(p) {}
+        // A copied private value is not the activity's registered result.
+        // In particular it cannot retain a location after the original exits.
+        Location(const Location &) noexcept {}
+        Location &operator=(const Location &) noexcept { shard = page = nullptr; return *this; }
+        Location(Location &&other) noexcept
+            : shard(std::exchange(other.shard, nullptr)), page(std::exchange(other.page, nullptr)) {}
+        Location &operator=(Location &&other) noexcept
+        { shard = std::exchange(other.shard, nullptr); page = std::exchange(other.page, nullptr); return *this; }
+    } location;
+    // Set by metadata acceptance. This is a generational locator, not another
+    // version authority; readers validate the record identity under its gate.
+    KisVersionSlotId acceptedSlot;
     bool reserved = false;
     bool completed = false;
     bool freshMetadataRequired = false;

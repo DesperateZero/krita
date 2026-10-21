@@ -47,6 +47,7 @@ class KisCpuWriteBindingReservation;
 class KisCpuResidentBinding;
 struct KisPageTransition;
 struct KisPagePrivateWrite;
+struct KisPageWriteSelection;
 enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
 
@@ -653,11 +654,7 @@ public:
     // Caller holds owner admission. The output is transient transition input,
     // not a second page/overlay authority; no provider allocation occurs here.
     bool prepareWriteBaseLocked(const KisPageTransaction &, const KisPageWriteIntent &,
-                                KisPagePublicationCoordinator &, KisPageTransition *,
-                                KisPageAllocationDescriptor *, QString *error,
-                                KisReplicaHandle *recoverableBefore = nullptr,
-                                std::shared_ptr<KisCpuResidentBinding> *binding = nullptr,
-                                std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout = nullptr);
+                                KisPagePublicationCoordinator &, KisPageWriteSelection *, QString *error);
     KisPageMetadataTransitionResult acquireLeaseWrite(KisPageTransition &);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
@@ -668,6 +665,7 @@ public:
         const std::shared_ptr<KisPageReplicaProvider> &, KisPageAccessRequirement,
         const KisPageAllocationDescriptor &,
         KisPagePublicationCoordinator &, KisPageTransition &, const KisReplicaHandle &recoverableBefore,
+        KisReplicaHandle idleCapacity,
         QMutexLocker<QMutex> &,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
         KisPagePrivateWrite *native = nullptr);

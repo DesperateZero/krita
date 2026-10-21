@@ -1129,6 +1129,28 @@ KisReplicaBackingFootprint KisPageOwnerLedger::observeBackingFootprint(
                            : KisReplicaBackingFootprint{};
 }
 
+std::shared_ptr<KisPagePrivateWrite> KisPageOwnerLedger::takeNativeWriteStorage(const KisReplicaHandle &replica)
+{
+    if (!replica.isValid()) return {};
+    QMutexLocker lock(&d->mutex);
+    const auto found = d->backings.find(replica.allocationIdentity());
+    if (found == d->backings.end() || !(found->second.replica == replica)) return {};
+    return std::move(found->second.nativeWriteStorage);
+}
+
+void KisPageOwnerLedger::returnNativeWriteStorage(const KisReplicaHandle &replica,
+    std::shared_ptr<KisPagePrivateWrite> storage)
+{
+    Q_ASSERT(storage && !storage->reserved && !storage->target.isValid()
+        && !storage->descriptor && !storage->binding && !storage->proof.isValid());
+    QMutexLocker lock(&d->mutex);
+    const auto found = d->backings.find(replica.allocationIdentity());
+    if (found != d->backings.end() && found->second.replica == replica
+        && !found->second.nativeWriteStorage)
+        found->second.nativeWriteStorage = std::move(storage);
+    // Rejected capacity is destroyed after dropping the ledger gate.
+}
+
 bool KisPageOwnerLedger::registerBacking(const KisReplicaHandle &replica,
                                          KisBackingBudgetReservation &reservation,
                                          KisBackingBudgetClass budgetClass,
@@ -2481,7 +2503,7 @@ bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
         KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
         return false;
     }
-    if (!metadata->sealCpuProof(sealed, issuer, nullptr, complete ? &result : nullptr)) {
+    if (!metadata->sealCpuProof(sealed, issuer, nullptr, &result)) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU result changed or already has a capability"));
         return false;
     }

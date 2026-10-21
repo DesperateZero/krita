@@ -26,6 +26,9 @@ struct KisPagePrivateWrite;
 struct KisPagePublicationChange;
 struct KisPagePublicationProof;
 struct KisPageRetirementRecord;
+template<class Tag> struct KisGenerationalSlotId;
+struct KisVersionSlotTag;
+using KisVersionSlotId = KisGenerationalSlotId<KisVersionSlotTag>;
 // A borrowed selection value, never another per-version allocation or owner.
 struct KisCpuReadBinding {
     KisReplicaHandle replica;
@@ -316,7 +319,8 @@ private:
     // This is a scalar observation; joint write preparation still revalidates
     // eligibility and acquires the physical claim before touching any bytes.
     bool queryMutationBase(const KisPageVersion &base, const KisPageVersion &sealed,
-                           bool discoverBefore, MutationBaseInfo *info) const;
+                           bool discoverBefore, MutationBaseInfo *info,
+                           const KisVersionSlotId *selectedSlot = nullptr) const;
     // Cold exact query for original read-release records. Completion may clear
     // multiple leases carrying the same ticket; this never grants write access.
     bool queryLastUsePending(const KisReplicaHandle &replica,
@@ -383,7 +387,7 @@ private:
     KisCpuReadBinding cpuReadBinding(const KisPageVersion &version) const;
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
     size_t retainNativeReads(KisPageNativeReadRef *references, size_t &next, size_t count,
-        void *context, bool (*select)(void *, quint32, KisPageVersion *),
+        void *context, bool (*select)(void *, quint32, KisPageVersion *, KisVersionSlotId *),
         KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
     size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t &next, size_t count, KisPageKey *revisit);
     KisPageVersion nativeReadVersion(const KisPageNativeReadRef &reference, KisCpuReadBinding *binding = nullptr) const;

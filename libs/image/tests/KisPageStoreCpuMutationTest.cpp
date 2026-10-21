@@ -1061,6 +1061,7 @@ private Q_SLOTS:
         QTest::newRow("H1") << true;
     }
     void sharedIdleWarmQuantities();
+    void nativeRangeRejectsInvalidSelector();
     void nativeFinalRect_data();
     void nativeFinalRect();
     void nativeRangeResources_data();
@@ -2769,7 +2770,7 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
     QVERIFY2(f.init(release.get()), qPrintable(f.error));
     size_t next = release->next;
     release->retained = f.metadata.retainNativeReads(release->nativeRefs.data(), next, 1, &f.replica.version,
-        [](void *context, quint32, KisPageVersion *out) {
+        [](void *context, quint32, KisPageVersion *out, KisVersionSlotId *) {
             *out = *static_cast<KisPageVersion *>(context); return true;
         });
     QCOMPARE(release->retained, size_t(1));
@@ -8330,6 +8331,22 @@ void KisPageStoreCpuMutationTest::idleExpiryKeepsChargeUnderPressure()
     QTRY_COMPARE_WITH_TIMEOUT(f.provider->memoryUsage().committedBytes, 3 * bytes, 5000);
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::nativeRangeRejectsInvalidSelector()
+{
+    Fixture f; QVERIFY(f.init());
+    const auto retained = f.store->captureRetainedEpoch();
+    auto invalid = KisPageReadView{};
+    invalid.epoch = retained.snapshot.epoch;
+    QVERIFY(!f.store->captureReadRange({1}, QRect(0, 0, 1, 1), invalid, &f.error).isValid());
+    const auto transaction = f.store->beginCurrentTransaction();
+    invalid = KisPageReadView::transactionOverlay(transaction.id);
+    invalid.retention = retained.token;
+    QVERIFY(!f.store->captureReadRange({1}, QRect(0, 0, 1, 1), invalid, &f.error).isValid());
+    QVERIFY(f.store->abort(transaction));
+    QVERIFY(f.store->releaseSnapshot(retained.token));
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
 }
 
 void KisPageStoreCpuMutationTest::sharedIdleWarmQuantities()

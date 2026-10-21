@@ -13,6 +13,7 @@
 struct KisPageRetirementWait;
 struct KisPagePreparedBackingChange;
 struct KisPagePhysicalBackingRecord;
+struct KisPagePrivateWrite;
 
 struct KisPageBackingRecord
 {
@@ -25,6 +26,10 @@ struct KisPageBackingRecord
     KisPagePhysicalBackingRecord *physicalRecord = nullptr;
     KisPageBackingRecord *previous = nullptr;
     KisPageBackingRecord *next = nullptr;
+    // Empty native edit capacity follows this actual backing lifetime. It is
+    // checked out exclusively, carries no live authority while parked, and
+    // is destroyed with this original retirement record after real release.
+    std::shared_ptr<KisPagePrivateWrite> nativeWriteStorage;
 };
 
 struct KisPagePhysicalBackingRecord

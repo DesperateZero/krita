@@ -534,7 +534,9 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
                 Q_ASSERT(change.acceptedOverlayProof);
                 *change.acceptedOverlayProof = change.replacement.proofValue();
             } else {
-                auto inserted = state.proofs.insert(data->proofNodes.extract(key));
+                auto node = data->proofNodes.extract(key);
+                node.mapped().proof = change.replacement.proofValue();
+                auto inserted = state.proofs.insert(std::move(node));
                 Q_ASSERT(inserted.inserted);
             }
         }
@@ -783,6 +785,49 @@ bool KisPagePublicationCoordinator::resolveVersionLocked(const KisPageKey &key,
         *version = {key, KisPageGeneration{1}, surface.defaultPixelRevision};
     }
     return version->isValid();
+}
+
+bool KisPagePublicationCoordinator::prepareNativeReadSelectionLocked(KisSurfaceId surface,
+    const KisPageReadView &view, NativeReadSelection *selection) const
+{
+    if (!m_operational || !selection || !surface.isValid()) return false;
+    *selection = {};
+    if (view.kind == KisPageReadViewKind::CurrentCommittedEpoch) {
+        selection->root = m_epochs.captureCommittedRoot();
+    } else if (view.kind == KisPageReadViewKind::TransactionOverlay) {
+        const auto transaction = m_epochs.activeTransaction(view.transaction);
+        if (!transaction.isValid()) return false;
+        selection->root = m_epochs.root(transaction.baseEpoch);
+        const auto found = m_preparedTransactions.find(transaction.id.value);
+        if (found != m_preparedTransactions.end()) selection->delta = found->second.get();
+    } else return false;
+    if (!selection->root.surfaceState(surface, &selection->surface)) return false;
+    if (selection->delta)
+        for (const auto &change : selection->delta->surfaceChanges)
+            if (change.after.surface == surface) { selection->surface = change.after; break; }
+    return true;
+}
+
+bool KisPagePublicationCoordinator::NativeReadSelection::resolve(const KisPageKey &key,
+    KisPageVersion *version, KisVersionSlotId *slot) const
+{
+    if (!version || !slot || !(key.surface == surface.surface)) return false;
+    *slot = {};
+    if (delta) {
+        const auto found = delta->proofs.find(key);
+        if (found != delta->proofs.end()) {
+            *version = found->second.proof.version;
+            *slot = found->second.proof.metadataSlot;
+            return true;
+        }
+        if (delta->removals.count(key)) {
+            *version = {key, {1}, surface.defaultPixelRevision};
+            return true;
+        }
+    }
+    if (!root.resolve(key, version)) return false;
+    if (version->isDefaultPixel()) version->defaultPixelRevision = surface.defaultPixelRevision;
+    return true;
 }
 
 bool KisPagePublicationCoordinator::stageSurfaceDefaultPixelLocked(const KisPageTransaction &transaction,
@@ -1628,11 +1673,13 @@ KisPreparedPageProof KisPagePublicationCoordinator::projectProof(const KisPagePu
 }
 
 KisPageVersion KisPagePublicationCoordinator::findPreparedVersionLocked(
-    KisPageTransactionId transaction, const KisPageKey &key) const
+    KisPageTransactionId transaction, const KisPageKey &key, KisVersionSlotId *slot) const
 {
+    if (slot) *slot = {};
     const auto *proofs = findProofsLocked(transaction);
     if (!proofs) return {};
     const auto found = proofs->find(key);
+    if (slot && found != proofs->end()) *slot = found->second.proof.metadataSlot;
     return found == proofs->end() ? KisPageVersion{} : found->second.proof.version;
 }
 

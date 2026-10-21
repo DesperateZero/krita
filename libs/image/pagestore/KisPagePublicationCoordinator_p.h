@@ -191,6 +191,18 @@ class KisPagePublicationCoordinator final
 public:
     using OverlayChange = KisPagePublicationChange::Input;
 
+    // One synchronous selection window under the Store gate. The original
+    // immutable root and transaction delta remain the authorities; this view
+    // may not escape that gate. Independent reads retain metadata afterwards.
+    struct NativeReadSelection {
+        KisImageEpochRootSnapshot root;
+        const KisPagePublicationDelta *delta = nullptr;
+        KisSurfaceEpochState surface;
+        bool resolve(const KisPageKey &, KisPageVersion *, KisVersionSlotId *) const;
+    };
+    bool prepareNativeReadSelectionLocked(KisSurfaceId, const KisPageReadView &,
+                                         NativeReadSelection *) const;
+
     class KRITAIMAGE_EXPORT KisPreparedPagePublication final
     {
     public:
@@ -351,7 +363,8 @@ public:
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
     KisPreparedPageProof projectProof(const KisPagePublicationProof &) const;
-    KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &) const;
+    KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &,
+                                            KisVersionSlotId *slot = nullptr) const;
     KisReplicaHandle takeIdleCapacityLocked(const KisPageKey &key);
     // Same original records and Store gate for H0, H1, expiry and close.
     qint64 expireIdleCapacityLocked(qint64 now, bool all = false);

@@ -1356,7 +1356,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "releasePublicationActivity",
             "entry.originalPage = page",
             "page->second.activity.publicationClaim = data.get()",
-            "page->second.activity.publicationClaim = rows",
+            "page->activity.publicationClaim = rows",
             "shard->installDetachment(*page, version, native",
             "releaseActivities(first, end)",
             "entry.shardOwner->releasePublicationActivity(entry.key(), entry.originalPage->second)",
@@ -1606,12 +1606,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             errors.append("fresh final payload restored premature metadata completion")
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
-        for contract in ("struct ColdPageBlock", "std::optional<Page> pages[2]",
-                         "KisMutationStorageAllocator<ColdPageBlock>", "ColdPageBlock *available",
+        for contract in ("KisMutationStorageAllocator<Pair>::retained", "takeNativeWriteStorage(idle)",
+                         "returnNativeWriteStorage(target, std::move(page))", "*page = Page{}",
                          "coldPages.takeReleasedBlocks()", "entry.setColdPage(page)"):
             if contract not in store_text:
                 errors.append(f"mutation cold resources lost stable budgeted storage: {contract}")
-        if "coldPageIndex" in store_text or "KisMutationStorage<Page, 2>" in store_text:
+        if any(retired in store_text for retired in ("coldPageIndex", "KisMutationStorage<Page, 2>", "ColdPageBlock")):
             errors.append("retired cold directory returned")
         if "owner.detachRetirementIndexesForDestruction()" not in store_text:
             errors.append("root teardown lost retirement index detachment")
@@ -1619,8 +1619,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:
                 errors.append(f"mutation cold resources regained duplicate state: {forbidden}")
-        if "static_assert(sizeof(Page) <= 512)" not in cold_page:
-            errors.append("mutation cold resource layout lost its 512-byte ceiling")
+        if "static_assert(sizeof(Page) <= 576)" not in cold_page:
+            errors.append("mutation cold resource layout lost its bounded capacity ceiling")
         private_records = code_only(metadata_records_header.read_text(encoding="utf-8"))
         if ("struct Page : KisPagePrivateWrite" not in cold_page
                 or "std::shared_ptr<const KisPageAllocationDescriptor> descriptor" not in private_records
