@@ -45,6 +45,15 @@ struct KisPageCapturedRelease
     // independent reallocation exists after capture starts.
     KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget,
         size_t versions = 0, size_t removals = 0, size_t surfaces = 0, size_t references = 0);
+    // The original capture body and its member capacities share this layout.
+    // A standalone release record is used by the isolated coordinator tests.
+    struct KRITAIMAGE_EXPORT Layout {
+        Layout(size_t body, size_t versions, size_t removals, size_t surfaces, size_t references);
+        void bind(KisPageCapturedRelease &record, void *storage) const;
+        size_t bytes, v, r, s, n;
+        size_t versionCount, removalCount, surfaceCount, referenceCount;
+    };
+    void (*dispose)(KisPageCapturedRelease *, KisBackingBudgetController *) noexcept = nullptr;
     KRITAIMAGE_EXPORT void groupNativeRefs(qsizetype shardCount);
     KisImageEpochSnapshotToken token;
     KisMutationWorkspace::Array<KisPageVersion> versions;

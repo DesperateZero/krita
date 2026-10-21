@@ -2938,7 +2938,6 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     selection->recoverableBefore = baseInfo.recoverableBefore;
     selection->binding = std::move(baseInfo.binding);
     *write = {};
-    write->kind = KisPageTransitionKind::AcquireWrite;
     write->baseVersion = baseVersion;
     write->version = KisPageVersion{intent.key, baseInfo.nextGeneration};
     write->source = base.authority;
@@ -2950,7 +2949,7 @@ bool KisPageWriteCoordinator::prepareWriteBaseLocked(
     return true;
 }
 
-KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(KisPageTransition &write)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(KisPageWriteInput &write)
 {
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
@@ -2964,7 +2963,7 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(KisPa
         }
         write.source = current.authority;
     }
-    return metadata->applyOwner(write.version.key, write);
+    return metadata->applyOwner(write.version.key, write.leaseTransition());
 }
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::publishLeaseWrite(KisPageTransition write)
@@ -3015,7 +3014,6 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         && !metadata->canAddTransientVersion(write.version, transientLimit)) return fallback;
 
     const bool reuseCapacity = spare.isValid();
-    const bool privateCapacity = native && reuseCapacity;
     if (!reuseCapacity && !before.isValid()) return fallback;
 
     // Cold short-lived storage only. The existing owners retain every live
@@ -3082,20 +3080,19 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     }
     auto recoverable = write;
     if (!reuseCapacity) {
-        recoverable.kind = KisPageTransitionKind::AcquireRecoverableWrite;
         recoverable.source = before;
     }
     recoverable.target = physical.target();
     prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, recoverable.target);
-    if (prepared->accounting.isValid() && !privateCapacity) {
+    if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
-        publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, recoverable)
-            : metadata->prepareRecoverableWrite(transaction, recoverable, nullptr, native);
+        publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, recoverable.leaseTransition())
+            : metadata->prepareRecoverableWrite(transaction, recoverable.leaseTransition(KisPageTransitionKind::AcquireRecoverableWrite));
     }
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepared, 1);
     locker.relock();
     if (!prepared->accounting.isValid()
-        || (!privateCapacity && !prepared->publication->metadata.isValid())) return fallback;
+        || (!native && !prepared->publication->metadata.isValid())) return fallback;
 
     // All fallible storage exists before taking the physical claim. Metadata
     // install strictly rechecks the page revision and exact recovery identity.
@@ -3103,8 +3100,9 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     const auto plan = reuseCapacity ? KisPageWritePlanKind::ReuseWorkingCapacity : select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
     if (!physical.tryClaim()) return fallback;
-    const bool installed = privateCapacity
-        ? metadata->reservePrivateWrite(recoverable, native, transientLimit)
+    const bool installed = native
+        ? metadata->acceptPrivateTarget(recoverable, native, transientLimit, nullptr,
+              reuseCapacity ? std::shared_ptr<KisCpuResidentBinding>{} : prepared->beforeBinding)
         : reuseCapacity
         ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)
         : metadata->installRecoverableWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup);
@@ -3252,7 +3250,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::select(
 
 KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
     const KisPageWriteIntent &intent, KisPageReplicaProvider &provider,
-    const KisPageTransition &write, const KisPageAllocationDescriptor &descriptor,
+    const KisPageWriteInput &write, const KisPageAllocationDescriptor &descriptor,
     KisPageAccessRequirement access, KisPagePriority priority,
     const KisCpuPagePayload *payload,
     const std::shared_ptr<const KisPageReplicaSource> &initialization,
@@ -3357,7 +3355,7 @@ KisCompletionTicket KisPageWriteCoordinator::initializeFreshReplica(
 
 void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
                                            const KisPageWriteIntent &intent,
-                                           const KisPageTransition &write,
+                                           const KisPageWriteInput &write,
                                            KisMutationPageEntryState state)
 {
     Q_ASSERT(entry.key() == intent.key && entry.state == KisMutationPageEntryState::IntentOnly);
@@ -3370,8 +3368,6 @@ void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
     entry.intent.flags |= semanticRemoval;
     entry.baseVersion = write.baseVersion;
     entry.targetGeneration = write.version.generation;
-    entry.operation = write.operation;
-    entry.writer = write.writer;
     entry.state = state;
 }
 
@@ -3392,8 +3388,6 @@ void KisPageWriteCoordinator::recordCancelled(KisMutationPageEntry &entry)
     Q_ASSERT(entry.state == KisMutationPageEntryState::MutableReady || entry.hasPrivateResult());
     entry.baseVersion = {};
     entry.targetGeneration = {};
-    entry.operation = {};
-    entry.writer = {};
     entry.state = KisMutationPageEntryState::IntentOnly;
 }
 
@@ -3403,16 +3397,14 @@ void KisPageWriteCoordinator::recordExposure(KisMutationPageEntry &entry, bool e
     entry.state = exposed ? KisMutationPageEntryState::Exposed : KisMutationPageEntryState::MutableReady;
 }
 
-KisPageTransition KisPageWriteCoordinator::writeTransition(const KisMutationPageEntry &entry,
+KisPageWriteInput KisPageWriteCoordinator::writeInput(const KisMutationPageEntry &entry,
                                                            KisPageTransactionId transaction,
                                                            const KisReplicaHandle &source,
                                                            const KisReplicaHandle &target) const
 {
-    KisPageTransition write;
+    KisPageWriteInput write;
     write.baseVersion = entry.baseVersion;
     write.version = entry.preparedTargetVersion();
-    write.operation = entry.operation;
-    write.writer = entry.writer;
     write.writeMode = entry.intent.mode;
     write.transaction = transaction;
     write.source = source;

@@ -53,7 +53,7 @@ struct KisPagePublicationDelta {
         }
     };
     struct PageState {
-        KisPagePublicationProof proof;
+        KisPagePublicationIdentity proof;
     };
     using ProofMap = boost::container::flat_map<KisPageKey, PageState, PageLess,
         KisMutationStorageAllocator<std::pair<KisPageKey, PageState>>>;
@@ -357,7 +357,7 @@ public:
 
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
-    KisPreparedPageProof projectProof(const KisPagePublicationProof &) const;
+    KisPreparedPageProof projectProof(const KisPagePublicationIdentity &) const;
     KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &,
                                             KisVersionSlotId *slot = nullptr) const;
     KisPageIdleCapacity takeIdleCapacityLocked(const KisPageKey &key);
@@ -413,7 +413,7 @@ private:
     KisImageEpochCommitTicket commitInputLocked(const KisPageTransaction &transaction, const Input &input,
         KisRetainedImageEpochSnapshot *retainedAfter, const KisPageStore *diagnosticOwner,
         QMutexLocker<QMutex> &ownerLock);
-    void finishAbortedProofLocked(const KisPagePublicationProof &proof) noexcept;
+    void finishAbortedProofLocked(const KisPagePublicationIdentity &proof) noexcept;
     std::shared_ptr<KisPagePublicationDelta> preparedStateLocked(KisPageTransactionId transaction);
     const ProofMap *findProofsLocked(KisPageTransactionId transaction) const;
 

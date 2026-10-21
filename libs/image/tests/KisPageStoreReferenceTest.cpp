@@ -6553,7 +6553,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
     write.version = pageVersion(0, 2); write.target = replica(write.version, 1, 1, 2);
     write.transaction = {74}; write.operation = {19}; write.writer = {19};
     KisPagePrivateWrite result;
-    QVERIFY(metadata.reservePrivateWrite(write, &result, 64));
+    QVERIFY(metadata.acceptPrivateTarget(KisPageWriteInput(write), &result, 64));
     if (variant != 3) QVERIFY(metadata.completePrivateWrite(&result));
     auto replacement = replica(write.version, 1, 1, 3);
     KisPagePrivateWrite foreign = result;
@@ -6571,8 +6571,8 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         KisPreparedPageProof proof;
         proof.authority = result.target; proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-        QVERIFY(metadata.sealCpuProof(proof, 1));
-        const KisPagePublicationProof identity(proof);
+        QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
+        const KisPagePublicationIdentity identity(proof);
         QCOMPARE(metadata.cpuProof(identity, 1), proof);
         QVERIFY(metadata.ownsCpuProof(proof, 1));
         for (int field = 0; field < 5; ++field) {
@@ -6584,9 +6584,13 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
             if (field == 4) ++forged.authority.layout.rowStride;
             QVERIFY(!metadata.ownsCpuProof(forged, 1));
             QVERIFY(!metadata.revokeCpuProof(forged, 1));
-            if (field != 4) {
-                QVERIFY(!metadata.cpuProof(KisPagePublicationProof(forged), 1).isValid());
-                QVERIFY(!metadata.revokeCpuProof(KisPagePublicationProof(forged), 1));
+            if (field < 3) {
+                QVERIFY(!metadata.cpuProof(KisPagePublicationIdentity(forged), 1).isValid());
+                QVERIFY(!metadata.revokeCpuProof(KisPagePublicationIdentity(forged), 1));
+            } else {
+                // Internal lookup contains no copied authority. It projects
+                // the original record; it does not authenticate forged input.
+                QCOMPARE(metadata.cpuProof(KisPagePublicationIdentity(forged), 1), proof);
             }
             QCOMPARE(metadata.cpuProofCount(1), qsizetype(1));
         }
@@ -6617,12 +6621,12 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         // Completion capability must name the original registered result;
         // neither a copied result nor the ordinary seal may complete it.
-        QVERIFY(!metadata.sealCpuProof(proof, 1, nullptr, &foreign));
+        QVERIFY(!metadata.acceptPrivateValidation(foreign, proof.transaction, proof.providerValidationStamp, 1, true));
         QVERIFY(!result.completed);
-        QVERIFY(!metadata.sealCpuProof(proof, 1));
-        QVERIFY(metadata.sealCpuProof(proof, 1, nullptr, &result));
+        QVERIFY(!metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
+        QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1, true));
         QVERIFY(result.completed);
-        QVERIFY(!metadata.sealCpuProof(proof, 1, nullptr, &result));
+        QVERIFY(!metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1, true));
     }
     if (result.reserved) QVERIFY(metadata.cancelPrivateResult(&result));
 }
@@ -7804,10 +7808,10 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
     QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(input));
     KisPagePrivateWrite result;
     auto collision = write; collision.target.allocation = write.source.allocation;
-    QVERIFY(!metadata.reservePrivateWrite(collision, &result, 64));
+    QVERIFY(!metadata.acceptPrivateTarget(KisPageWriteInput(collision), &result, 64));
     auto stale = write; ++stale.version.generation.value; stale.target.version = stale.version;
-    QVERIFY(!metadata.reservePrivateWrite(stale, &result, 64));
-    QVERIFY(metadata.reservePrivateWrite(write, &result, 64));
+    QVERIFY(!metadata.acceptPrivateTarget(KisPageWriteInput(stale), &result, 64));
+    QVERIFY(metadata.acceptPrivateTarget(KisPageWriteInput(write), &result, 64));
     QVERIFY(metadata.completePrivateWrite(&result));
     const auto completion = registry.allocatePending(registry.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
@@ -7815,7 +7819,7 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
     KisPreparedPageProof proof;
     proof.transaction = transaction; proof.authority = write.target;
     proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-    QVERIFY(metadata.sealCpuProof(proof, 1));
+    QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
     auto commit = write; commit.kind = KisPageTransitionKind::CommitTransaction; commit.imageEpoch = {2};
     const KisPageTransaction tx{transaction, {1}};
     auto candidate = metadata.preparePublication(tx, {2}, QVector<KisPageTransition>{commit});
@@ -8699,7 +8703,7 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     const auto slot = writes.handleAt(0);
     KisPageTransition prepared;
     prepared.version = pageVersion(0, 2);
-    coordinator.recordTarget(entry, intent, prepared, KisMutationPageEntryState::MutableReady);
+    coordinator.recordTarget(entry, intent, KisPageWriteInput(prepared), KisMutationPageEntryState::MutableReady);
     coordinator.recordExposure(entry, true);
     QVERIFY(!writes.erase(slot));
     coordinator.recordExposure(entry, false);
@@ -9706,7 +9710,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     prepared.operation = {71};
     prepared.writer = {81};
     prepared.writeMode = intent.mode;
-    coordinator.recordTarget(pendingEntry, intent, prepared, KisMutationPageEntryState::MutableReady);
+    coordinator.recordTarget(pendingEntry, intent, KisPageWriteInput(prepared), KisMutationPageEntryState::MutableReady);
     intent.inputKind = KisPageWriteInputKind::Semantic;
     QCOMPARE(coordinator.select(intent), KisPageWritePlanKind::SemanticOnly);
     QCOMPARE(coordinator.select(intent, &pendingEntry), KisPageWritePlanKind::ReusePending);
@@ -9718,12 +9722,12 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
         coordinator.recordExposure(pendingEntry, false);
         QVERIFY(!pendingEntry.isExposed());
     }
-    const auto reconstructed = coordinator.writeTransition(pendingEntry, prepared.transaction,
+    const auto reconstructed = coordinator.writeInput(pendingEntry, prepared.transaction,
                                                             prepared.source, prepared.target);
     QCOMPARE(reconstructed.baseVersion, prepared.baseVersion);
     QCOMPARE(reconstructed.version, prepared.version);
-    QCOMPARE(reconstructed.operation, prepared.operation);
-    QCOMPARE(reconstructed.writer, prepared.writer);
+    QVERIFY(!reconstructed.operation.isValid()); // Operation IDs are not retained after completion.
+    QVERIFY(!reconstructed.writer.isValid()); // Native aliases acquire no generic lease token.
     QCOMPARE(reconstructed.transaction, prepared.transaction);
     QCOMPARE(reconstructed.writeMode, prepared.writeMode);
     QCOMPARE(reconstructed.source, prepared.source);

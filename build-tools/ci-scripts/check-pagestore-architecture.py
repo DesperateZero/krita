@@ -1153,7 +1153,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::optional<Entries> entries",
             "entries.emplace(std::move(*other.entries))",
             "struct KisPageOperationPublication",
-            "KisPagePublicationProof proof",
+            "KisPagePublicationIdentity proof",
             "boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity",
             "static constexpr qint64 IdleCapacityAgeMs = 100",
             "takeIdleCapacityLocked",
@@ -1583,8 +1583,16 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         owner_source = code_only((page_store_source.parent / "KisPageOwnerLedger.cpp").read_text())
         if "nextProviderInCut" in owner_source:
             errors.append("provider traversal restored one registration lookup per provider")
-        if "(complete && native != complete)" not in metadata_text:
-            errors.append("combined CPU completion no longer requires the original result")
+        for required in ("activity.nativeWrite != &result", "(!result.completed && !complete)",
+                         "activity.writerTransaction == transaction"):
+            if required not in metadata_text:
+                errors.append("native validation no longer consumes the original result: " + required)
+        retired = ("sealCpuPreparedPage", "sealCpuProof", "reservePrivateWrite",
+                   "KisPagePublicationProof", "borrowedMutation", "needsOwnedMutation")
+        for symbol in retired:
+            if any(symbol in code_only(p.read_text()) for p in page_store_source.parent.glob("KisPage*.*")
+                   if p.suffix in (".h", ".cpp")):
+                errors.append("retired native preparation contract returned: " + symbol)
         selector_begin = write_source.find("KisPageWritePlanKind KisPageWriteCoordinator::select")
         selector_end = write_source.find(
             "void KisPageWriteCoordinator::recordPrepared",

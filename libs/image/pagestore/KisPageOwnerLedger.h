@@ -211,17 +211,14 @@ public:
     // counts while retirement workers can bind/release operations.
     qsizetype publicationBlockingOperationCount() const;
     qsizetype sealedProofCount() const;
-    KisPreparedPageProof projectPreparedPage(const KisPageVersion &, KisPageTransactionId, quint64 stamp,
-                                            const KisReplicaAllocationIdentity &) const;
+    KisPreparedPageProof exportPublication(const KisPagePublicationIdentity &) const;
     bool ownsPreparedPageProof(const KisPreparedPageProof &proof) const;
     // Store configuration binds exactly one original metadata owner. The CPU
     // producer consumes its prepaid version slot; exported proofs keep their
     // independent capability lifetime and may coexist for the same version.
     bool bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion);
-    bool sealCpuPreparedPage(KisPagePrivateWrite &result,
-                            KisPageTransactionId transaction,
-                            const KisCompletionTicket &producerCompletion,
-                            QString *error = nullptr, bool complete = false);
+    bool validatePrivateWrite(KisPagePrivateWrite &result, KisPageTransactionId transaction,
+                              QString *error = nullptr, bool complete = false);
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger
@@ -243,8 +240,8 @@ public:
 private:
     // Publication retains the original transaction/key claims. These consume
     // its compact identity directly; exported capabilities keep their checks.
-    bool validatePublicationProof(const KisPageMetadataCoordinator &, const KisPagePublicationProof &) const;
-    bool revokePublicationProof(const KisPagePublicationProof &);
+    bool validatePublicationIdentity(const KisPageMetadataCoordinator &, const KisPagePublicationIdentity &) const;
+    bool releasePublicationIdentity(const KisPagePublicationIdentity &);
     using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Synchronously read immutable publication facts into the caller's original

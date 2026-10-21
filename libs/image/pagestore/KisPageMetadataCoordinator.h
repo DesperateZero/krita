@@ -24,8 +24,9 @@
 class KisCpuResidentBinding;
 struct KisPageNativeReadRef;
 struct KisPagePrivateWrite;
+struct KisPageWriteInput;
 struct KisPagePublicationChange;
-struct KisPagePublicationProof;
+struct KisPagePublicationIdentity;
 struct KisPageRetirementRecord;
 template<class Tag> struct KisGenerationalSlotId;
 struct KisVersionSlotTag;
@@ -289,23 +290,30 @@ private:
     const KisPageAllocationDescriptor *borrowVersionDescriptor(const KisPageVersion &) const;
     bool exchangeVersionDescriptor(const KisPageVersion &,
         std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
-    bool sealCpuProof(const KisPreparedPageProof &, quint64 issuer, KisPreparedPageProof *destination = nullptr,
-                      KisPagePrivateWrite *complete = nullptr);
-    bool reservePrivateWrite(const KisPageTransition &, KisPagePrivateWrite *, quint32 limit,
-                            QString *error = nullptr);
+    // Original-result acceptance of an unlocked provider validation. The
+    // retained location, registered writer and issuer are checked together;
+    // no exported capability is produced or decoded by this internal handoff.
+    bool acceptPrivateValidation(KisPagePrivateWrite &, KisPageTransactionId,
+                                 quint64 stamp, quint64 issuer, bool complete = false);
+    bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
+        KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor) const;
+    // Called while the original physical write claim is held. A nonempty
+    // independent before binding permits reclaiming the current authority's
+    // physical slot; no synthetic lease/writer or target arena is created.
+    bool acceptPrivateTarget(const KisPageWriteInput &, KisPagePrivateWrite *, quint32 limit,
+        QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {});
     bool completePrivateWrite(KisPagePrivateWrite *);
     bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &);
     bool cancelPrivateResult(KisPagePrivateWrite *);
     KisPagePrivateWrite *nativeWrite(const KisPageVersion &) const;
     KisPagePrivateWrite *nativeWriteForProof(const KisPreparedPageProof &) const;
     bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
-    // Internal identity is resolved once by its original metadata owner. When
-    // requested, the descriptor is returned only for a still-Prepared result.
-    KisPreparedPageProof cpuProof(const KisPagePublicationProof &, quint64 issuer,
-        std::shared_ptr<const KisPageAllocationDescriptor> *preparedDescriptor = nullptr) const;
+    // Public projection only; internal provider validation uses the retained
+    // authority and layout without materializing a completion capability.
+    KisPreparedPageProof cpuProof(const KisPagePublicationIdentity &, quint64 issuer) const;
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
-    bool revokeCpuProof(const KisPagePublicationProof &, quint64 issuer);
+    bool revokeCpuProof(const KisPagePublicationIdentity &, quint64 issuer);
     qsizetype cpuProofCount(quint64 issuer) const;
     struct MutationBaseInfo {
         bool baseExists = false;
@@ -428,10 +436,6 @@ private:
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
                                            KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
-        // Prepared semantic disposition, in original input coordinates. All
-        // selected releases must pass the joint install claim; late protection
-        // rejects the whole candidate before any modification.
-        void forEachCapacityRelease(void *context, void (*visit)(void *, size_t)) const;
 
     private:
         class Data;
@@ -440,6 +444,10 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
+        class NativeCapacity;
+        struct NativeCapacityDeleter { void operator()(NativeCapacity *) const noexcept; };
+        using NativeCapacityPointer = std::unique_ptr<NativeCapacity, NativeCapacityDeleter>;
+        NativeCapacityPointer m_nativeCapacity;
         KisPagePublicationRows m_rows;
         size_t m_count = 0;
         KisPageTransaction m_transaction;
@@ -509,7 +517,6 @@ private:
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
                                                KisPagePublicationRows operationRows = {},
-                                               KisPagePrivateWrite *privateResult = nullptr,
                                                bool detachUnprotectedCurrent = false) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
     // claims all pages, revalidates exact Prepared identity/transaction and no
@@ -529,6 +536,8 @@ private:
                          QString *error = nullptr,
                          DeferredPublicationCleanup *deferredCleanup = nullptr,
                          bool *retryCapacity = nullptr);
+    // The original rows remain alive until this unlocked post-acceptance cleanup.
+    void finishMutation(KisPagePublicationRows);
     // Logical half only. The write coordinator must independently retain the
     // exact before, prepare provider retag/descriptor/budget/terminal storage,
     // and acquire physical claims before installation. Rejection consumes the
@@ -537,8 +546,7 @@ private:
     // no bytes may be exposed until provider retag has also been consumed.
     PreparedPublication prepareRecoverableWrite(const KisPageTransaction &transaction,
                                                 const KisPageTransition &transition,
-                                                QString *error = nullptr,
-                                                KisPagePrivateWrite *privateResult = nullptr) const;
+                                                QString *error = nullptr) const;
     bool installRecoverableWrite(PreparedPublication &&prepared,
                                  const KisPageTransaction &transaction,
                                  QString *error = nullptr,

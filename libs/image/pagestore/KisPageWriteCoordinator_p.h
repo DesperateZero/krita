@@ -130,8 +130,6 @@ private:
     KisPageWriteIntent intent;
     KisPageVersion baseVersion;
     KisPageGeneration targetGeneration;
-    KisPageOperationId operation;
-    KisPageWriterToken writer;
     std::shared_ptr<const KisPageReplicaSource> initialization;
     KisPagePrivateWrite *coldPageStorage = nullptr;
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
@@ -305,7 +303,7 @@ public:
     // not a second page/overlay authority; no provider allocation occurs here.
     bool prepareWriteBaseLocked(const KisPageTransaction &, const KisPageWriteIntent &,
                                 KisPagePublicationCoordinator &, KisPageWriteSelection *, QString *error);
-    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageTransition &);
+    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &);
     // Both access adapters use this cold first-write decision. On handoff it
     // installs the logical writer, descriptor and accounting before returning
     // the retagged physical reservation. Otherwise write is unchanged and the
@@ -320,7 +318,7 @@ public:
         KisPagePrivateWrite *native = nullptr);
     KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
-        KisPageReplicaProvider &, const KisPageTransition &,
+        KisPageReplicaProvider &, const KisPageWriteInput &,
         const KisPageAllocationDescriptor &, KisPageAccessRequirement,
         KisPagePriority, const KisCpuPagePayload *,
         const std::shared_ptr<const KisPageReplicaSource> &initialization,
@@ -340,13 +338,13 @@ public:
     KisPageWritePlanKind select(const KisPageWriteIntent &,
                                 const KisMutationPageEntry *pending = nullptr,
                                 bool recoverablePrepared = false) const;
-    void recordTarget(KisMutationPageEntry &, const KisPageWriteIntent &, const KisPageTransition &,
+    void recordTarget(KisMutationPageEntry &, const KisPageWriteIntent &, const KisPageWriteInput &,
                       KisMutationPageEntryState);
     void recordPrivateCompletion(KisMutationPageEntry &);
     void recordAliasAccepted(KisMutationPageEntry &);
     void recordCancelled(KisMutationPageEntry &);
     void recordExposure(KisMutationPageEntry &, bool exposed);
-    KisPageTransition writeTransition(const KisMutationPageEntry &, KisPageTransactionId,
+    KisPageWriteInput writeInput(const KisMutationPageEntry &, KisPageTransactionId,
                                      const KisReplicaHandle &source, const KisReplicaHandle &target) const;
 
     [[nodiscard]] bool beginSessionActivity(KisPageTransactionId, QMutexLocker<QMutex> &, QString *error = nullptr);

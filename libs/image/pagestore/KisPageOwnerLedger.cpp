@@ -2393,31 +2393,30 @@ bool KisPageOwnerLedger::bindCpuProofs(KisPageMetadataCoordinator &metadata, con
     return true;
 }
 
-KisPreparedPageProof KisPageOwnerLedger::projectPreparedPage(const KisPageVersion &version,
-    KisPageTransactionId transaction, quint64 stamp, const KisReplicaAllocationIdentity &allocation) const
+KisPreparedPageProof KisPageOwnerLedger::exportPublication(const KisPagePublicationIdentity &identity) const
 {
+    if (!identity.isValid()) return {};
     QMutexLocker lock(&d->mutex);
-    const auto found = d->sealedProofs.find(stamp, ProofLess{});
-    if (found != d->sealedProofs.end()) {
-        const auto &proof = found->proof;
-        return proof.authority.version == version && proof.transaction == transaction
-            && proof.authority.allocationIdentity() == allocation ? proof : KisPreparedPageProof{};
+    if (!identity.native) {
+        const auto found = d->sealedProofs.find(identity.stamp, ProofLess{});
+        if (found != d->sealedProofs.end()) {
+            const auto &proof = found->proof;
+            return proof.authority.version == identity.version && proof.transaction == identity.transaction
+                ? proof : KisPreparedPageProof{};
+        }
     }
     auto *metadata = d->cpuMetadata;
     const auto issuer = d->cpuProofIssuer;
     lock.unlock();
-    // Metadata owns the exact CPU authority and its stamp. Resolve both there
-    // instead of reconstructing a capability through physical registration.
-    return metadata ? metadata->cpuProof({version, transaction, stamp, true, allocation}, issuer)
-                    : KisPreparedPageProof{};
+    return metadata ? metadata->cpuProof(identity, issuer) : KisPreparedPageProof{};
 }
 
-bool KisPageOwnerLedger::validatePublicationProof(const KisPageMetadataCoordinator &metadata,
-    const KisPagePublicationProof &identity) const
+bool KisPageOwnerLedger::validatePublicationIdentity(const KisPageMetadataCoordinator &metadata,
+    const KisPagePublicationIdentity &identity) const
 try
 {
     if (!identity.native) {
-        const auto proof = projectPreparedPage(identity.version, identity.transaction, identity.stamp, identity.allocation);
+        const auto proof = exportPublication(identity);
         auto descriptor = metadata.versionDescriptor(identity.version);
         return descriptor && validatePreparedPage(metadata, proof, *descriptor);
     }
@@ -2428,20 +2427,20 @@ try
         issuer = d->cpuProofIssuer;
     }
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-    const auto proof = metadata.cpuProof(identity, issuer, &descriptor);
-    if (!proof.isValid() || !descriptor || !descriptor->isValid()
-        || !proof.authority.layout.matches(*descriptor)) return false;
-    // The CPU completion was verified once at issuer binding and is immutable.
-    // Dynamic provider state still requires this unlocked callback every time.
-    const auto authorityProvider = provider(proof.authority.provider, proof.authority.providerEpoch);
-    return authorityProvider && authorityProvider->validate(proof.authority, *descriptor);
+    KisReplicaHandle authority;
+    if (!metadata.cpuPreparedAuthority(identity, issuer, &authority, &descriptor)
+        || !descriptor || !descriptor->isValid() || !authority.layout.matches(*descriptor)) return false;
+    // This is the real dynamic boundary. Internal validation consumes the
+    // original authority; the immutable completion belongs to public export.
+    const auto authorityProvider = provider(authority.provider, authority.providerEpoch);
+    return authorityProvider && authorityProvider->validate(authority, *descriptor);
 }
 catch (const std::bad_alloc &) { return false; }
 
-bool KisPageOwnerLedger::revokePublicationProof(const KisPagePublicationProof &identity)
+bool KisPageOwnerLedger::releasePublicationIdentity(const KisPagePublicationIdentity &identity)
 {
     if (!identity.native)
-        return revokePreparedPage(projectPreparedPage(identity.version, identity.transaction, identity.stamp, identity.allocation));
+        return revokePreparedPage(exportPublication(identity));
     QMutexLocker lock(&d->mutex);
     auto *metadata = d->cpuMetadata;
     const auto issuer = d->cpuProofIssuer;
@@ -2463,17 +2462,12 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
     return metadata && metadata->ownsCpuProof(proof, issuer);
 }
 
-bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
-    KisPageTransactionId transaction, const KisCompletionTicket &producerCompletion, QString *error,
-    bool complete)
+bool KisPageOwnerLedger::validatePrivateWrite(KisPagePrivateWrite &result,
+    KisPageTransactionId transaction, QString *error, bool complete)
 {
-    // One owner visit obtains the immutable provider/issuer and issues the
-    // stamp. Validation remains outside this gate; metadata consumes the same
-    // result at the real completion/seal boundary, including its late checks.
     std::shared_ptr<KisPageReplicaProvider> authorityProvider;
     KisPageMetadataCoordinator *metadata;
-    KisPreparedPageProof sealed;
-    quint64 issuer;
+    quint64 issuer, stamp;
     {
         QMutexLocker locker(&d->mutex);
         const auto registered = d->registeredProvider(providerKey(result.target.provider, result.target.providerEpoch));
@@ -2482,18 +2476,15 @@ bool KisPageOwnerLedger::sealCpuPreparedPage(KisPagePrivateWrite &result,
         issuer = d->cpuProofIssuer;
         if (!metadata || !d->nextValidationStamp
             || d->nextValidationStamp == std::numeric_limits<quint64>::max()) return false;
-        sealed.transaction = transaction;
-        sealed.authority = result.target;
-        sealed.producerCompletion = producerCompletion;
-        sealed.providerValidationStamp = d->nextValidationStamp++;
+        stamp = d->nextValidationStamp++;
     }
     if (!result.reserved || (!result.completed && !complete) || !result.descriptor || !authorityProvider
         || !authorityProvider->validate(result.target, *result.descriptor)) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
         return false;
     }
-    if (!metadata->sealCpuProof(sealed, issuer, nullptr, &result)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU result changed or already has a capability"));
+    if (!metadata->acceptPrivateValidation(result, transaction, stamp, issuer, complete)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU original result changed during validation"));
         return false;
     }
     KisPageStoreDetail::setError(error, {});

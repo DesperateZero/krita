@@ -409,7 +409,9 @@ private:
     }
     void selectReadWindow(size_t first, size_t count, quint32 *indices, KisCpuReadBinding *bindings) const;
     class Private;
-    std::shared_ptr<Private> d;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
+    boost::intrusive_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuReadGuard;
     friend class KisTiledDataManagerPageStoreBackend;
@@ -438,7 +440,7 @@ public:
 
 private:
     void reset();
-    std::shared_ptr<KisCapturedReadView::Private> m_scope;
+    boost::intrusive_ptr<KisCapturedReadView::Private> m_scope;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
     const void *m_data = nullptr;
     std::shared_ptr<const KisCpuDefaultReadBuffer> m_defaultBuffer;

@@ -16,8 +16,32 @@ class KisCpuResidentBinding;
 // One selected input, retained by the original operation through comparison,
 // resource checkout and acquisition. Layout is either the selected immutable
 // version's layout or the actual surface value for a default/semantic input.
+// Facts for one actual write. Read leases, completion lists, root epochs and
+// transition kinds are not part of native acquisition. Only a real generic
+// lease boundary projects the reference-model transition below.
+struct KisPageWriteInput {
+    KisPageVersion baseVersion, version;
+    KisReplicaHandle source, target;
+    KisPageOperationId operation;
+    KisPageWriterToken writer; // Only the generic lease consumer needs a token.
+    KisPageTransactionId transaction;
+    KisPageWriteMode writeMode = KisPageWriteMode::PreserveContents;
+    KisPageWriteInput() = default;
+    explicit KisPageWriteInput(const KisPageTransition &value)
+        : baseVersion(value.baseVersion), version(value.version), source(value.source), target(value.target),
+          operation(value.operation), writer(value.writer), transaction(value.transaction), writeMode(value.writeMode) {}
+    KisPageTransition leaseTransition(KisPageTransitionKind kind = KisPageTransitionKind::AcquireWrite) const
+    {
+        KisPageTransition value;
+        value.kind = kind; value.baseVersion = baseVersion; value.version = version;
+        value.source = source; value.target = target; value.operation = operation;
+        value.writer = writer; value.transaction = transaction; value.writeMode = writeMode;
+        return value;
+    }
+};
+
 struct KisPageWriteSelection {
-    KisPageTransition write;
+    KisPageWriteInput write;
     KisReplicaHandle recoverableBefore;
     std::shared_ptr<KisCpuResidentBinding> binding;
     std::shared_ptr<const KisPageAllocationDescriptor> layout;
@@ -36,18 +60,6 @@ struct KisPagePrivateWrite {
         quint64 providerValidationStamp = 0;
         bool isValid() const { return transaction.isValid() && providerValidationStamp; }
     } proof;
-    // A value projection, not an ownership test. Real consumers still use
-    // the owner's dynamic validate/owns/revoke policy. The original result
-    // remains alive and immutable through Sealing/CommitPreparation.
-    KisPreparedPageProof proofValue(const KisCompletionTicket &completion) const
-    {
-        if (!completed || !proof.isValid()) return {};
-        KisPreparedPageProof value;
-        value.authority = target; value.transaction = proof.transaction;
-        value.providerValidationStamp = proof.providerValidationStamp;
-        value.producerCompletion = completion;
-        return value;
-    }
     bool matchesProof(const KisPreparedPageProof &value, const KisCompletionTicket &completion) const
     {
         return proof.isValid() && proof.transaction == value.transaction

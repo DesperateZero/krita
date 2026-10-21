@@ -948,28 +948,42 @@ void KisPageReadCoordinator::noteCapturedViewCreatedLocked(bool nativeRange)
 void KisPageCapturedReleaseDeleter::operator()(KisPageCapturedRelease *record) const noexcept
 {
     if (!record) return;
+    if (record->dispose) { record->dispose(record, budget); return; }
     std::destroy_at(record);
     kisFreeMutationStorage(budget, record, 0, alignof(KisPageCapturedRelease));
 }
 
-KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget,
-    size_t versions, size_t removals, size_t surfaces, size_t references)
+KisPageCapturedRelease::Layout::Layout(size_t body, size_t versions, size_t removals,
+    size_t surfaces, size_t references)
+    : bytes(body), versionCount(versions), removalCount(removals),
+      surfaceCount(surfaces), referenceCount(references)
 {
     static_assert(alignof(KisPageCapturedRelease) >= alignof(KisPageVersion)
         && alignof(KisPageCapturedRelease) >= alignof(KisPageKey)
         && alignof(KisPageCapturedRelease) >= alignof(KisSurfaceEpochState)
         && alignof(KisPageCapturedRelease) >= alignof(KisPageNativeReadRef));
-    size_t bytes = sizeof(KisPageCapturedRelease);
-    const auto v = KisMutationWorkspace::append<KisPageVersion>(bytes, versions);
-    const auto r = KisMutationWorkspace::append<KisPageKey>(bytes, removals);
-    const auto s = KisMutationWorkspace::append<KisSurfaceEpochState>(bytes, surfaces);
-    const auto n = KisMutationWorkspace::append<KisPageNativeReadRef>(bytes, references);
-    auto *storage = static_cast<char *>(kisAllocateMutationStorage(&budget, bytes, alignof(KisPageCapturedRelease)));
+    v = KisMutationWorkspace::append<KisPageVersion>(bytes, versions);
+    r = KisMutationWorkspace::append<KisPageKey>(bytes, removals);
+    s = KisMutationWorkspace::append<KisSurfaceEpochState>(bytes, surfaces);
+    n = KisMutationWorkspace::append<KisPageNativeReadRef>(bytes, references);
+}
+
+void KisPageCapturedRelease::Layout::bind(KisPageCapturedRelease &record, void *storage) const
+{
+    auto *start = static_cast<char *>(storage);
+    record.versions.bind(reinterpret_cast<KisPageVersion *>(start + v), versionCount);
+    record.removedPages.bind(reinterpret_cast<KisPageKey *>(start + r), removalCount);
+    record.stagedSurfaces.bind(reinterpret_cast<KisSurfaceEpochState *>(start + s), surfaceCount);
+    record.nativeRefs.bind(reinterpret_cast<KisPageNativeReadRef *>(start + n), referenceCount);
+}
+
+KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget,
+    size_t versions, size_t removals, size_t surfaces, size_t references)
+{
+    const Layout layout(sizeof(KisPageCapturedRelease), versions, removals, surfaces, references);
+    auto *storage = kisAllocateMutationStorage(&budget, layout.bytes, alignof(KisPageCapturedRelease));
     KisPageCapturedReleasePointer record(new (storage) KisPageCapturedRelease, KisPageCapturedReleaseDeleter{&budget});
-    record->versions.bind(reinterpret_cast<KisPageVersion *>(storage + v), versions);
-    record->removedPages.bind(reinterpret_cast<KisPageKey *>(storage + r), removals);
-    record->stagedSurfaces.bind(reinterpret_cast<KisSurfaceEpochState *>(storage + s), surfaces);
-    record->nativeRefs.bind(reinterpret_cast<KisPageNativeReadRef *>(storage + n), references);
+    layout.bind(*record, storage);
     return record;
 }
 

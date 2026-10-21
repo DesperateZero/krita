@@ -377,10 +377,6 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepare(
             if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
             return false;
         }
-        for (auto &change : data->changes) change.releasesCapacity = false;
-        data->metadata.forEachCapacityRelease(&*data, [](void *context, size_t i) {
-            static_cast<Data *>(context)->changes.at(i).releasesCapacity = true;
-        });
     }
     data->prepared = true;
     KisPageStoreDetail::setError(error, {});
@@ -539,7 +535,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     auto &state = *data->state;
     for (Data::Change &change : data->changes) {
         const auto found = state.proofs.find(change.replacement.key());
-        const KisPagePublicationProof current = found == state.proofs.end() ? KisPagePublicationProof{} : found->second.proof;
+        const KisPagePublicationIdentity current = found == state.proofs.end() ? KisPagePublicationIdentity{} : found->second.proof;
         if (!(current == change.superseded)
             || (state.removals.count(change.replacement.key()) != 0) != change.wasRemoved
             || (current.isValid() && !current.native
@@ -603,13 +599,14 @@ void KisPagePublicationCoordinator::KisPreparedPagePublication::finishUnlocked(
     // collection. Release or hand off that storage before requesting history.
     owner.m_disposeMetadataCleanup(owner.m_ownerContext, std::move(cleanup));
     if (data->installed) {
+        owner.m_metadata.finishMutation(data->changes);
         ownerLock.relock();
         // Only accepted replacements transfer the superseded proofs. Rejected
         // preparation still borrows its producer's proofs and must not revoke.
         bool historyRequested = false;
         for (const auto &change : std::as_const(data->changes)) {
             if (!change.superseded.isValid() || change.releasesCapacity) continue;
-            const bool revoked = owner.m_owner.revokePublicationProof(change.superseded);
+            const bool revoked = owner.m_owner.releasePublicationIdentity(change.superseded);
             Q_ASSERT(revoked);
             Q_UNUSED(revoked);
             owner.m_history.requestKeyLocked(change.replacement.key());
@@ -1146,7 +1143,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
 static const KisPageVersion &publicationVersion(const KisPagePublicationChange::Replacement &entry) { return entry.version(); }
 static const KisPageVersion &publicationVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
 { return entry.second.proof.version; }
-static const KisPagePublicationProof &publicationIdentity(const KisPagePublicationDelta::ProofMap::value_type &entry)
+static const KisPagePublicationIdentity &publicationIdentity(const KisPagePublicationDelta::ProofMap::value_type &entry)
 {
     return entry.second.proof;
 }
@@ -1191,7 +1188,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
     diagnostic.next(Phase::CommitProviderValidation, quint64(owned.proofs.size()));
     bool proofsValid = true;
     for (const auto &entry : owned.proofs) {
-        if (!m_owner.validatePublicationProof(m_metadata, publicationProof(entry))) {
+        if (!m_owner.validatePublicationIdentity(m_metadata, publicationProof(entry))) {
             proofsValid = false;
             break;
         }
@@ -1399,7 +1396,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         // intact for history key delivery, then release storage outside the gate.
         // Abort instead erases each accepted revocation so refusal can resume.
         for (const auto &entry : owned.proofs) {
-            if (!m_owner.revokePublicationProof(publicationProof(entry)))
+            if (!m_owner.releasePublicationIdentity(publicationProof(entry)))
                 qFatal("Owned committed proof changed before revocation");
         }
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
@@ -1704,9 +1701,9 @@ KisPagePublicationCoordinator::findProofsLocked(KisPageTransactionId transaction
     return found == m_preparedTransactions.cend() || found->second->proofs.empty() ? nullptr : &found->second->proofs;
 }
 
-KisPreparedPageProof KisPagePublicationCoordinator::projectProof(const KisPagePublicationProof &proof) const
+KisPreparedPageProof KisPagePublicationCoordinator::projectProof(const KisPagePublicationIdentity &proof) const
 {
-    return proof.isValid() ? m_owner.projectPreparedPage(proof.version, proof.transaction, proof.stamp, proof.allocation)
+    return proof.isValid() ? m_owner.exportPublication(proof)
         : KisPreparedPageProof{};
 }
 
@@ -1848,7 +1845,7 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
                 return {};
             }
             auto *native = value.removal ? nullptr : m_metadata.nativeWriteForProof(value.proof);
-            auto identity = KisPagePublicationProof(value.proof);
+            auto identity = KisPagePublicationIdentity(value.proof);
             identity.native = bool(native);
             changes.push_back({{value.key, identity, value.removal, native}, {}, false, false, false, {}});
         }
@@ -1896,7 +1893,6 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             entry.supersededAuthority = nullptr;
             entry.releasesCapacity = false;
             entry.acceptedIdle = nullptr;
-            entry.needsOwnedMutation = false;
             const auto &change = entry.replacement;
             const bool hasProof = change.hasProof();
             auto *native = hasProof ? change.native : nullptr;
@@ -1915,9 +1911,9 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             // to skip validation of an independently exported capability.
             entry.replacement.native = native;
             const auto superseded = [&] {
-                if (!state) return KisPagePublicationProof{};
+                if (!state) return KisPagePublicationIdentity{};
                 const auto found = state->proofs.find(change.key());
-                return found == state->proofs.end() ? KisPagePublicationProof{} : found->second.proof;
+                return found == state->proofs.end() ? KisPagePublicationIdentity{} : found->second.proof;
             }();
             if (superseded.isValid()) {
                 if ((!superseded.native && !m_owner.ownsPreparedPageProof(projectProof(superseded)))
@@ -1931,8 +1927,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             if (superseded.isValid()) {
                 // The original result already retains its exact source. A
                 // foreign/generic source projects at its real boundary.
-                if (native && native->source.version == superseded.version
-                    && native->source.allocationIdentity() == superseded.allocation) {
+                if (native && native->source.version == superseded.version) {
                     entry.supersededAuthority = &native->source;
                 } else {
                     // This is the actual independent input, not a second
@@ -1990,7 +1985,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
 }
 
 void KisPagePublicationCoordinator::finishAbortedProofLocked(
-    const KisPagePublicationProof &proof) noexcept
+    const KisPagePublicationIdentity &proof) noexcept
 {
     auto transaction = m_preparedTransactions.find(proof.transaction.value);
     if (transaction == m_preparedTransactions.end())
@@ -2003,7 +1998,7 @@ void KisPagePublicationCoordinator::finishAbortedProofLocked(
     // explicit revocation. There is no post-acceptance resource refusal.
     if (stored == state.proofs.end() || !(stored->second.proof == proof))
         qFatal("Owned prepared proof changed before revocation");
-    if (!m_owner.revokePublicationProof(proof)) {
+    if (!m_owner.releasePublicationIdentity(proof)) {
         KisPageMetadataCoordinator::VersionInfo remaining;
         m_metadata.versionSnapshot(proof.version, &remaining);
         if (remaining.version.isValid())

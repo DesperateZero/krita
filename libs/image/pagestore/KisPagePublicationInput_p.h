@@ -17,29 +17,29 @@
 struct KisPagePrivateWrite;
 struct KisPageRetirementRecord;
 
-// Internal identity of an already validated capability. It is not an external
-// capability: full values are projected only from their original live owner.
-struct KisPagePublicationProof {
+// Original publication locator, admitted only after validating a real input.
+// The issuer's monotonically unique stamp names its validation fact; the
+// generational slot is a checked location. Authority/layout/completion stay
+// with their original owners, never duplicated in each transaction selection.
+// This is NOT an external capability; full input authenticity is checked
+// before conversion and again at every public proof-taking boundary.
+struct KisPagePublicationIdentity {
     KisPageVersion version;
     KisPageTransactionId transaction;
     quint64 stamp = 0;
-    KisReplicaAllocationIdentity allocation;
     KisVersionSlotId metadataSlot;
     bool native = false;
-    KisPagePublicationProof() = default;
-    KisPagePublicationProof(const KisPreparedPageProof &proof)
-        : version(proof.authority.version), transaction(proof.transaction), stamp(proof.providerValidationStamp),
-          allocation(proof.authority.allocationIdentity()) {}
-    KisPagePublicationProof(const KisPageVersion &v, KisPageTransactionId t, quint64 s, bool n,
-                            const KisReplicaAllocationIdentity &a, KisVersionSlotId slot = {})
-        : version(v), transaction(t), stamp(s), allocation(a), metadataSlot(slot), native(n) {}
+    KisPagePublicationIdentity() = default;
+    KisPagePublicationIdentity(const KisPreparedPageProof &proof)
+        : version(proof.authority.version), transaction(proof.transaction), stamp(proof.providerValidationStamp) {}
+    KisPagePublicationIdentity(const KisPageVersion &v, KisPageTransactionId t, quint64 s, bool n,
+                            KisVersionSlotId slot = {})
+        : version(v), transaction(t), stamp(s), metadataSlot(slot), native(n) {}
     bool isValid() const { return version.isValid() && transaction.isValid() && stamp; }
     bool matches(const KisPreparedPageProof &proof) const
-    { return version == proof.authority.version && transaction == proof.transaction && stamp == proof.providerValidationStamp
-        && allocation == proof.authority.allocationIdentity(); }
-    bool operator==(const KisPagePublicationProof &other) const
-    { return version == other.version && transaction == other.transaction && stamp == other.stamp
-        && allocation == other.allocation && native == other.native; }
+    { return version == proof.authority.version && transaction == proof.transaction && stamp == proof.providerValidationStamp; }
+    bool operator==(const KisPagePublicationIdentity &other) const
+    { return version == other.version && transaction == other.transaction && stamp == other.stamp && native == other.native; }
 };
 
 struct KisPagePublicationChange {
@@ -51,7 +51,7 @@ struct KisPagePublicationChange {
     struct Replacement {
         struct Owned {
             KisPageKey key;
-            KisPagePublicationProof proof;
+            KisPagePublicationIdentity proof;
         };
         // CPU publication borrows the original frozen result. Only a removal
         // or an independently owned external input constructs the value form.
@@ -63,7 +63,7 @@ struct KisPagePublicationChange {
         KisPagePrivateWrite *native = nullptr;
         bool borrowed = false;
         Replacement() { new (&payload.owned) Owned{}; }
-        Replacement(const KisPageKey &key, const KisPagePublicationProof &proof,
+        Replacement(const KisPageKey &key, const KisPagePublicationIdentity &proof,
                     bool removed = false, KisPagePrivateWrite *result = nullptr)
             : removal(removed), native(result)
         { new (&payload.owned) Owned{key, proof}; }
@@ -76,19 +76,19 @@ struct KisPagePublicationChange {
         bool hasProof() const
         { return borrowed ? native->proof.isValid() && native->target.version.isValid() : payload.owned.proof.isValid(); }
         bool nativeProof() const { return borrowed || payload.owned.proof.native; }
-        KisPagePublicationProof proofValue() const
+        KisPagePublicationIdentity proofValue() const
         {
-            return borrowed ? KisPagePublicationProof{native->target.version, native->proof.transaction,
-                native->proof.providerValidationStamp, true, native->target.allocationIdentity(), native->acceptedSlot} : payload.owned.proof;
+            return borrowed ? KisPagePublicationIdentity{native->target.version, native->proof.transaction,
+                native->proof.providerValidationStamp, true, native->acceptedSlot} : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;
-    KisPagePublicationChange(Replacement replacement, KisPagePublicationProof superseded = {},
+    KisPagePublicationChange(Replacement replacement, KisPagePublicationIdentity superseded = {},
         bool removalWasInBase = false, bool wasRemoved = false, bool releasesCapacity = false,
         const KisReplicaHandle *supersededAuthority = nullptr)
         : replacement(std::move(replacement)), superseded(superseded), removalWasInBase(removalWasInBase),
           wasRemoved(wasRemoved), releasesCapacity(releasesCapacity), supersededAuthority(supersededAuthority) {}
-    KisPagePublicationProof superseded;
+    KisPagePublicationIdentity superseded;
     bool removalWasInBase = false;
     bool wasRemoved = false;
     bool releasesCapacity = false;
@@ -111,8 +111,6 @@ struct KisPagePublicationChange {
         size_t shardIndex = 0;
         size_t inputOrdinal = 0;
     } metadataAcceptance;
-    bool borrowedMutation = false;
-    bool needsOwnedMutation = false;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }
