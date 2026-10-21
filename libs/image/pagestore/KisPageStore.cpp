@@ -677,12 +677,22 @@ public:
     explicit Private(KisPageStore::Private *owner)
         : writes(&owner->backingBudget), coldPages(owner) {}
     struct Page : KisPagePrivateWrite {
+        KisPagePublicationChange publicationRow;
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
         std::shared_ptr<Page> next;
         Page *previous = nullptr;
+        void resetProducer() noexcept
+        {
+            // Publication scratch owns nothing. Each attempt overwrites its
+            // inputs/acceptance fields before use; do not zero that workspace
+            // again when returning actual native capacity to its backing.
+            static_assert(std::is_trivially_destructible_v<KisPagePublicationChange>);
+            static_cast<KisPagePrivateWrite &>(*this) = KisPagePrivateWrite{};
+            writable = {}; resetPixel.clear(); next.reset(); previous = nullptr;
+        }
     };
-    static_assert(sizeof(Page) <= 576);
+    static_assert(sizeof(Page) <= 976);
     struct ColdPageSet {
         KisPageStore::Private *owner = nullptr;
         std::shared_ptr<Page> head;
@@ -714,7 +724,7 @@ public:
                 Q_ASSERT(!page->reserved);
                 // Reuse empty capacity only. Neither old identities nor
                 // provider/layout references survive this producer lifetime.
-                *page = Page{};
+                page->resetProducer();
                 if (accepted && owner)
                     owner->owner.returnNativeWriteStorage(target, std::move(page));
             }
@@ -1029,6 +1039,7 @@ public:
             return page;
         auto *page = coldPages.create(idle);
         entry.setColdPage(page);
+        entry.publicationRow = &page->publicationRow;
         return page;
     } catch (const std::bad_alloc &) {
         return nullptr;
@@ -1048,6 +1059,7 @@ public:
         auto *entry = &value;
         auto *page = static_cast<Page *>(entry->coldPage());
         entry->setColdPage(nullptr);
+        entry->publicationRow = nullptr;
         coldPages.erase(page);
     }
     void clearSources()
@@ -2867,16 +2879,12 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         lock.unlock();
     }
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
-    KisPagePublicationChanges changes(KisMutationStorageAllocator<KisPagePublicationChange>::retained(&owner->backingBudget));
+    KisPagePublicationRows changes;
     try {
-        if (success) changes.reserve(overlayChangeCount);
         phase.next(Phase::MutationSealProofPrepare, quint64(overlayChangeCount - sealedRemovals));
         for (auto slot = d->writes.firstEntry(); success && overlayChangeCount && slot.isValid(); slot = d->writes.nextEntry(slot)) {
-            const auto *entry = d->writes.at(slot.index);
-            if (entry->isRemoval()) {
-                changes.push_back({{entry->key(), {}, true}, {}, false, false, false, {}});
-                continue;
-            }
+            auto *entry = d->writes.at(slot.index);
+            if (entry->isRemoval()) continue;
             auto *page = d->pageAtEntry(slot.index);
             if (!page) continue;
             const bool completeAtSeal = !sealedSources;
@@ -2891,8 +2899,9 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
                 owner->writeCoordinator.recordPrivateCompletion(*d->writes.at(slot.index));
             // Proof is still private; no writer may survive its publication.
             page->writable.reset();
-            changes.push_back({KisPagePublicationChange::Replacement(page), {}, false, false, false, {}});
+            page->publicationRow.replacement = KisPagePublicationChange::Replacement(page);
         }
+        if (success) changes = d->writes.publicationRows();
     } catch (const std::bad_alloc &) {
         success = false;
         storageRefused = true;
@@ -2917,7 +2926,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealStoragePrepare, quint64(overlayChangeCount));
     auto overlay = hasOverlay
         ? owner->publicationCoordinator.preparePagePublicationLocked(
-              d->transaction, std::move(changes), &failure, &storageRefused, canonical)
+              d->transaction, changes, &failure, &storageRefused, canonical)
         : KisPagePublicationCoordinator::KisPreparedPagePublication{};
     if (success && hasOverlay && !overlay.isValid()) {
         success = false;
@@ -2926,8 +2935,8 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     }
     const qsizetype metadataChangeCount = overlay.metadataChangeCount();
     lock.unlock();
-    // Candidate storage owns the input values; no borrowed iterator survives
-    // this call or the following unlocked metadata preparation.
+    // Sealing and the scope gate retain original rows through unlocked
+    // preparation, acceptance, adapter installation and candidate cleanup.
     phase.next(Phase::MutationSealMetadataPrepare,
                quint64(metadataChangeCount));
     if (success && hasOverlay && !overlay.prepare(&failure, &storageRefused)) {
@@ -2979,7 +2988,6 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         if (!storageRefused) d->state = Private::State::Failed;
         lock.unlock();
         phase.next(Phase::MutationSealCleanup, pageWork);
-        changes = KisPagePublicationChanges{};
         overlay.finishUnlocked(std::move(metadataCleanup), lock);
         lock.relock();
         retire();

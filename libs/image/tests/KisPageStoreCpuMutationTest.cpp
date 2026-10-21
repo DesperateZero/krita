@@ -831,6 +831,8 @@ private Q_SLOTS:
     void aliasProofUsesPrepaidVersionStorage();
     void immutableAliasSource_data() { pixelRows(); }
     void immutableAliasSource();
+    void originalPublicationKeepsUntouchedClaims_data() { pixelRows(); }
+    void originalPublicationKeepsUntouchedClaims();
     void transactionSelectionSparseLifecycle_data();
     void transactionSelectionSparseLifecycle();
     void mixedSemanticAtomicity_data();
@@ -8581,7 +8583,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         // physical authority, rather than an exported generic proof, qualify.
         KisPagePublicationChange birth;
         birth.replacement = {version.key, KisPagePublicationProof(native.proofValue(f.ready)), false, &native};
-        auto first = f.metadata.prepareMutation(tx, &birth, 1, &f.error);
+        auto first = f.metadata.prepareMutation(tx, {&birth, 1}, &f.error);
         QVERIFY2(first.isValid(), qPrintable(f.error));
         QVERIFY(f.metadata.installMutation(std::move(first), tx, &f.error));
         auto &input = inputs[2 * i + 1];
@@ -8595,7 +8597,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
     capture.kind = KisPageTransitionKind::RetainCapturedVersion;
     capture.version = targets[1].version; capture.transaction = tx.id; capture.readView = {191};
     if (mode == 2) QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
-    auto candidate = f.metadata.prepareMutation(tx, inputs.data(), inputs.size(), &f.error);
+    auto candidate = f.metadata.prepareMutation(tx, {inputs.data(), inputs.size()}, &f.error);
     QVERIFY2(candidate.isValid(), qPrintable(f.error));
     std::array<bool, 5> planned{};
     candidate.forEachCapacityRelease(&planned, +[](void *p, size_t i) {
@@ -11090,6 +11092,56 @@ void KisPageStoreCpuMutationTest::semanticOnlyMutation()
     }
     f.store->release(std::move(lease)); before = {}; during = {}; sealed = {};
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::originalPublicationKeepsUntouchedClaims()
+{
+    QFETCH(int, bpp);
+    Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto mutation = f.begin(tx);
+    QVector<KisLogicalPageId> keys;
+    for (int i = 32; i >= 0; --i) keys.push_back({i, 0});
+    auto execution = mutation.borrowExecution({1}, keys, &f.error);
+    QVERIFY2(execution.isActive(), qPrintable(f.error));
+    QByteArray bytes(64 * 64 * bpp, char(0x61));
+    for (int i : {1, 31})
+        QVERIFY(execution.writeFinalRect(key(i), {}, {bytes.constData(), 64 * bpp, bytes.size()}, &f.error));
+    // Equal content has a claim, but contributes no publication row.
+    bytes.fill(char(0x31));
+    QVERIFY(execution.writeFinalRect(key(0), {}, {bytes.constData(), 64 * bpp, bytes.size()}, &f.error));
+    QVERIFY(execution.finish());
+    QVERIFY(mutation.removePage(key(16)));
+    bool checked = false, retained = false;
+    f.provider->beforeValidate = [&] {
+        if (checked) return;
+        checked = true;
+        auto contender = f.begin(tx);
+        retained = contender.isActive() && !contender.beginWrite(key(0)).isValid()
+            && !contender.beginWrite(key(32)).isValid() && contender.cancel();
+    };
+    auto cut = mutation.checkpointForRead(&f.error);
+    QVERIFY2(cut.isValid(), qPrintable(f.error));
+    f.provider->beforeValidate = {};
+    QVERIFY(checked && retained);
+    QCOMPARE(f.store->preparedPages(tx).proofs.size(), qsizetype(2));
+    for (int i = 0; i < 33; ++i) {
+        auto read = cut.readResidentPage(key(i)); QVERIFY(read.isValid());
+        QCOMPARE(QByteArray(static_cast<const char *>(read.data()), bpp),
+                 QByteArray(bpp, char(i == 0 ? 0x31 : i == 1 || i == 31 ? 0x61 : 0x2a)));
+    }
+    // The checkpoint discarded its completed original D. The same session
+    // can create a new segment, and the prior independent cut stays intact.
+    auto next = mutation.beginWrite(key(16)); QVERIFY(next.isValid());
+    memset(next.data(), 0x72, size_t(next.byteSize())); next = {};
+    QVERIFY(mutation.seal());
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    QCOMPARE(f.pixel({}, 16), QByteArray(bpp, char(0x72)));
+    auto old = cut.readResidentPage(key(16)); QVERIFY(old.isValid());
+    QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x2a));
+    old = {}; cut = {};
+    QVERIFY(f.store->closeSession());
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::transactionSelectionSparseLifecycle_data()

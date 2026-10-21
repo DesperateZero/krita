@@ -235,39 +235,39 @@ class BorrowedBackingChanges
     {
     public:
         Iterator() = default;
-        Iterator(PreparedBackingChange *rows, size_t stride, ptrdiff_t index)
-            : rows(reinterpret_cast<char *>(rows)), stride(stride), index(index) {}
+        Iterator(PreparedBackingChange *rows, KisPagePublicationRows publicationRows, ptrdiff_t index)
+            : rows(rows), publicationRows(publicationRows), index(index) {}
     private:
         PreparedBackingChange &dereference() const
-        { return *reinterpret_cast<PreparedBackingChange *>(rows + index * ptrdiff_t(stride)); }
+        { return publicationRows ? publicationRows[size_t(index)].backingPreparation : rows[index]; }
         bool equal(const Iterator &other) const { return rows == other.rows && index == other.index; }
         void increment() { ++index; }
         void decrement() { --index; }
         void advance(ptrdiff_t n) { index += n; }
         ptrdiff_t distance_to(const Iterator &other) const { return other.index - index; }
-        char *rows = nullptr;
-        size_t stride = 0;
+        PreparedBackingChange *rows = nullptr;
+        KisPagePublicationRows publicationRows;
         ptrdiff_t index = 0;
         friend class boost::iterator_core_access;
     };
 public:
-    BorrowedBackingChanges(PreparedBackingChange *rows, size_t stride, size_t capacity, size_t size = 0)
-        : rows(rows), stride(stride), capacity(capacity), used(size) {}
+    BorrowedBackingChanges(PreparedBackingChange *rows, KisPagePublicationRows publicationRows, size_t capacity, size_t size = 0)
+        : rows(rows), publicationRows(publicationRows), capacity(capacity), used(size) {}
     void reserve(size_t n) { Q_ASSERT(n <= capacity); Q_UNUSED(n); }
     void push_back(PreparedBackingChange value)
     {
         static_assert(std::is_trivially_destructible_v<PreparedBackingChange>);
         Q_ASSERT(used < capacity);
-        auto *slot = reinterpret_cast<PreparedBackingChange *>(reinterpret_cast<char *>(rows) + used++ * stride);
+        auto *slot = &*(begin() + ptrdiff_t(used++));
         ::new (static_cast<void *>(slot)) PreparedBackingChange(value);
     }
     size_t size() const { return used; }
-    Iterator begin() const { return Iterator(rows, stride, 0); }
-    Iterator end() const { return Iterator(rows, stride, ptrdiff_t(used)); }
+    Iterator begin() const { return Iterator(rows, publicationRows, 0); }
+    Iterator end() const { return Iterator(rows, publicationRows, ptrdiff_t(used)); }
     PreparedBackingChange &operator[](size_t i) const { Q_ASSERT(i < used); return *(begin() + ptrdiff_t(i)); }
 private:
     PreparedBackingChange *rows;
-    size_t stride;
+    KisPagePublicationRows publicationRows;
     size_t capacity;
     size_t used;
 };
@@ -1008,7 +1008,7 @@ KisBackingClassChangeReservation::KisBackingClassChangeReservation(
     : m_owner(std::exchange(other.m_owner, nullptr))
     , m_cookie(std::exchange(other.m_cookie, 0))
     , m_rows(std::exchange(other.m_rows, nullptr))
-    , m_stride(std::exchange(other.m_stride, 0))
+    , m_publicationRows(std::exchange(other.m_publicationRows, {}))
     , m_count(std::exchange(other.m_count, 0))
     , m_budget(std::move(other.m_budget))
 {
@@ -1023,7 +1023,7 @@ KisBackingClassChangeReservation::operator=(
         m_owner = std::exchange(other.m_owner, nullptr);
         m_cookie = std::exchange(other.m_cookie, 0);
         m_rows = std::exchange(other.m_rows, nullptr);
-        m_stride = std::exchange(other.m_stride, 0);
+        m_publicationRows = std::exchange(other.m_publicationRows, {});
         m_count = std::exchange(other.m_count, 0);
         m_budget = std::move(other.m_budget);
     }
@@ -1657,9 +1657,9 @@ try {
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChanges(
     KisPagePreparedBackingChange *rows, size_t capacity, void *context,
-    int (*read)(void *, KisBackingClassChange *), QString *error, size_t stride)
+    int (*read)(void *, KisBackingClassChange *), QString *error, KisPagePublicationRows publicationRows)
 try {
-    if ((capacity && !rows) || !read) {
+    if ((capacity && !rows) || !read || (publicationRows && capacity > publicationRows.size())) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing change workspace is invalid"));
         return {};
     }
@@ -1680,12 +1680,12 @@ try {
         return d->backingBudget->admitUnchangedBacking(error) ? KisBackingClassChangeReservation(this, 0)
                                                            : KisBackingClassChangeReservation{};
     KisBackingClassChangeReservation result;
-    BorrowedBackingChanges projected(rows, stride, capacity);
+    BorrowedBackingChanges projected(rows, publicationRows, capacity);
     auto rollback = qScopeGuard([&] { d->finishProjectedChanges(projected, rows, result.m_budget); });
     if (!d->prepareProjectedChanges(first, next, capacity, projected, rows, result.m_budget, error)) return {};
     result.m_owner = this;
     result.m_rows = rows;
-    result.m_stride = stride;
+    result.m_publicationRows = publicationRows;
     result.m_count = projected.size();
     ++d->activeBorrowedChanges;
     rollback.dismiss();
@@ -1696,8 +1696,9 @@ try {
 }
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareIdleCapacity(
-    KisPagePublicationChange *rows, size_t count, quint64 allowance, QString *error)
+    KisPagePublicationRows rows, quint64 allowance, QString *error)
 {
+    const size_t count = rows.size();
     if (count && !rows) {
         KisPageStoreDetail::setError(error, QStringLiteral("capacity release range is invalid"));
         return {};
@@ -1715,9 +1716,9 @@ KisBackingClassChangeReservation KisPageOwnerLedger::prepareIdleCapacity(
         }
         return 0;
     };
-    return prepareBackingChanges(count ? &rows->backingPreparation : nullptr, count, &next,
+    return prepareBackingChanges(count ? &rows[0].backingPreparation : nullptr, count, &next,
         [](void *context, KisBackingClassChange *change) { return (*static_cast<decltype(next) *>(context))(change); },
-        error, sizeof(*rows));
+        error, rows);
 }
 
 KisBackingClassChangeReservation KisPageOwnerLedger::prepareBackingChangesImpl(
@@ -2001,13 +2002,13 @@ void KisPageOwnerLedger::cancelPreparedBackingChanges(quint64 cookie) noexcept
 void KisPageOwnerLedger::finishBorrowedBackingChanges(KisBackingClassChangeReservation &reservation, bool commit) noexcept
 {
     QMutexLocker locker(&d->mutex);
-    BorrowedBackingChanges rows(reservation.m_rows, reservation.m_stride, reservation.m_count, reservation.m_count);
+    BorrowedBackingChanges rows(reservation.m_rows, reservation.m_publicationRows, reservation.m_count, reservation.m_count);
     if (commit) d->commitProjectedChanges(rows, reservation.m_rows, reservation.m_budget);
     d->finishProjectedChanges(rows, reservation.m_rows, reservation.m_budget, commit);
     Q_ASSERT(d->activeBorrowedChanges);
     --d->activeBorrowedChanges;
     reservation.m_rows = nullptr;
-    reservation.m_stride = 0;
+    reservation.m_publicationRows = {};
     reservation.m_count = 0;
     reservation.m_owner = nullptr;
 }

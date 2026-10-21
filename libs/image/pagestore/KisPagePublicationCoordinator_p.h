@@ -82,7 +82,7 @@ struct KisPagePublicationDelta {
 // edits. Filtering visits each row once; no per-index map walk is hidden here.
 struct KisPageOperationPublication {
     template<bool Proof> struct Pages {
-        const KisPagePublicationChanges &rows;
+        KisPagePublicationRows rows;
         size_t length;
         struct Iterator {
             using iterator_category = std::forward_iterator_tag;
@@ -90,7 +90,7 @@ struct KisPageOperationPublication {
             using value_type = std::conditional_t<Proof, KisPagePublicationChange::Replacement, KisPageKey>;
             using pointer = const value_type *;
             using reference = const value_type &;
-            KisPagePublicationChanges::const_iterator current, last;
+            KisPagePublicationRows::const_iterator current, last;
             bool selected() const {
                 return Proof ? !current->replacement.removal
                     : current->replacement.removal && current->removalWasInBase;
@@ -237,12 +237,12 @@ public:
     private:
         bool installOverlayLocked(KisPageMetadataCoordinator::DeferredPublicationCleanup *, QString *);
         // This preparation belongs to the original call/handle. Only actual
-        // row and installation capacity allocates; the header has no separate
-        // charged object or allocator-retention lifetime.
+        // Native input is borrowed from the original write set. Only external
+        // input and real installation capacity allocate; this header is inline.
         struct Data {
             using Change = KisPagePublicationChange;
             explicit Data(const KisMutationStorageAllocator<char> &storage)
-                : changes(storage), ownedAuthorities(storage) {}
+                : ownedChanges(storage), ownedAuthorities(storage) {}
             Data(Data &&) noexcept = default;
             Data &operator=(Data &&) noexcept = default;
             ~Data() { releaseCapacity(); }
@@ -256,7 +256,8 @@ public:
             }
             KisPagePublicationCoordinator *owner = nullptr;
             KisPageTransaction transaction;
-            KisPagePublicationChanges changes;
+            KisPagePublicationChanges ownedChanges;
+            KisPagePublicationRows changes;
             size_t mutationCount = 0;
             std::shared_ptr<KisPagePublicationDelta> state;
             std::vector<KisReplicaHandle, KisMutationStorageAllocator<KisReplicaHandle>> ownedAuthorities;
@@ -370,8 +371,8 @@ public:
         const OverlayChange *changes, size_t count,
         QString *error, bool *storageRefused = nullptr);
     KisPreparedPagePublication preparePagePublicationLocked(
-        const KisPageTransaction &transaction, KisPagePublicationChanges changes,
-        QString *error, bool *storageRefused, bool canonical);
+        const KisPageTransaction &transaction, KisPagePublicationRows changes,
+        QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned = {});
     // Consume the caller's stable sequence directly into candidate storage.
     // The reader is borrowed synchronously and is never kept by the candidate.
     template<class ReadChange>

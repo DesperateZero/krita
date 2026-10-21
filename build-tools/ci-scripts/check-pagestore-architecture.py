@@ -1358,7 +1358,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "releasePublicationActivity",
             "entry.originalPage = page",
             "page->second.activity.publicationClaim = data.get()",
-            "page->activity.publicationClaim = rows",
+            "page->activity.publicationClaim = &rows[0]",
             "shard->installDetachment(*page, version, native",
             "releaseActivities(first, end)",
             "entry.shardOwner->releasePublicationActivity(entry.key(), entry.originalPage->second)",
@@ -1516,6 +1516,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         write_header = code_only(write_coordinator_header.read_text(
             encoding="utf-8", errors="replace"
         ))
+        budget_header = code_only((REPOSITORY_ROOT / "libs/image/pagestore/KisPageBackingBudget_p.h").read_text(encoding="utf-8"))
         for contract in (
             "KisPageWriteCoordinator final",
             "KisPageWriteAdmission final",
@@ -1530,14 +1531,20 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::optional<KisMutationPageEntry> inlineEntry",
             "KisMutationStorage<KisMutationPageEntry, 8> overflow",
             "std::optional<Index> index",
-            "using Index = std::vector<EntryIndex, KisMutationStorageAllocator<EntryIndex>>",
+            "using Index = boost::container::small_vector<KisPagePublicationSource *, 1,",
+            "KisPagePublicationRows publicationRows()",
             "static_assert(sizeof(KisPageWriteIntent) <= 32)",
-            "static_assert(sizeof(KisMutationPageEntry) <= 112)",
+            "static_assert(sizeof(KisMutationPageEntry) <= 120)",
             "std::shared_ptr<const KisPageReplicaSource> initialization",
             "KisPagePrivateWrite *coldPageStorage = nullptr",
         ):
-            if contract not in write_header:
+            if contract not in write_header + budget_header:
                 errors.append(f"BR1 converged write schema is missing: {contract}")
+        store_source = code_only((REPOSITORY_ROOT / "libs/image/pagestore/KisPageStore.cpp").read_text(encoding="utf-8"))
+        if "KisPagePublicationChanges changes" in store_source or "changes.push_back" in store_source:
+            errors.append("native seal reconstructed a second publication-row owner")
+        if "indexBucket" in write_coordinator_source.read_text(encoding="utf-8"):
+            errors.append("mutation directory restored the superseded slot locator")
         entry_begin = write_header.find("KisMutationPageEntry final")
         entry_end = write_header.find("KisMutationWriteSet final", entry_begin)
         entry_text = write_header[entry_begin:entry_end]
@@ -1565,7 +1572,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                          "m_sharedChildren.find(slot->sharedChild)"):
             if obsolete in write_source:
                 errors.append(f"budget restored redundant projection/registration: {obsolete}")
-        if ("changedComponents" not in write_header or "slot->bucket(" not in write_source
+        if ("changedComponents" not in budget_header or "slot->bucket(" not in write_source
                 or "std::is_trivially_copyable_v<ReservationSlot>" not in write_source
                 or "std::memcpy(candidate.get(), m_slots.get()," not in write_source):
             errors.append("budget selected-component storage lost safe masked consumption/growth")
@@ -1609,7 +1616,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
         for contract in ("KisMutationStorageAllocator<Pair>::retained", "takeNativeWriteStorage(idle)",
-                         "returnNativeWriteStorage(target, std::move(page))", "*page = Page{}",
+                         "returnNativeWriteStorage(target, std::move(page))", "page->resetProducer()",
+                         "static_cast<KisPagePrivateWrite &>(*this) = KisPagePrivateWrite{}", "resetPixel.clear()",
                          "coldPages.takeReleasedBlocks()", "entry.setColdPage(page)"):
             if contract not in store_text:
                 errors.append(f"mutation cold resources lost stable budgeted storage: {contract}")
@@ -1621,7 +1629,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:
                 errors.append(f"mutation cold resources regained duplicate state: {forbidden}")
-        if "static_assert(sizeof(Page) <= 576)" not in cold_page:
+        if "static_assert(sizeof(Page) <= 976)" not in cold_page:
             errors.append("mutation cold resource layout lost its bounded capacity ceiling")
         private_records = code_only(metadata_records_header.read_text(encoding="utf-8"))
         if ("struct Page : KisPagePrivateWrite" not in cold_page

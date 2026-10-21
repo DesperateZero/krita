@@ -599,9 +599,11 @@ public:
         static_assert(std::is_nothrow_default_constructible_v<Block>);
         if (blocks > (size_t(std::numeric_limits<qint64>::max()) - offset) / sizeof(Block)) throw std::bad_alloc();
         const size_t units = (offset + blocks * sizeof(Block) + sizeof(AllocationUnit) - 1) / sizeof(AllocationUnit);
-        m_blocks.reserve(blocks);
         auto *budget = m_blocks.get_allocator().budget;
-        auto *raw = KisMutationStorageAllocator<AllocationUnit>(budget).allocate(units);
+        KisMutationStorageAllocator<AllocationUnit> allocator(budget);
+        auto *raw = allocator.allocate(units);
+        try { m_blocks.reserve(blocks); }
+        catch (...) { allocator.deallocate(raw, units); throw; }
         auto *group = new (raw) Group{{blocks}, units};
         auto *storage = reinterpret_cast<std::byte *>(raw) + offset;
         for (size_t b = 0; b < blocks; ++b) {
@@ -623,13 +625,15 @@ public:
             const bool append = m_vacant == Invalid;
             const size_t directory = append ? m_blocks.size() : m_vacant;
             if (directory >= (Invalid - 1u) / BlockElements) throw std::bad_alloc();
-            if (append && m_blocks.size() == m_blocks.capacity())
-                m_blocks.reserve(m_blocks.capacity() ? 2 * m_blocks.capacity() : size_t(1));
             KisMutationStorageAllocator<Block> allocator(budget);
             Block *raw = allocator.allocate(1);
             try { ::new (static_cast<void *>(raw)) Block(); }
             catch (...) { allocator.deallocate(raw, 1); throw; }
             OwnedBlock prepared(raw, DeleteBlock{budget});
+            // Refused row storage must not leave an enlarged directory behind.
+            // The new block is still local if directory funding also refuses.
+            if (append && m_blocks.size() == m_blocks.capacity())
+                m_blocks.reserve(m_blocks.capacity() ? 2 * m_blocks.capacity() : size_t(1));
             if (append) m_blocks.emplace_back();
             else m_vacant = m_blocks[directory].nextVacant;
             auto &entry = m_blocks[directory]; entry.block = std::move(prepared); entry.nextVacant = Invalid;

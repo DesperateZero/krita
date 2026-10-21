@@ -7,6 +7,7 @@
 #define KIS_PAGE_PUBLICATION_INPUT_P_H
 
 #include "KisPageStoreTypes.h"
+#include "KisPagePublicationRows_p.h"
 #include "KisMutationStorage_p.h"
 #include "KisPageMetadataCoordinator_p.h"
 #include "KisPageRetirementRecord_p.h"
@@ -108,6 +109,7 @@ struct KisPagePublicationChange {
         void *prepared = nullptr;
         KisVersionSlotId replacementSlot;
         size_t shardIndex = 0;
+        size_t inputOrdinal = 0;
     } metadataAcceptance;
     bool borrowedMutation = false;
     bool needsOwnedMutation = false;
@@ -123,23 +125,34 @@ struct KisPagePublicationChange {
 using KisPagePublicationChanges = std::vector<KisPagePublicationChange,
     KisMutationStorageAllocator<KisPagePublicationChange>>;
 
-// Sort only a phase's adjunct fields. The original D and all result pointers
-// remain fixed; this view has neither storage nor ownership.
+inline KisPagePublicationChange &KisPagePublicationRows::Iterator::operator*() const
+{
+    Q_ASSERT(!indirect || (indirect[index] && indirect[index]->publicationRow));
+    return indirect ? *indirect[index]->publicationRow : direct[index];
+}
+inline KisPagePublicationRows KisPagePublicationRows::subspan(size_t offset) const
+{
+    Q_ASSERT(offset <= count);
+    return indirect ? KisPagePublicationRows(indirect + offset, count - offset)
+                    : KisPagePublicationRows(direct + offset, count - offset);
+}
+
+// Sort only a phase's adjunct fields; original facts and addresses stay fixed.
 template<class T, T KisPagePublicationChange::*Member>
 class KisPublicationMemberIterator : public boost::iterator_facade<KisPublicationMemberIterator<T, Member>,
     T, boost::random_access_traversal_tag>
 {
 public:
     KisPublicationMemberIterator() = default;
-    explicit KisPublicationMemberIterator(KisPagePublicationChange *row) : row(row) {}
+    explicit KisPublicationMemberIterator(KisPagePublicationRows::Iterator row) : row(row) {}
 private:
-    T &dereference() const { return row->*Member; }
+    T &dereference() const { return (*row).*Member; }
     bool equal(const KisPublicationMemberIterator &other) const { return row == other.row; }
     void increment() { ++row; }
     void decrement() { --row; }
     void advance(ptrdiff_t n) { row += n; }
     ptrdiff_t distance_to(const KisPublicationMemberIterator &other) const { return other.row - row; }
-    KisPagePublicationChange *row = nullptr;
+    KisPagePublicationRows::Iterator row;
     friend class boost::iterator_core_access;
 };
 

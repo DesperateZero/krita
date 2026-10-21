@@ -2325,15 +2325,16 @@ void kisFreeMutationStorage(KisBackingBudgetController *budget, void *data, size
 }
 
 KisMutationWriteSet::KisMutationWriteSet(KisBackingBudgetController *value)
-    : overflow(value), budget(value) {}
+    : overflow(value), index(std::in_place, Index::allocator_type(KisMutationStorageAllocator<KisPagePublicationSource *>(value))), budget(value) {}
 
 KisMutationWriteSet::KisMutationWriteSet(KisMutationWriteSet &&other) noexcept
     : inlineEntry(std::move(other.inlineEntry))
     , inlineIncarnation(std::exchange(other.inlineIncarnation, 0))
     , nextInlineIncarnation(std::exchange(other.nextInlineIncarnation, 0))
     , overflow(std::move(other.overflow))
-    , index(std::move(other.index)), budget(std::exchange(other.budget, nullptr)), indexSeed(other.indexSeed)
+    , index(std::move(other.index)), semanticRows(std::move(other.semanticRows)), budget(std::exchange(other.budget, nullptr)), publishedCount(other.publishedCount), indexSeed(other.indexSeed)
 {
+    rebindInline(other.inlineEntry ? &*other.inlineEntry : nullptr);
     other.inlineEntry.reset();
     other.index.reset();
 }
@@ -2345,9 +2346,14 @@ KisMutationWriteSet &KisMutationWriteSet::operator=(KisMutationWriteSet &&other)
         inlineIncarnation = std::exchange(other.inlineIncarnation, 0);
         nextInlineIncarnation = std::exchange(other.nextInlineIncarnation, 0);
         overflow = std::move(other.overflow);
-        index = std::move(other.index);
+        index.reset();
+        if (other.index) index.emplace(std::move(*other.index));
+        semanticRows.reset();
+        if (other.semanticRows) semanticRows.emplace(std::move(*other.semanticRows));
         budget = std::exchange(other.budget, nullptr);
+        publishedCount = other.publishedCount;
         indexSeed = other.indexSeed;
+        rebindInline(other.inlineEntry ? &*other.inlineEntry : nullptr);
         other.inlineEntry.reset();
         other.index.reset();
     }
@@ -2365,49 +2371,124 @@ const KisMutationPageEntry *KisMutationWriteSet::find(const KisPageKey &key) con
     return found == InvalidEntry ? nullptr : at(found);
 }
 
+void KisMutationWriteSet::rebindInline(const KisMutationPageEntry *old) noexcept
+{
+    if (!old || !index) return;
+    for (auto &row : *index) if (row == old) row = &*inlineEntry;
+}
+
+size_t KisMutationWriteSet::directoryPosition(const KisPageKey &key) const
+{
+    if (!index) return 0;
+    if (directoryHashed()) return directoryBucket(*index, key);
+    if (!publishedCount) {
+        const auto found = std::find_if(index->begin(), index->end(), [&](const auto *source) {
+            return static_cast<const KisMutationPageEntry *>(source)->key() == key;
+        });
+        return size_t(found - index->begin());
+    }
+    const auto less = [](const KisPageKey &a, const KisPageKey &b) {
+        return std::tie(a.surface.value, a.page.row, a.page.column)
+            < std::tie(b.surface.value, b.page.row, b.page.column);
+    };
+    const size_t split = publishedCount.value_or(index->size());
+    for (const auto range : {std::pair<size_t, size_t>{0, split}, {split, index->size()}}) {
+        const auto end = index->begin() + range.second;
+        const auto found = std::lower_bound(index->begin() + range.first, end, key,
+            [&](const auto *row, const auto &key) { return less(static_cast<const KisMutationPageEntry *>(row)->key(), key); });
+        if (found != end && static_cast<const KisMutationPageEntry *>(*found)->key() == key)
+            return size_t(found - index->begin());
+    }
+    return index->size();
+}
+
 KisMutationWriteSet::EntryIndex KisMutationWriteSet::findIndex(const KisPageKey &key) const
 {
-    if (index) {
-        return (*index)[indexBucket(*index, key)];
-    }
-    for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot)) {
-        if (at(slot)->key() == key)
-            return slot.index;
-    }
-    return InvalidEntry;
+    const size_t pos = directoryPosition(key);
+    return index && pos < index->size() && (*index)[pos]
+        ? static_cast<const KisMutationPageEntry *>((*index)[pos])->slotIndex : InvalidEntry;
 }
 
 KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent &intent, bool *inserted)
 {
     if (inserted) *inserted = false;
-    if (KisMutationPageEntry *found = find(intent.key))
-        return *found;
+    Q_ASSERT(index);
+    size_t position = directoryPosition(intent.key);
+    if (position < index->size() && (*index)[position])
+        return *static_cast<KisMutationPageEntry *>((*index)[position]);
+    Q_ASSERT(!publishedCount);
     const bool useInline = !inlineEntry && nextInlineIncarnation;
     const auto raw = useInline ? EntryHandle{} : overflow.prepareSlot();
     const EntryHandle slot = useInline ? EntryHandle{0, nextInlineIncarnation}
                                       : EntryHandle{raw.index + 1, raw.incarnation};
-    // All fallible index work precedes the noexcept entry construction. The
-    // owner serializes preparation and installation; no candidate survives an
-    // unlock or a second mutation of this set.
-    if ((!index && size() >= 8) || (index && size_t(size()) + 1 > index->size() / 2)) {
-        auto prepared = prepareIndex(size() + 1);
-        prepared[indexBucket(prepared, intent.key)] = slot.index;
+    bool hashed = directoryHashed();
+    // One source directory serves admission and the sealed D. Keep append/
+    // expected-constant lookup during mutable input; never shift an unbounded
+    // sorted suffix for each arriving key. Freeze later sorts pointers once.
+    if ((!hashed && size() >= 8) || (hashed && size_t(size()) + 1 > index->size() / 2)) {
+        auto prepared = prepareDirectory(size() + 1);
+        position = directoryBucket(prepared, intent.key);
         index.emplace(std::move(prepared));
-    } else if (index) {
-        (*index)[indexBucket(*index, intent.key)] = slot.index;
+        hashed = true;
+    } else if (!hashed && index->size() == index->capacity()) {
+        index->reserve(index->size() + std::max(size_t(1), size_t(index->size())));
     }
+    KisMutationPageEntry *entry;
     if (useInline) {
         inlineEntry.emplace(intent);
         inlineIncarnation = nextInlineIncarnation;
-        nextInlineIncarnation = nextInlineIncarnation == std::numeric_limits<quint64>::max()
-            ? 0 : nextInlineIncarnation + 1;
-        if (inserted) *inserted = true;
-        return *inlineEntry;
-    }
-    auto *entry = overflow.emplacePrepared(raw, intent);
+        nextInlineIncarnation = nextInlineIncarnation == std::numeric_limits<quint64>::max() ? 0 : nextInlineIncarnation + 1;
+        entry = &*inlineEntry;
+    } else entry = overflow.emplacePrepared(raw, intent);
     Q_ASSERT(entry);
+    entry->slotIndex = slot.index;
+    if (hashed) (*index)[position] = entry;
+    else index->push_back(entry);
     if (inserted) *inserted = true;
     return *entry;
+}
+
+KisPagePublicationRows KisMutationWriteSet::publicationRows()
+{
+    Q_ASSERT(index);
+    if (!publishedCount) {
+        // Reuse the same directory allocation. No page/permission entry moves
+        // and no second D index or key/proof snapshot is built.
+        size_t used = 0;
+        for (auto *source : *index) if (source) (*index)[used++] = source;
+        index->resize(used);
+        const auto active = [](const auto *row) {
+            const auto *entry = static_cast<const KisMutationPageEntry *>(row);
+            return entry->isRemoval() || (entry->coldPage() && entry->coldPage()->target.isValid());
+        };
+        const size_t removals = size_t(std::count_if(index->begin(), index->end(), [](const auto *source) {
+            return static_cast<const KisMutationPageEntry *>(source)->isRemoval();
+        }));
+        if (removals) {
+            semanticRows.emplace(KisMutationStorageAllocator<KisPagePublicationChange>::retained(budget));
+            semanticRows->reserve(removals);
+            for (auto *source : *index) {
+                const auto *entry = static_cast<const KisMutationPageEntry *>(source);
+                if (!entry->isRemoval()) continue;
+                semanticRows->emplace_back(KisPagePublicationChange::Replacement{entry->key(), {}, true});
+                source->publicationRow = &semanticRows->back();
+            }
+        }
+        // Classify each source once. Activity checks include the full native
+        // handle/layout validation; repeating them inside a sorting comparator
+        // turns one eligibility decision into O(log N) validation per row.
+        const auto split = std::partition(index->begin(), index->end(), active);
+        publishedCount = size_t(split - index->begin());
+        const auto less = [](const auto *a, const auto *b) {
+            const auto &ka = static_cast<const KisMutationPageEntry *>(a)->key();
+            const auto &kb = static_cast<const KisMutationPageEntry *>(b)->key();
+            return std::tie(ka.surface.value, ka.page.row, ka.page.column) < std::tie(kb.surface.value, kb.page.row, kb.page.column);
+        };
+        // Only source pointers move; row facts and acceptance scratch stay put.
+        std::sort(index->begin(), split, less);
+        std::sort(split, index->end(), less);
+    }
+    return {index->data(), *publishedCount};
 }
 
 KisMutationWriteSet::EntryHandle KisMutationWriteSet::handleAt(EntryIndex entry) const
@@ -2467,8 +2548,21 @@ bool KisMutationWriteSet::erase(EntryHandle slot)
     if (!entry || entry->isExposed() || entry->coldPage() != nullptr
         || entry->initializationSource())
         return false;
-    if (index)
-        eraseIndex(entry->key());
+    const auto position = directoryPosition(entry->key());
+    Q_ASSERT(index && position < index->size());
+    if (directoryHashed()) {
+        const size_t mask = index->size() - 1;
+        size_t hole = position;
+        for (size_t next = (hole + 1) & mask; (*index)[next]; next = (next + 1) & mask) {
+            const auto *source = static_cast<const KisMutationPageEntry *>((*index)[next]);
+            const size_t home = qHash(source->key(), indexSeed) & mask;
+            if (((next - home) & mask) >= ((hole - home) & mask)) {
+                (*index)[hole] = (*index)[next]; hole = next;
+            }
+        }
+        (*index)[hole] = nullptr;
+    } else index->erase(index->begin() + position);
+    if (publishedCount && position < *publishedCount) --*publishedCount;
     if (!slot.index) {
         inlineEntry.reset();
         inlineIncarnation = 0;
@@ -2484,52 +2578,41 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
     const qsizetype inlineCapacity = inlineEntry || nextInlineIncarnation ? 1 : 0;
     if (count > inlineCapacity)
         overflow.reserveTogether(size_t(count - inlineCapacity));
-    if (count > 8 && (!index || size_t(count) > index->size() / 2))
-        index.emplace(prepareIndex(count));
+    Q_ASSERT(index && !publishedCount);
+    if (count > 8 && (!directoryHashed() || size_t(count) > index->size() / 2))
+        index.emplace(prepareDirectory(count));
+    else if (!directoryHashed()) index->reserve(size_t(count));
+}
+
+size_t KisMutationWriteSet::directoryBucket(const Index &table, const KisPageKey &key) const noexcept
+{
+    const size_t mask = table.size() - 1;
+    size_t position = qHash(key, indexSeed) & mask;
+    while (table[position] && !(static_cast<const KisMutationPageEntry *>(table[position])->key() == key))
+        position = (position + 1) & mask;
+    return position;
+}
+
+KisMutationWriteSet::Index KisMutationWriteSet::prepareDirectory(qsizetype count) const
+{
+    size_t buckets = 32;
+    while (buckets / 2 < size_t(count)) {
+        if (buckets > size_t(std::numeric_limits<qint64>::max()) / sizeof(KisPagePublicationSource *) / 2)
+            throw std::bad_alloc();
+        buckets *= 2;
+    }
+    Index result(index->get_allocator());
+    result.resize(buckets, nullptr);
+    for (auto *source : *index) if (source) {
+        const auto *entry = static_cast<const KisMutationPageEntry *>(source);
+        result[directoryBucket(result, entry->key())] = source;
+    }
+    return result;
 }
 
 qsizetype KisMutationWriteSet::size() const
 {
     return qsizetype(overflow.size()) + (inlineEntry ? 1 : 0);
-}
-
-size_t KisMutationWriteSet::indexBucket(const Index &table, const KisPageKey &key) const noexcept
-{
-    const size_t mask = table.size() - 1;
-    size_t bucket = qHash(key, indexSeed) & mask;
-    while (table[bucket] != InvalidEntry && !(at(table[bucket])->key() == key))
-        bucket = (bucket + 1) & mask;
-    return bucket;
-}
-
-void KisMutationWriteSet::eraseIndex(const KisPageKey &key) noexcept
-{
-    auto &table = *index;
-    const size_t mask = table.size() - 1;
-    size_t hole = indexBucket(table, key);
-    Q_ASSERT(table[hole] != InvalidEntry);
-    for (size_t next = (hole + 1) & mask; table[next] != InvalidEntry; next = (next + 1) & mask) {
-        const size_t home = qHash(at(table[next])->key(), indexSeed) & mask;
-        if (((next - home) & mask) >= ((hole - home) & mask)) {
-            table[hole] = table[next];
-            hole = next;
-        }
-    }
-    table[hole] = InvalidEntry;
-}
-
-KisMutationWriteSet::Index KisMutationWriteSet::prepareIndex(qsizetype count) const
-{
-    size_t buckets = 16;
-    while (buckets / 2 < size_t(count)) {
-        if (buckets > size_t(std::numeric_limits<qint64>::max()) / sizeof(EntryIndex) / 2)
-            throw std::bad_alloc();
-        buckets *= 2;
-    }
-    Index result(buckets, InvalidEntry, KisMutationStorageAllocator<EntryIndex>(budget));
-    for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot))
-        result[indexBucket(result, at(slot)->key())] = slot.index;
-    return result;
 }
 
 KisPageWriteAdmission::ClaimSet::~ClaimSet()

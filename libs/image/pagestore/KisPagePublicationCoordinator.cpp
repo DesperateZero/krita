@@ -31,7 +31,7 @@ bool overlayKeyLess(const KisPageKey &a, const KisPageKey &b)
 // once in that storage; value-only updates touch only D validated positions.
 // Entries are capabilities/keys, not resource owners requiring deferred free.
 template<bool Proof, typename Table>
-void acceptSelection(Table &table, const KisPagePublicationChanges &changes)
+void acceptSelection(Table &table, KisPagePublicationRows changes)
 {
     const auto selected = [](const auto &row) {
         if constexpr (Proof) return !row.replacement.removal;
@@ -372,7 +372,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepare(
     }
     if (data->mutationCount) {
         data->metadata = data->owner->m_metadata.prepareMutation(
-            data->transaction, data->changes.data(), qsizetype(data->changes.size()), error);
+            data->transaction, data->changes, error);
         if (!data->metadata.isValid()) {
             if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
             return false;
@@ -438,7 +438,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepareSurfaceLo
         })) {
             // Derive from the same base + overlay used by captured readers.
             // Persistent subtree bounds avoid exporting the document manifest.
-            const auto storage = data->changes.get_allocator();
+            const auto storage = data->ownedChanges.get_allocator();
             std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removals(storage), additions(storage);
             removals.reserve((data->state ? data->state->removals.size() : 0) + data->changes.size());
             additions.reserve((data->state ? data->state->proofs.size() : 0) + data->changes.size());
@@ -562,7 +562,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         const auto allowance = owner.idleAllowanceLocked();
         if (allowance)
             capacityReservation = owner.m_owner.prepareIdleCapacity(
-                data->changes.data() + i, data->changes.size() - i, allowance);
+                data->changes.subspan(i), allowance);
         break;
     }
 
@@ -1851,7 +1851,11 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
             identity.native = bool(native);
             changes.push_back({{value.key, identity, value.removal, native}, {}, false, false, false, {}});
         }
-        return preparePagePublicationLocked(transaction, std::move(changes), error, storageRefused, canonical);
+        std::sort(changes.begin(), changes.end(), [](const auto &a, const auto &b) {
+            return overlayKeyLess(a.replacement.key(), b.replacement.key());
+        });
+        const KisPagePublicationRows rows(changes.data(), changes.size());
+        return preparePagePublicationLocked(transaction, rows, error, storageRefused, canonical, std::move(changes));
     } catch (const std::bad_alloc &) {
         if (storageRefused) *storageRefused = true;
         KisPageStoreDetail::setError(error, QStringLiteral("overlay storage preparation was refused"));
@@ -1861,11 +1865,11 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
 
 KisPagePublicationCoordinator::KisPreparedPagePublication
 KisPagePublicationCoordinator::preparePagePublicationLocked(
-    const KisPageTransaction &transaction, KisPagePublicationChanges changes,
-    QString *error, bool *storageRefused, bool canonical)
+    const KisPageTransaction &transaction, KisPagePublicationRows changes,
+    QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned)
 {
     if (storageRefused) *storageRefused = false;
-    if (!hasActiveTransactionLocked(transaction) || changes.empty()) {
+    if (!hasActiveTransactionLocked(transaction) || !changes || changes.empty()) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
         return {};
     }
@@ -1876,10 +1880,8 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
         candidate->owner = this;
         candidate->transaction = transaction;
         candidate->canonical = canonical;
-        candidate->changes = std::move(changes);
-        std::sort(candidate->changes.begin(), candidate->changes.end(), [](const auto &a, const auto &b) {
-            return overlayKeyLess(a.replacement.key(), b.replacement.key());
-        });
+        if (!owned.empty()) candidate->ownedChanges = std::move(owned);
+        candidate->changes = changes;
         size_t proofInsertions = 0, removalInsertions = 0;
         const auto base = m_epochs.root(transaction.baseEpoch);
         if (!canonical) candidate->state = preparedStateLocked(transaction.id);
@@ -1887,6 +1889,13 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
         auto *state = candidate->state.get();
         KisPageKey previous;
         for (auto &entry : candidate->changes) {
+            // Every attempt refreshes dynamic acceptance facts; the producer
+            // and original row survive a capacity refusal, candidate tails do not.
+            entry.superseded = {};
+            entry.supersededAuthority = nullptr;
+            entry.releasesCapacity = false;
+            entry.acceptedIdle = nullptr;
+            entry.needsOwnedMutation = false;
             const auto &change = entry.replacement;
             const bool hasProof = change.hasProof();
             auto *native = hasProof ? change.native : nullptr;

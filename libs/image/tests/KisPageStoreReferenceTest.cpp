@@ -8778,15 +8778,20 @@ void KisPageStoreReferenceTest::mutationWriteSetBudgetFailureIsAtomic()
         intent.key = pageKey(i);
         return &writes.getOrCreate(intent);
     };
-    quint64 admittedBytes = 0;
+    quint64 admittedBytes = 0, preparationPeak = 0;
     {
         KisBackingBudgetController probe;
         KisMutationWriteSet writes(&probe);
         for (int i = 0; i < count - 1; ++i) add(writes, i);
-        admittedBytes = probe.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        const auto usage = probe.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        admittedBytes = usage.live.cpuRam;
+        preparationPeak = usage.peak.cpuRam;
     }
     KisPageBackingLimits limits;
-    limits.metadataArenaBytes = admittedBytes;
+    // Directory growth must retain the old live locator until replacement
+    // capacity is funded. Reproduce the real preparation peak, not only its
+    // smaller final live size, before testing the next rejected growth.
+    limits.metadataArenaBytes = preparationPeak;
     KisBackingBudgetController budget(limits);
     {
         KisMutationWriteSet writes(&budget);
@@ -9254,7 +9259,7 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
         }
         QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].reserved.cpuRam, quint64(0));
     }
-    auto partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
+    auto partial = owner.prepareIdleCapacity({rows.data(), rows.size()}, 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
     for (const auto &row : rows) QVERIFY(!row.acceptedIdle);
     partial.release();
@@ -9263,17 +9268,17 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
         QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
     }
     std::array<KisPagePublicationChange, 2> duplicate{rows[0], rows[0]};
-    QVERIFY(!owner.prepareIdleCapacity(duplicate.data(), duplicate.size(), 8192, &error).isValid());
+    QVERIFY(!owner.prepareIdleCapacity({duplicate.data(), duplicate.size()}, 8192, &error).isValid());
     QVERIFY(error.contains(QStringLiteral("more than once")));
     auto invalid = rows;
     auto invalidAuthority = authorities[2];
     invalidAuthority.allocation.slot = 9999;
     invalid[2].supersededAuthority = &invalidAuthority;
-    QVERIFY(!owner.prepareIdleCapacity(invalid.data(), invalid.size(), 12288, &error).isValid());
+    QVERIFY(!owner.prepareIdleCapacity({invalid.data(), invalid.size()}, 12288, &error).isValid());
     for (const auto &row : invalid) QVERIFY(!row.acceptedIdle);
     for (const auto &row : rows) QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
     rows[0].releasesCapacity = false;
-    partial = owner.prepareIdleCapacity(rows.data(), rows.size(), 4096, &error);
+    partial = owner.prepareIdleCapacity({rows.data(), rows.size()}, 4096, &error);
     QVERIFY2(partial.isValid(), qPrintable(error));
     owner.commitBackingChanges(std::move(partial));
     QVERIFY(!rows[0].acceptedIdle);

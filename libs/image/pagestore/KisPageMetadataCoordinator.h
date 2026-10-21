@@ -6,6 +6,7 @@
 
 #ifndef KIS_PAGE_METADATA_COORDINATOR_H
 #define KIS_PAGE_METADATA_COORDINATOR_H
+#include "KisPagePublicationRows_p.h"
 
 #include <QMutex>
 #include <QSharedPointer>
@@ -439,7 +440,7 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
-        KisPagePublicationChange *m_rows = nullptr;
+        KisPagePublicationRows m_rows;
         size_t m_count = 0;
         KisPageTransaction m_transaction;
         std::shared_ptr<const quint8> m_owner;
@@ -507,7 +508,7 @@ private:
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
-                                               const KisPagePublicationChange *operationRows = nullptr,
+                                               KisPagePublicationRows operationRows = {},
                                                KisPagePrivateWrite *privateResult = nullptr,
                                                bool detachUnprotectedCurrent = false) const;
     // Transaction-overlay detachment is a compact semantic delta. Install
@@ -521,7 +522,7 @@ private:
                                         const KisPageVersion *versions, qsizetype count,
                                         QString *error = nullptr) const;
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
-                                        KisPagePublicationChange *rows, qsizetype count,
+                                        KisPagePublicationRows rows,
                                         QString *error = nullptr) const;
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,

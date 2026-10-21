@@ -4,7 +4,7 @@
 #ifndef KIS_PAGE_RETIREMENT_RECORD_P_H
 #define KIS_PAGE_RETIREMENT_RECORD_P_H
 #include "KisPageRetirementStorage_p.h"
-#include "KisPageWriteCoordinator_p.h"
+#include "KisPageBackingBudget_p.h"
 #include "KisPageReplicaProvider.h"
 #include <boost/intrusive/list.hpp>
 #include <map>

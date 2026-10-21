@@ -6,6 +6,7 @@
 
 #ifndef KIS_PAGE_OWNER_LEDGER_H
 #define KIS_PAGE_OWNER_LEDGER_H
+#include "KisPagePublicationRows_p.h"
 
 #include <QScopedPointer>
 #include <QSharedPointer>
@@ -62,7 +63,7 @@ private:
     KisPageOwnerLedger *m_owner = nullptr;
     quint64 m_cookie = 0;
     KisPagePreparedBackingChange *m_rows = nullptr;
-    size_t m_stride = 0;
+    KisPagePublicationRows m_publicationRows;
     size_t m_count = 0;
     KisBackingBudgetReservation m_budget;
 
@@ -256,11 +257,11 @@ private:
     KisBackingClassChangeReservation prepareBackingChanges(
         KisPagePreparedBackingChange *rows, size_t capacity, void *context,
         int (*read)(void *, KisBackingClassChange *), QString *error = nullptr,
-        size_t stride = sizeof(KisPagePreparedBackingChange));
+        KisPagePublicationRows publicationRows = {});
     // Read the original frozen release rows; no intermediate class-change array.
     // Uses the same claims, accounting policy and terminal as generic changes.
     KisBackingClassChangeReservation prepareIdleCapacity(
-        KisPagePublicationChange *rows, size_t count, quint64 allowance,
+        KisPagePublicationRows rows, quint64 allowance,
         QString *error = nullptr);
     KisBackingClassChangeReservation prepareBackingChangesImpl(
         BackingChanges changes,

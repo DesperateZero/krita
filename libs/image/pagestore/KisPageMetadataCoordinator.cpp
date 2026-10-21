@@ -2509,14 +2509,14 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::cancel() noexcept
 KisPageMetadataCoordinator::PreparedPublication::PreparedPublication() = default;
 KisPageMetadataCoordinator::PreparedPublication::~PreparedPublication() = default;
 KisPageMetadataCoordinator::PreparedPublication::PreparedPublication(PreparedPublication &&other) noexcept
-    : data(std::move(other.data)), m_rows(std::exchange(other.m_rows, nullptr)),
+    : data(std::move(other.data)), m_rows(std::exchange(other.m_rows, {})),
       m_count(std::exchange(other.m_count, 0)), m_transaction(other.m_transaction),
       m_owner(std::move(other.m_owner)), m_failure(other.m_failure) {}
 KisPageMetadataCoordinator::PreparedPublication &
 KisPageMetadataCoordinator::PreparedPublication::operator=(PreparedPublication &&other) noexcept
 {
     if (this != &other) {
-        data = std::move(other.data); m_rows = std::exchange(other.m_rows, nullptr);
+        data = std::move(other.data); m_rows = std::exchange(other.m_rows, {});
         m_count = std::exchange(other.m_count, 0); m_transaction = other.m_transaction;
         m_owner = std::move(other.m_owner); m_failure = other.m_failure;
     }
@@ -2711,7 +2711,7 @@ KisPageMetadataCoordinator::preparePublication(const KisPageTransaction &transac
                                                QString *error, bool detachUnprotectedCurrent) const
 {
     return preparePublicationImpl(transaction, minimumEpoch, nullptr, count, false, error,
-                                  PreparationKind::Publication, nullptr, changes, nullptr, nullptr,
+                                  PreparationKind::Publication, nullptr, changes, {}, nullptr,
                                   detachUnprotectedCurrent);
 }
 
@@ -2734,11 +2734,12 @@ KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transactio
 
 KisPageMetadataCoordinator::PreparedPublication
 KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transaction,
-                                            KisPagePublicationChange *rows, qsizetype count,
+                                            KisPagePublicationRows rows,
                                             QString *error) const
 {
     PreparedPublication result;
     auto *d = m_core.load(std::memory_order_acquire);
+    const qsizetype count = qsizetype(rows.size());
     if (!d || !transaction.isValid() || !rows || count <= 0) return result;
     bool owned = false;
     size_t mutations = 0;
@@ -2757,6 +2758,7 @@ KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transactio
         ++mutations;
         auto &work = input.metadataAcceptance;
         work.input = &input;
+        work.inputOrdinal = size_t(i);
         work.shard = Private::shardFor(d, version.key);
         work.shardIndex = kisStablePageKeyHash(version.key) % d->shards.size();
         if (!work.shard) return result;
@@ -2770,7 +2772,7 @@ KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transactio
     }
     using It = KisPublicationMemberIterator<KisPagePublicationChange::MetadataAcceptance,
                                            &KisPagePublicationChange::metadataAcceptance>;
-    std::sort(It(rows), It(rows + count), [](const auto &a, const auto &b) {
+    std::sort(It(rows.begin()), It(rows.end()), [](const auto &a, const auto &b) {
         if (!a.input || !b.input) return a.input && !b.input;
         return a.shardIndex != b.shardIndex ? a.shardIndex < b.shardIndex
             : MetadataKeyLess{}(a.input->mutationVersion().key, b.input->mutationVersion().key);
@@ -2792,7 +2794,7 @@ void KisPageMetadataCoordinator::PreparedPublication::forEachCapacityRelease(
     if (m_rows)
         for (size_t i = 0; i < m_count; ++i) {
             const auto *input = m_rows[i].metadataAcceptance.input;
-            if (input->borrowedMutation) visit(context, size_t(input - m_rows));
+            if (input->borrowedMutation) visit(context, m_rows[i].metadataAcceptance.inputOrdinal);
         }
     if (!data || data->kind != PreparationKind::Detachment) return;
     for (const auto &entry : data->entries)
@@ -2823,7 +2825,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
     if (!prepared.m_rows)
         return installPublicationImpl(std::move(prepared), transaction, {}, error,
                                       PreparationKind::Detachment, deferredCleanup);
-    auto *rows = std::exchange(prepared.m_rows, nullptr);
+    auto rows = std::exchange(prepared.m_rows, {});
     const size_t count = std::exchange(prepared.m_count, 0);
     auto data = std::move(prepared.data);
     const bool canDefer = deferredCleanup && deferredCleanup->isEmpty();
@@ -2879,7 +2881,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
                 }
             }
             work.page = page;
-            page->activity.publicationClaim = rows;
+            page->activity.publicationClaim = &rows[0];
             ++claimed;
         }
         if (claimed != end) break;
@@ -2922,7 +2924,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
             auto *page = static_cast<MetadataPage *>(work.page);
             auto *native = input.replacement.native;
             const auto &version = input.mutationVersion();
-            Q_ASSERT(page && page->activity.publicationClaim == rows);
+            Q_ASSERT(page && page->activity.publicationClaim == &rows[0]);
             std::shared_ptr<const KisPageAllocationDescriptor> oldDescriptor;
             std::shared_ptr<KisCpuResidentBinding> oldBinding;
             auto *releasedDescriptor = entry ? &entry->releasedDescriptor : &oldDescriptor;
@@ -2960,7 +2962,7 @@ KisPageMetadataCoordinator::prepareRecoverableWrite(const KisPageTransaction &tr
                                                    QString *error, KisPagePrivateWrite *privateResult) const
 {
     return preparePublicationImpl(transaction, {}, &transition, 1, false, error,
-        PreparationKind::RecoverableWrite, nullptr, nullptr, nullptr, privateResult);
+        PreparationKind::RecoverableWrite, nullptr, nullptr, {}, privateResult);
 }
 
 bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&prepared,
@@ -2998,7 +3000,7 @@ KisPageMetadataCoordinator::preparePublicationImpl(const KisPageTransaction &tra
                                                    PreparationKind kind,
                                                    const KisPageVersion *versions,
                                                    const PublicationChange *changes,
-                                                   const KisPagePublicationChange *operationRows,
+                                                   KisPagePublicationRows operationRows,
                                                    KisPagePrivateWrite *privateResult,
                                                    bool detachUnprotectedCurrent) const
 try {
@@ -3016,9 +3018,9 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
         return result;
     }
-    const bool nativeDetachment = detachment && operationRows && std::any_of(operationRows, operationRows + count,
+    const bool nativeDetachment = detachment && operationRows && std::any_of(operationRows.begin(), operationRows.end(),
         [](const auto &input) { return input.replacement.native; });
-    const size_t mutationCount = operationRows ? size_t(std::count_if(operationRows, operationRows + count,
+    const size_t mutationCount = operationRows ? size_t(std::count_if(operationRows.begin(), operationRows.end(),
         [](const auto &input) { return input.hasMutation() && !input.borrowedMutation; })) : size_t(count);
     const auto storageOwner = d->budgetAuthority->storage<char>();
     const size_t bytesPerPage = sizeof(PreparedPublication::Data::Entry)
