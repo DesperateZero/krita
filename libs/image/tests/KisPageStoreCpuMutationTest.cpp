@@ -831,6 +831,8 @@ private Q_SLOTS:
     void aliasProofUsesPrepaidVersionStorage();
     void immutableAliasSource_data() { pixelRows(); }
     void immutableAliasSource();
+    void transactionSelectionSparseLifecycle_data();
+    void transactionSelectionSparseLifecycle();
     void mixedSemanticAtomicity_data();
     void mixedSemanticAtomicity();
     void concurrentMixedSemanticCapture();
@@ -6438,7 +6440,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     using Change = KisPagePublicationCoordinator::OverlayChange;
     QMutexLocker lock(&f.mutex);
     const Change first{key(1), proofs[0], false}, second{key(2), proofs[1], false};
-    // Two original candidates coexist: bucket preparation includes both
+    // Two original candidates coexist: selection capacity includes both
     // outstanding insertions, while the visible authority is still empty.
     auto a = publication->preparePagePublicationLocked(tx, &first, 1, &f.error);
     auto b = publication->preparePagePublicationLocked(tx, &second, 1, &f.error);
@@ -11088,6 +11090,74 @@ void KisPageStoreCpuMutationTest::semanticOnlyMutation()
     }
     f.store->release(std::move(lease)); before = {}; during = {}; sealed = {};
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::transactionSelectionSparseLifecycle_data()
+{
+    QTest::addColumn<int>("pages");
+    QTest::addColumn<bool>("abort");
+    for (int pages : {16, 257}) for (bool abort : {false, true})
+        QTest::newRow(qPrintable(QStringLiteral("pages-%1-abort-%2").arg(pages).arg(abort))) << pages << abort;
+}
+
+void KisPageStoreCpuMutationTest::transactionSelectionSparseLifecycle()
+{
+    QFETCH(int, pages); QFETCH(bool, abort);
+    Fixture f; QVERIFY(f.init(1)); QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    const auto overlay = KisPageReadView::transactionOverlay(tx.id);
+    auto first = f.begin(tx);
+    for (int i = pages - 1; i >= 0; --i) {
+        auto w = first.beginWrite(key(2 * i)); QVERIFY(w.isValid());
+        memset(w.data(), 0x41, size_t(w.byteSize()));
+    }
+    QVERIFY2(first.seal(&f.error), qPrintable(f.error));
+    auto old = f.store->captureReadView(overlay); QVERIFY(old.isValid());
+    // Interleave new sparse keys, replacement, removal and untouched choices.
+    // The real native/metadata acceptance must retain all-D visibility while
+    // the directory changes size; an older capture remains independently live.
+    auto next = f.begin(tx);
+    for (int i = pages - 1; i >= 0; --i) {
+        if (i % 4 == 0) QVERIFY(next.removePage(key(2 * i)));
+        else if (i % 4 == 1) {
+            auto w = next.beginWrite(key(2 * i)); QVERIFY(w.isValid());
+            memset(w.data(), 0x62, size_t(w.byteSize()));
+        }
+        if (i % 3 == 0) {
+            auto w = next.beginWrite(key(2 * i + 1)); QVERIFY(w.isValid());
+            memset(w.data(), 0x53, size_t(w.byteSize()));
+        }
+    }
+    QVERIFY2(next.seal(&f.error), qPrintable(f.error));
+    auto middle = f.store->captureReadView(overlay); QVERIFY(middle.isValid());
+    auto last = f.begin(tx);
+    for (int i = 0; i < pages; ++i) {
+        if (i % 4 == 0) {
+            auto w = last.beginWrite(key(2 * i)); QVERIFY(w.isValid());
+            memset(w.data(), 0x73, size_t(w.byteSize()));
+        }
+        if (i % 6 == 0) QVERIFY(last.removePage(key(2 * i + 1)));
+    }
+    QVERIFY2(last.seal(&f.error), qPrintable(f.error));
+    for (int i = 0; i < pages; ++i) {
+        QCOMPARE(f.pixel(overlay, 2 * i), QByteArray(1, char(i % 4 == 0 ? 0x73 : i % 4 == 1 ? 0x62 : 0x41)));
+        const char odd = i % 6 == 0 ? 0x2a : i % 3 == 0 ? 0x53 : 0x2a;
+        QCOMPARE(f.pixel(overlay, 2 * i + 1), QByteArray(1, odd));
+    }
+    if (abort) QVERIFY(f.store->abort(tx));
+    else QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    for (int i = 0; i < pages; ++i) {
+        auto original = old.readResidentPage(key(2 * i)); QVERIFY(original.isValid());
+        QCOMPARE(static_cast<const quint8 *>(original.data())[0], quint8(0x41));
+        auto captured = middle.readResidentPage(key(2 * i)); QVERIFY(captured.isValid());
+        QCOMPARE(static_cast<const quint8 *>(captured.data())[0], quint8(i % 4 == 0 ? 0x2a : i % 4 == 1 ? 0x62 : 0x41));
+        const char expected = abort ? (i == 0 ? 0x31 : 0x2a)
+            : i % 4 == 0 ? 0x73 : i % 4 == 1 ? 0x62 : 0x41;
+        QCOMPARE(f.pixel({}, 2 * i), QByteArray(1, expected));
+    }
+    old = {}; middle = {};
+    QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::mixedSemanticAtomicity_data()

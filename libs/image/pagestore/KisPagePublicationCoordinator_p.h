@@ -27,8 +27,8 @@
 #include <atomic>
 #include <algorithm>
 #include <tuple>
-#include <unordered_map>
-#include <unordered_set>
+#include <boost/container/flat_map.hpp>
+#include <boost/container/flat_set.hpp>
 
 struct KisPagePublicationCoordinatorSnapshot {
     qsizetype preparedProofs = 0;
@@ -44,21 +44,22 @@ struct KisPageCapturedRelease;
 // these containers only while the owner's CommitPreparation excludes edits;
 // it still creates its own necessary immutable version projection.
 struct KisPagePublicationDelta {
-    struct PageHash {
-        size_t operator()(const KisPageKey &key) const noexcept { return qHash(key, seed); }
-        size_t seed = QHashSeed::globalSeed();
+    struct PageLess {
+        bool operator()(const KisPageKey &a, const KisPageKey &b) const noexcept
+        {
+            return std::tie(a.surface.value, a.page.row, a.page.column)
+                < std::tie(b.surface.value, b.page.row, b.page.column);
+        }
     };
     struct PageState {
         KisPagePublicationProof proof;
     };
-    using ProofMap = std::unordered_map<KisPageKey, PageState, PageHash,
-        std::equal_to<KisPageKey>, KisMutationStorageAllocator<std::pair<const KisPageKey, PageState>>>;
-    using RemovalSet = std::unordered_set<KisPageKey, PageHash,
-        std::equal_to<KisPageKey>, KisMutationStorageAllocator<KisPageKey>>;
+    using ProofMap = boost::container::flat_map<KisPageKey, PageState, PageLess,
+        KisMutationStorageAllocator<std::pair<KisPageKey, PageState>>>;
+    using RemovalSet = boost::container::flat_set<KisPageKey, PageLess,
+        KisMutationStorageAllocator<KisPageKey>>;
     explicit KisPagePublicationDelta(const KisMutationStorageAllocator<char> &storage)
-        : proofs(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
-        , surfaceChanges(storage)
-        , removals(0, PageHash{}, std::equal_to<KisPageKey>{}, storage) {}
+        : proofs(PageLess{}, storage), surfaceChanges(storage), removals(PageLess{}, storage) {}
     ProofMap proofs;
     std::vector<KisSurfaceEpochChange, KisMutationStorageAllocator<KisSurfaceEpochChange>> surfaceChanges;
     RemovalSet removals;
@@ -140,9 +141,7 @@ class KisPagePublicationCoordinator final
 {
     friend class KisPageWriteCoordinator;
     friend class KisPageStoreCpuMutationTest;
-    using PageHash = KisPagePublicationDelta::PageHash;
     using ProofMap = KisPagePublicationDelta::ProofMap;
-    using RemovalSet = KisPagePublicationDelta::RemovalSet;
     // Installation storage only; the original metadata version owns layout.
     // A single target stays inline instead of allocating a replacement node.
     using DescriptorEntry = std::pair<KisPageVersion, std::shared_ptr<const KisPageAllocationDescriptor>>;
@@ -243,10 +242,7 @@ public:
         struct Data {
             using Change = KisPagePublicationChange;
             explicit Data(const KisMutationStorageAllocator<char> &storage)
-                : changes(storage)
-                , proofNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
-                , removalNodes(0, PageHash{}, std::equal_to<KisPageKey>{}, storage)
-                , oldProofNodes(storage), oldRemovalNodes(storage), ownedAuthorities(storage) {}
+                : changes(storage), ownedAuthorities(storage) {}
             Data(Data &&) noexcept = default;
             Data &operator=(Data &&) noexcept = default;
             ~Data() { releaseCapacity(); }
@@ -263,10 +259,6 @@ public:
             KisPagePublicationChanges changes;
             size_t mutationCount = 0;
             std::shared_ptr<KisPagePublicationDelta> state;
-            ProofMap proofNodes;
-            RemovalSet removalNodes;
-            std::vector<ProofMap::node_type, KisMutationStorageAllocator<ProofMap::node_type>> oldProofNodes;
-            std::vector<RemovalSet::node_type, KisMutationStorageAllocator<RemovalSet::node_type>> oldRemovalNodes;
             std::vector<KisReplicaHandle, KisMutationStorageAllocator<KisReplicaHandle>> ownedAuthorities;
             size_t proofInsertions = 0;
             size_t removalInsertions = 0;

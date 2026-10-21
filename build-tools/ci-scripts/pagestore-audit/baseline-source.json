@@ -2091,7 +2091,7 @@
         "utility",
         "vector"
       ],
-      "lines": 2155,
+      "lines": 2188,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisPageStore",
@@ -2103,11 +2103,11 @@
       "public_types": [
         "KisPagePublicationCoordinator"
       ],
-      "sha256": "8efdf66fe83339a3a6d1ebd77faa14b04ef2e3ff6d3cb1be55bc653ed1b314f4",
+      "sha256": "2608b77e4f0b110139535603a80bf35f426020278e926eba00d0158765ed5736",
       "synchronization_declarations": 11
     },
     "libs/image/pagestore/KisPagePublicationCoordinator_p.h": {
-      "container_declarations": 16,
+      "container_declarations": 14,
       "include_edges": [
         "KisImageEpochReferenceModel.h",
         "KisPageHistoryCollector_p.h",
@@ -2121,16 +2121,16 @@
         "QVector",
         "algorithm",
         "atomic",
+        "boost/container/flat_map.hpp",
+        "boost/container/flat_set.hpp",
         "boost/container/small_vector.hpp",
         "boost/intrusive/list.hpp",
         "map",
         "memory",
         "optional",
-        "tuple",
-        "unordered_map",
-        "unordered_set"
+        "tuple"
       ],
-      "lines": 482,
+      "lines": 474,
       "member_fields": [
         "m_beginMutationPreparation",
         "m_committedTransactions",
@@ -2166,13 +2166,13 @@
         "KisPreparedMutationCommit",
         "KisPreparedPagePublication",
         "NativeReadSelection",
-        "PageHash",
+        "PageLess",
         "PageState",
         "PreparedDescriptorChange",
         "PreparedDescriptors",
         "Surfaces"
       ],
-      "sha256": "103e294a5fd0048f9dfe1dee51c874369797265d229241983c06b04ec35075e3",
+      "sha256": "877863dec4b24faa2d58474906d16dd8425bf9c08ee7360ab470548cc42fb1bf",
       "synchronization_declarations": 13
     },
     "libs/image/pagestore/KisPagePublicationInput_p.h": {
@@ -2199,7 +2199,7 @@
         "Owned",
         "Replacement"
       ],
-      "sha256": "ca24693df8facbb3f365ad9f56f6176557a48b5f7314b57c5b2c63e3c7871aa1",
+      "sha256": "982ca67200109ef563e5a5a7dabceca02130a1cce93ea034d635df1d956eb299",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageReadCoordinator.cpp": {
@@ -3768,7 +3768,7 @@
         "unistd.h",
         "vector"
       ],
-      "lines": 14095,
+      "lines": 14165,
       "member_fields": [
         "m_joinable",
         "m_stop",
@@ -3810,7 +3810,7 @@
         "TestProvider",
         "Value"
       ],
-      "sha256": "ddf87da354ebeff930bed8993243dbbb11e2dfc8c595bfc61f5807bfaff13925",
+      "sha256": "7366161b5bb0856e02c5161248186fcf0449a4f3664021cc1e44175de314c0fa",
       "synchronization_declarations": 4
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -6870,5 +6870,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "630c52219dc059eb50b064d45d005066ce7c2b7a"
+  "working_tree_head": "4b69f8b8008b7795dcbf54f1e50a101c06ec0587"
 }

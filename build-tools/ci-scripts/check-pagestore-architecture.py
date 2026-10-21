@@ -53,7 +53,8 @@ TYPE_RE = re.compile(
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 CONTAINER_RE = re.compile(
     r"\b(?:QHash|QSet|QMap|QVector|QList|QSharedPointer|QScopedPointer|"
-    r"std::(?:vector|list|map|unordered_map|unordered_set|shared_ptr|unique_ptr))\s*<"
+    r"std::(?:vector|list|map|unordered_map|unordered_set|shared_ptr|unique_ptr)|"
+    r"boost::container::(?:flat_map|flat_set))\s*<"
 )
 SYNC_RE = re.compile(r"\b(?:QMutex|QReadWriteLock|QWaitCondition|std::mutex|std::condition_variable)\b")
 RETIRED_WRITE_PROTOCOL_RE = re.compile(
@@ -66,7 +67,8 @@ RETIRED_WRITE_PROTOCOL_RE = re.compile(
     r"queueMaterializationCompletion|activeMaterializationCount|"
     r"KisMutationSourceSet|KisPageStoreWriteReservation|takeWorkingCapacityLocked|"
     r"adoptReservationLocked|planEntry|DiscardSupersededPreparedVersions|"
-    r"discardSupersededPreparedVersion|discardReadSuperseded|m_discardSuperseded)\b"
+    r"discardSupersededPreparedVersion|discardReadSuperseded|m_discardSuperseded|"
+    r"proofNodes|removalNodes|oldProofNodes|oldRemovalNodes|acceptedOverlayProof)\b"
 )
 FIELD_RE = re.compile(
     r"^\s*(?:(?:mutable|const|static|std::atomic_bool)\s+)*"

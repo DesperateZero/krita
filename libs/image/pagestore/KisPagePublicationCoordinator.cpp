@@ -23,9 +23,70 @@ namespace
 
 bool overlayKeyLess(const KisPageKey &a, const KisPageKey &b)
 {
-    if (a.surface.value != b.surface.value) return a.surface.value < b.surface.value;
-    if (a.page.row != b.page.row) return a.page.row < b.page.row;
-    return a.page.column < b.page.column;
+    return KisPagePublicationDelta::PageLess{}(a, b);
+}
+
+// The transaction owns the only mutable selection. Capacity was admitted for
+// all sibling candidates before metadata acceptance. Structural changes merge
+// once in that storage; value-only updates touch only D validated positions.
+// Entries are capabilities/keys, not resource owners requiring deferred free.
+template<bool Proof, typename Table>
+void acceptSelection(Table &table, const KisPagePublicationChanges &changes)
+{
+    const auto selected = [](const auto &row) {
+        if constexpr (Proof) return !row.replacement.removal;
+        else return row.replacement.removal && row.removalWasInBase;
+    };
+    size_t additions = 0, removals = 0;
+    for (const auto &row : changes) {
+        const bool before = Proof ? row.superseded.isValid() : row.wasRemoved;
+        const bool after = selected(row);
+        additions += after && !before;
+        removals += before && !after;
+    }
+    if (!additions && !removals) {
+        if constexpr (Proof) {
+            for (const auto &row : changes) {
+                if (selected(row))
+                    (table.begin() + row.acceptedOverlayIndex)->second.proof = row.replacement.proofValue();
+            }
+        }
+        return;
+    }
+    auto values = table.extract_sequence();
+    using Value = typename decltype(values)::value_type;
+    static_assert(std::is_nothrow_move_assignable_v<Value>);
+    static_assert(std::is_nothrow_default_constructible_v<Value>);
+    const auto key = [](const Value &value) -> const KisPageKey & {
+        if constexpr (Proof) return value.first;
+        else return value;
+    };
+    size_t old = values.size();
+    size_t output = old + additions;
+    Q_ASSERT(output <= values.capacity());
+    values.resize(output);
+    for (auto row = changes.rbegin(); row != changes.rend(); ++row) {
+        const auto &changedKey = row->replacement.key();
+        while (old && overlayKeyLess(changedKey, key(values[old - 1]))) {
+            --old; --output;
+            if (old != output) values[output] = std::move(values[old]);
+        }
+        if (old && key(values[old - 1]) == changedKey) --old;
+        if (selected(*row)) {
+            --output;
+            if constexpr (Proof) values[output] = Value{changedKey,
+                KisPagePublicationDelta::PageState{row->replacement.proofValue()}};
+            else values[output] = changedKey;
+        }
+    }
+    // The prefix before the first changed key is already final. Do not scan
+    // or copy it (in particular, appending sparse keys must not visit N rows).
+    Q_ASSERT(output == old + removals);
+    if (removals) {
+        std::move(values.begin() + output, values.end(), values.begin() + old);
+        values.resize(values.size() - removals);
+    }
+    table.adopt_sequence(boost::container::ordered_unique_range, std::move(values));
 }
 
 // The immutable prepared publication/root need no owner/metadata/provider
@@ -489,7 +550,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
                 error, QStringLiteral("overlay update source changed"));
             return false;
         }
-        change.acceptedOverlayProof = found == state.proofs.end() ? nullptr : &found->second.proof;
+        change.acceptedOverlayIndex = size_t(found - state.proofs.begin());
     }
 
     // The frozen release set is the only input to optional fees. Admission
@@ -510,37 +571,12 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     if (capacityReservation.isValid())
         owner.m_owner.commitBackingChanges(std::move(capacityReservation));
 
-    // Every missing node and all buckets were constructed before metadata
-    // installation. Keep extracted nodes alive until unlocked cleanup.
-    for (const Data::Change &change : std::as_const(data->changes)) {
-        const auto &key = change.replacement.key();
+    for (const auto &change : std::as_const(data->changes)) {
         if (change.releasesCapacity)
             owner.acceptCapacityLocked(*change.supersededAuthority, change.acceptedIdle);
-        if (change.replacement.removal) {
-            if (change.superseded.isValid())
-                data->oldProofNodes.push_back(state.proofs.extract(key));
-            if (change.removalWasInBase && !change.wasRemoved) {
-                auto inserted = state.removals.insert(data->removalNodes.extract(key));
-                Q_ASSERT(inserted.inserted);
-            } else if (!change.removalWasInBase && change.wasRemoved) {
-                data->oldRemovalNodes.push_back(state.removals.extract(key));
-            }
-        } else {
-            if (change.wasRemoved)
-                data->oldRemovalNodes.push_back(state.removals.extract(key));
-            if (change.superseded.isValid()) {
-                // Insertions may rehash, but references to other elements stay
-                // stable. Unique input keys cannot erase this row beforehand.
-                Q_ASSERT(change.acceptedOverlayProof);
-                *change.acceptedOverlayProof = change.replacement.proofValue();
-            } else {
-                auto node = data->proofNodes.extract(key);
-                node.mapped().proof = change.replacement.proofValue();
-                auto inserted = state.proofs.insert(std::move(node));
-                Q_ASSERT(inserted.inserted);
-            }
-        }
     }
+    acceptSelection<true>(state.proofs, data->changes);
+    acceptSelection<false>(state.removals, data->changes);
     if (data->surfaceChange.after.surface.isValid()) {
         if (data->surfaceIndex >= 0) state.surfaceChanges[data->surfaceIndex] = data->surfaceChange;
         else state.surfaceChanges.push_back(data->surfaceChange);
@@ -1616,7 +1652,9 @@ bool KisPagePublicationCoordinator::abortLocked(
     }
 
     while (const auto *remainingProofs = findProofsLocked(transaction.id)) {
-        const auto proof = remainingProofs->cbegin()->second.proof;
+        // Consume the final selection: abort must not shift the remaining
+        // transaction directory after each independently accepted transition.
+        const auto proof = remainingProofs->crbegin()->second.proof;
         if (!projectProof(proof).isValid())
             qFatal("Owned abort source proof changed before metadata transition");
         KisPageTransition transition;
@@ -1842,7 +1880,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
         std::sort(candidate->changes.begin(), candidate->changes.end(), [](const auto &a, const auto &b) {
             return overlayKeyLess(a.replacement.key(), b.replacement.key());
         });
-        size_t oldProofNodes = 0, oldRemovalNodes = 0;
+        size_t proofInsertions = 0, removalInsertions = 0;
         const auto base = m_epochs.root(transaction.baseEpoch);
         if (!canonical) candidate->state = preparedStateLocked(transaction.id);
         else if (hasPreparedDeltaLocked(transaction.id) || isPreparingCommitLocked(transaction.id)) return {};
@@ -1904,34 +1942,29 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             const bool removalWasInBase = change.removal && base.containsPage(change.key());
             const bool wasRemoved = state && state->removals.count(change.key()) != 0;
             if (!canonical && hasProof && !superseded.isValid())
-                candidate->proofNodes.emplace(change.key(), KisPagePublicationDelta::PageState{change.proofValue()});
+                ++proofInsertions;
             if (!canonical && removalWasInBase && !wasRemoved)
-                candidate->removalNodes.insert(change.key());
-            oldProofNodes += change.removal && superseded.isValid();
-            oldRemovalNodes += wasRemoved && (hasProof || !removalWasInBase);
+                ++removalInsertions;
             entry.superseded = superseded;
             entry.removalWasInBase = removalWasInBase;
             entry.wasRemoved = wasRemoved;
         }
 
-        candidate->oldProofNodes.reserve(oldProofNodes);
-        candidate->oldRemovalNodes.reserve(oldRemovalNodes);
-
-        // Node transfer alone is not enough: a sibling may install while this
-        // candidate prepares metadata. Include every outstanding insertion,
-        // and never shrink a reservation made for another candidate.
+        // A sibling may install while this candidate prepares metadata.
+        // Reserve the sum of outstanding additions in the original tables;
+        // cancellation drops its claim but does not destroy reusable capacity.
         const auto reserve = [](auto &map, size_t outstanding, size_t additions) {
             if (additions > map.max_size() - map.size()
                 || outstanding > map.max_size() - map.size() - additions)
                 throw std::bad_alloc();
             const size_t required = map.size() + outstanding + additions;
-            if (required > map.bucket_count() * map.max_load_factor()) map.reserve(required);
+            if (required > map.capacity()) map.reserve(required);
         };
         if (state) {
-            reserve(state->proofs, state->proofInsertions.load(), candidate->proofNodes.size());
-            reserve(state->removals, state->removalInsertions.load(), candidate->removalNodes.size());
-            candidate->proofInsertions = candidate->proofNodes.size();
-            candidate->removalInsertions = candidate->removalNodes.size();
+            reserve(state->proofs, state->proofInsertions.load(), proofInsertions);
+            reserve(state->removals, state->removalInsertions.load(), removalInsertions);
+            candidate->proofInsertions = proofInsertions;
+            candidate->removalInsertions = removalInsertions;
             state->proofInsertions.fetch_add(candidate->proofInsertions);
             state->removalInsertions.fetch_add(candidate->removalInsertions);
         }

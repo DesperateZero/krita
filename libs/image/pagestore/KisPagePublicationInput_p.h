@@ -97,9 +97,9 @@ struct KisPagePublicationChange {
     const KisReplicaHandle *supersededAuthority = nullptr;
     // Commit output, borrowed until immediate handover under Store admission.
     KisPageRetirementRecord *acceptedIdle = nullptr;
-    // Borrowed only inside installOverlayLocked's uninterrupted owner gate.
-    // Revalidation overwrites it on every attempt; it is never an authority.
-    KisPagePublicationProof *acceptedOverlayProof = nullptr;
+    // Position verified in the uninterrupted acceptance gate. Consumed only
+    // when replacing values without changing the selection table's structure.
+    size_t acceptedOverlayIndex = 0;
     KisPagePreparedBackingChange backingPreparation;
     struct MetadataAcceptance {
         KisPagePublicationChange *input = nullptr;
