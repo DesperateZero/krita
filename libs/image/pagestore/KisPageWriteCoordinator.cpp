@@ -3095,7 +3095,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         || (!native && !prepared->publication->metadata.isValid())) return fallback;
 
     // All fallible storage exists before taking the physical claim. Metadata
-    // install strictly rechecks the page revision and exact recovery identity.
+    // install rechecks actual blockers and the exact recovery identity.
     if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
     const auto plan = reuseCapacity ? KisPageWritePlanKind::ReuseWorkingCapacity : select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);

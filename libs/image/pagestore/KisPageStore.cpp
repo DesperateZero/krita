@@ -2341,7 +2341,7 @@ KisPageMutationSession KisPageStore::beginMutation(const KisPageTransaction &tra
 
 KisPageMutationSession KisPageStore::reserveManagedRange(
     KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
-    bool legacyIntent, bool *borrowed, QString *error) try
+    bool legacyIntent, bool *borrowed, QString *error, bool initialExecution) try
 {
     if (borrowed)
         *borrowed = false;
@@ -2367,7 +2367,7 @@ KisPageMutationSession KisPageStore::reserveManagedRange(
         --d->activeProviderCalls;
     });
     lock.unlock();
-    range = KisPageMutationSession::Private::create(d.data(), size_t(targets.size()));
+    range = KisPageMutationSession::Private::create(d.data(), initialExecution ? size_t(targets.size()) : 0);
     range->writes.reserveKnownTargetCount(targets.size());
     for (const KisLogicalPageId &page : targets) {
         const KisPageKey key{surface, page};

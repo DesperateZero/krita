@@ -1976,7 +1976,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     // Projection clears can overlap a managed write at page granularity.
     // Acquire all claims before any page work, where no adapter gate is held;
     // the original batch then owns both semantic and writable page claims.
-    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
+    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error, false);
     if (!range.d) return false;
     auto batch = beginMutationBatchImpl(error, false, &range);
     if (!batch) return false;
@@ -2131,7 +2131,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     } else {
         bool storeBorrowed = false;
         auto range = store()->reserveManagedRange(d->surface, targets, legacyIntent,
-                                                  &storeBorrowed, error);
+                                                  &storeBorrowed, error, true);
         if (!range.d) return storeBorrowed ? Result::Borrowed : Result::Failed;
         phase.next(Phase::PixelOperationRangeReserved, quint64(targets.size()));
         batch = beginMutationBatchImpl(error, false, &range, &execution);
@@ -2406,7 +2406,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
         for (qint64 column = pageCoordinate(rect.left(), KisTileData::WIDTH);
              column <= pageCoordinate(rect.right(), KisTileData::WIDTH); ++column)
             targets.append({qint32(column), qint32(row)});
-    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error);
+    auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error, false);
     if (!range.d) return false;
     auto targetView = captureReadView(false, error);
     if (!targetView.resolveSurfaceState(surface(), &targetState) ||

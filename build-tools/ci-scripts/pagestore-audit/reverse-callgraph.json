@@ -84104,7 +84104,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 23,
           "dynamic": false,
           "implicit": false,
@@ -84874,7 +84874,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 19,
           "dynamic": false,
           "implicit": false,
@@ -90750,7 +90750,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 18,
           "dynamic": false,
           "implicit": false,
@@ -110877,7 +110877,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 16,
           "dynamic": false,
           "implicit": false,
@@ -110886,7 +110886,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 20,
           "dynamic": false,
           "implicit": false,
@@ -110895,7 +110895,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 20,
           "dynamic": false,
           "implicit": false,
@@ -110904,7 +110904,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 20,
           "dynamic": false,
           "implicit": false,
@@ -110913,7 +110913,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 20,
           "dynamic": false,
           "implicit": false,
@@ -110922,7 +110922,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 40,
           "dynamic": false,
           "implicit": false,
@@ -110931,7 +110931,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 73,
           "dynamic": false,
           "implicit": false,
@@ -110940,7 +110940,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 12,
           "dynamic": false,
           "implicit": false,
@@ -110949,7 +110949,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 12,
           "dynamic": false,
           "implicit": false,
@@ -111700,7 +111700,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 24,
           "dynamic": false,
           "implicit": false,
@@ -112739,7 +112739,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 46,
           "dynamic": false,
           "implicit": false,
@@ -185969,7 +185969,7 @@
       "qualified-name": "KisPageStore::reserveManagedRange",
       "specializations-and-overrides": [],
       "test-callers": [],
-      "usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#"
+      "usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#"
     },
     {
       "callback-registrations": [],
@@ -199045,7 +199045,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 29,
           "dynamic": false,
           "implicit": false,
@@ -199054,7 +199054,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 33,
           "dynamic": false,
           "implicit": false,
@@ -199063,7 +199063,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 33,
           "dynamic": false,
           "implicit": false,
@@ -199072,7 +199072,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 33,
           "dynamic": false,
           "implicit": false,
@@ -199081,7 +199081,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 33,
           "dynamic": false,
           "implicit": false,
@@ -199090,7 +199090,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 25,
           "dynamic": false,
           "implicit": false,
@@ -199099,7 +199099,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 25,
           "dynamic": false,
           "implicit": false,
@@ -205477,7 +205477,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 37,
           "dynamic": false,
           "implicit": false,
@@ -206117,7 +206117,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 19,
           "dynamic": false,
           "implicit": false,
@@ -214877,7 +214877,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 34,
           "dynamic": false,
           "implicit": false,
@@ -215836,7 +215836,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 35,
           "dynamic": false,
           "implicit": false,
@@ -215990,7 +215990,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 34,
           "dynamic": false,
           "implicit": false,
@@ -216726,7 +216726,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 54,
           "dynamic": false,
           "implicit": false,
@@ -216871,7 +216871,7 @@
       "production-callers": [
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 51,
           "dynamic": false,
           "implicit": false,
@@ -217216,7 +217216,7 @@
       "production-callers": [
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 53,
           "dynamic": false,
           "implicit": false,
@@ -233346,7 +233346,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 18,
           "dynamic": false,
           "implicit": false,
@@ -270400,7 +270400,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 37,
           "dynamic": false,
           "implicit": false,
@@ -270409,7 +270409,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 41,
           "dynamic": false,
           "implicit": false,
@@ -270566,7 +270566,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 55,
           "dynamic": false,
           "implicit": false,
@@ -270575,7 +270575,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 59,
           "dynamic": false,
           "implicit": false,
@@ -270584,7 +270584,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 78,
           "dynamic": false,
           "implicit": false,
@@ -279211,7 +279211,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 39,
           "dynamic": false,
           "implicit": false,
@@ -364164,8 +364164,8 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
-          "column": 78,
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
+          "column": 97,
           "dynamic": false,
           "implicit": false,
           "line": 2370,
@@ -364173,7 +364173,7 @@
         },
         {
           "caller": "KisPageStore::reserveManagedRange",
-          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "caller-usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "column": 51,
           "dynamic": false,
           "implicit": false,
@@ -367817,7 +367817,7 @@
         "c:@S@KisPageStore@F@registerTransferBridge#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageReplicaTransferBridge#",
         "c:@S@KisPageStore@F@release#$@S@KisReadLease#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@releaseSnapshot#$@S@KisImageEpochSnapshotToken#",
-        "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+        "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
         "c:@S@KisPageStore@F@resolve#&1$@S@KisReadRequest#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@resolve#&1$@S@KisWriteRequest#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@resolvePagePresenceInto#$@S@KisSurfaceId#&1$@S@QList>#$@S@KisLogicalPageId#&1$@S@KisPageReadView#*c#K#1",
@@ -368064,7 +368064,7 @@
         "c:@S@KisPageStore@F@registerTransferBridge#&1$@N@std@N@__1@S@shared_ptr>#$@S@KisPageReplicaTransferBridge#",
         "c:@S@KisPageStore@F@release#$@S@KisReadLease#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@releaseSnapshot#$@S@KisImageEpochSnapshotToken#",
-        "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+        "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
         "c:@S@KisPageStore@F@resolve#&1$@S@KisReadRequest#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@resolve#&1$@S@KisWriteRequest#&1$@S@KisCompletionTicket#",
         "c:@S@KisPageStore@F@resolvePagePresenceInto#$@S@KisSurfaceId#&1$@S@QList>#$@S@KisLogicalPageId#&1$@S@KisPageReadView#*c#K#1",
@@ -376471,8 +376471,8 @@
       },
       {
         "predecessors": {
-          "indirect": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
-          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "indirect": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
+          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "test": "c:@S@KisPageStore@F@beginMutation#&1$@S@KisPageTransaction#$@S@KisPageMutationSession#*$@S@KisPageMutationExecution#*$@S@QString#"
         },
         "status": "production-boundary-reachable",
@@ -381351,7 +381351,7 @@
           "test": "c:@S@KisTiledDataManagerPageStoreBackend@F@copyFrom#&1$@S@KisTiledDataManagerPageStoreBackend#&1$@S@KisCapturedReadView#&1$@S@QRect#S4_#b#*$@S@QString#*$@S@QList>#$@S@KisLogicalPageId#*$@S@KisTiledDataManagerPageStoreBackend@S@OperationDelivery#&1$@N@std@N@__1@S@function>#Fb(#b#S6_)#&1$@N@std@N@__1@S@function>#Fb(#&1$@N@std@N@__1@S@function>#Fb(#S6_)#S6_)#*$@S@QVarLengthArray>#c#VK64#"
         },
         "status": "production-boundary-reachable",
-        "usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#"
+        "usr": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#"
       },
       {
         "predecessors": {
@@ -382210,7 +382210,7 @@
       {
         "predecessors": {
           "indirect": "c:@S@KisPageStore@F@closeSession#*$@S@QString#",
-          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "test": "c:@S@KisPageHistoryCollector@F@waitForIdleLocked#"
         },
         "status": "production-boundary-reachable",
@@ -382353,8 +382353,8 @@
       },
       {
         "predecessors": {
-          "indirect": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
-          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#",
+          "indirect": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
+          "production": "c:@S@KisPageStore@F@reserveManagedRange#$@S@KisSurfaceId#&1$@S@KisPageSnapshotArray>#$@S@KisLogicalPageId#b#*b#*$@S@QString#b#",
           "test": null
         },
         "status": "production-boundary-reachable",
@@ -395192,8 +395192,8 @@
     "libs/image/pagestore/KisPageStateMachine.cpp": "a7492120ceeb5c1aea53fe9d026a1035548204854bc534bde22b35e5717d5eea",
     "libs/image/pagestore/KisPageStateMachine.h": "c263f371dd793ae6dcd3faf9f70d2b8bcff44b7737a15a4789433ec83e0abda6",
     "libs/image/pagestore/KisPageStateMachine_p.h": "7243caa08544fa62bab9ff4d9b76c7a26bac3b9196cdbe36c128bcdaeb703025",
-    "libs/image/pagestore/KisPageStore.cpp": "61d617226140dbf3e120b5b9dfa4d355305fe93fa4942a07d0e7551ed1b35dae",
-    "libs/image/pagestore/KisPageStore.h": "891fd004cd65cb31d0b804bbf049d3e9a3365b1f914059034ff24a896b04e4ee",
+    "libs/image/pagestore/KisPageStore.cpp": "75d908340be4e96b27b0b7478921c62cb34bb2499eb809badc6b1dc381013cb1",
+    "libs/image/pagestore/KisPageStore.h": "8d914647ce6323a5ad4eea8d070354d865f5fae24f9af2560c3a721e94a3f16e",
     "libs/image/pagestore/KisPageStoreDiagnostics.cpp": "b60d6169ed45ee7147e979d5a2dff586853f42ce5fe9fbf8b0c5993c84daaeb1",
     "libs/image/pagestore/KisPageStoreDiagnostics_p.h": "8a30df40dab61f35d4a34714cd5dd8e014403fc2dcf8062fe588f43927f2e1ea",
     "libs/image/pagestore/KisPageStoreIteratorReadScope.cpp": "5cf2ab59b970e637ed9fbaf9ab3f446417030e1e86c437079024cf2fdb931c6a",
@@ -395205,7 +395205,7 @@
     "libs/image/pagestore/KisPageStoreTypes.h": "ba02283d908533f78349d41a504ff15326f93ff7dbbcbb98ed4eac292ddf5136",
     "libs/image/pagestore/KisPageStoreWriteOperation_p.h": "5370759e9e895da6147509a41ec1bd808df778e5e7a72929698f8261138d5364",
     "libs/image/pagestore/KisPageWaitCondition_p.h": "7dfbeb985f9c380f3507ad9c88df007af168ca065b2f152b3e28eb28f6e74ce0",
-    "libs/image/pagestore/KisPageWriteCoordinator.cpp": "ae7d6c14a0dcdffa6c132866bd07b935d752f0b1482042c6d10e27fe345515fb",
+    "libs/image/pagestore/KisPageWriteCoordinator.cpp": "45dd1db3fcd848a557883025fa5fd9fb220491dd5fb6f852166d7d61bd67d44c",
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": "ce5eae568914e741cb67d0e0c14d9110e269c969c232edcfaa279b23076dcbda",
     "libs/image/pagestore/KisPaintExecutionContext.h": "4c9ce6ca338ba19e2152ea68453e942f9734396fd3b2266cf231690923577071",
     "libs/image/pagestore/KisResidencyController.cpp": "732d7eb9d2069b654ab5428d4eb8904631b9935eb3821d17b1167c541688ff11",
@@ -395214,7 +395214,7 @@
     "libs/image/pagestore/KisSurfaceCodecRegistry.h": "45f328dc935804030a96ce78926ecfbe2c3956eef80ccfc3e9f39a1a922e0a49",
     "libs/image/pagestore/KisSurfaceRegistry.cpp": "aa5bf7439e389666e6e916dc1f33ba185efe0d69837f4373ca42aa3732c4536c",
     "libs/image/pagestore/KisSurfaceRegistry.h": "098c4d4793e8368ed3ddedfdac71d456270be72a414153a770a4260a387a4cf0",
-    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "189f3e174b733da865c4b23749edf9e3b069ed611376a9e1abd841c5013701bb",
+    "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp": "a81e65bf2a6e1e33de91b8b21fbce8f5df86b91d7a94ebc6b3a98c18f48350c7",
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": "f15770fb3338bd0af5656c2f2a2452a2c363be7fc7435f55c2cfd05031082f80",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.cpp": "3b1520a0dae40c527c3b16b8570253bd4ae26fe05062d458f0882298f74944be",
     "libs/image/pagestore/KisTiles3PageReplicaProvider.h": "32a0ba7109d49029c71f4981d59ef38e2113c91f074d5ff6c6181533b864d0f3",

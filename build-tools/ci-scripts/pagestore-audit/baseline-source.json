@@ -2765,7 +2765,7 @@
         "WriteClosureRecord",
         "alignas"
       ],
-      "sha256": "61d617226140dbf3e120b5b9dfa4d355305fe93fa4942a07d0e7551ed1b35dae",
+      "sha256": "75d908340be4e96b27b0b7478921c62cb34bb2499eb809badc6b1dc381013cb1",
       "synchronization_declarations": 21
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -2841,7 +2841,7 @@
         "PrivateReleaser",
         "SealMode"
       ],
-      "sha256": "891fd004cd65cb31d0b804bbf049d3e9a3365b1f914059034ff24a896b04e4ee",
+      "sha256": "8d914647ce6323a5ad4eea8d070354d865f5fae24f9af2560c3a721e94a3f16e",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageStoreDiagnostics.cpp": {
@@ -3297,7 +3297,7 @@
         "Publication",
         "Resource"
       ],
-      "sha256": "ae7d6c14a0dcdffa6c132866bd07b935d752f0b1482042c6d10e27fe345515fb",
+      "sha256": "45dd1db3fcd848a557883025fa5fd9fb220491dd5fb6f852166d7d61bd67d44c",
       "synchronization_declarations": 14
     },
     "libs/image/pagestore/KisPageWriteCoordinator_p.h": {
@@ -3515,7 +3515,7 @@
         "KisTiledDataManagerPageStoreWriteBatch",
         "ProductBackingPolicy"
       ],
-      "sha256": "189f3e174b733da865c4b23749edf9e3b069ed611376a9e1abd841c5013701bb",
+      "sha256": "a81e65bf2a6e1e33de91b8b21fbce8f5df86b91d7a94ebc6b3a98c18f48350c7",
       "synchronization_declarations": 6
     },
     "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.h": {
@@ -6929,5 +6929,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "a9daeb798dae35945ed2629ec3fc17c0a251e5be"
+  "working_tree_head": "87d9f2b630fb21f703d51fce681c1a73805129c4"
 }
