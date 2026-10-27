@@ -117,7 +117,8 @@ public:
                          KisBackingBudgetClass budgetClass,
                          QString *error = nullptr,
                          KisPageRetirementRecordPointer *preparedRetirement = nullptr);
-    KisPageRetirementRecordPointer takeRetirementRecord(const KisReplicaHandle &replica);
+    KisPageRetirementRecordPointer takeRetirementRecord(const KisReplicaHandle &replica,
+                                                       KisBackingBudgetClass *originalClass = nullptr);
     KisBackingBudgetClass backingClass(const KisReplicaHandle &replica) const;
     bool reclassifyBacking(const KisReplicaHandle &replica,
                            KisBackingBudgetClass budgetClass,
@@ -126,10 +127,6 @@ public:
                            KisBackingBudgetClass budgetClass,
                            KisBackingBudgetReservation &reservation,
                            QString *error = nullptr);
-    // Cold budget admission only. The consumer must revalidate the exact
-    // physical/class state using reclassifyBacking before calling its provider.
-    KisPageReadinessStatus watchRetirementBudget(const KisReplicaHandle &replica,
-        KisPageReadinessCallback notify, KisBackingBudgetWaiter *waiter);
     bool retainRetirementDebtReservation(const KisReplicaHandle &replica,
                                          KisBackingBudgetReservation &reservation,
                                          QString *error = nullptr);
@@ -167,7 +164,6 @@ public:
                                QString *error = nullptr);
     void commitRetirementDebt(quint64 cookie) noexcept;
     void cancelRetirementDebt(quint64 cookie) noexcept;
-    void releaseRetiredBacking(const KisReplicaHandle &replica) noexcept;
 
     bool registerProvider(const std::shared_ptr<KisPageReplicaProvider> &provider,
                           QString *error = nullptr);
@@ -191,19 +187,11 @@ public:
         KisPageOperationId operation,
         const KisReplicaOperation &result,
         QString *error = nullptr) const;
-    // Fill the original record's preinstalled retirement operation only.
-    // Callers must prepare it before invoking the provider; no result-time
-    // allocation or fallback binding is permitted.
-    bool bindRetirementOperation(KisPageOperationId operation,
-                                 const KisReplicaOperation &result,
-                                 QString *error = nullptr);
     KisVerifiedCompletion verifyProviderOperation(
         KisPageOperationId operation,
         QString *error = nullptr) const;
     bool releaseTerminalProviderOperation(KisPageOperationId operation,
                                           QString *error = nullptr);
-    KisPageReadinessStatus watchProviderOperation(KisPageOperationId operation,
-        KisPageReadinessCallback scheduleReady, KisPageReadinessSubscription *subscription) const;
     KisPageReadinessStatus watchCompletion(const KisCompletionTicket &ticket,
         KisPageReadinessCallback scheduleReady, KisPageReadinessSubscription *subscription) const;
     qsizetype providerOperationCount() const;
@@ -262,8 +250,35 @@ private:
         const KisPageTransitionEffect *effects, qsizetype count, QString *error);
     KisReplicaBackingFootprint observeBackingFootprint(
         const KisReplicaHandle &replica) const;
-    KisPageOperationId prepareRetirementOperation(KisPageRetirementRecord &record);
-    void cancelRetirementOperation(KisPageOperationId operation);
+    // Internal only: the original queue/caller already owns this ledger record.
+    // Same storage budget alone is not proof of ledger identity.
+    KisPageReadinessStatus watchRetirementBudget(KisPageRetirementRecord &record,
+        KisPageReadinessCallback notify, KisBackingBudgetWaiter *waiter);
+    KisPageRetirementRecordPointer takeRetirementRecordImpl(const KisReplicaHandle &replica,
+        KisBackingBudgetClass *originalClass, bool *registered);
+    enum class RecordAdmission { Unregistered, Refused, Accepted };
+    RecordAdmission admitRetirementRecord(KisPageRetirementRecord &record);
+    RecordAdmission admitRetirementRecordLocked(KisPageRetirementRecord &record);
+    // The queue exclusively owns the original record until completion/close.
+    // Admission and embedded-node preparation share one ledger window.
+    RecordAdmission prepareRetirementOperation(KisPageRetirementRecord &record,
+                                               KisPageOperationId *operation);
+    void cancelRetirementOperation(KisPageRetirementRecord &record);
+    KisVerifiedCompletion observeRetirementOperation(KisPageRetirementRecord &record);
+    bool consumeRetirementOperation(KisPageRetirementRecord &record,
+                                    const KisVerifiedCompletion &terminal);
+    KisPageReadinessStatus watchRetirementOperation(const KisPageRetirementRecord &record,
+        KisPageReadinessCallback notify, KisPageReadinessSubscription *subscription) const;
+    // Only initial adoption may withdraw an unpublished registration without
+    // provider completion. Physical ownership stays with the external caller.
+    bool rollbackBackingRegistration(KisPageRetirementRecord &record) noexcept;
+    KisPageRetirementRecordPointer takeRetirementRecord(KisPageRetirementRecord &record,
+        const KisReplicaHandle &expected);
+    KisPageRetirementRecordPointer takeRetirementRecordLocked(KisPageBackingRecord &backing,
+        const KisReplicaHandle &replica, KisBackingBudgetClass *originalClass);
+    bool reclassifyBackingLocked(KisPageBackingIndex::iterator found,
+        const KisReplicaHandle &replica, KisBackingBudgetClass budgetClass,
+        KisBackingBudgetReservation *reservation, QString *error);
     bool reclassifyBackingImpl(const KisReplicaHandle &replica,
                                KisBackingBudgetClass budgetClass,
                                KisBackingBudgetReservation *reservation,
@@ -284,6 +299,7 @@ private:
     friend class KisPageRetirementQueue;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
+    friend class KisPageOwnerLedgerTestAccess;
 };
 
 #endif // KIS_PAGE_OWNER_LEDGER_H

@@ -69,7 +69,14 @@ void KisCpuResidentBinding::finishHandoff(const KisReplicaHandle *target) noexce
 {
     QMutexLocker lock(&m_mutex);
     Q_ASSERT(m_writeState == WriteState::Handoff && m_data && !m_retired);
-    if (target) m_handle = *target;
+    if (target) {
+        // Slot/provider/layout never change. In particular, slot is also the
+        // immutable key read under the provider's index gate; rewriting the
+        // whole handle here would race with that otherwise independent read.
+        Q_ASSERT(target->allocation.slot == m_handle.allocation.slot);
+        m_handle.version = target->version;
+        m_handle.allocation.generation = target->allocation.generation;
+    }
     finishStorageHandoff(target != nullptr);
     m_writeState = target ? WriteState::Reserved : WriteState::Idle;
     if (!target) m_data = nullptr;
@@ -147,8 +154,8 @@ bool KisCpuResidentProviderState::configure(
         if (completionSource) completions = registry;
     }
     if (!completionSource) return fail(QStringLiteral("provider completion source registration failed"));
-    // A refused ready record leaves this original source unissued. Retry it
-    // after pressure relief instead of accumulating abandoned registrations.
+    // The first slot is funded by source admission. Preparing Ready consumes
+    // that original capacity without a separate storage request.
     const auto ready = registry->allocatePending(completionSource);
     if (!ready.isValid()) return fail(QStringLiteral("provider ready completion preparation failed"));
     registry->completePrepared(ready, KisCompletionStatus::Succeeded);

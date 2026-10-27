@@ -13,6 +13,16 @@
 
 class KisCpuResidentBinding;
 
+// Borrowed from the original configured metadata core. Its page directory
+// only inserts nodes, so the enclosing Store/operation retains this address.
+// This carries a location, never the right to write: acceptance still checks
+// the exact generational base and all current shard facts after unlocking.
+struct KisPageMutationBaseLocation {
+    void *shard = nullptr;
+    void *node = nullptr;
+    size_t shardIndex = 0;
+};
+
 // One selected input, retained by the original operation through comparison,
 // resource checkout and acquisition. Layout is either the selected immutable
 // version's layout or the actual surface value for a default/semantic input.
@@ -21,16 +31,24 @@ class KisCpuResidentBinding;
 // lease boundary projects the reference-model transition below.
 struct KisPageWriteInput {
     KisPageVersion baseVersion, version;
-    KisReplicaHandle source, target;
+    // The base query already resolves this generational location. It is a
+    // hint, not authority: acceptance checks the exact version under its
+    // shard gate after every unlocked provider/physical preparation window.
+    KisVersionSlotId baseSlot;
+    KisPageMutationBaseLocation baseLocation;
+    // The accepted target belongs to the original private/request result.
+    // Selection retains only the exact source, never another result copy.
+    KisReplicaHandle source;
     KisPageOperationId operation;
     KisPageWriterToken writer; // Only the generic lease consumer needs a token.
     KisPageTransactionId transaction;
     KisPageWriteMode writeMode = KisPageWriteMode::PreserveContents;
     KisPageWriteInput() = default;
     explicit KisPageWriteInput(const KisPageTransition &value)
-        : baseVersion(value.baseVersion), version(value.version), source(value.source), target(value.target),
+        : baseVersion(value.baseVersion), version(value.version), source(value.source),
           operation(value.operation), writer(value.writer), transaction(value.transaction), writeMode(value.writeMode) {}
-    KisPageTransition leaseTransition(KisPageTransitionKind kind = KisPageTransitionKind::AcquireWrite) const
+    KisPageTransition leaseTransition(const KisReplicaHandle &target,
+        KisPageTransitionKind kind = KisPageTransitionKind::AcquireWrite) const
     {
         KisPageTransition value;
         value.kind = kind; value.baseVersion = baseVersion; value.version = version;
@@ -45,9 +63,9 @@ struct KisPageWriteSelection {
     KisReplicaHandle recoverableBefore;
     std::shared_ptr<KisCpuResidentBinding> binding;
     std::shared_ptr<const KisPageAllocationDescriptor> layout;
-    KisPageAllocationDescriptor surfaceLayout;
+    std::optional<KisPageAllocationDescriptor> surfaceLayout;
     const KisPageAllocationDescriptor &descriptor() const
-    { return layout ? *layout : surfaceLayout; }
+    { Q_ASSERT(layout || surfaceLayout); return layout ? *layout : *surfaceLayout; }
 };
 
 // Lives in the original mutation's stable cold page. The shard activity only
@@ -77,16 +95,19 @@ struct KisPagePrivateWrite {
     struct Location {
         void *shard = nullptr;
         void *page = nullptr;
+        size_t shardIndex = 0;
         Location() = default;
-        Location(void *s, void *p) : shard(s), page(p) {}
+        Location(void *s, void *p, size_t i) : shard(s), page(p), shardIndex(i) {}
         // A copied private value is not the activity's registered result.
         // In particular it cannot retain a location after the original exits.
         Location(const Location &) noexcept {}
-        Location &operator=(const Location &) noexcept { shard = page = nullptr; return *this; }
+        Location &operator=(const Location &) noexcept { shard = page = nullptr; shardIndex = 0; return *this; }
         Location(Location &&other) noexcept
-            : shard(std::exchange(other.shard, nullptr)), page(std::exchange(other.page, nullptr)) {}
+            : shard(std::exchange(other.shard, nullptr)), page(std::exchange(other.page, nullptr)),
+              shardIndex(std::exchange(other.shardIndex, 0)) {}
         Location &operator=(Location &&other) noexcept
-        { shard = std::exchange(other.shard, nullptr); page = std::exchange(other.page, nullptr); return *this; }
+        { shard = std::exchange(other.shard, nullptr); page = std::exchange(other.page, nullptr);
+          shardIndex = std::exchange(other.shardIndex, 0); return *this; }
     } location;
     // Set by metadata acceptance. This is a generational locator, not another
     // version authority; readers validate the record identity under its gate.

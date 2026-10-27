@@ -7,7 +7,7 @@
 
 #include <QMutex>
 #include <bitset>
-#include <map>
+#include <boost/intrusive/set.hpp>
 #include <mutex>
 #include <utility>
 #include <unordered_map>
@@ -71,6 +71,7 @@ private:
     friend class KisCpuWriteBindingReservation;
     friend class KisCpuBackingHandoff;
     friend class KisTiles3PageReplicaProvider;
+    template<class Binding> friend struct KisCpuResidentAllocationIndex;
     // Only exported through an already active owner-issued read guard.
     KisReplicaAllocationIdentity readIdentity(const KisPageVersion &version) const;
     enum class WriteState : quint8 { Idle, Active, Reserved, Handoff };
@@ -167,17 +168,53 @@ KRITAIMAGE_EXPORT KisReplicaOperation kisTransferCpuBinding(const KisReplicaTran
     const std::shared_ptr<KisCpuResidentBinding> &source,
     const std::shared_ptr<KisCpuResidentBinding> &target);
 
-template<typename Allocation>
+// The stable binding is the allocation record. The intrusive index owns one
+// original shared reference in that record, rather than a separately paid map
+// node/control protocol. Preparation never installs that reference; extract and
+// index destruction always move it out after unlinking the original node.
+template<class Binding>
 struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
 {
-    using AllocationMap = std::map<quint64, Allocation, std::less<quint64>,
-        KisMutationStorageAllocator<std::pair<const quint64, Allocation>>>;
-    using Iterator = typename AllocationMap::iterator;
+    struct SlotKey {
+        using type = quint64;
+        const quint64 &operator()(const Binding &binding) const noexcept
+        { return binding.m_handle.allocation.slot; }
+    };
+    using AllocationIndex = boost::intrusive::set<Binding, boost::intrusive::key_of_value<SlotKey>>;
+    using Iterator = typename AllocationIndex::iterator;
     struct Retirement {
         Iterator allocation;
         KisCompletionTicket completion;
         QString failure;
     };
+
+    ~KisCpuResidentAllocationIndex()
+    {
+        while (!allocations.empty()) {
+            auto released = extractAllocation(allocations.begin());
+        }
+    }
+
+    const std::shared_ptr<Binding> &providerBinding(Iterator entry) const noexcept
+    {
+        Q_ASSERT(entry != allocations.end() && entry->providerOwnership.get() == &*entry);
+        return entry->providerOwnership;
+    }
+    bool installAllocation(std::shared_ptr<Binding> &candidate, const KisCompletionTicket &retirement)
+    {
+        Q_ASSERT(candidate && !candidate->is_linked() && !candidate->providerOwnership && retirement.isValid());
+        const auto installed = allocations.insert(*candidate);
+        if (!installed.second) return false;
+        candidate->retirementCompletion = retirement;
+        candidate->providerOwnership = std::move(candidate);
+        return true;
+    }
+    std::shared_ptr<Binding> extractAllocation(Iterator entry) noexcept
+    {
+        auto &record = *entry;
+        allocations.erase(entry);
+        return std::move(record.providerOwnership);
+    }
 
     bool owns(const KisReplicaHandle &handle) const
     {
@@ -188,7 +225,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
     Iterator findExactAllocation(const KisReplicaHandle &handle)
     {
         auto found = allocations.find(handle.allocation.slot);
-        return owns(handle) && found != allocations.end() && found->second.binding && found->second.binding->matchesHandle(handle)
+        return owns(handle) && found != allocations.end() && found->matchesHandle(handle)
             ? found : allocations.end();
     }
 
@@ -197,13 +234,12 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         std::lock_guard<QMutex> locker(mutex);
         for (const auto &[id, lease] : std::as_const(activeLeases)) {
             const auto found = allocations.find(lease.allocation.slot);
-            if (found == allocations.end() ||
-                !found->second.binding || !found->second.binding->matchesAllocation(lease.allocation)) continue;
-            if (lease.mode == KisPageAccessMode::Read) found->second.binding->releaseRead();
-            else found->second.binding->releaseWrite();
+            if (found == allocations.end() || !found->matchesAllocation(lease.allocation)) continue;
+            if (lease.mode == KisPageAccessMode::Read) found->releaseRead();
+            else found->releaseWrite();
         }
-        for (const auto &[slot, allocation] : std::as_const(allocations)) {
-            if (allocation.binding) allocation.binding->revoke();
+        for (auto &allocation : allocations) {
+            allocation.revoke();
             if (allocation.retirementCompletion.isValid())
                 completions->completePrepared(allocation.retirementCompletion, KisCompletionStatus::Cancelled);
         }
@@ -216,7 +252,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         std::lock_guard<QMutex> locker(mutex);
         const auto allocation = findExactAllocation(replica);
         return allocation == allocations.end() ? KisReplicaAccess{} : kisAcquireCpuBindingAccess(
-            activeLeases, allocation->second.binding, lease, operation, replica, requirement, mode);
+            activeLeases, providerBinding(allocation), lease, operation, replica, requirement, mode);
     }
 
     void releaseAccess(const KisReplicaAccess &access)
@@ -224,7 +260,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         std::lock_guard<QMutex> locker(mutex);
         const auto allocation = findExactAllocation(access.replica);
         if (allocation != allocations.end()) kisReleaseCpuBindingAccess(
-            activeLeases, allocation->second.binding, access);
+            activeLeases, providerBinding(allocation), access);
     }
 
     std::shared_ptr<KisCpuResidentBinding> binding(
@@ -235,7 +271,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         if (status) *status = found == allocations.end()
             ? KisCpuResidentReadStatus::InvalidIdentity : KisCpuResidentReadStatus::Ready;
         return found == allocations.end()
-            ? std::shared_ptr<KisCpuResidentBinding>{} : found->second.binding;
+            ? std::shared_ptr<KisCpuResidentBinding>{} : providerBinding(found);
     }
 
     KisReplicaOperation transfer(const KisReplicaTransferRequest &request)
@@ -251,10 +287,9 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         const auto target = findExactAllocation(request.target);
         if (source == allocations.end() || target == allocations.end() ||
             !request.source.layout.matches(request.descriptor) ||
-            !request.target.layout.matches(request.descriptor) ||
-            !source->second.binding || !target->second.binding) return fail(QStringLiteral("transfer allocation is stale"));
+            !request.target.layout.matches(request.descriptor)) return fail(QStringLiteral("transfer allocation is stale"));
         return kisTransferCpuBinding(request, readyCompletion,
-                                     source->second.binding, target->second.binding);
+                                     providerBinding(source), providerBinding(target));
     }
 
     Retirement beginRetirement(KisPageOperationId operation,
@@ -271,14 +306,12 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
         const auto allocation = findExactAllocation(replica);
         if (allocation == allocations.end())
             return {allocation, {}, QStringLiteral("retirement allocation is stale")};
-        // Cold allocation prepared this terminal capacity before physical
-        // adoption. A refusal to retire keeps the same private ticket Pending.
-        const auto completion = allocation->second.retirementCompletion;
+        const auto completion = allocation->retirementCompletion;
         if (!completion.isValid()) qFatal("Live allocation has no prepared retirement completion");
-        return {allocation, completion};
+        return {allocation, completion, {}};
     }
 
-    AllocationMap allocations;
+    AllocationIndex allocations;
 };
 
 /** Move-only page-local writer reservation, independent of RAM residency.

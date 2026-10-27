@@ -10,6 +10,9 @@
 #include <map>
 #include <array>
 #include <unordered_map>
+#include <new>
+#include <type_traits>
+#include <QtCore/qalgorithms.h>
 
 enum class KisBackingBudgetClass : quint8 {
     Current,
@@ -86,8 +89,83 @@ auto kisPageDomainComponent(DomainBytes &bytes, KisPageAccessDomain domain)
     return nullptr;
 }
 
-struct KisBackingBudgetDelta {
-    std::array<KisPageDomainByteDelta, static_cast<size_t>(KisBackingBudgetClass::Count)> buckets{};
+class KisBackingBudgetDelta
+{
+    static constexpr size_t Count = static_cast<size_t>(KisBackingBudgetClass::Count);
+    static_assert(Count <= 8);
+    static_assert(std::is_trivially_copyable_v<KisPageDomainByteDelta>
+                  && std::is_trivially_destructible_v<KisPageDomainByteDelta>);
+public:
+    KisBackingBudgetDelta() noexcept {} // Value-initialization must not zero unused capacity.
+    KisBackingBudgetDelta(const KisBackingBudgetDelta &other) noexcept
+        : m_constructed(other.m_constructed) { copyValues(other); }
+    KisBackingBudgetDelta &operator=(const KisBackingBudgetDelta &other) noexcept
+    {
+        if (this == &other) return *this;
+        copyValues(other);
+        m_constructed = other.m_constructed;
+        return *this;
+    }
+    // Untouched classes are semantic zero, not constructed scratch values.
+    // Mutation constructs one actual class; full-value producers avoid even
+    // that zero initialization through setBucket. No heap/index owns a delta.
+    KisPageDomainByteDelta &bucket(size_t i) noexcept
+    {
+        Q_ASSERT(i < Count);
+        if (!(m_constructed & (1u << i))) setBucket(i, {});
+        return *value(i);
+    }
+    const KisPageDomainByteDelta &bucket(size_t i) const noexcept
+    {
+        Q_ASSERT(i < Count);
+        return m_constructed & (1u << i) ? *value(i) : Empty;
+    }
+    KisPageDomainByteDelta &bucket(KisBackingBudgetClass c) noexcept { return bucket(size_t(c)); }
+    const KisPageDomainByteDelta &bucket(KisBackingBudgetClass c) const noexcept { return bucket(size_t(c)); }
+    void setBucket(size_t i, KisPageDomainByteDelta value) noexcept
+    {
+        Q_ASSERT(i < Count);
+        ::new (static_cast<void *>(&m_values[i].value)) KisPageDomainByteDelta(value);
+        m_constructed |= quint8(1u << i);
+    }
+    quint32 changedClasses() const noexcept
+    {
+        quint32 changed = 0;
+        for (quint32 mask = m_constructed; mask; mask &= mask - 1) {
+            const size_t i = size_t(qCountTrailingZeroBits(mask));
+            const auto &v = *value(i);
+            if (v.cpuRam || v.umaShared || v.discreteVram || v.ssd) changed |= quint32(1) << i;
+        }
+        return changed;
+    }
+private:
+    union Cell {
+        KisPageDomainByteDelta value;
+        Cell() noexcept {} // No active value until this class is touched.
+    };
+    static_assert(std::is_trivially_copyable_v<Cell>);
+    void copyValues(const KisBackingBudgetDelta &other) noexcept
+    {
+        const quint32 mask = other.m_constructed;
+        if (!mask) return;
+        if (!(mask & (mask - 1))) {
+            const size_t i = size_t(qCountTrailingZeroBits(mask));
+            m_values[i] = other.m_values[i];
+        } else {
+            // Keep multiple-class copying at a fixed vector-copy cost instead
+            // of a per-class branch/address/mask loop. Trivial union copy
+            // starts corresponding active member lifetimes; unselected cells
+            // are never interpreted as domain values, including under C++17.
+            m_values = other.m_values;
+        }
+    }
+    KisPageDomainByteDelta *value(size_t i) noexcept
+    { return std::launder(&m_values[i].value); }
+    const KisPageDomainByteDelta *value(size_t i) const noexcept
+    { return std::launder(&m_values[i].value); }
+    inline static constexpr KisPageDomainByteDelta Empty{};
+    std::array<Cell, Count> m_values;
+    quint8 m_constructed = 0;
 };
 
 class KisBackingBudgetController;
@@ -163,8 +241,21 @@ private:
 // original inert storage owner until the last actual free. It is never a
 // second account; every access still holds the parent's accounting gate.
 struct KisSharedNonPayloadUsage {
-    quint64 liveBytes = 0;
+    // Ordinary accepted fees plus the actual storage capacity charge. This
+    // child record retains ownership, not the parent's live/reserved split.
+    quint64 chargedBytes = 0;
     quint64 reservedBytes = 0;
+};
+
+// An empty original operation, not a second account or permission record.
+// Its allocation remains live/charged. Only the accounting root links it;
+// disposal runs after dropping that gate and must acquire no Store gate.
+struct KisReusableMutationStorage {
+    KisReusableMutationStorage *previous = nullptr;
+    KisReusableMutationStorage *next = nullptr;
+    KisBackingBudgetController *origin = nullptr;
+    size_t bytes = 0;
+    void (*dispose)(KisReusableMutationStorage *) noexcept = nullptr;
 };
 
 class KRITAIMAGE_EXPORT KisBackingBudgetController final
@@ -199,6 +290,10 @@ public:
         QString *error = nullptr);
     bool ensureProcessStorageBudget(QString *error = nullptr);
     void releaseLive(KisBackingBudgetClass, KisPageAccessDomain, quint64 bytes) noexcept;
+    static constexpr size_t ReusableMutationBytes = 64 * 1024;
+    bool retainMutationStorage(KisReusableMutationStorage *) noexcept;
+    KisReusableMutationStorage *takeMutationStorage() noexcept;
+    void stopMutationStorageReuse() noexcept;
 
 private:
     struct ReservationSlot {
@@ -251,8 +346,7 @@ private:
     ReservationSlot *activeReservation(quint64 cookie)
     {
         const quint32 index = quint32(cookie);
-        auto *slot = index == std::numeric_limits<quint32>::max()
-            ? &m_storageReservation : index < m_slotCount ? &m_slots[index] : nullptr;
+        auto *slot = index < m_slotCount ? &m_slots[index] : nullptr;
         if (!slot || !slot->active || slot->generation != quint32(cookie >> 32))
             return nullptr;
         return slot;
@@ -262,9 +356,12 @@ private:
         return const_cast<KisBackingBudgetController *>(this)->activeReservation(cookie);
     }
 
-    bool settle(quint64 cookie, const KisBackingBudgetDelta *installed,
-                const KisBackingBudgetDelta *retained, bool prepared = false,
-                KisBackingBudgetDelta *sharedInstalled = nullptr) noexcept;
+    // The parent consumes one shared domain bucket; the local controller
+    // consumes full class deltas. Both use the same settlement policy.
+    template<class Delta>
+    bool settle(quint64 cookie, const Delta *installed,
+                const Delta *retained, bool prepared = false,
+                KisPageDomainByteDelta *sharedInstalled = nullptr) noexcept;
     // OwnerLedger-only: headroom for reclassifying an already charged physical
     // backing. Moving it creates no payload or additional durable allocation.
     void moveRetirementHeadroom(quint64 cookie, KisPageAccessDomain source,
@@ -280,18 +377,29 @@ private:
                                              QString *error,
                                              const KisBackingBudgetDelta *signedChange = nullptr);
     KisBackingBudgetReservation reserveSharedNonPayload(
-        SharedChildUsage *child, const KisBackingBudgetDelta &, QString *error);
+        SharedChildUsage *child, const KisPageDomainByteDelta &, QString *error);
     quint64 registerSharedNonPayloadChild(SharedChildUsage **usage, QString *error);
     void unregisterSharedNonPayloadChild(quint64 child) noexcept;
     void releaseSharedNonPayloadLive(SharedChildUsage *child,
                                      KisPageAccessDomain domain,
                                      quint64 bytes) noexcept;
+    void releaseSharedNonPayloadLive(SharedChildUsage *child,
+                                     const KisPageDomainByteDelta &change) noexcept;
+    void releaseSharedNonPayloadLiveLocked(SharedChildUsage *child,
+                                           KisPageAccessDomain domain,
+                                           quint64 bytes) noexcept;
+    void releaseStorage(quint64 bytes, bool installed = true) noexcept;
+    void releaseSharedStorage(SharedChildUsage *child, quint64 bytes, bool installed) noexcept;
+    void releaseStorageLocked(quint64 bytes, bool installed) noexcept;
+    quint64 storageBytesLocked() const noexcept;
 
     bool fitsLocked(const KisBackingBudgetDelta &,
         const std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)> &,
         quint64 durableBytes, bool emptyUsage = false,
         quint64 irreducibleMetadataBytes = 0) const;
     bool fitsMetadataStorageLocked(quint64 bytes, quint64 *processBytes = nullptr) const;
+    bool reclaimMutationStorage(bool ownOnly, bool waitingOnly = false) noexcept;
+    void unlinkMutationStorageLocked(KisReusableMutationStorage *) noexcept;
     void *allocateStorage(const KisPageStorageLayout &layout);
     quint64 nonMetadataLiveSsdLocked() const;
     bool priorWaiterConflictsLocked(const KisBackingBudgetDelta &,
@@ -310,7 +418,7 @@ private:
     WaitCallbacks dispatchWaiters();
     void notifyWaitersLocked() noexcept;
     KisBackingBudgetReservation finishWaiter(quint64 sequence, bool take);
-    static KisBackingBudgetDelta sharedNonPayloadDelta(const KisBackingBudgetDelta &,
+    static KisPageDomainByteDelta sharedNonPayloadDelta(const KisBackingBudgetDelta &,
                                                        bool *valid = nullptr) noexcept;
     boost::intrusive_ptr<KisBackingBudgetWaitContext> m_waitContext;
     boost::intrusive_ptr<KisMutationStorageOwner> m_storageOwner;
@@ -318,28 +426,35 @@ private:
     std::shared_ptr<KisBackingBudgetController> m_sharedNonPayloadBudget;
     quint64 m_sharedNonPayloadChild = 0;
     SharedChildUsage *m_sharedNonPayloadUsage = nullptr;
+    // Guarded by the shared root's m_mutex (this->m_mutex without a parent).
+    KisReusableMutationStorage *m_reusableMutation = nullptr;
+    KisReusableMutationStorage *m_firstReusableMutation = nullptr;
+    KisReusableMutationStorage *m_lastReusableMutation = nullptr;
+    bool m_acceptReusableMutation = true;
 
     mutable QMutex m_mutex;
     KisPageBackingLimits m_limits;
     KisPageBackingUsage m_usage;
-    // A single embedded cold reservation bootstraps charging the slot array
-    // through the same accounting transitions, without reserving another slot.
-    // It never escapes into a caller or waiter and growth is serialized.
-    ReservationSlot m_storageReservation;
+    // The ordinary slot array is actual storage too. Its original allocator
+    // needs no reservation slot to fund itself, including on first growth.
     struct SlotStorageDeleter {
+        KisBackingBudgetController *budget = nullptr;
         void operator()(ReservationSlot *storage) const noexcept
-        { kisFreePageStorage(storage, alignof(ReservationSlot)); }
+        { kisFreeMutationStorage(budget, storage, 0, alignof(ReservationSlot)); }
     };
-    std::unique_ptr<ReservationSlot[], SlotStorageDeleter> m_slots;
+    std::unique_ptr<ReservationSlot[], SlotStorageDeleter> m_slots{nullptr, SlotStorageDeleter{this}};
     quint32 m_slotCount = 0;
     quint32 m_slotCapacity = 0;
     QMutex m_slotGrowthMutex;
     quint32 m_firstFreeSlot = std::numeric_limits<quint32>::max();
-    // Aggregate/durable reservations include active slots and stack-owned
-    // physical storage preparation. Update them at both reservation boundaries;
-    // admission cost must not depend on a historical concurrency peak.
+    // Ordinary transactions reserve their net aggregate change; that can be
+    // less than their positive domain reservations during a cross-domain move.
     std::array<quint64, static_cast<size_t>(KisBackingBudgetClass::Count)>
         m_reservedAggregateBytes{};
+    // Actual storage occupies its whole admitted capacity until physical free.
+    // Success publishes only the live split, without re-entering either gate.
+    quint64 m_storageBytes = 0;
+    std::atomic<quint64> m_storageLiveBytes{0};
     quint64 m_reservedDurableBytes = 0;
     SharedChildMap m_sharedChildren;
     quint64 m_nextSharedChild = 1;
@@ -358,6 +473,7 @@ private:
     friend class KisMutationStorageOwner;
     friend KisMutationStorageOwner *kisMutationStorageOwner(KisBackingBudgetController *);
     friend void *kisAllocateMutationStorage(KisBackingBudgetController *, size_t, size_t);
+    friend void kisFreeMutationStorage(KisBackingBudgetController *, void *, size_t, size_t) noexcept;
     friend void *kisAllocatePageProcessStorage(size_t, size_t);
     friend void kisFreePageProcessStorage(void *, size_t, size_t) noexcept;
     friend void kisReservePageProcessStorage(size_t);

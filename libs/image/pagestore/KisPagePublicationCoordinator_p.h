@@ -40,6 +40,8 @@ struct KisPagePublicationCoordinatorSnapshot {
 class KisPageReadCleanup;
 struct KisPageCapturedRelease;
 struct KisPageIdleCapacity;
+struct KisPageWriteIntent;
+struct KisPageWriteSelection;
 
 // The publication owner's original mutable delta. Epoch preparation borrows
 // these containers only while the owner's CommitPreparation excludes edits;
@@ -169,6 +171,7 @@ class KisPagePublicationCoordinator final
         }
         bool hasStorage() const noexcept { return entries.has_value(); }
         bool empty() const noexcept { return !entries || entries->empty(); }
+        size_t size() const noexcept { return entries ? entries->size() : 0; }
         size_t capacity() const noexcept { return entries ? entries->capacity() : 0; }
         static size_t internal_capacity() { return Entries::internal_capacity(); }
         void reserve(size_t count) { Q_ASSERT(entries); entries->reserve(count); }
@@ -224,19 +227,16 @@ public:
         // acceptance. A late capacity conflict drops it for one conservative
         // reprepare, then rechecks the original inputs and surface before install.
         bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);
-        bool tryAcceptLocked(
-            KisPageMetadataCoordinator::DeferredPublicationCleanup *metadataCleanup,
-            QMutexLocker<QMutex> &ownerLock, QString *error, bool *storageRefused = nullptr);
+        bool tryAcceptLocked(QMutexLocker<QMutex> &ownerLock, QString *error, bool *storageRefused = nullptr);
         bool acceptsCanonical() const;
         bool tryAcceptCanonicalLocked(const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock);
         // Caller first relinquishes any accepted producer proofs. Keep its
         // admission across cleanup. Enter/return unlocked; the gate is acquired
         // only for history collection. Consumes accepted or rejected preparation.
-        void finishUnlocked(KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup,
-                            QMutexLocker<QMutex> &ownerLock);
+        void finishUnlocked(QMutexLocker<QMutex> &ownerLock);
 
     private:
-        bool installOverlayLocked(KisPageMetadataCoordinator::DeferredPublicationCleanup *, QString *);
+        bool installOverlayLocked(QString *);
         // This preparation belongs to the original call/handle. Only actual
         // Native input is borrowed from the original write set. Only external
         // input and real installation capacity allocate; this header is inline.
@@ -271,7 +271,6 @@ public:
             bool prepared = false;
             bool installed = false;
             bool canonical = false;
-            bool retryMutationCapacity = false;
         };
         std::optional<Data> data;
         void cancel() noexcept;
@@ -352,26 +351,29 @@ public:
                                                          QMutexLocker<QMutex> &ownerLock,
         const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
         const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter);
-    bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,
+    KRITAIMAGE_EXPORT bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,
                      KisPageReadCleanup &cleanup);
 
     bool isPreparingCommitLocked(KisPageTransactionId transaction) const;
 
     KisPreparedPageProof projectProof(const KisPagePublicationIdentity &) const;
-    KisPageVersion findPreparedVersionLocked(KisPageTransactionId, const KisPageKey &,
-                                            KisVersionSlotId *slot = nullptr) const;
+    // Caller retains owner admission. One original delta lookup selects the
+    // actual sealed/root input, removal and surface facts for every adapter.
+    KRITAIMAGE_EXPORT bool selectWriteBaseLocked(const KisPageTransaction &, const KisPageWriteIntent &,
+                              KisPageWriteSelection *, QString *error);
     KisPageIdleCapacity takeIdleCapacityLocked(const KisPageKey &key);
     // Same original records and Store gate for H0, H1, expiry and close.
-    qint64 expireIdleCapacityLocked(qint64 now, bool all = false);
+    qint64 nextIdleDeadlineLocked() const;
+    void collectExpiredIdleCapacityLocked(qint64 now, qsizetype budget);
+    void drainIdleCapacityLocked();
     KisPreparedPageSet transactionDeltaLocked(KisPageTransactionId transaction) const;
     bool captureDeltaLocked(KisPageTransactionId transaction, KisPageCapturedRelease &capture,
                             size_t *versions, size_t *removals, size_t *surfaces) const;
-    bool stagesRemovalLocked(KisPageTransactionId transaction, const KisPageKey &key) const;
     KRITAIMAGE_EXPORT KisPreparedPagePublication preparePagePublicationLocked(
         const KisPageTransaction &transaction,
         const OverlayChange *changes, size_t count,
         QString *error, bool *storageRefused = nullptr);
-    KisPreparedPagePublication preparePagePublicationLocked(
+    KRITAIMAGE_EXPORT KisPreparedPagePublication preparePagePublicationLocked(
         const KisPageTransaction &transaction, KisPagePublicationRows changes,
         QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned = {});
     // Consume the caller's stable sequence directly into candidate storage.
@@ -391,12 +393,13 @@ public:
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version,
         const KisPageAllocationDescriptor &descriptor, const KisPageVersion &base);
-    void noteVersionExitLocked(const KisPageVersion &version);
+    KRITAIMAGE_EXPORT bool descriptorPreparationCoversLocked(
+        const PreparedDescriptorChange *, size_t count, const PreparedDescriptors &) const;
     // A borrow lasts until its version's descriptor is replaced or removed.
     // The native page's original claim/session excludes both during its use.
     const KisPageAllocationDescriptor *descriptorLocked(
         const KisPageVersion &version, KisPageAllocationDescriptor *descriptor = nullptr) const;
-    PreparedDescriptors prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count,
+    KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorAdditionsLocked(const PreparedDescriptorChange *changes, size_t count,
         const std::shared_ptr<const KisPageAllocationDescriptor> *sharedLayout = nullptr);
     KRITAIMAGE_EXPORT void installDescriptorAdditionsLocked(PreparedDescriptors *prepared);
     void discardDescriptorAdditionsLocked(PreparedDescriptors *, QMutexLocker<QMutex> &ownerLock);
@@ -458,7 +461,6 @@ private:
     using DefaultRevisionMap = std::map<quint64, quint64, std::less<quint64>,
         KisMutationStorageAllocator<std::pair<const quint64, quint64>>>;
     DefaultRevisionMap m_defaultRevisionHighWater;
-    quint64 m_descriptorRevision = 1;
     KisPageStorePublicationStatistics m_statistics;
     quint64 m_committedTransactions = 0;
     // Non-owning: the original ledger keeps each record. Its intrusive hook

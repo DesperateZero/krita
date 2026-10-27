@@ -66,7 +66,7 @@ std::shared_ptr<const KisCpuDefaultReadBuffer> KisPageDefaultStorage::createRead
     const KisPageStorageLayout layout(size_t(stride * height), alignment);
     if (!layout.isValid()) return {};
     const size_t capacity = layout.capacity();
-    requested.buckets[size_t(KisBackingBudgetClass::OptionalCache)].cpuRam = qint64(capacity);
+    requested.bucket(size_t(KisBackingBudgetClass::OptionalCache)).cpuRam = qint64(capacity);
     auto reservation = budget.reserve(requested, nullptr);
     if (!reservation.isValid()) return {};
 

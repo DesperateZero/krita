@@ -25,13 +25,15 @@ class KisCpuResidentBinding;
 struct KisPageNativeReadRef;
 struct KisPagePrivateWrite;
 struct KisPageWriteInput;
+struct KisPageWriteSelection;
 struct KisPagePublicationChange;
 struct KisPagePublicationIdentity;
 struct KisPageRetirementRecord;
 template<class Tag> struct KisGenerationalSlotId;
 struct KisVersionSlotTag;
 using KisVersionSlotId = KisGenerationalSlotId<KisVersionSlotTag>;
-// A borrowed selection value, never another per-version allocation or owner.
+// An exact selection value, never another per-version allocation or owner.
+// A valid replica with no binding is a cold source, not a pixel capability.
 struct KisCpuReadBinding {
     KisReplicaHandle replica;
     std::shared_ptr<KisCpuResidentBinding> binding;
@@ -288,6 +290,8 @@ private:
     // borrowed pointer requires the caller's existing version/range lifetime.
     std::shared_ptr<const KisPageAllocationDescriptor> versionDescriptor(const KisPageVersion &) const;
     const KisPageAllocationDescriptor *borrowVersionDescriptor(const KisPageVersion &) const;
+    // Compare within the original shard gate; no independent lifetime escapes.
+    bool versionDescriptorMatches(const KisPageVersion &, const KisPageAllocationDescriptor &) const;
     bool exchangeVersionDescriptor(const KisPageVersion &,
         std::shared_ptr<const KisPageAllocationDescriptor> *prepared);
     // Original-result acceptance of an unlocked provider validation. The
@@ -300,8 +304,10 @@ private:
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
     // physical slot; no synthetic lease/writer or target arena is created.
-    bool acceptPrivateTarget(const KisPageWriteInput &, KisPagePrivateWrite *, quint32 limit,
-        QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {});
+    bool acceptPrivateTarget(const KisPageWriteInput &, const KisReplicaHandle &source,
+                             const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
+        QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
+        bool complete = false);
     bool completePrivateWrite(KisPagePrivateWrite *);
     bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &);
     bool cancelPrivateResult(KisPagePrivateWrite *);
@@ -315,21 +321,14 @@ private:
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
     bool revokeCpuProof(const KisPagePublicationIdentity &, quint64 issuer);
     qsizetype cpuProofCount(quint64 issuer) const;
-    struct MutationBaseInfo {
-        bool baseExists = false;
-        bool hasWriter = false;
-        KisPageGeneration nextGeneration;
-        VersionInfo selected;
-        KisReplicaHandle recoverableBefore;
-        std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-        std::shared_ptr<KisCpuResidentBinding> binding;
-    };
-    // One shard cut for the root base, sealed selection and Fresh candidate.
-    // This is a scalar observation; joint write preparation still revalidates
-    // eligibility and acquires the physical claim before touching any bytes.
-    bool queryMutationBase(const KisPageVersion &base, const KisPageVersion &sealed,
-                           bool discoverBefore, MutationBaseInfo *info,
-                           const KisVersionSlotId *selectedSlot = nullptr) const;
+    enum class MutationBaseSelection { Selected, Absent, Rejected };
+    // The publication owner has already selected the exact sealed/root base.
+    // Fill its fresh actual write input once under this shard cut, without exporting
+    // another diagnostic projection. Only Selected grants usable input facts;
+    // physical/private acceptance still revalidates after unlocking.
+    MutationBaseSelection selectMutationBase(const KisPageVersion &base, bool discoverBefore,
+        KisPageWriteSelection *selection, QString *error = nullptr,
+        const KisVersionSlotId *selectedSlot = nullptr) const;
     // Cold exact query for original read-release records. Completion may clear
     // multiple leases carrying the same ticket; this never grants write access.
     bool queryLastUsePending(const KisReplicaHandle &replica,
@@ -351,16 +350,21 @@ private:
     PublicationHeads publicationHeads() const;
     struct HistorySlice {
         static constexpr qsizetype Limit = 32;
-        std::array<KisPageVersion, Limit> versions{};
-        qsizetype count = 0;
         KisPageVersion after;
         qsizetype total = 0;
         bool exists = false;
     };
+    // Versions are ordered by generation/default-pixel revision for this key.
     // Value cursor, not a borrowed iterator. Removal cannot dangle it. A
     // caller must rescan after semantic changes can insert before the cursor;
     // this is enumeration, NOT root reachability or retirement authorization.
-    HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after, qsizetype budget) const;
+    // Replaces values in the caller's original bounded capacity. No history
+    // array is materialized and copied between metadata and its consumer.
+    HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after,
+        KisMutationWorkspace::Array<KisPageVersion> &versions, qsizetype budget) const;
+    // Scheduling fact only. Reachability/protection and retirement admission
+    // remain dynamic and are checked when the collector processes the key.
+    bool hasHistory(const KisPageKey &key) const;
     // Select eligible, unreachable records and prepare their exact effects and
     // Debt before removal. Replica effects require a configured Debt owner and
     // their original registered retirement records. Refusal changes no record;
@@ -369,7 +373,9 @@ private:
     bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
                         qsizetype count, quint32 reachableMask,
                         quint32 *removedMask);
-    void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &)) const;
+    // Callback runs under the shard gate and must not reenter metadata. The
+    // history-only census supplies the collector's already observed fact.
+    void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &), bool historicalOnly = false) const;
     KisPageMetadataTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
                                       KisPageMetadataReadCleanup *cleanup = nullptr);
     KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
@@ -394,6 +400,10 @@ private:
     void removeCpuReadBinding(const KisReplicaHandle &replica,
                               const KisCpuResidentBinding *expected = nullptr);
     KisCpuReadBinding cpuReadBinding(const KisPageVersion &version) const;
+    // One exact cut: conditionally evict only the stale candidate, then return
+    // a cached binding or the selected replica with an empty binding. Neither
+    // grants a pin. Provider discovery must consume this same selection.
+    KisCpuReadBinding selectCpuReadBinding(const KisPageVersion &, const KisCpuReadBinding &stale = {});
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
     size_t retainNativeReads(KisPageNativeReadRef *references, size_t &next, size_t count,
         void *context, bool (*select)(void *, quint32, KisPageVersion *, KisVersionSlotId *),
@@ -433,6 +443,7 @@ private:
         // retry a revision race or retain its input until capacity returns.
         bool needsReprepare() const { return m_failure == Failure::Conflict; }
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
+        bool needsMutationCapacity() const { return m_owner && m_failure == Failure::Capacity; }
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
                                            KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
@@ -444,15 +455,15 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
-        class NativeCapacity;
-        struct NativeCapacityDeleter { void operator()(NativeCapacity *) const noexcept; };
-        using NativeCapacityPointer = std::unique_ptr<NativeCapacity, NativeCapacityDeleter>;
-        NativeCapacityPointer m_nativeCapacity;
+        class MutationCapacity;
+        struct MutationCapacityDeleter { void operator()(MutationCapacity *) const noexcept; };
+        using MutationCapacityPointer = std::unique_ptr<MutationCapacity, MutationCapacityDeleter>;
+        MutationCapacityPointer m_mutationCapacity;
         KisPagePublicationRows m_rows;
         size_t m_count = 0;
         KisPageTransaction m_transaction;
         std::shared_ptr<const quint8> m_owner;
-        enum class Failure : quint8 { None, Conflict, Storage };
+        enum class Failure : quint8 { None, Conflict, Storage, Capacity };
         Failure m_failure = Failure::None;
         friend class KisPageMetadataCoordinator;
         friend class DeferredPublicationCleanup;
@@ -469,10 +480,6 @@ private:
         DeferredPublicationCleanup(const DeferredPublicationCleanup &) = delete;
         DeferredPublicationCleanup &operator=(const DeferredPublicationCleanup &) = delete;
         bool isEmpty() const;
-        bool needsCapacityReprepare() const;
-        // Failed all-D claim, in original input coordinates. Only these rows
-        // lost their prepared release permission; no authority is granted.
-        void forEachCapacityInvalidation(void *context, void (*visit)(void *, size_t)) const;
         // One unit is one candidate page (or one empty-candidate terminal
         // payload). Actual candidate capacity remains charged until freed.
         // This is a cooperative destruction budget,
@@ -507,7 +514,7 @@ private:
     PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
                                            const KisPageVersion *versions, qsizetype count,
                                            QString *error = nullptr) const;
-    enum class PreparationKind : quint8 { Publication, Detachment, RecoverableWrite, PrivateWrite };
+    enum class PreparationKind : quint8 { Publication, RecoverableWrite, PrivateWrite };
     PreparedPublication preparePublicationImpl(const KisPageTransaction &transaction,
                                                KisImageEpochId minimumEpoch,
                                                const KisPageTransition *transitions, qsizetype count,
@@ -516,26 +523,22 @@ private:
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
-                                               KisPagePublicationRows operationRows = {},
                                                bool detachUnprotectedCurrent = false) const;
-    // Transaction-overlay detachment is a compact semantic delta. Install
-    // claims all pages, revalidates exact Prepared identity/transaction and no
-    // writer, then changes only publication/preparedBy in CURRENT metadata.
-    // Reader/pin/last-use changes are preserved, not overwritten or retried.
-    // The committed epoch tag is unchanged. This is not a stale root merge.
-    // Versions are the complete private input; other transition kinds,
-    // operation IDs and epoch tags cannot enter this capability.
-    PreparedPublication prepareMutation(const KisPageTransaction &transaction,
-                                        const KisPageVersion *versions, qsizetype count,
-                                        QString *error = nullptr) const;
+    // Original D accepts native results and external detachments atomically.
+    // Exact identity, writers and real readers are revalidated before edits;
+    // a capacity-only conflict retains the frozen preparation for repair.
+    // Original publication rows retain each semantic input and its acceptance
+    // position through prepare/install/finish. External capabilities have
+    // already been checked by publication; this is not a second proof issuer.
     PreparedPublication prepareMutation(const KisPageTransaction &transaction,
                                         KisPagePublicationRows rows,
                                         QString *error = nullptr) const;
+    // Unlocked continuation of the same frozen D. Retains existing capacity
+    // and positions; only newly invalidated native rows reserve more slots.
+    bool prepareMutationCapacity(PreparedPublication &, QString *error = nullptr) const;
     bool installMutation(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
-                         QString *error = nullptr,
-                         DeferredPublicationCleanup *deferredCleanup = nullptr,
-                         bool *retryCapacity = nullptr);
+                         QString *error = nullptr);
     // The original rows remain alive until this unlocked post-acceptance cleanup.
     void finishMutation(KisPagePublicationRows);
     // Logical half only. The write coordinator must independently retain the

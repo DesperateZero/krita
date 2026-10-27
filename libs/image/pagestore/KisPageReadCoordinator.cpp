@@ -460,18 +460,19 @@ KisCpuReadBinding KisPageReadCoordinator::discoverCpuReadBinding(
     KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
     const KisPageVersion &version, const KisCpuReadBinding &stale, KisCpuResidentReadStatus *status)
 {
+    return resolveSelectedCpuReadBinding(metadata, owner, metadata.selectCpuReadBinding(version, stale), status);
+}
+
+KisCpuReadBinding KisPageReadCoordinator::resolveSelectedCpuReadBinding(
+    KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
+    const KisCpuReadBinding &selected, KisCpuResidentReadStatus *status)
+{
     if (status) *status = KisCpuResidentReadStatus::BindingUnavailable;
-    if (stale) {
-        if (!(stale.replica.version == version)) return {};
-        metadata.removeCpuReadBinding(stale.replica, stale.binding.get());
-    }
-    // Another reader may already have installed the replacement. Preserve its
-    // direct binding rather than installing a duplicate selection.
-    if (auto current = metadata.cpuReadBinding(version)) {
+    if (selected) {
         if (status) *status = KisCpuResidentReadStatus::Ready;
-        return current;
+        return selected;
     }
-    const auto replica = metadata.cpuReadReplica(version);
+    const auto &replica = selected.replica;
     if (!replica.isValid()) return {};
     const auto provider = owner.provider(replica.provider, replica.providerEpoch);
     if (!provider) return {};
@@ -480,6 +481,8 @@ KisCpuReadBinding KisPageReadCoordinator::discoverCpuReadBinding(
         if (status && *status == KisCpuResidentReadStatus::Ready) *status = KisCpuResidentReadStatus::InvalidIdentity;
         return {};
     }
+    // The provider ran unlocked. This true boundary still revalidates the
+    // exact replica before publishing, without chasing a newer page head.
     return metadata.installCpuReadBinding(replica, std::move(binding));
 }
 
@@ -791,7 +794,7 @@ bool KisPageReadCoordinator::releaseReadLocked(
     release.lease = lease;
     release.completion = completion;
     const auto result = m_metadata.applyOwner(replica.version.key, release, &cleanup.m_storage);
-    if (result.historyNeedsRevisit) m_history.requestKeyLocked(replica.version.key);
+    if (result.historyNeedsRevisit) m_history.requestKeyLocked(replica.version.key, true);
     cleanup.retainLocked();
     return result.accepted;
 }
@@ -877,7 +880,7 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
             record->replica.version, record->replica, completion, &cleanup.m_storage);
         cleanup.retainLocked();
         if (!result.accepted) return false;
-        if (result.historyNeedsRevisit) m_history.requestKeyLocked(record->replica.version.key);
+        if (result.historyNeedsRevisit) m_history.requestKeyLocked(record->replica.version.key, true);
     }
     record->metadataReleased = false;
     --m_pendingLastUses;
@@ -1076,7 +1079,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
         if (!released) return blocked();
         pending.retained -= released;
         for (size_t i = 0; i < released; ++i)
-            if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i]);
+            if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i], true);
     }
     bool becameUnretained = false;
     if (pending.token.isValid()

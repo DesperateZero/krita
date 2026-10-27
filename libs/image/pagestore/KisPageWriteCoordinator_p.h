@@ -66,9 +66,7 @@ enum class KisPageWritePlanKind : quint8 {
     ReusePending,
     FreshPayload,
     FreshDiscard,
-    FreshCow,
-    RecoverableHandoff,
-    ReuseWorkingCapacity
+    FreshCow
 };
 
 enum class KisPageWriteIntentFlag : quint8 {
@@ -103,10 +101,7 @@ public:
     KisMutationPageEntry &operator=(const KisMutationPageEntry &) = delete;
 
     const KisPageKey &key() const { return intent.key; }
-    KisPageVersion preparedTargetVersion() const
-    {
-        return targetGeneration.isValid() ? KisPageVersion{key(), targetGeneration} : KisPageVersion{};
-    }
+    KisPageVersion preparedTargetVersion() const;
     bool isExposed() const { return state == KisMutationPageEntryState::Exposed; }
     bool acceptsMutableInput() const { return state < KisMutationPageEntryState::Exposed; }
     bool hasPrivateResult() const
@@ -128,8 +123,10 @@ public:
 
 private:
     KisPageWriteIntent intent;
-    KisPageVersion baseVersion;
-    KisPageGeneration targetGeneration;
+    // The key already belongs to intent; the target/source belong to the
+    // original cold result. Retain only the independent base identity suffix.
+    KisPageGeneration baseGeneration;
+    quint64 baseDefaultPixelRevision = 0;
     std::shared_ptr<const KisPageReplicaSource> initialization;
     KisPagePrivateWrite *coldPageStorage = nullptr;
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
@@ -162,12 +159,16 @@ public:
     KisMutationPageEntry *at(EntryHandle);
     const KisMutationPageEntry *at(EntryHandle) const;
     EntryHandle handleAt(EntryIndex) const;
+    // The caller still owns this original entry; do not rediscover it by key.
+    EntryHandle handleOf(const KisMutationPageEntry &) const;
     EntryHandle firstEntry() const;
     EntryHandle nextEntry(EntryHandle) const;
     // Caller first terminates cold resources and releases this entry's claim.
     bool erase(EntryHandle);
     ReleasedBlocks takeReleasedBlocks() noexcept { return overflow.takeReleasedBlocks(); }
     void reserveKnownTargetCount(qsizetype);
+    void clearValues() noexcept;
+    size_t storageBytes() const noexcept;
     qsizetype size() const;
     // Freeze the one original directory: actual changes first, claims-only
     // rows last. No entry moves, and retries reuse this same frozen D.
@@ -194,6 +195,10 @@ private:
     KisBackingBudgetController *budget = nullptr;
     std::optional<size_t> publishedCount;
     size_t indexSeed = QHashSeed::globalSeed();
+    mutable size_t indexStorageCapacity = 0;
+    mutable size_t indexStorageBytes = 0;
+    mutable size_t semanticStorageCapacity = 0;
+    mutable size_t semanticStorageBytes = 0;
 };
 
 class KRITAIMAGE_EXPORT KisPageWriteAdmission final
@@ -227,6 +232,10 @@ public:
         ClaimSet &operator=(const ClaimSet &) = delete;
 
         bool isValid() const;
+        // No further execution/delivery may consume the original write rows.
+        // Admission retains the keys; this terminal owner retains only token.
+        void retainTokenForTerminal() noexcept;
+        bool isTerminal() const { return isValid() && !writeSet; }
         void release() noexcept;
         void releaseLocked() noexcept;
 
@@ -297,23 +306,20 @@ public:
                                                 KisBackingBudgetClass budgetClass,
                                                 QString *error,
                                                 const KisPageVersion &target = {},
-                                                KisPageRetirementRecordPointer *preparedRetirement = nullptr);
+                                                KisPageRetirementRecordPointer *preparedRetirement = nullptr,
+                                                KisReplicaSourceUse sourceUse = KisReplicaSourceUse::WritableCopy);
 
-    // Caller holds owner admission. The output is transient transition input,
-    // not a second page/overlay authority; no provider allocation occurs here.
-    bool prepareWriteBaseLocked(const KisPageTransaction &, const KisPageWriteIntent &,
-                                KisPagePublicationCoordinator &, KisPageWriteSelection *, QString *error);
-    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &);
-    // Both access adapters use this cold first-write decision. On handoff it
-    // installs the logical writer, descriptor and accounting before returning
-    // the retagged physical reservation. Otherwise write is unchanged and the
-    // caller continues the selected Fresh plan. Admission spans unlocked work.
-    KisPageWritePlanKind prepareWritePlanLocked(
+    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &, const KisReplicaHandle &target);
+    // Both adapters try the same physical reuse/metadata/accounting protocol.
+    // A success writes the original private or request target, not selection.
+    // A refusal leaves selection/result unchanged for Fresh. Admission spans
+    // unlocked work; native accepts directly, only a lease projects a transition.
+    bool tryAcquireReusedTargetLocked(
         const KisPageTransaction &, const KisPageWriteIntent &,
         const std::shared_ptr<KisPageReplicaProvider> &, KisPageAccessRequirement,
         KisPageWriteSelection &, KisPagePublicationCoordinator &,
         KisPageIdleCapacity idleCapacity,
-        QMutexLocker<QMutex> &,
+        QMutexLocker<QMutex> &, KisReplicaHandle &target,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
         KisPagePrivateWrite *native = nullptr);
     KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);
@@ -336,16 +342,14 @@ public:
     KisPageMetadataTransitionResult cancelLeaseWrite(KisPageTransition write);
 
     KisPageWritePlanKind select(const KisPageWriteIntent &,
-                                const KisMutationPageEntry *pending = nullptr,
-                                bool recoverablePrepared = false) const;
+                                const KisMutationPageEntry *pending = nullptr) const;
     void recordTarget(KisMutationPageEntry &, const KisPageWriteIntent &, const KisPageWriteInput &,
                       KisMutationPageEntryState);
     void recordPrivateCompletion(KisMutationPageEntry &);
     void recordAliasAccepted(KisMutationPageEntry &);
     void recordCancelled(KisMutationPageEntry &);
     void recordExposure(KisMutationPageEntry &, bool exposed);
-    KisPageWriteInput writeInput(const KisMutationPageEntry &, KisPageTransactionId,
-                                     const KisReplicaHandle &source, const KisReplicaHandle &target) const;
+    KisPageWriteInput writeInput(const KisMutationPageEntry &, KisPageTransactionId) const;
 
     [[nodiscard]] bool beginSessionActivity(KisPageTransactionId, QMutexLocker<QMutex> &, QString *error = nullptr);
     void endSessionActivity(KisPageTransactionId);

@@ -79,6 +79,7 @@ private:
     void detach(const std::shared_ptr<KisBackingBudgetController> &parent, quint64 child,
                 KisSharedNonPayloadUsage *usage) noexcept;
     void stopAllocations() noexcept;
+    void refundCharge(quint64 bytes, KisBackingBudgetClass budgetClass, bool storage) noexcept;
     std::atomic<quint32> m_references{0};
     QMutex m_gate;
     KisBackingBudgetController *m_controller;
@@ -236,6 +237,13 @@ public:
             if (m_size == m_capacity) throw std::bad_alloc();
             new (m_data + m_size) T(std::move(value));
             ++m_size;
+        }
+        void append(const T *values, size_t count)
+        {
+            if (count > m_capacity - m_size) throw std::bad_alloc();
+            if (!count) return;
+            std::uninitialized_copy_n(values, count, m_data + m_size);
+            m_size += count;
         }
         void clear() noexcept { while (m_size) m_data[--m_size].~T(); }
         void resize(size_t size)
@@ -427,23 +435,38 @@ public:
         changed();
         return true;
     }
+    // Admission already checked every conflict and reserved the missing
+    // population under the same gate. Preserve existing values, and locate
+    // each actual insertion only once. No pointer survives a growth/install.
+    Value *getOrInsertPrepared(const Key &key, const Value &value) noexcept
+    {
+        auto &entry = data()[bucket(data(), m_buckets, key, m_seed)];
+        if (entry.occupied) return &entry.value;
+        if (!canInsert(1)) return nullptr;
+        entry = {key, value, true};
+        ++m_size;
+        changed();
+        return &entry.value;
+    }
     bool erase(const Key &key) noexcept
     {
-        Entry *entries = data();
-        size_t hole = bucket(entries, m_buckets, key, m_seed);
-        if (!entries[hole].occupied) return false;
-        const size_t mask = m_buckets - 1;
-        for (size_t next = (hole + 1) & mask; entries[next].occupied; next = (next + 1) & mask) {
-            const size_t home = hash(entries[next].key, m_seed) & mask;
-            if (((next - home) & mask) >= ((hole - home) & mask)) {
-                entries[hole] = entries[next];
-                hole = next;
-            }
-        }
-        entries[hole] = {};
-        --m_size;
+        const size_t position = bucket(data(), m_buckets, key, m_seed);
+        if (!data()[position].occupied) return false;
+        eraseBucket(position);
         changed();
         return true;
+    }
+    template<class Predicate> size_t eraseIf(Predicate &&selected) noexcept
+    {
+        size_t erased = 0;
+        for (size_t i = 0; i < m_buckets;) {
+            if (data()[i].occupied && selected(data()[i].key, data()[i].value)) {
+                eraseBucket(i);
+                ++erased; // Recheck a value shifted back into this bucket.
+            } else ++i;
+        }
+        if (erased) changed();
+        return erased;
     }
     // Every in-place value edit participates in snapshot validation, including
     // activity counter changes that leave the key set and size unchanged.
@@ -458,6 +481,20 @@ public:
     }
 
 private:
+    void eraseBucket(size_t hole) noexcept
+    {
+        Entry *entries = data();
+        const size_t mask = m_buckets - 1;
+        for (size_t next = (hole + 1) & mask; entries[next].occupied; next = (next + 1) & mask) {
+            const size_t home = hash(entries[next].key, m_seed) & mask;
+            if (((next - home) & mask) >= ((hole - home) & mask)) {
+                entries[hole] = entries[next];
+                hole = next;
+            }
+        }
+        entries[hole] = {};
+        --m_size;
+    }
     Entry *data() noexcept { return m_storage ? m_storage.get() : m_inline.data(); }
     const Entry *data() const noexcept { return m_storage ? m_storage.get() : m_inline.data(); }
     std::array<Entry, InlineBuckets> m_inline{};
@@ -568,7 +605,9 @@ public:
         , m_freeHead(std::exchange(other.m_freeHead, Invalid)), m_freeTail(std::exchange(other.m_freeTail, Invalid))
         , m_liveHead(std::exchange(other.m_liveHead, Invalid)), m_liveTail(std::exchange(other.m_liveTail, Invalid))
         , m_vacant(std::exchange(other.m_vacant, Invalid))
-        , m_nextIncarnation(std::exchange(other.m_nextIncarnation, 0)) {}
+        , m_nextIncarnation(std::exchange(other.m_nextIncarnation, 0))
+        , m_cachedStorageBytes(std::exchange(other.m_cachedStorageBytes, 0))
+        , m_storageBytesDirty(std::exchange(other.m_storageBytesDirty, false)) {}
     KisMutationStorage &operator=(KisMutationStorage &&other) noexcept
     {
         if (this != &other) {
@@ -579,6 +618,8 @@ public:
             m_liveHead = std::exchange(other.m_liveHead, Invalid); m_liveTail = std::exchange(other.m_liveTail, Invalid);
             m_vacant = std::exchange(other.m_vacant, Invalid);
             m_nextIncarnation = std::exchange(other.m_nextIncarnation, 0);
+            m_cachedStorageBytes = std::exchange(other.m_cachedStorageBytes, 0);
+            m_storageBytesDirty = std::exchange(other.m_storageBytesDirty, false);
         }
         return *this;
     }
@@ -605,6 +646,7 @@ public:
         try { m_blocks.reserve(blocks); }
         catch (...) { allocator.deallocate(raw, units); throw; }
         auto *group = new (raw) Group{{blocks}, units};
+        m_storageBytesDirty = true;
         auto *storage = reinterpret_cast<std::byte *>(raw) + offset;
         for (size_t b = 0; b < blocks; ++b) {
             auto *block = new (storage + b * sizeof(Block)) Block();
@@ -637,6 +679,7 @@ public:
             if (append) m_blocks.emplace_back();
             else m_vacant = m_blocks[directory].nextVacant;
             auto &entry = m_blocks[directory]; entry.block = std::move(prepared); entry.nextVacant = Invalid;
+            m_storageBytesDirty = true;
             ++m_attached;
             for (size_t i = 0; i < BlockElements; ++i)
                 appendLink(quint32(directory * BlockElements + i), m_freeHead, m_freeTail);
@@ -670,6 +713,44 @@ public:
         Q_ASSERT(value); return *value;
     }
     size_t size() const { return m_size; }
+    // End the logical phase without destroying its already funded slots.
+    // No handle from this phase remains valid; generations never rewind.
+    void clearValues() noexcept
+    {
+        m_released.reset();
+        m_liveHead = m_liveTail = m_freeHead = m_freeTail = Invalid;
+        m_size = 0;
+        for (size_t b = 0; b < m_blocks.size(); ++b) {
+            auto &block = m_blocks[b].block;
+            if (!block) continue;
+            block->live = 0;
+            for (size_t i = 0; i < BlockElements; ++i) {
+                auto &slot = block->slots[i];
+                slot.value.reset();
+                slot.incarnation = 0;
+                appendLink(quint32(b * BlockElements + i), m_freeHead, m_freeTail);
+            }
+        }
+    }
+    size_t storageBytes() const noexcept
+    {
+        if (!m_storageBytesDirty) return m_cachedStorageBytes;
+        size_t bytes = kisPageStorageBytes(m_blocks.data(), alignof(DirectoryEntry));
+        const Group *group = nullptr;
+        for (const auto &entry : m_blocks) {
+            const auto *block = entry.block.get();
+            if (!block) continue;
+            if (block->group) {
+                // reserveTogether groups only a fresh directory, once.
+                Q_ASSERT(!group || group == block->group);
+                if (!group) bytes += kisPageStorageBytes(block->group, alignof(AllocationUnit));
+                group = block->group;
+            } else bytes += kisPageStorageBytes(block, alignof(Block));
+        }
+        m_cachedStorageBytes = bytes;
+        m_storageBytesDirty = false;
+        return bytes;
+    }
     Handle handleAt(size_t index) const
     {
         const auto *slot = slotAt(index);
@@ -679,7 +760,8 @@ public:
     Handle next(Handle current) const
     {
         const auto *slot = slotAt(current.index);
-        return at(current) ? handleAt(slot->next) : Handle{};
+        return current.isValid() && slot && slot->incarnation == current.incarnation && slot->value
+            ? handleAt(slot->next) : Handle{};
     }
     T *at(Handle handle) { return const_cast<T *>(std::as_const(*this).at(handle)); }
     const T *at(Handle handle) const
@@ -687,8 +769,12 @@ public:
         const auto *slot = slotAt(handle.index);
         return handle.isValid() && slot && slot->incarnation == handle.incarnation && slot->value ? &*slot->value : nullptr;
     }
-    T *at(size_t index) { return at(handleAt(index)); }
-    const T *at(size_t index) const { return at(handleAt(index)); }
+    T *at(size_t index) { return const_cast<T *>(std::as_const(*this).at(index)); }
+    const T *at(size_t index) const
+    {
+        const auto *slot = slotAt(index);
+        return slot && slot->incarnation && slot->value ? &*slot->value : nullptr;
+    }
     T &operator[](size_t index) { Q_ASSERT(at(index)); return *at(index); }
     const T &operator[](size_t index) const { Q_ASSERT(at(index)); return *at(index); }
     bool erase(Handle handle)
@@ -740,6 +826,7 @@ private:
     }
     void detachEmptyBlock(size_t directory)
     {
+        m_storageBytesDirty = true;
         auto &entry = m_blocks[directory]; Q_ASSERT(entry.block && !entry.block->live);
         for (size_t i = 0; i < BlockElements; ++i)
             removeLink(quint32(directory * BlockElements + i), m_freeHead, m_freeTail);
@@ -757,6 +844,8 @@ private:
     quint32 m_liveHead = Invalid, m_liveTail = Invalid;
     quint32 m_vacant = Invalid;
     Generation m_nextIncarnation = 1;
+    mutable size_t m_cachedStorageBytes = 0;
+    mutable bool m_storageBytesDirty = false;
 };
 
 #endif

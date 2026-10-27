@@ -84,10 +84,12 @@ public:
     // infallible under the metadata owner's gate and invokes no provider.
     KRITAIMAGE_EXPORT void acceptEffect(const KisPageTransitionEffect &effect) noexcept;
     // The accepting owner has detached the logical version (or proved it was
-    // never visible). Current/working capacity keeps its original charge.
+    // never visible). Its original payload charge remains until Debt admission;
+    // this includes detached History and backings already charged to Debt.
     // Any existing headroom stays with its backing; Fresh capacity need not
     // retain one. Enqueue without a provider call. The existing worker performs
     // class admission or retains the original charge until admission succeeds.
+    void acceptDetachedRecord(KisPageRetirementRecord &record, const KisReplicaHandle &expected) noexcept;
     void acceptDetachedBacking(const KisReplicaHandle &replica) noexcept;
     KRITAIMAGE_EXPORT KisPageStoreRetirementProgress process(qsizetype replicaBudget);
 
@@ -104,14 +106,11 @@ public:
     KRITAIMAGE_EXPORT KisPageRetirementQueueSnapshot snapshot() const;
 
 private:
-    enum class RetirementOutcome { Complete, AdmissionRefused, Pending };
+    enum class RetirementOutcome { Complete, AdmissionRefused, OrphanAdmissionRefused, Pending };
     RetirementOutcome attemptRetirement(KisPageRetirementRecord &record);
     void acceptRecord(KisPageRetirementRecordPointer record) noexcept;
     KisPageRetirementRecordPointer takeEffectRecord(const KisPageTransitionEffect &effect) noexcept;
-    bool admitOwnedRetirementDebt(KisPageRetirementRecord &record,
-                                  KisBackingBudgetReservation *reservation,
-                                  KisBackingBudgetClass currentClass);
-    void defer(KisPageRetirementRecordPointer record);
+    void defer(KisPageRetirementRecordPointer record, RetirementOutcome outcome);
     KisPageStoreRetirementProgress retireBatch(KisPageRetirementRecords &batch);
     void finishAttemptLocked(KisPageRetirementRecords &batch, KisPageRetirementRecords::iterator entry, bool retired);
     void schedulePassLocked();
@@ -119,7 +118,7 @@ private:
     void cancelRetryLocked();
     void disarmAutomaticWakeupsLocked();
     void updatePeaksLocked();
-    void prepareWait(KisPageRetirementRecord &record);
+    void prepareWait(KisPageRetirementRecord &record, RetirementOutcome outcome);
     std::shared_ptr<KisPageRetirementWait> prepareWaitState(
         const std::shared_ptr<KisPageRetirementWakeContext> &context);
     void enqueuePendingLocked(KisPageRetirementRecords &source, KisPageRetirementRecords::iterator entry);

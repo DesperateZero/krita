@@ -35,7 +35,7 @@ public:
             if (!capacity) return;
             if (m_storage.budget) {
                 KisBackingBudgetDelta delta;
-                delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
+                delta.bucket(size_t(KisBackingBudgetClass::MetadataArena)).cpuRam = qint64(capacity);
                 auto reservation = m_storage.budget->reserve(delta, nullptr);
                 if (!reservation.isValid()) throw std::bad_alloc();
                 m_storage.budget->commitReservation(std::move(reservation), delta);

@@ -7,7 +7,6 @@
 #include "KisPageBackingBudget_p.h"
 #include "KisPageReplicaProvider.h"
 #include <boost/intrusive/list.hpp>
-#include <map>
 #include <boost/intrusive/set.hpp>
 #include <tuple>
 struct KisPageRetirementWait;
@@ -26,7 +25,6 @@ struct KisPageBackingRecord
 {
     KisReplicaHandle replica;
     KisBackingBudgetClass budgetClass = KisBackingBudgetClass::ActivePending;
-    KisReplicaPhysicalSlotIdentity physical;
     KisBackingBudgetReservation retirementHeadroom;
     // Non-null only while the ledger owns the enclosing retirement record.
     KisPageRetirementRecord *retirement = nullptr;
@@ -38,8 +36,18 @@ struct KisPageBackingRecord
     std::shared_ptr<KisCpuResidentBinding> nativeBinding;
 };
 
-struct KisPagePhysicalBackingRecord
+struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>
 {
+    explicit KisPagePhysicalBackingRecord(KisMutationStorageAllocator<KisPagePhysicalBackingRecord> allocator)
+        : storage(std::move(allocator)) {}
+    KisReplicaPhysicalSlotIdentity identity;
+    // Independent actual allocation/refund lifetime. The first terminal may
+    // end before a surviving alias; it must not keep dead terminal bytes.
+    KisMutationStorageAllocator<KisPagePhysicalBackingRecord> storage;
+    struct Key {
+        using type = KisReplicaPhysicalSlotIdentity;
+        const type &operator()(const KisPagePhysicalBackingRecord &record) const { return record.identity; }
+    };
     KisReplicaHandle representative;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 domainRevision = 0;
@@ -97,9 +105,9 @@ struct KisPageBackingNode : boost::intrusive::set_base_hook<> {
 using KisPageBackingIndex = boost::intrusive::set<KisPageBackingNode,
     boost::intrusive::key_of_value<KisPageBackingNode::Key>,
     boost::intrusive::compare<KisPageBackingIdentityLess>>;
-using KisPagePhysicalBackingIndex = std::map<KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord,
-    KisPageBackingIdentityLess,
-    KisMutationStorageAllocator<std::pair<const KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord>>>;
+using KisPagePhysicalBackingIndex = boost::intrusive::set<KisPagePhysicalBackingRecord,
+    boost::intrusive::key_of_value<KisPagePhysicalBackingRecord::Key>,
+    boost::intrusive::compare<KisPageBackingIdentityLess>>;
 
 // Transient ledger preparation in the caller's frozen publication row. The
 // physical claim protects these locations; no copied replica or second input
@@ -140,19 +148,8 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
         : storage(std::move(allocator))
     {
         operationNode.second.retirement = this;
-        preparePhysicalStorage();
     }
-    void preparePhysicalStorage()
-    {
-        // Physical aliases have an independent last consumer. Only this node
-        // needs separate storage; logical and operation indexes borrow us.
-        KisPagePhysicalBackingIndex physical(KisPageBackingIdentityLess{},
-            KisMutationStorageAllocator<std::pair<const KisReplicaPhysicalSlotIdentity, KisPagePhysicalBackingRecord>>(storage));
-        if (physicalStorage.empty()) {
-            physical.emplace(KisReplicaPhysicalSlotIdentity{}, KisPagePhysicalBackingRecord{});
-            physicalStorage = physical.extract(physical.begin());
-        }
-    }
+    KRITAIMAGE_EXPORT void preparePhysicalStorage();
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
     KisReplicaHandle replica;
     std::shared_ptr<KisPageReplicaProvider> provider;
@@ -167,7 +164,7 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KisReplicaOperation retirementResult;
     KisPageProviderOperationNode operationNode;
     KisPageBackingNode backingNode;
-    KisPagePhysicalBackingIndex::node_type physicalStorage;
+    KisPagePhysicalBackingPointer physicalStorage;
     // Rare provider-result rejection: keep the preallocation reservation
     // charged until an unregistered physical replica reaches terminal retire.
     KisBackingBudgetReservation orphanReservation;

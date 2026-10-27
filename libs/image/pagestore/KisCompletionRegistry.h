@@ -33,6 +33,10 @@ struct KRITAIMAGE_EXPORT KisCompletionSourceStatistics
     quint64 readinessSignals = 0;
     // Lookup slots, not a byte budget. Empty notification maps release them.
     quint64 readinessCapacity = 0;
+    // Capacity owned by this source, not historical ticket count. The inline
+    // slot belongs to the paid source node; empty overflow blocks are freed.
+    quint64 intervalStorageBlocks = 0;
+    quint64 intervalCapacity = 0;
 };
 
 /** Terminal completion evidence minted only by KisCompletionRegistry. */

@@ -100,7 +100,6 @@ struct KRITAIMAGE_EXPORT KisTileDataResidencyState
  */
 class KRITAIMAGE_EXPORT KisTileDataStore
 {
-    struct ResidencyObservers;
 public:
     KisTileDataStore();
     ~KisTileDataStore();
@@ -252,12 +251,47 @@ public:
             storage->deallocate(value, sizeof(*value), alignof(ResidencyObserverRegistration));
         }
     };
+    // The original registration pin may retain a larger physical record.
+    // Provider indices and in-flight swap snapshots then share one allocation,
+    // while unregister and the provider's last logical release remain distinct.
+    struct ResidencyObservers : boost::intrusive::set_base_hook<> {
+    private:
+        friend class KisTileDataStore;
+        KisTileData *tile;
+        std::shared_ptr<KisTileDataResidencyObserver> storageOwner;
+        std::atomic<quint32> references{1};
+        bool resident = false;
+        quint64 revision = 0;
+        quint64 observersRevision = 0;
+        boost::intrusive::list<ResidencyObserverRegistration> observers;
+    protected:
+        explicit ResidencyObservers(std::shared_ptr<KisTileDataResidencyObserver> storage)
+            : tile(nullptr), storageOwner(std::move(storage)) {}
+        virtual ~ResidencyObservers() { Q_ASSERT(observers.empty()); }
+        void prepareMember(ResidencyObserverRegistration &member) {
+            Q_ASSERT(!member.is_linked() && !member.observer && !member.ownsStorage);
+            member.observer = storageOwner;
+            observers.push_back(member);
+        }
+        const auto &allocationOwner() const { return storageOwner; }
+        virtual void destroy() noexcept {
+            auto storage = storageOwner;
+            this->~ResidencyObservers();
+            storage->deallocate(this, sizeof(*this), alignof(ResidencyObservers));
+        }
+    public:
+        friend void intrusive_ptr_add_ref(ResidencyObservers *value) noexcept { value->references.fetch_add(1, std::memory_order_relaxed); }
+        friend void intrusive_ptr_release(ResidencyObservers *value) noexcept {
+            if (value->references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+            // An embedded member must be unlinked before the derived physical
+            // record destroys its members, rather than in the base destructor.
+            value->observers.clear_and_dispose(&ResidencyObserverRegistration::dispose);
+            value->destroy();
+        }
+    };
     using PreparedResidencyObserver = boost::intrusive_ptr<ResidencyObservers>;
     PreparedResidencyObserver prepareResidencyObserver(
         const std::shared_ptr<KisTileDataResidencyObserver> &observer);
-    PreparedResidencyObserver prepareResidencyObserver(
-        const std::shared_ptr<KisTileDataResidencyObserver> &observer,
-        ResidencyObserverRegistration *member);
     bool registerResidencyObserver(
         KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer,
         KisTileDataResidencyState *initialState = nullptr,
@@ -266,25 +300,6 @@ public:
         KisTileData *td, const std::shared_ptr<KisTileDataResidencyObserver> &observer);
 
 private:
-    struct ResidencyObservers : boost::intrusive::set_base_hook<> {
-        KisTileData *tile;
-        std::shared_ptr<KisTileDataResidencyObserver> storageOwner;
-        std::atomic<quint32> references{1};
-        bool resident = false;
-        quint64 revision = 0;
-        quint64 observersRevision = 0;
-        boost::intrusive::list<ResidencyObserverRegistration> observers;
-        ResidencyObservers(KisTileData *value, std::shared_ptr<KisTileDataResidencyObserver> storage)
-            : tile(value), storageOwner(std::move(storage)) {}
-        ~ResidencyObservers() { observers.clear_and_dispose(&ResidencyObserverRegistration::dispose); }
-        friend void intrusive_ptr_add_ref(ResidencyObservers *value) noexcept { value->references.fetch_add(1, std::memory_order_relaxed); }
-        friend void intrusive_ptr_release(ResidencyObservers *value) noexcept {
-            if (value->references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
-            auto storage = value->storageOwner;
-            std::destroy_at(value);
-            storage->deallocate(value, sizeof(*value), alignof(ResidencyObservers));
-        }
-    };
     struct ResidencyLess {
         bool operator()(const ResidencyObservers &a, const ResidencyObservers &b) const { return std::less<KisTileData *>{}(a.tile, b.tile); }
         bool operator()(KisTileData *a, const ResidencyObservers &b) const { return std::less<KisTileData *>{}(a, b.tile); }

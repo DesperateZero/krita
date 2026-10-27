@@ -16,6 +16,24 @@
 #include <utility>
 #include <limits>
 
+void KisPagePhysicalBackingRecordDeleter::operator()(KisPagePhysicalBackingRecord *record) const noexcept
+{
+    if (!record) return;
+    Q_ASSERT(!record->is_linked() && !record->members);
+    auto storage = std::move(record->storage);
+    std::destroy_at(record);
+    storage.deallocate(record, 1);
+}
+
+void KisPageRetirementRecord::preparePhysicalStorage()
+{
+    if (physicalStorage) return;
+    KisMutationStorageAllocator<KisPagePhysicalBackingRecord> allocator(storage);
+    auto *raw = allocator.allocate(1);
+    try { physicalStorage.reset(::new (raw) KisPagePhysicalBackingRecord(allocator)); }
+    catch (...) { allocator.deallocate(raw, 1); throw; }
+}
+
 void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record) const noexcept
 {
     if (!record) return;
@@ -200,15 +218,14 @@ std::shared_ptr<KisPageRetirementWait> KisPageRetirementQueue::prepareWaitState(
 }
 
 
-void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
+void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record, RetirementOutcome outcome) try
 {
-    if (!record.backgroundRetirement) return;
-    const auto backingClass = m_owner.backingClass(record.replica);
-    const bool needsBudget = backingClass != KisBackingBudgetClass::RetirementDebt &&
-                             !record.orphanDebtAdmitted;
-    // Unowned orphans can only consume their original reservation. A waiter
-    // never manufactures backing ownership or missing cancellation headroom.
-    if (needsBudget && backingClass == KisBackingBudgetClass::Count) return;
+    // This attempt still exclusively owns the record. Its result describes
+    // the unfinished responsibility; no class lookup or persistent shadow bit.
+    if (!record.backgroundRetirement || !record.provider
+        || outcome == RetirementOutcome::OrphanAdmissionRefused) return;
+    Q_ASSERT(outcome != RetirementOutcome::Complete);
+    const bool needsBudget = outcome == RetirementOutcome::AdmissionRefused;
     std::shared_ptr<KisPageRetirementWakeContext> context;
     {
         QMutexLocker lock(&m_mutex);
@@ -232,9 +249,9 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record) try
     const auto &scheduleReady = wait->scheduleReady;
     auto status = KisPageReadinessStatus::Unavailable;
     if (needsBudget) {
-        status = m_owner.watchRetirementBudget(record.replica, scheduleReady, &wait->budgetWaiter);
+        status = m_owner.watchRetirementBudget(record, scheduleReady, &wait->budgetWaiter);
     } else if (record.retirementOperation.isValid()) {
-        status = m_owner.watchProviderOperation(record.retirementOperation,
+        status = m_owner.watchRetirementOperation(record,
                                                 scheduleReady, &wait->subscription);
     } else {
         if (record.lastUse.isValid())
@@ -320,36 +337,6 @@ void KisPageRetirementQueue::scheduleRetryLocked()
         m_nextRetryDelayMs = std::min(100, m_nextRetryDelayMs * 2);
 }
 
-bool KisPageRetirementQueue::admitOwnedRetirementDebt(
-    KisPageRetirementRecord &record,
-    KisBackingBudgetReservation *reservation,
-    KisBackingBudgetClass currentClass)
-{
-    if (currentClass == KisBackingBudgetClass::RetirementDebt) {
-        record.admissionReservation.release();
-        if (reservation) reservation->release();
-        return true;
-    }
-    if (record.admissionReservation.isValid()) {
-        const bool admitted = m_owner.reclassifyBacking(
-            record.replica, KisBackingBudgetClass::RetirementDebt, record.admissionReservation);
-        record.admissionReservation.release();
-        if (admitted) {
-            if (reservation) reservation->release();
-            return true;
-        }
-    }
-    if (reservation && reservation->isValid() &&
-        m_owner.reclassifyBacking(
-            record.replica, KisBackingBudgetClass::RetirementDebt, *reservation))
-        return true;
-    // This original record already owns the detached replica. A single atomic
-    // reclassification needs no batch projection or new preparation storage.
-    if (!m_owner.reclassifyBacking(record.replica, KisBackingBudgetClass::RetirementDebt)) return false;
-    if (reservation) reservation->release();
-    return true;
-}
-
 bool KisPageRetirementQueue::retireRecord(KisPageRetirementRecord &record)
 {
     return attemptRetirement(record) == RetirementOutcome::Complete;
@@ -359,20 +346,21 @@ KisPageRetirementQueue::RetirementOutcome
 KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
 {
     if (!record.provider) return RetirementOutcome::Pending;
-    const auto backingClass = m_owner.backingClass(record.replica);
-    if (backingClass != KisBackingBudgetClass::Count &&
-        !admitOwnedRetirementDebt(record, &record.orphanReservation, backingClass))
-        return RetirementOutcome::AdmissionRefused;
-    if (backingClass == KisBackingBudgetClass::Count && record.orphanReservation.isValid() && !record.orphanDebtAdmitted) {
-        if (!m_owner.retainRetirementDebtReservation(record.replica, record.orphanReservation))
-            return RetirementOutcome::AdmissionRefused;
-        record.orphanDebtAdmitted = true;
-    }
-
     if (!record.retirementOperation.isValid()) {
-        const auto operation = m_owner.prepareRetirementOperation(record);
+        KisPageOperationId operation;
+        const auto admission = m_owner.prepareRetirementOperation(record, &operation);
+        if (admission == KisPageOwnerLedger::RecordAdmission::Refused)
+            return RetirementOutcome::AdmissionRefused;
+        if (admission == KisPageOwnerLedger::RecordAdmission::Unregistered
+            && record.orphanReservation.isValid() && !record.orphanDebtAdmitted) {
+            // An orphan's provider footprint must be observed outside the ledger.
+            if (!m_owner.retainRetirementDebtReservation(record.replica, record.orphanReservation))
+                return RetirementOutcome::OrphanAdmissionRefused;
+            record.orphanDebtAdmitted = true;
+            m_owner.prepareRetirementOperation(record, &operation);
+        }
         if (!operation.isValid()) return RetirementOutcome::Pending;
-        auto cancelPrepared = qScopeGuard([&] { m_owner.cancelRetirementOperation(operation); });
+        auto cancelPrepared = qScopeGuard([&] { m_owner.cancelRetirementOperation(record); });
         KisReplicaOperation result;
         try {
             result = record.provider->retire(
@@ -388,22 +376,12 @@ KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
         record.retirementOperation = operation;
         record.retirementResult = result;
     }
-    if (record.retirementResult.isValid()) {
-        if (!(record.retirementResult.replica == record.replica) ||
-            !m_owner.bindRetirementOperation(record.retirementOperation, record.retirementResult))
-            return RetirementOutcome::Pending; // Keep an accepted result; never reissue retire.
-        record.retirementResult = {};
-    }
-    // A late completion is polled, never replayed as a second retire.
-    const auto terminal =
-        m_owner.verifyProviderOperation(record.retirementOperation);
-    if (!terminal.isValid()) return RetirementOutcome::Pending;
-    if (!m_owner.releaseTerminalProviderOperation(record.retirementOperation)) {
+    // Accepted operations only observe their original ticket. One immutable
+    // terminal proof authorizes both operation consumption and backing refund.
+    const auto terminal = m_owner.observeRetirementOperation(record);
+    if (!terminal.isValid() || !m_owner.consumeRetirementOperation(record, terminal))
         return RetirementOutcome::Pending;
-    }
-    record.retirementOperation = {};
     if (!terminal.succeeded()) return RetirementOutcome::Pending;
-    m_owner.releaseRetiredBacking(record.replica);
     // Release orphan charge while the composition root/budget still lives;
     // batch records can outlast the worker's final owner-lifetime release.
     record.orphanReservation.release();
@@ -426,7 +404,8 @@ void KisPageRetirementQueue::retireForClose(KisPageRetirementRecords &records)
         const auto entry = it++;
         const auto outcome = attemptRetirement(*entry);
         if (outcome == RetirementOutcome::Complete) consume(records, entry);
-        else if (outcome == RetirementOutcome::AdmissionRefused)
+        else if (outcome == RetirementOutcome::AdmissionRefused
+                 || outcome == RetirementOutcome::OrphanAdmissionRefused)
             admissionBlocked.splice(admissionBlocked.end(), records, entry);
     }
     // A later funded record may have released the capacity an earlier record
@@ -450,9 +429,9 @@ void KisPageRetirementQueue::updatePeaksLocked()
     m_peakPendingBytes = std::max(m_peakPendingBytes, m_pendingBytes);
 }
 
-void KisPageRetirementQueue::defer(KisPageRetirementRecordPointer record)
+void KisPageRetirementQueue::defer(KisPageRetirementRecordPointer record, RetirementOutcome outcome)
 {
-    prepareWait(*record);
+    prepareWait(*record, outcome);
     Q_ASSERT(record->replica.isValid());
     KisPageRetirementRecords admitted;
     admitted.push_back(*record.release());
@@ -546,9 +525,9 @@ void KisPageRetirementQueue::retireOrDefer(
     KisPageBackingPreparation &&backing)
 {
     if (!replica.isValid()) return;
-    const auto backingClass = m_owner.backingClass(replica);
-    const bool owned = backingClass != KisBackingBudgetClass::Count;
-    auto record = owned ? m_owner.takeRetirementRecord(replica) : std::move(backing.retirement);
+    bool owned = false;
+    auto record = m_owner.takeRetirementRecordImpl(replica, nullptr, &owned);
+    if (!owned) record = std::move(backing.retirement);
     if (!record) {
         // Foreign/stale handles are not asynchronously owned. Never fabricate
         // an unaccounted record after an external provider result.
@@ -568,27 +547,38 @@ void KisPageRetirementQueue::retireOrDefer(
     // An unregistered result fixes it once on entry to this original owner.
     if (!owned) record->backgroundRetirement = provider && provider->capabilities().backgroundRetirement;
     record->orphanReservation = std::move(backing.reservation);
+    if (!record->backgroundRetirement) {
+        // Admission may release an orphan's redundant reservation when another
+        // member already pays the physical charge. That does not end custody.
+        const bool retainsBacking = owned || record->orphanReservation.isValid();
+        const auto outcome = attemptRetirement(*record);
+        if (outcome != RetirementOutcome::Complete && retainsBacking)
+            defer(std::move(record), outcome);
+        return;
+    }
+    // Background handover preserves the existing early fee transition before
+    // a subsequent Fresh allocation. The worker prepares its node in one gate.
     bool debtAdmitted = false;
     if (owned) {
-        debtAdmitted = admitOwnedRetirementDebt(*record, &record->orphanReservation, backingClass);
+        debtAdmitted = m_owner.admitRetirementRecord(*record) == KisPageOwnerLedger::RecordAdmission::Accepted;
     } else if (record->orphanReservation.isValid()) {
         debtAdmitted = m_owner.retainRetirementDebtReservation(replica, record->orphanReservation);
         record->orphanDebtAdmitted = debtAdmitted;
     }
-    if (!debtAdmitted && !owned && retireRecord(*record)) return;
     if (!debtAdmitted) {
-        if (owned || record->orphanReservation.isValid()) defer(std::move(record));
+        // An orphan observation can become valid on the actual attempt. Carry
+        // that attempt's outcome (including accepted Pending) into its wait.
+        const auto outcome = owned ? RetirementOutcome::AdmissionRefused
+                                   : attemptRetirement(*record);
+        if (outcome == RetirementOutcome::Complete) return;
+        if (owned || record->orphanReservation.isValid()) defer(std::move(record), outcome);
         return;
     }
-    if (record->backgroundRetirement) {
-        QMutexLocker lock(&m_mutex);
-        m_pendingBytes += replica.layout.byteSize;
-        m_ready.push_back(*record.release());
-        updatePeaksLocked();
-        schedulePassLocked();
-        return;
-    }
-    if (!retireRecord(*record)) defer(std::move(record));
+    QMutexLocker lock(&m_mutex);
+    m_pendingBytes += replica.layout.byteSize;
+    m_ready.push_back(*record.release());
+    updatePeaksLocked();
+    schedulePassLocked();
 }
 
 KisPageStoreRetirementProgress KisPageRetirementQueue::process(
@@ -626,8 +616,9 @@ KisPageStoreRetirementProgress KisPageRetirementQueue::retireBatch(KisPageRetire
     for (auto it = batch.begin(); it != batch.end();) {
         const auto entry = it++;
         ++result.attempted;
-        const bool retired = retireRecord(*entry);
-        if (!retired) prepareWait(*entry);
+        const auto outcome = attemptRetirement(*entry);
+        const bool retired = outcome == RetirementOutcome::Complete;
+        if (!retired) prepareWait(*entry, outcome);
         QMutexLocker lock(&m_mutex);
         if (retired) ++result.retired;
         finishAttemptLocked(batch, entry, retired);
@@ -664,11 +655,12 @@ KisPageRetirementRecordPointer KisPageRetirementQueue::takeEffectRecord(
     // Every production effect was accepted with committed Debt and an exact
     // original record before metadata detach/publication. Neither batch nor
     // History handoff may turn a broken acceptance invariant into recovery.
-    if (m_owner.backingClass(effect.replica) != KisBackingBudgetClass::RetirementDebt)
+    KisBackingBudgetClass original;
+    auto record = m_owner.takeRetirementRecord(effect.replica, &original);
+    if (original != KisBackingBudgetClass::RetirementDebt)
         qFatal("Detached effect has no committed retirement debt");
-    m_metadata.removeCpuReadBinding(effect.replica);
-    auto record = m_owner.takeRetirementRecord(effect.replica);
     if (!record) qFatal("Detached effect has no original retirement record");
+    m_metadata.removeCpuReadBinding(effect.replica);
     record->lastUse = effect.lastUse;
     return record;
 }
@@ -680,14 +672,21 @@ void KisPageRetirementQueue::acceptEffect(const KisPageTransitionEffect &effect)
 
 void KisPageRetirementQueue::acceptDetachedBacking(const KisReplicaHandle &replica) noexcept
 {
-    const auto original = m_owner.backingClass(replica);
-    if (original != KisBackingBudgetClass::ActivePending && original != KisBackingBudgetClass::Current
-        && original != KisBackingBudgetClass::OptionalCache
-        && original != KisBackingBudgetClass::IdleCapacity)
-        qFatal("Detached backing lost its original charge");
-    m_metadata.removeCpuReadBinding(replica);
+    // The semantic owner proved there are no consumers; the exact original
+    // registered record proves paid ownership. Its current fee category is
+    // not another visibility gate. Debt admission remains with the worker.
     auto record = m_owner.takeRetirementRecord(replica);
     if (!record) qFatal("Detached backing lost its original retirement record");
+    m_metadata.removeCpuReadBinding(replica);
+    acceptRecord(std::move(record));
+}
+
+void KisPageRetirementQueue::acceptDetachedRecord(KisPageRetirementRecord &original,
+    const KisReplicaHandle &expected) noexcept
+{
+    auto record = m_owner.takeRetirementRecord(original, expected);
+    if (!record) qFatal("Detached original record lost accepted identity");
+    m_metadata.removeCpuReadBinding(expected);
     acceptRecord(std::move(record));
 }
 

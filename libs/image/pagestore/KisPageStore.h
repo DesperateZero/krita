@@ -238,6 +238,8 @@ public:
     bool overwritePage(const KisPageKey &key, const KisCpuPagePayload &payload, QString *error = nullptr);
     // Outstanding guards reject seal/cancel; destroying the session with a
     // guard alive defers cancellation until that guard has relinquished data.
+    // Successful terminal completion returns empty capacity to the original
+    // budget. An inactive facade keeps its stable control identity.
     bool seal(QString *error = nullptr);
     // Freeze every change in this session into the original transaction and
     // capture its complete sealed overlay. Outstanding executions/guards
@@ -272,6 +274,7 @@ private:
     enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
     bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
         const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
+    void returnTerminalCapacity();
     // The original final batch owns this quiescent segment exclusively.
     // Freeze failed input before invoking adapters outside every session/
     // Store gate. The original entries/claims remain until cancel or release.
@@ -285,6 +288,7 @@ private:
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreWriteBatch;
+    friend class KisPageStoreCpuMutationTest; // Account stable control separately from transferable capacity.
     class Private;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
@@ -706,7 +710,7 @@ private:
     class Private;
     static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {
-        static void cleanup(Private *);
+        static void cleanup(Private *, bool deferDestruction = false);
     };
     // Preserve the one-pointer facade ABI. Captured scopes hold an intrusive
     // lifetime reference; that reference grants no writer or pixel access.

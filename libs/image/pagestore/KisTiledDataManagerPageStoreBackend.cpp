@@ -592,9 +592,9 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
                                                         (sealed || !failed) ? error : nullptr);
     failed = failed || !terminal;
     if (sealed && !backend->completeAdapters(*this, terminal, installAdapter)) return false;
-    if (releaseWorkingAdmission) {
+    if (releaseWorkingAdmission || (terminal && !retainAdmission)) {
         sources.clear();
-        mutation = {}; // finish(), not facade destruction, ends this claim.
+        mutation = {}; // Accepted final delivery ends this facade's ownership.
     }
     detachFromBackend();
     return !failed;

@@ -16,7 +16,7 @@
 #include "KisPageWaitCondition_p.h"
 
 #include <array>
-#include <map>
+#include <boost/intrusive/set.hpp>
 
 struct KisPageHistoryWakeContext;
 
@@ -54,15 +54,15 @@ public:
     static constexpr qsizetype PageAdmissionBudget = 16;
     static constexpr qsizetype VersionScanBudget = 32;
     static constexpr qsizetype RootVisitBudget = 32;
+    static constexpr qsizetype IdleCapacityBudget = 16;
 
     using ReleaseOwnerLifetime = void (*)(void *context);
-    using RemoveDescriptor = void (*)(void *context,
-                                      const KisPageVersion &version);
     using HasAbandonedMutations = bool (*)(void *context);
     using CollectAbandonedMutations = void (*)(void *context);
-    // Expires due non-owning capacity under the same Store gate; returns the
-    // next monotonic deadline, or zero. Provider work stays on the old queue.
-    using CollectIdleCapacity = qint64 (*)(void *context, qint64 now);
+    // Observing the original chain never retires capacity. Only the worker
+    // invokes collection, under the Store gate and with a bounded allowance.
+    using NextIdleDeadline = qint64 (*)(void *context);
+    using CollectIdleCapacity = void (*)(void *context, qint64 now, qsizetype budget);
 
     KRITAIMAGE_EXPORT KisPageHistoryCollector(KisPageMetadataCoordinator &metadata,
                             KisImageEpochReferenceModel &epochs,
@@ -74,9 +74,9 @@ public:
                             bool &backgroundReclamation,
                             void *ownerContext,
                             ReleaseOwnerLifetime releaseOwnerLifetime,
-                            RemoveDescriptor removeDescriptor,
                             HasAbandonedMutations hasAbandonedMutations = nullptr,
                             CollectAbandonedMutations collectAbandonedMutations = nullptr,
+                            NextIdleDeadline nextIdleDeadline = nullptr,
                             CollectIdleCapacity collectIdleCapacity = nullptr);
     KRITAIMAGE_EXPORT ~KisPageHistoryCollector();
     KRITAIMAGE_EXPORT void prepareTask(KisBackingBudgetController &budget);
@@ -92,7 +92,7 @@ public:
     // scan and foreground/background policy as a retained snapshot release.
     void collectAfterEpochChangeLocked(bool rescanHistory = false);
     KRITAIMAGE_EXPORT void requestKeyLocked(const KisPageKey &key) noexcept;
-    void scheduleLocked();
+    KRITAIMAGE_EXPORT void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();
     void clearLocked();
@@ -100,13 +100,24 @@ public:
     KRITAIMAGE_EXPORT KisPageHistoryCollectorSnapshot snapshotLocked() const;
 
 private:
+    // True consumes the original metadata census under its shard gate, or a
+    // successful read-protection result without releasing Store admission.
+    // It is only a scheduling fact; collection still checks live protection.
+    // Ordinary requests query only a new key's history.
+    void requestKeyLocked(const KisPageKey &, bool historyAlreadyObserved) noexcept;
+    friend class KisPageReadCoordinator;
     struct Work : boost::intrusive::list_base_hook<>
     {
+        explicit Work(const KisPageKey &value) noexcept : key(value)
+        { candidates.bind(reinterpret_cast<KisPageVersion *>(candidateStorage.data()), VersionScanBudget); }
+        void markReachable(const KisPageVersion &) noexcept;
+        boost::intrusive::set_member_hook<> indexHook;
         KisPageKey key;
         KisPageVersion after;
         KisPageVersion sliceAfter;
-        std::array<KisPageVersion, VersionScanBudget> candidates{};
-        qsizetype candidateCount = 0;
+        // The original Work owns capacity; only real slice values exist.
+        alignas(KisPageVersion) std::array<std::byte, sizeof(KisPageVersion) * VersionScanBudget> candidateStorage;
+        KisMutationWorkspace::Array<KisPageVersion> candidates;
         quint64 reachability = 0;
         quint32 reachableMask = 0;
         qsizetype historicalCount = 0;
@@ -120,12 +131,24 @@ private:
             return a.page.column < b.page.column;
         }
     };
-    using WorkIndex = std::map<KisPageKey, Work, KeyLess,
-        KisMutationStorageAllocator<std::pair<const KisPageKey, Work>>>;
-    bool collectSliceLocked(Work &work,
+    struct WorkKey {
+        using type = KisPageKey;
+        const KisPageKey &operator()(const Work &work) const noexcept { return work.key; }
+    };
+    using WorkIndex = boost::intrusive::set<Work,
+        boost::intrusive::member_hook<Work, boost::intrusive::set_member_hook<>, &Work::indexHook>,
+        boost::intrusive::key_of_value<WorkKey>, boost::intrusive::compare<KeyLess>>;
+    enum class SliceResult { Ready, Blocked, Removed };
+    SliceResult collectSliceLocked(Work &work,
         quint64 &visitedVersions, qsizetype &rootBudget);
     bool collectPassLocked();
     void endScanLocked(Work &work, bool finished = false);
+    void queueWorkLocked(Work &work) noexcept;
+    void disposeWork(Work *work) noexcept;
+    bool hasSemanticWorkLocked() const;
+    // Requires the notification gate only. Both foreground and timer use
+    // this one admission; neither can queue a second instance of the task.
+    bool enqueueTask(KisPageHistoryWakeContext &context);
 
     KisPageMetadataCoordinator &m_metadata;
     KisImageEpochReferenceModel &m_epochs;
@@ -137,27 +160,22 @@ private:
     bool &m_backgroundReclamation;
     void *m_ownerContext = nullptr;
     ReleaseOwnerLifetime m_releaseOwnerLifetime = nullptr;
-    RemoveDescriptor m_removeDescriptor = nullptr;
     HasAbandonedMutations m_hasAbandonedMutations = nullptr;
     CollectAbandonedMutations m_collectAbandonedMutations = nullptr;
+    NextIdleDeadline m_nextIdleDeadline = nullptr;
     CollectIdleCapacity m_collectIdleCapacity = nullptr;
 
+    KisMutationStorageAllocator<Work> m_workAllocator;
     WorkIndex m_work;
     boost::intrusive::list<Work> m_ready;
     qsizetype m_activeScans = 0;
     bool m_rescanRequested = false;
-    bool m_jobScheduled = false;
     KisPageReclamationJobPointer m_task;
     std::shared_ptr<KisPageHistoryWakeContext> m_wakeContext;
-    KisPageReclamationDelay m_retry;
-    bool m_retryScheduled = false;
     qint64 m_pressureDeadline = 0;
-    qint64 m_timerDeadline = 0;
     bool m_blocked = false;
     bool m_automaticWakeupsStopped = false;
     int m_retryDelayMs = 1;
-    quint64 m_retryWakeups = 0;
-    KisPageWaitCondition m_idle;
 
     quint64 m_pagesVisited = 0;
     quint64 m_foregroundPagesVisited = 0;

@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <boost/intrusive_ptr.hpp>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
@@ -19,6 +20,8 @@
 #include "KisPageStoreTypes.h"
 
 class KisImageEpochPageRoot;
+KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(const KisImageEpochPageRoot *) noexcept;
+KRITAIMAGE_EXPORT void intrusive_ptr_release(const KisImageEpochPageRoot *) noexcept;
 class KisImageEpochSurfaces;
 class KisBackingBudgetController;
 struct KisPagePublicationDelta;
@@ -68,6 +71,10 @@ public:
                                  QRect *extent) const;
 
 private:
+    // Semantic default selection and explicit tree membership are distinct
+    // facts obtained by the same lookup. Public resolve keeps its bool API.
+    enum class ResolutionKind { Missing, Default, Explicit };
+    ResolutionKind resolveVersion(const KisPageKey &, KisPageVersion *) const;
     // Only a retained capture supplies these sorted immutable inputs. Export
     // directly into one exact-sized manifest; no intermediate root/delta copy.
     KisImageEpochSnapshot snapshotWithChanges(const KisPageVersion *versions, size_t versionCount,
@@ -96,7 +103,7 @@ private:
     quint64 m_defaultPixelRevision = 0;
     quint64 m_extentRevision = 0;
     quint64 m_propertyRevision = 0;
-    std::shared_ptr<const KisImageEpochPageRoot> m_pageRoot;
+    boost::intrusive_ptr<const KisImageEpochPageRoot> m_pageRoot;
     std::shared_ptr<const KisImageEpochSurfaces> m_surfaces;
 
     friend class KisImageEpochReferenceModel;
@@ -179,10 +186,10 @@ public:
     qsizetype retainedSnapshotCount() const;
     qsizetype rootCount() const; // Physical registry, including retired roots awaiting collection.
     qsizetype activeTransactionCount() const;
-    // Retirement links live in already-created registry records. Enqueue at
-    // publication/final release does not allocate a queue node or dedup entry.
-    // Budgets count examined queue entries, including still-protected roots,
-    // not only successful removals. Negative selects the explicit full drain.
+    // Retirement links live in already-created registry records. Roots enter
+    // only when their last logical protection ends; transaction records enter
+    // when finished. Neither enqueue allocates a queue node or dedup entry.
+    // Budgets bound removed records. Negative selects the explicit full drain.
     qsizetype collectFinishedTransactions(qsizetype budget = -1);
     qsizetype collectUnretainedRoots(qsizetype budget = -1);
     bool hasCollectionWork() const;
@@ -208,19 +215,20 @@ private:
     // outputs are bounded independently of history depth.
     static constexpr qsizetype ReachabilityScanLimit = 16;
     static constexpr qsizetype ReachabilityRootBudget = 32;
-    struct ReachabilityStart {
-        quint64 cookie = 0;
-        KisPageVersion current;
-    };
     struct ReachabilitySlice {
         bool valid = false;
         bool complete = false;
+        bool capacityUnavailable = false;
         qsizetype rootsVisited = 0;
-        std::array<KisPageVersion, ReachabilityRootBudget> versions{};
     };
-    ReachabilityStart beginReachabilityScan(const KisPageKey &);
-    ReachabilitySlice advanceReachabilityScan(quint64 cookie, qsizetype rootBudget);
-    void endReachabilityScan(quint64 cookie);
+    // Consume each resolved value while its original epoch gate is held.
+    // The consumer must neither throw, reenter the model nor retain the ref.
+    // Zero cookie starts a scan; only an unfinished frontier occupies a slot.
+    // Completion/invalidation releases that slot in this same window. The
+    // budget and returned count include the initial current-root visit.
+    ReachabilitySlice visitReachableVersions(const KisPageKey &, quint64 &cookie, qsizetype rootBudget,
+        void *context = nullptr, void (*visit)(void *, const KisPageVersion &) = nullptr);
+    void cancelReachabilityScan(quint64 cookie);
     friend class KisPageHistoryCollector;
 
     class Private;

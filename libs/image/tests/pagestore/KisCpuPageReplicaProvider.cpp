@@ -30,32 +30,26 @@ quint64 alignedRowStride(const KisPageAllocationDescriptor &descriptor)
 
 }
 
-struct CpuAllocation
+struct CpuAlignedBytes
 {
-    struct AlignedBytes
+    ~CpuAlignedBytes()
     {
-        ~AlignedBytes()
-        {
-            if (data) {
-                ::operator delete(data, std::align_val_t(alignment));
-            }
-        }
-
-        void *data = nullptr;
-        size_t alignment = alignof(std::max_align_t);
-    };
-
-    std::shared_ptr<KisCpuResidentBinding> binding;
-    KisCompletionTicket retirementCompletion;
+        if (data) ::operator delete(data, std::align_val_t(alignment));
+    }
+    void *data = nullptr;
+    size_t alignment = alignof(std::max_align_t);
 };
 
-class CpuResidentBinding final : public KisCpuResidentBinding
+class CpuResidentBinding final : public KisCpuResidentBinding, public boost::intrusive::set_base_hook<>
 {
 public:
-    CpuResidentBinding(const std::shared_ptr<CpuAllocation::AlignedBytes> &bytes,
+    CpuResidentBinding(const std::shared_ptr<CpuAlignedBytes> &bytes,
                        const KisReplicaHandle &handle)
         : KisCpuResidentBinding(handle), m_bytes(bytes) {}
 private:
+    friend struct KisCpuResidentAllocationIndex<CpuResidentBinding>;
+    std::shared_ptr<CpuResidentBinding> providerOwnership;
+    KisCompletionTicket retirementCompletion;
     void *pinStorage(bool, KisCpuResidentReadStatus *status) override
     {
         if (status) *status = m_bytes ? KisCpuResidentReadStatus::Ready : KisCpuResidentReadStatus::Retired;
@@ -63,10 +57,10 @@ private:
     }
     void unpinStorage() override {}
     void releaseStorage() override { m_bytes.reset(); }
-    std::shared_ptr<CpuAllocation::AlignedBytes> m_bytes;
+    std::shared_ptr<CpuAlignedBytes> m_bytes;
 };
 
-class KisCpuPageReplicaProvider::Private : public KisCpuResidentAllocationIndex<CpuAllocation>
+class KisCpuPageReplicaProvider::Private : public KisCpuResidentAllocationIndex<CpuResidentBinding>
 {
 public:
     KisReplicaOperation allocate(KisPageOperationId operation,
@@ -124,9 +118,8 @@ public:
                          quint32(rowStride),
                          byteSize};
 
-        CpuAllocation allocation;
-        allocation.retirementCompletion = retirementCompletion;
-        auto bytes = std::make_shared<CpuAllocation::AlignedBytes>();
+        auto bytes = std::make_shared<CpuAlignedBytes>();
+        auto allocation = std::make_shared<CpuResidentBinding>(bytes, handle);
         bytes->alignment = qMax<size_t>(
             size_t(descriptor.format.pixelAlignment), alignof(std::max_align_t));
         bytes->data = ::operator new(
@@ -151,8 +144,8 @@ public:
             }
         }
 
-        allocation.binding = std::make_shared<CpuResidentBinding>(bytes, handle);
-        allocations.emplace(handle.allocation.slot, allocation);
+        if (!installAllocation(allocation, retirementCompletion))
+            return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation identity is already owned"));
         committedBytes += byteSize;
         completions->completePrepared(completion, KisCompletionStatus::Succeeded);
 
@@ -278,18 +271,23 @@ KisReplicaOperation KisCpuPageReplicaProvider::retire(
     const KisReplicaHandle &replica,
     const KisCompletionTicket &lastUse)
 {
-    QMutexLocker locker(&d->mutex);
-    auto retirement = d->beginRetirement(operation, replica, lastUse);
-    if (!retirement.failure.isEmpty())
-        return KisReplicaOperation::failed(operation, retirement.failure);
-    if (!retirement.allocation->second.binding->retire(replica.allocationIdentity())) {
-        return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
+    std::shared_ptr<CpuResidentBinding> released;
+    KisCompletionTicket completion;
+    {
+        QMutexLocker locker(&d->mutex);
+        auto retirement = d->beginRetirement(operation, replica, lastUse);
+        if (!retirement.failure.isEmpty())
+            return KisReplicaOperation::failed(operation, retirement.failure);
+        if (!retirement.allocation->retire(replica.allocationIdentity())) {
+            return KisReplicaOperation::failed(operation, QStringLiteral("CPU allocation is still pinned"));
+        }
+        d->consumeOperation(operation);
+        d->committedBytes -= replica.layout.byteSize;
+        completion = retirement.completion;
+        released = d->extractAllocation(retirement.allocation);
     }
-    d->consumeOperation(operation);
-    d->committedBytes -= replica.layout.byteSize;
-    d->allocations.erase(retirement.allocation);
-    d->completions->completePrepared(retirement.completion, KisCompletionStatus::Succeeded);
-    return {KisPageRequestStatus::Ready, operation, replica, retirement.completion, {}};
+    d->completions->completePrepared(completion, KisCompletionStatus::Succeeded);
+    return {KisPageRequestStatus::Ready, operation, replica, completion, {}};
 }
 
 KisReplicaMemoryUsage KisCpuPageReplicaProvider::memoryUsage() const

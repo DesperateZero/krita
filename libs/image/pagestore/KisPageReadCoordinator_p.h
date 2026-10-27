@@ -137,6 +137,11 @@ public:
         KisPageMetadataCoordinator &metadata, KisPageOwnerLedger &owner,
         const KisPageVersion &version,
         const KisCpuReadBinding &stale = {}, KisCpuResidentReadStatus *status = nullptr);
+    // Continue a completed selection from the capture/slot/window; an empty
+    // binding must not cause that exact source to be selected again by key.
+    static Q_NEVER_INLINE KRITAIMAGE_EXPORT KisCpuReadBinding resolveSelectedCpuReadBinding(
+        KisPageMetadataCoordinator &, KisPageOwnerLedger &,
+        const KisCpuReadBinding &selected, KisCpuResidentReadStatus *status = nullptr);
 
     KRITAIMAGE_EXPORT KisReadRequest registerRequestLocked(
         const KisPageVersion &version,

@@ -84,22 +84,25 @@ struct KisPagePublicationChange {
     } replacement;
     KisPagePublicationChange() = default;
     KisPagePublicationChange(Replacement replacement, KisPagePublicationIdentity superseded = {},
-        bool removalWasInBase = false, bool wasRemoved = false, bool releasesCapacity = false,
+        bool removalWasInBase = false, bool wasRemoved = false, bool detachesSuperseded = false,
         const KisReplicaHandle *supersededAuthority = nullptr)
         : replacement(std::move(replacement)), superseded(superseded), removalWasInBase(removalWasInBase),
-          wasRemoved(wasRemoved), releasesCapacity(releasesCapacity), supersededAuthority(supersededAuthority) {}
+          wasRemoved(wasRemoved), detachesSuperseded(detachesSuperseded), supersededAuthority(supersededAuthority) {}
     KisPagePublicationIdentity superseded;
     bool removalWasInBase = false;
     bool wasRemoved = false;
-    bool releasesCapacity = false;
+    // Metadata's detachment plan, revalidated against real consumers at install.
+    // It grants neither a budget class change nor optional idle capacity.
+    bool detachesSuperseded = false;
     // Native publication borrows its frozen producer's original source.
     // Only a removal/foreign source needs a value in the preparation owner's
     // authority storage. All consumers finish before either source dies.
     const KisReplicaHandle *supersededAuthority = nullptr;
     // Commit output, borrowed until immediate handover under Store admission.
     KisPageRetirementRecord *acceptedIdle = nullptr;
-    // Position verified in the uninterrupted acceptance gate. Consumed only
-    // when replacing values without changing the selection table's structure.
+    // Preparation's position is only a hint across unlocked work. Acceptance
+    // checks its current key, then records the verified position consumed by
+    // replacement without changing the selection table's structure.
     size_t acceptedOverlayIndex = 0;
     KisPagePreparedBackingChange backingPreparation;
     struct MetadataAcceptance {
@@ -108,8 +111,9 @@ struct KisPagePublicationChange {
         void *page = nullptr;
         void *prepared = nullptr;
         KisVersionSlotId replacementSlot;
-        size_t shardIndex = 0;
-        size_t inputOrdinal = 0;
+        quint16 shardIndex = 0; // configure() permits at most 4096 shards.
+        // Only the first adjunct in a shard group requests native growth.
+        bool needsStorage = false;
     } metadataAcceptance;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.

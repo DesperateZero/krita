@@ -1,3 +1,4 @@
+#include "pagestore/KisPageOwnerLedgerTestAccess.h"
 /*
  * SPDX-FileCopyrightText: 2026 Krita contributors
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -358,6 +359,8 @@ private Q_SLOTS:
     void capturedReadRetriesStaleBinding();
     void retainedVersionRediscoveryAfterRetag_data();
     void retainedVersionRediscoveryAfterRetag();
+    void overlayCapturedSlotsSurviveAllOwners_data();
+    void overlayCapturedSlotsSurviveAllOwners();
     void bindingStorageFailureUnlocks_data();
     void bindingStorageFailureUnlocks();
     void resolveStorageBeforePin_data();
@@ -631,7 +634,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     QVERIFY(owner.registerProvider(provider));
     if (crossProvider) QVERIFY(owner.registerProvider(beforeProvider));
     for (const auto &replica : {a.replica, b.replica}) {
-        KisBackingBudgetDelta delta; delta.buckets[size_t(KisBackingBudgetClass::Current)].cpuRam = replica.layout.byteSize;
+        KisBackingBudgetDelta delta; delta.bucket(size_t(KisBackingBudgetClass::Current)).cpuRam = replica.layout.byteSize;
         auto r = budget.reserve(delta, nullptr); QVERIFY(owner.registerBacking(replica, r, KisBackingBudgetClass::Current));
     }
     KisPageMetadataCoordinator metadata;
@@ -653,7 +656,11 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     old.replicas = {{a.replica, KisReplicaValidity::Valid, {}, {}, 0, {}},
                     {b.replica, KisReplicaValidity::Valid, {}, {}, 0, {}}};
     page.versions = {old}; QVERIFY(metadata.registerPage(page));
-    auto stale = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version); QVERIFY(stale);
+    const auto coldSource = metadata.selectCpuReadBinding(version);
+    QVERIFY(!coldSource.binding); QCOMPARE(coldSource.replica, a.replica);
+    auto stale = KisPageReadCoordinator::resolveSelectedCpuReadBinding(metadata, owner, coldSource); QVERIFY(stale);
+    QCOMPARE(metadata.selectCpuReadBinding(version), stale); // Warm selection keeps the same binding.
+
     std::shared_ptr<KisCpuResidentBinding> binding;
     if (warm) { binding = stale.binding; QVERIFY(binding); }
     auto physical = KisCpuBackingHandoff::prepare(provider, a.replica, {key(0), {2}}, desc); QVERIFY(physical.isValid());
@@ -691,7 +698,12 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     }
     // Production captured reads call this exact cold selection with the
     // version resolved once from their retained root, never the latest key.
-    auto selected = KisPageReadCoordinator::discoverCpuReadBinding(metadata, owner, version, stale);
+    // The original source crossed a real provider/metadata retag window.
+    // Continuing it must fail; a cold continuation cannot chase a newer head.
+    QVERIFY(!KisPageReadCoordinator::resolveSelectedCpuReadBinding(metadata, owner, coldSource));
+    const auto replacement = metadata.selectCpuReadBinding(version, stale);
+    QVERIFY(!replacement.binding); QCOMPARE(replacement.replica, b.replica);
+    auto selected = KisPageReadCoordinator::resolveSelectedCpuReadBinding(metadata, owner, replacement);
     QVERIFY(selected); QCOMPARE(selected.replica, b.replica);
     auto beforeBinding = selected.binding; QVERIFY(beforeBinding);
     const auto *before = static_cast<const quint8 *>(beforeBinding->acquireRead(b.replica.allocationIdentity(), true));
@@ -717,9 +729,9 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     QCOMPARE(metadata.cpuReadBinding(version), newer);
     QCOMPARE(metadata.metrics().fullSnapshotExports, quint64(0));
     QVERIFY(owner.reclassifyBacking(target, KisBackingBudgetClass::RetirementDebt));
-    QVERIFY(provider->retire({100}, target, {}).isValid()); owner.releaseRetiredBacking(target);
+    QVERIFY(provider->retire({100}, target, {}).isValid()); KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, target);
     QVERIFY(owner.reclassifyBacking(b.replica, KisBackingBudgetClass::RetirementDebt));
-    QVERIFY(beforeProvider->retire({101}, b.replica, {}).isValid()); owner.releaseRetiredBacking(b.replica);
+    QVERIFY(beforeProvider->retire({101}, b.replica, {}).isValid()); KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, b.replica);
     const auto usage = budget.usage();
     for (size_t i = 0; i < usage.buckets.size(); ++i) {
         if (i != size_t(KisBackingBudgetClass::MetadataArena))
@@ -1001,6 +1013,54 @@ void KisPageStoreResidentReadTest::sharedDefaultIsExactAndBounded()
         QCOMPARE(f.store->sessionStats().cachedDefaultReadBytes, quint64(0));
         QCOMPARE(f.store->sessionStats().liveDefaultReadBytes, quint64(0));
     }
+}
+
+void KisPageStoreResidentReadTest::overlayCapturedSlotsSurviveAllOwners_data()
+{
+    QTest::addColumn<bool>("tiles3"); QTest::addColumn<bool>("removed");
+    QTest::addColumn<bool>("facadeFirst");
+    for (bool tiles3 : {false, true}) for (bool removed : {false, true}) for (bool facadeFirst : {false, true})
+        QTest::newRow(qPrintable(QString("tiles%1-removed%2-facadeFirst%3").arg(tiles3).arg(removed).arg(facadeFirst)))
+            << tiles3 << removed << facadeFirst;
+}
+
+void KisPageStoreResidentReadTest::overlayCapturedSlotsSurviveAllOwners()
+{
+    QFETCH(bool, tiles3); QFETCH(bool, removed); QFETCH(bool, facadeFirst);
+    Fixture f; QVERIFY2(f.init(tiles3), qPrintable(f.error));
+    QVERIFY2(f.fill(17, 0x31), qPrintable(f.error));
+    const auto tx = f.store->beginCurrentTransaction(); QVERIFY(tx.isValid());
+    if (removed) QVERIFY(KisPageStoreCpuSurfaceOps::removePage(f.store.get(), tx, key(0), &f.error));
+    else QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, tx, QRect(0, 0, 17 * 64, 64),
+        QByteArray(f.bpp, char(0x51)), &f.error));
+    auto view = f.store->captureReadView(KisPageReadView::transactionOverlay(tx.id), &f.error);
+    QVERIFY2(view.isValid(), qPrintable(f.error));
+    const auto before = kisPageStoreMetadataMetrics(*f.store).fullSnapshotExports;
+    KisPageVersion exact; QVERIFY(view.resolvePageVersion(key(0), &exact));
+    QCOMPARE(exact.isDefaultPixel(), removed);
+    // Seventeen entries cross both shard grouping and the native window size.
+    // Their original ordinals must remain associated with the exact versions.
+    for (int i = 16; i >= 0; --i) {
+        auto read = view.readResidentPage(key(i)); QVERIFY(read.isValid());
+        QCOMPARE(static_cast<const quint8 *>(read.data())[0], quint8(removed ? (i ? 0x31 : 0) : 0x51));
+    }
+    auto guard = view.readResidentPage(key(0)); QVERIFY(guard.isValid()); QCOMPARE(guard.version(), exact);
+    QCOMPARE(kisPageStoreMetadataMetrics(*f.store).fullSnapshotExports, before);
+    QVERIFY(f.store->abort(tx)); // The frozen overlay remains independently protected.
+    auto afterAbort = view.readResidentPage(key(0)); QVERIFY(afterAbort.isValid());
+    QCOMPARE(afterAbort.version(), exact); afterAbort = {};
+    if (!facadeFirst) { view = {}; QVERIFY(!f.store->closeSession(&f.error)); }
+    const std::weak_ptr<KisPageReplicaProvider> weak(f.provider);
+    f.provider.reset(); f.store.reset();
+    QVERIFY(!weak.expired());
+    QCOMPARE(static_cast<const quint8 *>(guard.data())[0], quint8(removed ? 0 : 0x51));
+    if (facadeFirst) {
+        guard = {}; // A remaining view still owns its logical cut.
+        QVERIFY(!weak.expired());
+        view = {};
+    } else guard = {}; // The guard was the original view's last consumer.
+    kisDrainPageStoreReclamation();
+    QVERIFY(weak.expired());
 }
 
 void KisPageStoreResidentReadTest::guardLifetimeAndHistory_data()

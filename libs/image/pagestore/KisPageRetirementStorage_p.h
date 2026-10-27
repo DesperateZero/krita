@@ -7,6 +7,12 @@
 #include <kritaimage_export.h>
 class KisBackingBudgetController;
 struct KisPageRetirementRecord;
+struct KisPagePhysicalBackingRecord;
+struct KisPagePhysicalBackingRecordDeleter {
+    KRITAIMAGE_EXPORT void operator()(KisPagePhysicalBackingRecord *) const noexcept;
+};
+using KisPagePhysicalBackingPointer =
+    std::unique_ptr<KisPagePhysicalBackingRecord, KisPagePhysicalBackingRecordDeleter>;
 struct KisPageRetirementRecordDeleter {
     KRITAIMAGE_EXPORT void operator()(KisPageRetirementRecord *) const noexcept;
 };

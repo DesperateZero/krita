@@ -151,7 +151,8 @@ size_t pageStoragePrefix(size_t alignment) noexcept
 
 // Caller keeps the original owner and its operation alive across unlocks.
 // Both callbacks run under the owner gate. required() revalidates the complete
-// request; install() consumes constructed buckets and cannot fail or allocate.
+// request; install(missing) consumes that same-gate fact and constructed
+// buckets. It cannot fail or allocate; unrelated unlocks always revalidate.
 template<class Table, class Required, class Install>
 bool admitMutationRecords(Table &table, QMutexLocker<QMutex> &lock,
                           Required required, Install install, QString *error) try
@@ -174,7 +175,7 @@ bool admitMutationRecords(Table &table, QMutexLocker<QMutex> &lock,
         const auto additional = required();
         if (!additional) return false;
         if (table.canInsert(*additional)) {
-            install();
+            install(*additional);
             KisPageStoreDetail::setError(error, {});
             return true;
         }
@@ -189,7 +190,7 @@ bool admitMutationRecords(Table &table, QMutexLocker<QMutex> &lock,
         // Another preparer may already have installed sufficient capacity.
         // Reuse it before requiring this candidate's old geometry to match.
         if (table.canInsert(*afterAllocation)) {
-            install();
+            install(*afterAllocation);
             KisPageStoreDetail::setError(error, {});
             return true;
         }
@@ -204,7 +205,7 @@ bool admitMutationRecords(Table &table, QMutexLocker<QMutex> &lock,
         if (!current) return false;
         if (table.canInsert(*current) || table.install(growth, *current)) {
             Q_ASSERT(table.canInsert(*current));
-            install();
+            install(*current);
             KisPageStoreDetail::setError(error, {});
             return true;
         }
@@ -240,12 +241,26 @@ bool hasDomainDelta(const KisPageDomainByteDelta &delta)
     return delta.cpuRam || delta.umaShared || delta.discreteVram || delta.ssd;
 }
 
-bool hasPositiveBytes(const KisBackingBudgetDelta &delta)
+bool hasPositiveBytes(const KisPageDomainByteDelta &delta)
 {
-    for (const auto &bucket : delta.buckets)
-        for (qint64 value : components(bucket))
-            if (value > 0) return true;
-    return false;
+    return delta.cpuRam > 0 || delta.umaShared > 0 || delta.discreteVram > 0 || delta.ssd > 0;
+}
+
+quint32 changedBudgetClasses(const KisBackingBudgetDelta &delta) { return delta.changedClasses(); }
+quint32 changedBudgetClasses(const KisPageDomainByteDelta &delta)
+{
+    return hasDomainDelta(delta) ? quint32(1) << size_t(KisBackingBudgetClass::MetadataArena) : 0;
+}
+const KisPageDomainByteDelta &budgetBucket(const KisBackingBudgetDelta &delta, size_t i)
+{
+    return delta.bucket(i);
+}
+const KisPageDomainByteDelta &budgetBucket(const KisPageDomainByteDelta &delta, size_t i)
+{
+    // Only the original shared-child slot consumes a single bucket.
+    Q_ASSERT(i == size_t(KisBackingBudgetClass::MetadataArena));
+    Q_UNUSED(i);
+    return delta;
 }
 
 std::array<quint64, 4> domainLimits(
@@ -329,14 +344,14 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
     std::array<quint64, budgetClassCount> *aggregateBytes, quint64 *durableBytes, QString *error)
 {
     qint64 durableChange = 0;
-    for (size_t i = 0; i < change.buckets.size(); ++i) {
-        if (!hasDomainDelta(change.buckets[i])) {
-            prepared->buckets[i] = {};
-            (*aggregateBytes)[i] = 0;
-            continue;
-        }
-        const auto values = components(change.buckets[i]);
-        auto target = components(prepared->buckets[i]);
+    // All callers supply fresh empty output and zero aggregates. Populate
+    // only actual input classes; absent classes remain semantic zero.
+    Q_ASSERT(!prepared->changedClasses());
+    for (quint32 classes = change.changedClasses(); classes; classes &= classes - 1) {
+        const size_t i = size_t(qCountTrailingZeroBits(classes));
+        const auto &input = change.bucket(i);
+        const auto values = components(input);
+        std::array<qint64, 4> target;
         qint64 aggregateChange = 0;
         for (size_t domain = 0; domain < values.size(); ++domain)
             target[domain] = std::max(qint64(0), values[domain]);
@@ -348,8 +363,7 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
                 return false;
             }
         }
-        prepared->buckets[i] = {
-            target[0], target[1], target[2], target[3]};
+        prepared->setBucket(i, {target[0], target[1], target[2], target[3]});
         (*aggregateBytes)[i] = aggregateChange > 0
             ? quint64(aggregateChange) : 0;
         if (i == size_t(KisBackingBudgetClass::IdleCapacity)) {
@@ -364,7 +378,7 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
             }
             (*aggregateBytes)[i] = positive;
         }
-        if (__builtin_add_overflow(durableChange, change.buckets[i].ssd,
+        if (__builtin_add_overflow(durableChange, input.ssd,
                                    &durableChange)) {
             KisPageStoreDetail::setError(
                 error, QStringLiteral("backing transition SSD delta overflows"));
@@ -373,14 +387,6 @@ bool prepareBudgetChange(const KisBackingBudgetDelta &change, KisBackingBudgetDe
     }
     *durableBytes = durableChange > 0 ? quint64(durableChange) : 0;
     return true;
-}
-
-quint32 changedBudgetClasses(const KisBackingBudgetDelta &delta) noexcept
-{
-    quint32 result = 0;
-    for (size_t i = 0; i < budgetClassCount; ++i)
-        if (hasDomainDelta(delta.buckets[i])) result |= quint32(1) << i;
-    return result;
 }
 
 } // namespace
@@ -508,6 +514,7 @@ KisBackingBudgetReservation KisBackingBudgetWaiter::take()
 
 KisBackingBudgetController::~KisBackingBudgetController()
 {
+    stopMutationStorageReuse();
     if (m_storageOwner) m_storageOwner->stopAllocations();
     if (m_waitContext) {
         {
@@ -531,11 +538,7 @@ KisBackingBudgetController::~KisBackingBudgetController()
     // State destruction above mirrors its metadata release to the parent.
     // Only then may the child identity satisfy the zero-live unregister rule.
     if (m_slotCapacity) {
-        const size_t bytes = kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot));
         m_slots.reset();
-        releaseLive(KisBackingBudgetClass::MetadataArena,
-                    KisPageAccessDomain::CpuRam,
-                    bytes);
     }
     if (m_storageOwner) {
         m_storageOwner->detach(m_sharedNonPayloadBudget,
@@ -569,6 +572,11 @@ quint64 KisBackingBudgetController::nonMetadataLiveSsdLocked() const
     return m_nonMetadataLiveSsd;
 }
 
+quint64 KisBackingBudgetController::storageBytesLocked() const noexcept
+{
+    return m_storageBytes;
+}
+
 bool KisBackingBudgetController::fitsLocked(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
@@ -592,16 +600,21 @@ bool KisBackingBudgetController::fitsLocked(
         const quint32 bit = quint32(1) << i;
         const bool metadata = budgetClass == KisBackingBudgetClass::MetadataArena;
         if (!emptyUsage && !metadata && (m_fittingBudgetClasses & bit)
-            && !aggregateBytes[i] && !hasDomainDelta(delta.buckets[i])) continue;
+            && !aggregateBytes[i] && !hasDomainDelta(delta.bucket(i))) continue;
         auto reserved = emptyUsage ? KisPageDomainBytes{} : m_usage.buckets[i].reserved;
+        // Storage's complete capacity remains occupied through physical free.
+        // Admission needs only this total, not the concurrent live split.
+        if (!emptyUsage && metadata)
+            reserved.cpuRam = saturatedAdd(reserved.cpuRam, storageBytesLocked());
         if (emptyUsage && metadata) live.cpuRam = irreducibleMetadataBytes;
         if (m_processStorage && metadata) {
             live.cpuRam = saturatedAdd(live.cpuRam, process.live);
             reserved.cpuRam = saturatedAdd(reserved.cpuRam, process.reserved);
         }
         auto pending = emptyUsage ? 0 : m_reservedAggregateBytes[i];
+        if (!emptyUsage && metadata) pending = saturatedAdd(pending, storageBytesLocked());
         if (m_processStorage && metadata) pending = saturatedAdd(pending, process.reserved);
-        if (!fitsBudgetBucket(live, reserved, delta.buckets[i],
+        if (!fitsBudgetBucket(live, reserved, delta.bucket(i),
                 domainLimits(m_limits, budgetClass), aggregateBytes[i], pending, classLimits[i]))
             return false;
         // A fitting nonnegative proposal also proves its present base fits.
@@ -637,7 +650,8 @@ bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes, quint6
     if (processBytes) *processBytes = process.total;
     const auto &usage = m_usage.buckets[metadata];
     const auto cpuLive = saturatedAdd(usage.live.cpuRam, process.live);
-    const auto cpuReserved = saturatedAdd(usage.reserved.cpuRam, process.reserved);
+    const auto cpuReserved = saturatedAdd(saturatedAdd(usage.reserved.cpuRam,
+        storageBytesLocked()), process.reserved);
     constexpr auto maximum = std::numeric_limits<quint64>::max();
     // Metadata has no per-domain cap below maximum. Check the real CPU
     // increase and existing cross-domain overflow without constructing a
@@ -648,7 +662,8 @@ bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes, quint6
         || usage.reserved.ssd > maximum - usage.live.ssd) return false;
     const auto current = saturatedAdd(saturatedAdd(saturatedAdd(cpuLive,
         usage.live.umaShared), usage.live.discreteVram), usage.live.ssd);
-    const auto pending = saturatedAdd(m_reservedAggregateBytes[metadata], process.reserved);
+    const auto pending = saturatedAdd(saturatedAdd(m_reservedAggregateBytes[metadata],
+        storageBytesLocked()), process.reserved);
     const auto classLimit = m_limits.metadataArenaBytes;
     if (bytes > classLimit || current > classLimit - bytes
         || pending > classLimit - bytes - current) return false;
@@ -675,8 +690,8 @@ bool KisBackingBudgetController::priorWaiterConflictsLocked(
             if (aggregateBytes[i] && prior->aggregateBytes[i] &&
                 classLimits[i] != std::numeric_limits<quint64>::max()) return true;
             const auto limits = domainLimits(m_limits, budgetClass);
-            const auto requested = components(delta.buckets[i]);
-            const auto waiting = components(prior->requested.buckets[i]);
+            const auto requested = components(delta.bucket(i));
+            const auto waiting = components(std::as_const(prior->requested).bucket(i));
             for (size_t domain = 0; domain < requested.size(); ++domain)
                 if (requested[domain] && waiting[domain] &&
                     limits[domain] != std::numeric_limits<quint64>::max()) return true;
@@ -914,6 +929,13 @@ KisPageReadinessStatus KisBackingBudgetController::waitForChange(
         waiter->context = m_waitContext;
         waiter->sequence = waiterSequence;
         KisPageStoreDetail::setError(error, {});
+        if (!ready) {
+            // Publishing the request excludes new empty-capacity retention.
+            // Drain only while a waiter still needs progress; this also
+            // covers a scope parked during unlocked request preparation.
+            lock.unlock();
+            while (reclaimMutationStorage(bool(m_sharedNonPayloadBudget), true)) {}
+        }
         return ready ? KisPageReadinessStatus::Ready : KisPageReadinessStatus::Waiting;
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("budget waiter allocation failed"));
@@ -1025,41 +1047,43 @@ void KisBackingBudgetReservation::settle(const KisBackingBudgetDelta *installed,
                                        bool prepared) noexcept
 {
     KisBackingBudgetController *local = owner;
-    const bool hasParent = local && local->m_sharedNonPayloadBudget;
-    std::optional<KisBackingBudgetDelta> sharedInstalled, sharedRetained;
-    if (hasParent && prepared) sharedInstalled.emplace();
-    else if (hasParent && installed) sharedInstalled = local->sharedNonPayloadDelta(*installed);
-    if (hasParent && retained) sharedRetained = local->sharedNonPayloadDelta(*retained);
+    if (!local || !local->m_sharedNonPayloadBudget) {
+        Q_ASSERT(!sharedOwner);
+        if (!local || !local->settle(cookie, installed, retained, prepared)) {
+            owner = nullptr;
+            cookie = 0;
+        }
+        return;
+    }
+    KisPageDomainByteDelta sharedInstalled, sharedRetained;
+    if (!prepared && installed) sharedInstalled = local->sharedNonPayloadDelta(*installed);
+    if (retained) sharedRetained = local->sharedNonPayloadDelta(*retained);
     // Exact ledger completion retains only debt, outside the shared classes.
     // Its parent change was accepted at preparation, including negative-only
     // refunds that deliberately did not allocate a parent reservation.
-    Q_ASSERT(!prepared || !sharedRetained || !hasPositiveBytes(*sharedRetained));
-    if (!local || !local->settle(cookie, installed, retained, prepared,
-                                prepared && sharedInstalled ? &*sharedInstalled : nullptr)) {
+    Q_ASSERT(!prepared || !hasPositiveBytes(sharedRetained));
+    if (!local->settle(cookie, installed, retained, prepared,
+                       prepared ? &sharedInstalled : nullptr)) {
         owner = nullptr;
         cookie = 0;
     }
     if (sharedOwner) {
-        if (!sharedOwner->settle(sharedCookie, sharedInstalled ? &*sharedInstalled : nullptr,
-                                sharedRetained ? &*sharedRetained : nullptr)) {
+        // The original parent slot retains its accepted signed change too.
+        // Exact acceptance consumes that fact; partial consumers provide only
+        // the actual shared bucket, through the same settlement implementation.
+        if (!sharedOwner->settle(sharedCookie, &sharedInstalled,
+                                retained ? &sharedRetained : nullptr, prepared)) {
             sharedOwner = nullptr;
             sharedCookie = 0;
         }
-    } else if (sharedInstalled) {
+    } else if (hasDomainDelta(sharedInstalled)) {
         // No positive parent demand means no parent ticket. Releasing its
         // existing child charge still has to happen, without another admission.
         // Existing retained consumers keep only RetirementDebt; a non-payload
         // retained amount would require its own already prepared parent ticket.
-        const auto amounts = components(sharedInstalled->buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
-        Q_ASSERT(!sharedRetained || !hasPositiveBytes(*sharedRetained));
-        const KisPageAccessDomain domains[] = {KisPageAccessDomain::CpuRam,
-            KisPageAccessDomain::UmaShared, KisPageAccessDomain::DiscreteVram, KisPageAccessDomain::Ssd};
-        for (size_t domain = 0; domain < amounts.size(); ++domain) {
-            Q_ASSERT(amounts[domain] <= 0);
-            if (amounts[domain] < 0)
-                local->m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
-                    local->m_sharedNonPayloadUsage, domains[domain], quint64(-amounts[domain]));
-        }
+        Q_ASSERT(!hasPositiveBytes(sharedRetained));
+        local->m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
+            local->m_sharedNonPayloadUsage, sharedInstalled);
     }
 }
 
@@ -1077,13 +1101,87 @@ KisBackingBudgetController::KisBackingBudgetController(const KisPageBackingLimit
 {
 }
 
+void KisBackingBudgetController::unlinkMutationStorageLocked(KisReusableMutationStorage *value) noexcept
+{
+    Q_ASSERT(value && value->origin && value->origin->m_reusableMutation == value);
+    if (value->previous) value->previous->next = value->next;
+    else m_firstReusableMutation = value->next;
+    if (value->next) value->next->previous = value->previous;
+    else m_lastReusableMutation = value->previous;
+    value->origin->m_reusableMutation = nullptr;
+    value->previous = value->next = nullptr;
+    value->origin = nullptr;
+}
+
+bool KisBackingBudgetController::retainMutationStorage(KisReusableMutationStorage *value) noexcept
+{
+    if (!value || !value->dispose || value->bytes > ReusableMutationBytes) return false;
+    auto *root = m_sharedNonPayloadBudget ? m_sharedNonPayloadBudget.get() : this;
+    KisReusableMutationStorage *replaced;
+    {
+        QMutexLocker lock(&root->m_mutex);
+        if (!m_acceptReusableMutation || root->m_usage.waitingRequests) return false;
+        Q_ASSERT(!value->origin && !value->previous && !value->next);
+        replaced = m_reusableMutation;
+        if (replaced) root->unlinkMutationStorageLocked(replaced);
+        value->origin = this;
+        value->previous = root->m_lastReusableMutation;
+        if (value->previous) value->previous->next = value;
+        else root->m_firstReusableMutation = value;
+        root->m_lastReusableMutation = value;
+        m_reusableMutation = value;
+    }
+    // Keep the most recently completed operation, without retaining a second
+    // empty scope after concurrent operations finish in a different order.
+    if (replaced) replaced->dispose(replaced);
+    return true;
+}
+
+KisReusableMutationStorage *KisBackingBudgetController::takeMutationStorage() noexcept
+{
+    auto *root = m_sharedNonPayloadBudget ? m_sharedNonPayloadBudget.get() : this;
+    QMutexLocker lock(&root->m_mutex);
+    auto *value = m_reusableMutation;
+    if (value) root->unlinkMutationStorageLocked(value);
+    return value;
+}
+
+bool KisBackingBudgetController::reclaimMutationStorage(bool ownOnly, bool waitingOnly) noexcept
+{
+    auto *root = m_sharedNonPayloadBudget ? m_sharedNonPayloadBudget.get() : this;
+    KisReusableMutationStorage *value;
+    {
+        QMutexLocker lock(&root->m_mutex);
+        if (waitingOnly && !root->m_usage.waitingRequests) return false;
+        value = ownOnly ? m_reusableMutation : root->m_firstReusableMutation;
+        if (!value) return false;
+        root->unlinkMutationStorageLocked(value);
+    }
+    value->dispose(value);
+    return true;
+}
+
+void KisBackingBudgetController::stopMutationStorageReuse() noexcept
+{
+    auto *root = m_sharedNonPayloadBudget ? m_sharedNonPayloadBudget.get() : this;
+    KisReusableMutationStorage *value;
+    {
+        QMutexLocker lock(&root->m_mutex);
+        m_acceptReusableMutation = false;
+        value = m_reusableMutation;
+        if (value) root->unlinkMutationStorageLocked(value);
+    }
+    if (value) value->dispose(value);
+}
+
 KisBackingBudgetReservation KisBackingBudgetController::reserve(
     const KisBackingBudgetDelta &delta, QString *error)
 {
     std::array<quint64, budgetClassCount> aggregateBytes{};
     quint64 durableBytes = 0;
-    for (size_t i = 0; i < delta.buckets.size(); ++i) {
-        const auto &bucket = delta.buckets[i];
+    for (quint32 classes = delta.changedClasses(); classes; classes &= classes - 1) {
+        const size_t i = size_t(qCountTrailingZeroBits(classes));
+        const auto &bucket = delta.bucket(i);
         for (qint64 value : components(bucket)) {
             if (value < 0) {
                 KisPageStoreDetail::setError(
@@ -1131,7 +1229,8 @@ bool KisBackingBudgetController::admitUnchangedBacking(QString *error)
     if (m_processStorage) {
         auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
-            saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), processStorageSnapshot().total));
+            saturatedAdd(saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                      storageBytesLocked()), processStorageSnapshot().total));
     }
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -1146,16 +1245,15 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     KisPageDomainByteDelta sharedChange;
     if (m_sharedNonPayloadBudget) {
         bool valid = false;
-        const KisBackingBudgetDelta sharedDelta = sharedNonPayloadDelta(
+        sharedChange = sharedNonPayloadDelta(
             signedChange ? *signedChange : delta, &valid);
         if (!valid) {
             KisPageStoreDetail::setError(error, QStringLiteral("shared non-payload transition delta overflows"));
             return {};
         }
-        sharedChange = sharedDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        if (hasPositiveBytes(sharedDelta)) {
+        if (hasPositiveBytes(sharedChange)) {
             sharedReservation = m_sharedNonPayloadBudget->reserveSharedNonPayload(
-                m_sharedNonPayloadUsage, sharedDelta, error);
+                m_sharedNonPayloadUsage, sharedChange, error);
             if (!sharedReservation.isValid()) {
                 QMutexLocker lock(&m_mutex);
                 ++m_usage.backpressureCount;
@@ -1173,8 +1271,13 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
     for (;;) {
         if (priorWaiterConflictsLocked(delta, aggregateBytes, durableBytes))
             return reject(QStringLiteral("backing reservation waits for an earlier admission request"));
-        if (!fitsLocked(delta, aggregateBytes, durableBytes))
+        if (!fitsLocked(delta, aggregateBytes, durableBytes)) {
+            lock.unlock();
+            const bool reclaimed = reclaimMutationStorage(bool(m_sharedNonPayloadBudget));
+            lock.relock();
+            if (reclaimed) continue;
             return reject(QStringLiteral("backing reservation exceeds its hard budget"));
+        }
         if (m_firstFreeSlot != std::numeric_limits<quint32>::max()
             || m_slotCount < m_slotCapacity) break;
         lock.unlock();
@@ -1198,9 +1301,9 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveImpl(
 
 bool KisBackingBudgetController::prepareReservationSlot(QString *error)
 {
-    // Never hold the accounting gate while waiting for another growth or
-    // allocating. The embedded slot funds its own array and the existing
-    // parent reservation funds the same actual bytes in the process budget.
+    // Serialise array growth, never physical allocation under accounting gates.
+    // The same actual-storage protocol bootstraps the first slot and owns every
+    // candidate/refund; no synthetic cookie or second reservation is needed.
     QMutexLocker growth(&m_slotGrowthMutex);
     QMutexLocker lock(&m_mutex);
     if (m_firstFreeSlot != std::numeric_limits<quint32>::max()
@@ -1216,77 +1319,34 @@ bool KisBackingBudgetController::prepareReservationSlot(QString *error)
     if (payloadBytes > std::numeric_limits<size_t>::max()) return false;
     const KisPageStorageLayout layout(size_t(payloadBytes), alignof(ReservationSlot));
     if (!layout.isValid()) return false;
-    const size_t bytes = layout.capacity();
-    const size_t oldBytes = kisPageStorageBytes(m_slots.get(), alignof(ReservationSlot));
-    KisBackingBudgetDelta storageDelta;
-    storageDelta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(bytes);
-    std::array<quint64, budgetClassCount> aggregate{};
-    aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = bytes;
     lock.unlock();
-    // Any rejected allocation releases its parent/local reservation only
-    // after the accounting gate is dropped.
-    KisBackingBudgetReservation storage;
-    KisBackingBudgetReservation shared;
-    if (m_sharedNonPayloadBudget) {
-        shared = m_sharedNonPayloadBudget->reserveSharedNonPayload(
-            m_sharedNonPayloadUsage, storageDelta, error);
-        if (!shared.isValid()) {
-            lock.relock();
-            return m_firstFreeSlot != std::numeric_limits<quint32>::max()
-                || m_slotCount < m_slotCapacity;
-        }
-    }
-    lock.relock();
-    if (m_firstFreeSlot != std::numeric_limits<quint32>::max()
-        || m_slotCount < m_slotCapacity) {
-        lock.unlock();
-        return true;
-    }
-    if (priorWaiterConflictsLocked(storageDelta, aggregate, 0)) {
-        lock.unlock();
-        KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage waits for an earlier admission request"));
-        return false;
-    }
-    if (!fitsMetadataStorageLocked(bytes)) {
-        lock.unlock();
-        KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage exceeds its hard budget"));
-        return false;
-    }
-    Q_ASSERT(!m_storageReservation.active);
-    if (!++m_storageReservation.generation) ++m_storageReservation.generation;
-    m_storageReservation.active = true;
-    const quint64 cookie = (quint64(m_storageReservation.generation) << 32) | maximum;
-    activateReservationLocked(cookie, storageDelta, aggregate, 0);
-    storage = KisBackingBudgetReservation(this, cookie);
-    if (shared.isValid()) {
-        storage.sharedOwner = shared.owner;
-        storage.sharedCookie = shared.cookie;
-        shared.clear();
-    }
-    lock.unlock();
-    decltype(m_slots) candidate;
+    decltype(m_slots) candidate(nullptr, SlotStorageDeleter{this});
     try {
-        candidate.reset(static_cast<ReservationSlot *>(kisAllocatePageStorage(layout)));
+        candidate.reset(static_cast<ReservationSlot *>(allocateStorage(layout)));
         std::uninitialized_value_construct_n(candidate.get(), capacity);
     } catch (const std::bad_alloc &) {
+        lock.relock();
+        if (m_firstFreeSlot != maximum || m_slotCount < m_slotCapacity) {
+            lock.unlock();
+            return true;
+        }
+        lock.unlock();
         KisPageStoreDetail::setError(error, QStringLiteral("backing reservation storage allocation failed"));
         return false;
     }
     lock.relock();
-    // Growth owns no payload or callbacks; these trivial records may be moved
-    // under the gate without allocation or destruction. Cookies stay stable.
+    if (m_firstFreeSlot != maximum || m_slotCount < m_slotCapacity) {
+        lock.unlock();
+        return true;
+    }
+    // Cookies retain their indices. Unselected scalar cells are deliberately
+    // indeterminate; copy object representations only under their original gate.
     static_assert(std::is_trivially_copyable_v<ReservationSlot>);
-    // Unselected scalar cells are deliberately indeterminate. Copy the
-    // object representation, never evaluate those cells as scalar values.
-    if (m_slotCount) std::memcpy(candidate.get(), m_slots.get(),
-                               m_slotCount * sizeof(ReservationSlot));
+    if (m_slotCount) std::memcpy(candidate.get(), m_slots.get(), m_slotCount * sizeof(ReservationSlot));
     m_slots.swap(candidate);
     m_slotCapacity = capacity;
     lock.unlock();
-    storage.commit(storageDelta);
     candidate.reset();
-    if (oldBytes) releaseLive(KisBackingBudgetClass::MetadataArena,
-                              KisPageAccessDomain::CpuRam, oldBytes);
     KisPageStoreDetail::setError(error, {});
     return true;
 }
@@ -1330,6 +1390,7 @@ void KisBackingBudgetController::activateReservationLocked(
 {
     auto *slot = activeReservation(cookie);
     Q_ASSERT(slot);
+    const auto storageBytes = storageBytesLocked();
     const auto processBytes = m_processStorage ? processStorageSnapshot().total : 0;
     const auto &accepted = signedChange ? *signedChange : delta;
     slot->sharedChange = sharedChange ? *sharedChange : KisPageDomainByteDelta{};
@@ -1337,9 +1398,9 @@ void KisBackingBudgetController::activateReservationLocked(
     slot->sharedChild = sharedChild;
     slot->changedComponents = 0;
     slot->changedClasses = 0;
-    for (size_t i = 0; i < budgetClassCount; ++i) {
-        if (!aggregateBytes[i] && !hasDomainDelta(accepted.buckets[i])) continue;
-        slot->setBucket(i, accepted.buckets[i]);
+    for (quint32 classes = accepted.changedClasses(); classes; classes &= classes - 1) {
+        const size_t i = size_t(qCountTrailingZeroBits(classes));
+        slot->setBucket(i, accepted.bucket(i));
         slot->aggregateBytes[i] = aggregateBytes[i];
         slot->changedClasses |= quint8(quint32(1) << i);
         m_reservedAggregateBytes[i] = saturatedAdd(m_reservedAggregateBytes[i], aggregateBytes[i]);
@@ -1347,11 +1408,13 @@ void KisBackingBudgetController::activateReservationLocked(
         auto reserved = components(usage.reserved);
         auto peak = components(usage.peak);
         const auto live = components(usage.live);
-        const auto requested = components(delta.buckets[i]);
+        const auto requested = components(delta.bucket(i));
         for (size_t domain = 0; domain < requested.size(); ++domain) {
             if (!requested[domain]) continue;
             reserved[domain] += quint64(requested[domain]);
             auto total = saturatedAdd(live[domain], reserved[domain]);
+            if (i == size_t(KisBackingBudgetClass::MetadataArena) && domain == 0)
+                total = saturatedAdd(total, storageBytes);
             if (m_processStorage && i == size_t(KisBackingBudgetClass::MetadataArena) && domain == 0)
                 total = saturatedAdd(total, processBytes);
             peak[domain] = std::max(peak[domain], total);
@@ -1367,7 +1430,8 @@ void KisBackingBudgetController::activateReservationLocked(
     if (m_processStorage) {
         auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
-            saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), processBytes));
+            saturatedAdd(saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                      storageBytes), processBytes));
     }
 }
 
@@ -1383,9 +1447,14 @@ KisPageBackingUsage KisBackingBudgetController::usage() const
 {
     QMutexLocker lock(&m_mutex);
     auto result = m_usage;
+    const auto storage = storageBytesLocked();
+    const auto live = m_storageLiveBytes.load(std::memory_order_relaxed);
+    Q_ASSERT(live <= storage);
+    auto &metadata = result.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+    metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, live);
+    metadata.reserved.cpuRam = saturatedAdd(metadata.reserved.cpuRam, storage - live);
     if (m_processStorage) {
         const auto process = processStorageSnapshot();
-        auto &metadata = result.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, process.live);
         metadata.reserved.cpuRam = saturatedAdd(metadata.reserved.cpuRam, process.reserved);
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
@@ -1421,9 +1490,10 @@ bool KisBackingBudgetController::reservationCovers(
     QMutexLocker lock(&m_mutex);
     const ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return false;
-    for (size_t i = 0; i < budgetClassCount; ++i) {
+    for (quint32 classes = needed.changedClasses(); classes; classes &= classes - 1) {
+        const size_t i = size_t(qCountTrailingZeroBits(classes));
         const auto reserved = components(slot->bucket(i));
-        const auto requested = components(needed.buckets[i]);
+        const auto requested = components(needed.bucket(i));
         for (size_t domain = 0; domain < requested.size(); ++domain)
             if (requested[domain] < 0 || requested[domain] > std::max(qint64(0), reserved[domain])) return false;
     }
@@ -1435,7 +1505,7 @@ bool KisBackingBudgetController::configureLimits(const KisPageBackingLimits &lim
 {
     QMutexLocker lock(&m_mutex);
     if (m_usage.waitingRequests || m_usage.grantedRequests
-        || !m_sharedChildren.empty()) {
+        || !m_sharedChildren.empty() || storageBytesLocked()) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("backing limits have active users or waiters"));
         return false;
@@ -1463,7 +1533,7 @@ bool KisBackingBudgetController::configureSharedNonPayloadBudget(
             error, QStringLiteral("shared non-payload budget parent is invalid"));
         return false;
     }
-    if (m_sharedNonPayloadBudget || !m_sharedChildren.empty()
+    if (m_sharedNonPayloadBudget || !m_sharedChildren.empty() || storageBytesLocked()
         || m_usage.waitingRequests || m_usage.grantedRequests) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("shared non-payload budget is already configured or in use"));
@@ -1528,17 +1598,19 @@ void KisBackingBudgetController::unregisterSharedNonPayloadChild(quint64 child) 
         const auto found = m_sharedChildren.find(child);
         Q_ASSERT(found != m_sharedChildren.end());
         if (found == m_sharedChildren.end()) return;
-        Q_ASSERT(found->second.liveBytes == 0 && found->second.reservedBytes == 0);
-        if (found->second.liveBytes || found->second.reservedBytes) return;
+        Q_ASSERT(found->second.chargedBytes == 0 && found->second.reservedBytes == 0);
+        if (found->second.chargedBytes || found->second.reservedBytes) return;
         released = m_sharedChildren.extract(found);
     }
 }
 
 KisBackingBudgetReservation KisBackingBudgetController::reserveSharedNonPayload(
     SharedChildUsage *child,
-    const KisBackingBudgetDelta &delta,
+    const KisPageDomainByteDelta &change,
     QString *error)
 {
+    KisBackingBudgetDelta delta;
+    delta.setBucket(size_t(KisBackingBudgetClass::MetadataArena), change);
     std::array<quint64, budgetClassCount> aggregateBytes{};
     quint64 durableBytes = 0;
     KisBackingBudgetDelta prepared;
@@ -1555,8 +1627,13 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveSharedNonPayload(
     for (;;) {
         if (priorWaiterConflictsLocked(prepared, aggregateBytes, durableBytes))
             return reject(QStringLiteral("shared non-payload reservation waits for an earlier request"));
-        if (!fitsLocked(prepared, aggregateBytes, durableBytes))
+        if (!fitsLocked(prepared, aggregateBytes, durableBytes)) {
+            lock.unlock();
+            const bool reclaimed = reclaimMutationStorage(false);
+            lock.relock();
+            if (reclaimed) continue;
             return reject(QStringLiteral("shared non-payload process budget is exhausted"));
+        }
         if (m_firstFreeSlot != std::numeric_limits<quint32>::max()
             || m_slotCount < m_slotCapacity) break;
         lock.unlock();
@@ -1568,17 +1645,16 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveSharedNonPayload(
         }
     }
     KisPageStoreDetail::setError(error, {});
-    return reserveLocked(prepared, aggregateBytes, durableBytes, child);
+    return reserveLocked(prepared, aggregateBytes, durableBytes, child, &delta);
 }
 
-KisBackingBudgetDelta KisBackingBudgetController::sharedNonPayloadDelta(
+KisPageDomainByteDelta KisBackingBudgetController::sharedNonPayloadDelta(
     const KisBackingBudgetDelta &delta, bool *valid) noexcept
 {
-    KisBackingBudgetDelta result;
-    const auto metadata = components(delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
-    const auto cache = components(delta.buckets[size_t(KisBackingBudgetClass::OptionalCache)]);
-    const auto idle = components(delta.buckets[size_t(KisBackingBudgetClass::IdleCapacity)]);
-    auto combined = components(result.buckets[size_t(KisBackingBudgetClass::MetadataArena)]);
+    const auto metadata = components(delta.bucket(size_t(KisBackingBudgetClass::MetadataArena)));
+    const auto cache = components(delta.bucket(size_t(KisBackingBudgetClass::OptionalCache)));
+    const auto idle = components(delta.bucket(size_t(KisBackingBudgetClass::IdleCapacity)));
+    std::array<qint64, 4> combined;
     bool overflow = false;
     for (size_t domain = 0; domain < combined.size(); ++domain) {
         if (cache[domain] > 0 && metadata[domain] > std::numeric_limits<qint64>::max() - cache[domain]) {
@@ -1600,12 +1676,37 @@ KisBackingBudgetDelta KisBackingBudgetController::sharedNonPayloadDelta(
     }
     if (valid) *valid = !overflow;
     Q_ASSERT(valid || !overflow); // Already admitted changes cannot overflow at commit.
-    auto &output = result.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-    output.cpuRam = combined[0];
-    output.umaShared = combined[1];
-    output.discreteVram = combined[2];
-    output.ssd = combined[3];
-    return result;
+    return {combined[0], combined[1], combined[2], combined[3]};
+}
+
+void KisBackingBudgetController::releaseStorageLocked(quint64 bytes, bool installed) noexcept
+{
+    Q_ASSERT(storageBytesLocked() >= bytes);
+    m_storageBytes -= bytes;
+    if (installed) {
+        const auto live = m_storageLiveBytes.fetch_sub(bytes, std::memory_order_relaxed);
+        Q_ASSERT(live >= bytes); Q_UNUSED(live);
+    }
+    notifyWaitersLocked();
+}
+
+void KisBackingBudgetController::releaseSharedStorage(
+    SharedChildUsage *child, quint64 bytes, bool installed) noexcept
+{
+    QMutexLocker lock(&m_mutex);
+    Q_ASSERT(child && child->chargedBytes >= bytes);
+    child->chargedBytes -= bytes;
+    releaseStorageLocked(bytes, installed);
+}
+
+void KisBackingBudgetController::releaseStorage(quint64 bytes, bool installed) noexcept
+{
+    {
+        QMutexLocker lock(&m_mutex);
+        releaseStorageLocked(bytes, installed);
+    }
+    if (m_sharedNonPayloadBudget)
+        m_sharedNonPayloadBudget->releaseSharedStorage(m_sharedNonPayloadUsage, bytes, installed);
 }
 
 void KisBackingBudgetController::releaseLive(KisBackingBudgetClass budgetClass,
@@ -1641,28 +1742,52 @@ void KisBackingBudgetController::releaseSharedNonPayloadLive(
     quint64 bytes) noexcept
 {
     QMutexLocker lock(&m_mutex);
-    Q_ASSERT(child && child->liveBytes >= bytes);
+    releaseSharedNonPayloadLiveLocked(child, domain, bytes);
+    notifyWaitersLocked();
+}
+
+void KisBackingBudgetController::releaseSharedNonPayloadLive(
+    SharedChildUsage *child, const KisPageDomainByteDelta &change) noexcept
+{
+    Q_ASSERT(hasDomainDelta(change) && !hasPositiveBytes(change));
+    const auto amounts = components(change);
+    const KisPageAccessDomain domains[] = {KisPageAccessDomain::CpuRam,
+        KisPageAccessDomain::UmaShared, KisPageAccessDomain::DiscreteVram, KisPageAccessDomain::Ssd};
+    QMutexLocker lock(&m_mutex);
+    for (size_t i = 0; i < amounts.size(); ++i)
+        if (amounts[i] < 0)
+            releaseSharedNonPayloadLiveLocked(child, domains[i], quint64(-(amounts[i] + 1)) + 1);
+    notifyWaitersLocked();
+}
+
+void KisBackingBudgetController::releaseSharedNonPayloadLiveLocked(
+    SharedChildUsage *child, KisPageAccessDomain domain, quint64 bytes) noexcept
+{
+    Q_ASSERT(child && child->chargedBytes >= bytes);
     if (!child) return;
-    child->liveBytes = bytes > child->liveBytes ? 0 : child->liveBytes - bytes;
+    child->chargedBytes = bytes > child->chargedBytes ? 0 : child->chargedBytes - bytes;
     quint64 *live = kisPageDomainComponent(
         m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)].live, domain);
     if (!live) return;
     Q_ASSERT(*live >= bytes);
     *live = bytes > *live ? 0 : *live - bytes;
-    notifyWaitersLocked();
 }
 
+template<class Delta>
 bool KisBackingBudgetController::settle(quint64 cookie,
-    const KisBackingBudgetDelta *installed,
-    const KisBackingBudgetDelta *retained, bool acceptPrepared,
-    KisBackingBudgetDelta *sharedInstalled) noexcept
+    const Delta *installed,
+    const Delta *retained, bool acceptPrepared,
+    KisPageDomainByteDelta *sharedInstalled) noexcept
 {
     QMutexLocker lock(&m_mutex);
     const quint32 slotIndex = quint32(cookie);
     ReservationSlot *slot = activeReservation(cookie);
     if (!slot) return false;
     constexpr auto metadata = size_t(KisBackingBudgetClass::MetadataArena);
-    if (acceptPrepared && sharedInstalled) sharedInstalled->buckets[metadata] = slot->sharedChange;
+    if constexpr (std::is_same_v<Delta, KisPageDomainByteDelta>) {
+        Q_ASSERT(slot->sharedChild && !(slot->changedClasses & ~(quint32(1) << metadata)));
+    }
+    if (acceptPrepared && sharedInstalled) *sharedInstalled = slot->sharedChange;
     auto *sharedUsage = slot->sharedChild;
     const quint64 sharedPreparedBytes = slot->aggregate(metadata);
     Q_ASSERT(m_reservedDurableBytes >= slot->durableBytes);
@@ -1678,8 +1803,8 @@ bool KisBackingBudgetController::settle(quint64 cookie,
     for (; affected; affected &= affected - 1) {
         const auto i = size_t(qCountTrailingZeroBits(affected));
         const auto original = slot->bucket(i);
-        const auto &applied = acceptPrepared ? original : installed ? installed->buckets[i] : empty;
-        const auto &kept = retained ? retained->buckets[i] : empty;
+        const auto &applied = acceptPrepared ? original : installed ? budgetBucket(*installed, i) : empty;
+        const auto &kept = retained ? budgetBucket(*retained, i) : empty;
         const auto aggregate = slot->aggregate(i);
         if (i != metadata && applied.ssd) m_nonMetadataLiveSsdValid = false;
         auto &usage = m_usage.buckets[i];
@@ -1729,6 +1854,8 @@ bool KisBackingBudgetController::settle(quint64 cookie,
         if (increased || saturatedAdd(sumComponents(live), m_reservedAggregateBytes[i]) > originalAggregate)
             m_fittingBudgetClasses &= ~(quint32(1) << i);
         if (i == metadata) {
+            usage.peak.cpuRam = std::max(usage.peak.cpuRam,
+                saturatedAdd(saturatedAdd(usage.live.cpuRam, usage.reserved.cpuRam), storageBytesLocked()));
             sharedApplied = {commit[0], commit[1], commit[2], commit[3]};
             sharedRetainedBytes = retainedAggregate;
         }
@@ -1741,9 +1868,9 @@ bool KisBackingBudgetController::settle(quint64 cookie,
         for (qint64 value : components(sharedApplied)) {
             if (value < 0) {
                 const quint64 removal = quint64(-(value + 1)) + 1;
-                Q_ASSERT(sharedUsage->liveBytes >= removal);
-                sharedUsage->liveBytes = removal > sharedUsage->liveBytes ? 0 : sharedUsage->liveBytes - removal;
-            } else sharedUsage->liveBytes = saturatedAdd(sharedUsage->liveBytes, quint64(value));
+                Q_ASSERT(sharedUsage->chargedBytes >= removal);
+                sharedUsage->chargedBytes = removal > sharedUsage->chargedBytes ? 0 : sharedUsage->chargedBytes - removal;
+            } else sharedUsage->chargedBytes = saturatedAdd(sharedUsage->chargedBytes, quint64(value));
         }
     }
     if (retainedClasses) {
@@ -1753,10 +1880,8 @@ bool KisBackingBudgetController::settle(quint64 cookie,
     } else {
         slot->active = false;
         slot->sharedChild = nullptr;
-        if (slotIndex != std::numeric_limits<quint32>::max()) {
-            slot->nextFree = m_firstFreeSlot;
-            m_firstFreeSlot = slotIndex;
-        }
+        slot->nextFree = m_firstFreeSlot;
+        m_firstFreeSlot = slotIndex;
     }
     notifyWaitersLocked();
     return retainedClasses != 0;
@@ -1791,7 +1916,7 @@ void KisBackingBudgetController::moveRetirementHeadroom(
 
 void KisBackingBudgetController::release(quint64 cookie) noexcept
 {
-    settle(cookie, nullptr, nullptr);
+    settle<KisBackingBudgetDelta>(cookie, nullptr, nullptr);
 }
 
 size_t kisPageStorageAllocationBytes(size_t bytes, size_t alignment) noexcept
@@ -1930,7 +2055,7 @@ void kisReservePageProcessStorage(size_t bytes)
     if (bytes > size_t(std::numeric_limits<qint64>::max())) throw std::bad_alloc();
     auto &state = processStorage();
     std::shared_ptr<KisBackingBudgetController> parent;
-    {
+    for (;;) {
         QMutexLocker gate(&state.gate);
         parent = state.parent.lock();
         const auto current = state.bytes.load(std::memory_order_relaxed);
@@ -1938,6 +2063,10 @@ void kisReservePageProcessStorage(size_t bytes)
         if (parent) {
             QMutexLocker budget(&parent->m_mutex);
             if (!parent->fitsMetadataStorageLocked(bytes)) {
+                budget.unlock();
+                gate.unlock();
+                if (parent->reclaimMutationStorage(false)) continue;
+                budget.relock();
                 ++parent->m_usage.backpressureCount;
                 throw std::bad_alloc();
             }
@@ -1946,12 +2075,14 @@ void kisReservePageProcessStorage(size_t bytes)
             publishProcessStorageLocked(state, live, reserved + bytes, current + bytes);
             auto &metadata = parent->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
             metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
-                saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam), current + bytes));
+                saturatedAdd(saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                          parent->storageBytesLocked()), current + bytes));
         } else {
             const auto live = state.liveBytes.load(std::memory_order_relaxed);
             const auto reserved = state.reservedBytes.load(std::memory_order_relaxed);
             publishProcessStorageLocked(state, live, reserved + bytes, current + bytes);
         }
+        return;
     }
 }
 
@@ -2163,7 +2294,7 @@ void KisMutationStorageOwner::deallocate(void *data, size_t, size_t alignment) n
 {
     if (!data) return;
     const size_t capacity = kisFreePageStorage(data, alignment);
-    releaseLiveCharge(capacity);
+    refundCharge(capacity, KisBackingBudgetClass::MetadataArena, true);
     deref();
 }
 
@@ -2181,15 +2312,23 @@ void KisMutationStorageOwner::releaseLiveCharge(quint64 bytes) noexcept
 
 void KisMutationStorageOwner::releaseLiveCharge(quint64 bytes, KisBackingBudgetClass budgetClass) noexcept
 {
+    refundCharge(bytes, budgetClass, false);
+}
+
+void KisMutationStorageOwner::refundCharge(
+    quint64 bytes, KisBackingBudgetClass budgetClass, bool storage) noexcept
+{
     {
         QMutexLocker lock(&m_gate);
         Q_ASSERT(m_bytes >= kisPageStorageBytes(this, alignof(KisMutationStorageOwner)) + bytes);
         m_bytes -= bytes;
-        if (m_controller)
-            m_controller->releaseLive(budgetClass,
-                                      KisPageAccessDomain::CpuRam, bytes);
-        else if (m_parent)
-            m_parent->releaseSharedNonPayloadLive(m_childUsage, KisPageAccessDomain::CpuRam, bytes);
+        if (m_controller) {
+            if (storage) m_controller->releaseStorage(bytes);
+            else m_controller->releaseLive(budgetClass, KisPageAccessDomain::CpuRam, bytes);
+        } else if (m_parent) {
+            if (storage) m_parent->releaseSharedStorage(m_childUsage, bytes, true);
+            else m_parent->releaseSharedNonPayloadLive(m_childUsage, KisPageAccessDomain::CpuRam, bytes);
+        }
     }
 }
 
@@ -2223,8 +2362,7 @@ void KisMutationStorageOwner::deref() noexcept
     Q_ASSERT(capacity == expectedCapacity);
     Q_UNUSED(expectedCapacity);
     if (parent) {
-        parent->releaseSharedNonPayloadLive(usage, KisPageAccessDomain::CpuRam,
-                                          capacity);
+        parent->releaseSharedStorage(usage, capacity, true);
         parent->unregisterSharedNonPayloadChild(child);
     }
 }
@@ -2246,10 +2384,11 @@ void *KisBackingBudgetController::allocateStorage(const KisPageStorageLayout &la
     // returned storage. Consume it directly; do not rediscover it at settle.
     // A normal allocation has one CPU metadata amount, not a general delta.
     const auto prepare = [&](KisBackingBudgetController *owner, KisSharedNonPayloadUsage *child) {
+      for (;;) {
         QMutexLocker lock(&owner->m_mutex);
         if (owner->m_usage.waitingRequests) {
             KisBackingBudgetDelta delta;
-            delta.buckets[size_t(KisBackingBudgetClass::MetadataArena)].cpuRam = qint64(capacity);
+            delta.bucket(size_t(KisBackingBudgetClass::MetadataArena)).cpuRam = qint64(capacity);
             std::array<quint64, budgetClassCount> aggregate{};
             aggregate[size_t(KisBackingBudgetClass::MetadataArena)] = capacity;
             if (owner->priorWaiterConflictsLocked(delta, aggregate, 0)) {
@@ -2259,40 +2398,29 @@ void *KisBackingBudgetController::allocateStorage(const KisPageStorageLayout &la
         }
         quint64 processBytes = 0;
         if (!owner->fitsMetadataStorageLocked(capacity, &processBytes)) {
+            lock.unlock();
+            if (owner->reclaimMutationStorage(bool(owner->m_sharedNonPayloadBudget))) continue;
+            lock.relock();
             ++owner->m_usage.backpressureCount;
             return false;
         }
         auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        metadata.reserved.cpuRam += capacity;
-        owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)] += capacity;
-        if (child) child->reservedBytes += capacity;
-        auto total = saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam);
+        owner->m_storageBytes += capacity;
+        if (child) child->chargedBytes += capacity;
+        auto total = saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                  owner->storageBytesLocked());
         // Growth of process storage also takes this budget gate. Concurrent
         // process releases may only reduce this admitted snapshot's total.
         total = saturatedAdd(total, processBytes);
         metadata.peak.cpuRam = std::max(metadata.peak.cpuRam, total);
         return true;
-    };
-    const auto settle = [&](KisBackingBudgetController *owner, KisSharedNonPayloadUsage *child, bool installed) noexcept {
-        QMutexLocker lock(&owner->m_mutex);
-        auto &metadata = owner->m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
-        auto &reserved = owner->m_reservedAggregateBytes[size_t(KisBackingBudgetClass::MetadataArena)];
-        Q_ASSERT(metadata.reserved.cpuRam >= capacity && reserved >= capacity);
-        metadata.reserved.cpuRam -= capacity;
-        reserved -= capacity;
-        if (installed) metadata.live.cpuRam = saturatedAdd(metadata.live.cpuRam, capacity);
-        if (child) {
-            Q_ASSERT(child->reservedBytes >= capacity);
-            child->reservedBytes -= capacity;
-            if (installed) child->liveBytes = saturatedAdd(child->liveBytes, capacity);
-        }
-        owner->notifyWaitersLocked();
+      }
     };
     bool localPrepared = false;
     bool parentPrepared = false;
     const auto cleanup = qScopeGuard([&] {
-        if (localPrepared) settle(budget, nullptr, false);
-        if (parentPrepared) settle(parent, shared, false);
+        if (localPrepared) budget->releaseStorage(capacity, false);
+        else if (parentPrepared) parent->releaseSharedStorage(shared, capacity, false);
     });
     if (parent) {
         Q_ASSERT(shared);
@@ -2306,9 +2434,12 @@ void *KisBackingBudgetController::allocateStorage(const KisPageStorageLayout &la
     if (!prepare(budget, nullptr)) throw std::bad_alloc();
     localPrepared = true;
     void *result = kisAllocatePageStorage(layout);
-    settle(budget, nullptr, true);
+    // The admitted total does not change on success. Publishing actual live
+    // storage needs neither another admission nor a waiter wake; only failure
+    // or physical free returns quota. Never hold budget gates across new/mmap.
+    budget->m_storageLiveBytes.fetch_add(capacity, std::memory_order_relaxed);
+    if (parent) parent->m_storageLiveBytes.fetch_add(capacity, std::memory_order_relaxed);
     localPrepared = false;
-    if (parentPrepared) settle(parent, shared, true);
     parentPrepared = false;
     return result;
 }
@@ -2321,7 +2452,7 @@ void kisFreeMutationStorage(KisBackingBudgetController *budget, void *data, size
         return;
     }
     const size_t capacity = kisFreePageStorage(data, alignment);
-    budget->releaseLive(KisBackingBudgetClass::MetadataArena, KisPageAccessDomain::CpuRam, capacity);
+    budget->releaseStorage(capacity);
 }
 
 KisMutationWriteSet::KisMutationWriteSet(KisBackingBudgetController *value)
@@ -2353,6 +2484,8 @@ KisMutationWriteSet &KisMutationWriteSet::operator=(KisMutationWriteSet &&other)
         budget = std::exchange(other.budget, nullptr);
         publishedCount = other.publishedCount;
         indexSeed = other.indexSeed;
+        indexStorageCapacity = indexStorageBytes = 0;
+        semanticStorageCapacity = semanticStorageBytes = 0;
         rebindInline(other.inlineEntry ? &*other.inlineEntry : nullptr);
         other.inlineEntry.reset();
         other.index.reset();
@@ -2367,8 +2500,9 @@ KisMutationPageEntry *KisMutationWriteSet::find(const KisPageKey &key)
 
 const KisMutationPageEntry *KisMutationWriteSet::find(const KisPageKey &key) const
 {
-    const EntryIndex found = findIndex(key);
-    return found == InvalidEntry ? nullptr : at(found);
+    const size_t position = directoryPosition(key);
+    return index && position < index->size()
+        ? static_cast<const KisMutationPageEntry *>((*index)[position]) : nullptr;
 }
 
 void KisMutationWriteSet::rebindInline(const KisMutationPageEntry *old) noexcept
@@ -2404,9 +2538,8 @@ size_t KisMutationWriteSet::directoryPosition(const KisPageKey &key) const
 
 KisMutationWriteSet::EntryIndex KisMutationWriteSet::findIndex(const KisPageKey &key) const
 {
-    const size_t pos = directoryPosition(key);
-    return index && pos < index->size() && (*index)[pos]
-        ? static_cast<const KisMutationPageEntry *>((*index)[pos])->slotIndex : InvalidEntry;
+    const auto *entry = find(key);
+    return entry ? entry->slotIndex : InvalidEntry;
 }
 
 KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent &intent, bool *inserted)
@@ -2459,13 +2592,15 @@ KisPagePublicationRows KisMutationWriteSet::publicationRows()
         index->resize(used);
         const auto active = [](const auto *row) {
             const auto *entry = static_cast<const KisMutationPageEntry *>(row);
-            return entry->isRemoval() || (entry->coldPage() && entry->coldPage()->target.isValid());
+            return entry->isRemoval() || (entry->coldPage() && entry->coldPage()->reserved);
         };
         const size_t removals = size_t(std::count_if(index->begin(), index->end(), [](const auto *source) {
             return static_cast<const KisMutationPageEntry *>(source)->isRemoval();
         }));
         if (removals) {
-            semanticRows.emplace(KisMutationStorageAllocator<KisPagePublicationChange>::retained(budget));
+            if (!semanticRows)
+                semanticRows.emplace(KisMutationStorageAllocator<KisPagePublicationChange>(budget));
+            semanticRows->clear();
             semanticRows->reserve(removals);
             for (auto *source : *index) {
                 const auto *entry = static_cast<const KisMutationPageEntry *>(source);
@@ -2509,9 +2644,15 @@ KisMutationWriteSet::EntryHandle KisMutationWriteSet::firstEntry() const
     return raw.isValid() ? EntryHandle{raw.index + 1, raw.incarnation} : EntryHandle{};
 }
 
+KisMutationWriteSet::EntryHandle KisMutationWriteSet::handleOf(const KisMutationPageEntry &entry) const
+{
+    Q_ASSERT(at(entry.slotIndex) == &entry);
+    return handleAt(entry.slotIndex);
+}
+
 KisMutationWriteSet::EntryHandle KisMutationWriteSet::nextEntry(EntryHandle entry) const
 {
-    if (!at(entry))
+    if (!entry.isValid() || (entry.index == 0 && (!inlineEntry || inlineIncarnation != entry.incarnation)))
         return {};
     const auto raw = entry.index == 0 ? overflow.first()
         : overflow.next({entry.index - 1, entry.incarnation});
@@ -2534,12 +2675,13 @@ const KisMutationPageEntry *KisMutationWriteSet::at(EntryHandle entry) const
 
 KisMutationPageEntry *KisMutationWriteSet::at(EntryIndex entry)
 {
-    return at(handleAt(entry));
+    return const_cast<KisMutationPageEntry *>(std::as_const(*this).at(entry));
 }
 
 const KisMutationPageEntry *KisMutationWriteSet::at(EntryIndex entry) const
 {
-    return at(handleAt(entry));
+    if (entry == InvalidEntry) return nullptr;
+    return entry == 0 ? (inlineEntry ? &*inlineEntry : nullptr) : overflow.at(size_t(entry - 1));
 }
 
 bool KisMutationWriteSet::erase(EntryHandle slot)
@@ -2582,6 +2724,47 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
     if (count > 8 && (!directoryHashed() || size_t(count) > index->size() / 2))
         index.emplace(prepareDirectory(count));
     else if (!directoryHashed()) index->reserve(size_t(count));
+}
+
+void KisMutationWriteSet::clearValues() noexcept
+{
+    if (!size() && !publishedCount) {
+        overflow.takeReleasedBlocks().reset();
+        return;
+    }
+    inlineEntry.reset();
+    inlineIncarnation = 0;
+    overflow.clearValues();
+    if (semanticRows) semanticRows->clear();
+    publishedCount.reset();
+    Q_ASSERT(index);
+    // Frozen D resized this same allocation to its live population. Restore
+    // the largest power-of-two directory that already fits; no growth is
+    // needed merely to start the next logical phase.
+    const size_t capacity = index->capacity();
+    index->clear();
+    if (capacity >= 16) {
+        size_t buckets = 16;
+        while (buckets <= capacity / 2) buckets *= 2;
+        index->resize(buckets, nullptr);
+    }
+}
+
+size_t KisMutationWriteSet::storageBytes() const noexcept
+{
+    const size_t capacity = index ? index->capacity() : 0;
+    if (capacity != indexStorageCapacity) {
+        indexStorageCapacity = capacity;
+        indexStorageBytes = index && capacity > Index::internal_capacity()
+            ? kisPageStorageBytes(index->data(), alignof(KisPagePublicationSource *)) : 0;
+    }
+    const size_t semanticCapacity = semanticRows ? semanticRows->capacity() : 0;
+    if (semanticCapacity != semanticStorageCapacity) {
+        semanticStorageCapacity = semanticCapacity;
+        semanticStorageBytes = semanticCapacity
+            ? kisPageStorageBytes(semanticRows->data(), alignof(KisPagePublicationChange)) : 0;
+    }
+    return overflow.storageBytes() + indexStorageBytes + semanticStorageBytes;
 }
 
 size_t KisMutationWriteSet::directoryBucket(const Index &table, const KisPageKey &key) const noexcept
@@ -2638,7 +2821,13 @@ KisPageWriteAdmission::ClaimSet &KisPageWriteAdmission::ClaimSet::operator=(Clai
 
 bool KisPageWriteAdmission::ClaimSet::isValid() const
 {
-    return owner && writeSet && token;
+    return owner && token;
+}
+
+void KisPageWriteAdmission::ClaimSet::retainTokenForTerminal() noexcept
+{
+    Q_ASSERT(isValid());
+    writeSet = nullptr;
 }
 
 void KisPageWriteAdmission::ClaimSet::release() noexcept
@@ -2709,8 +2898,8 @@ bool KisPageWriteAdmission::claimDirectLocked(const KisPageKey &key, quint64 own
         KisPageStoreDetail::setError(error, QStringLiteral("page is claimed by another writer"));
         return {};
     };
-    return admitMutationRecords(m_claims, lock, required, [&] {
-        if (!m_claims.contains(key)) {
+    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
+        if (missing) {
             const bool inserted = m_claims.insertPrepared(key, {ownerToken, ClaimOrigin::GenericWrite,
                                                                 QThread::currentThreadId()});
             Q_ASSERT(inserted);
@@ -2741,12 +2930,13 @@ KisPageWriteAdmission::ClaimSet KisPageWriteAdmission::beginClaimSet(const KisMu
 bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::EntryHandle entry,
                                      QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin)
 {
+    const KisMutationPageEntry *page = nullptr;
     const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || claims.owner != this || (m_operational && !*m_operational)) {
+        if (!claims.isValid() || !claims.writeSet || claims.owner != this || (m_operational && !*m_operational)) {
             KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
             return {};
         }
-        const auto *page = claims.writeSet->at(entry);
+        page = claims.writeSet->at(entry);
         if (!page) {
             KisPageStoreDetail::setError(error, QStringLiteral("write admission entry is invalid"));
             return {};
@@ -2757,10 +2947,9 @@ bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::Entr
         KisPageStoreDetail::setError(error, QStringLiteral("page is claimed by another writer"));
         return {};
     };
-    return admitMutationRecords(m_claims, lock, required, [&] {
-        const auto &key = claims.writeSet->at(entry)->key();
-        if (!m_claims.contains(key)) {
-            const bool inserted = m_claims.insertPrepared(key, {claims.token, origin, QThread::currentThreadId()});
+    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
+        if (missing) {
+            const bool inserted = m_claims.insertPrepared(page->key(), {claims.token, origin, QThread::currentThreadId()});
             Q_ASSERT(inserted);
         }
     }, error);
@@ -2768,7 +2957,7 @@ bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::Entr
 
 bool KisPageWriteAdmission::releaseOneLocked(ClaimSet &claims, KisMutationWriteSet::EntryHandle slot) noexcept
 {
-    if (!claims.isValid() || claims.owner != this) return false;
+    if (!claims.isValid() || !claims.writeSet || claims.owner != this) return false;
     const auto *entry = claims.writeSet->at(slot);
     if (!entry) return false;
     const auto *found = m_claims.find(entry->key());
@@ -2783,7 +2972,7 @@ KisPageWriteAdmission::Result KisPageWriteAdmission::claimAll(ClaimSet &claims, 
 {
     bool contended = false;
     const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || claims.owner != this || (m_operational && !*m_operational)) {
+        if (!claims.isValid() || !claims.writeSet || claims.owner != this || (m_operational && !*m_operational)) {
             KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
             return {};
         }
@@ -2800,13 +2989,13 @@ KisPageWriteAdmission::Result KisPageWriteAdmission::claimAll(ClaimSet &claims, 
         }
         return missing;
     };
-    const bool acquired = admitMutationRecords(m_claims, lock, required, [&] {
+    const bool acquired = admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
+        if (!missing) return;
         for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
             const auto &key = claims.writeSet->at(slot)->key();
-            if (!m_claims.contains(key)) {
-                const bool inserted = m_claims.insertPrepared(key, {claims.token, origin, QThread::currentThreadId()});
-                Q_ASSERT(inserted);
-            }
+            const auto *claim = m_claims.getOrInsertPrepared(key, {claims.token, origin, QThread::currentThreadId()});
+            Q_ASSERT(claim && claim->token == claims.token);
+            Q_UNUSED(claim);
         }
     }, error);
     return acquired ? Result::Acquired : contended ? Result::Contended : Result::Failed;
@@ -2816,7 +3005,7 @@ bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,
                                       const KisPageSnapshotArray<KisLogicalPageId> &pages, QMutexLocker<QMutex> &lock, QString *error)
 {
     const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || claims.owner != this || !surface.isValid() || pages.isEmpty()
+        if (!claims.isValid() || !claims.writeSet || claims.owner != this || !surface.isValid() || pages.isEmpty()
             || (m_operational && !*m_operational)) {
             KisPageStoreDetail::setError(error, QStringLiteral("execution claim range is invalid"));
             return {};
@@ -2832,21 +3021,21 @@ bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,
         }
         return missing;
     };
-    return admitMutationRecords(m_claims, lock, required, [&] {
+    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
+        if (!missing) return;
         for (const auto &page : pages) {
             const KisPageKey key{surface, page};
-            if (!m_claims.contains(key)) {
-                const bool inserted = m_claims.insertPrepared(key,
-                    {claims.token, ClaimOrigin::NativeSession, QThread::currentThreadId()});
-                Q_ASSERT(inserted);
-            }
+            const auto *claim = m_claims.getOrInsertPrepared(key,
+                {claims.token, ClaimOrigin::NativeSession, QThread::currentThreadId()});
+            Q_ASSERT(claim && claim->token == claims.token);
+            Q_UNUSED(claim);
         }
     }, error);
 }
 
 bool KisPageWriteAdmission::ownsClaimSetLocked(const ClaimSet &claims) const
 {
-    if (!claims.isValid() || claims.owner != this) return false;
+    if (!claims.isValid() || !claims.writeSet || claims.owner != this) return false;
     for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
         const auto *found = m_claims.find(claims.writeSet->at(slot)->key());
         if (!found || found->origin == ClaimOrigin::GenericWrite || found->token != claims.token) return false;
@@ -2865,14 +3054,23 @@ void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept
 {
     std::optional<QMutexLocker<QMutex>> lock;
     if (lockOwner) lock.emplace(m_ownerMutex);
-    if (claims.owner != this || !claims.writeSet) return;
+    if (claims.owner != this || !claims.token) return;
     bool changed = false;
-    for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
-        const auto &key = claims.writeSet->at(slot)->key();
-        const auto *found = m_claims.find(key);
-        if (found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token) {
-            m_claims.erase(key);
-            changed = true;
+    if (!claims.writeSet) {
+        // Only abandoned terminal scopes discard their row storage before
+        // release. The original table still owns every key and token; no
+        // copied range or second claim directory is needed for this tail.
+        changed = m_claims.eraseIf([&](const KisPageKey &, const ActiveClaim &claim) {
+            return claim.origin != ClaimOrigin::GenericWrite && claim.token == claims.token;
+        }) != 0;
+    } else {
+        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
+            const auto &key = claims.writeSet->at(slot)->key();
+            const auto *found = m_claims.find(key);
+            if (found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token) {
+                m_claims.erase(key);
+                changed = true;
+            }
         }
     }
     if (changed) m_ownerCondition->wakeAll();
@@ -2891,65 +3089,8 @@ KisPageWriteCoordinator::KisPageWriteCoordinator(KisPageMetadataCoordinator &met
 {
 }
 
-bool KisPageWriteCoordinator::prepareWriteBaseLocked(
-    const KisPageTransaction &transaction, const KisPageWriteIntent &intent,
-    KisPagePublicationCoordinator &publication, KisPageWriteSelection *selection, QString *error)
-{
-    Q_ASSERT(selection);
-    auto *write = &selection->write;
-    const auto fail = [&](const QString &reason) { KisPageStoreDetail::setError(error, reason); return false; };
-    const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
-    KisVersionSlotId selectedSlot;
-    const auto sealed = publication.findPreparedVersionLocked(transaction.id, intent.key, &selectedSlot);
-    KisPageVersion baseVersion = sealed;
-    // The active transaction and key claim already retain the root. A sealed
-    // overlay is the selected base; resolving its superseded root again adds
-    // no fact consumed by acquisition or comparison.
-    if (!sealed.isValid() && !epoch->resolve(intent.key, overlay, &baseVersion))
-        return fail(QStringLiteral("write base does not resolve"));
-    const bool removed = (intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval))
-        || publication.stagesRemovalLocked(transaction.id, intent.key);
-    const bool discoverBefore = !removed && intent.inputKind != KisPageWriteInputKind::Semantic;
-    KisPageMetadataCoordinator::MutationBaseInfo baseInfo;
-    if (!metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo, &selectedSlot)
-        || !baseInfo.baseExists) {
-        KisSurfaceEpochState before;
-        if (!epoch->surfaceState(intent.key.surface, overlay, &before)
-            || !publication.ensureVirtualDefaultLocked(baseVersion, before, error)
-            || !metadata->queryMutationBase(baseVersion, sealed, discoverBefore, &baseInfo, &selectedSlot))
-            return false;
-    }
-    if (baseInfo.hasWriter)
-        return fail(QStringLiteral("write page already has a writer"));
-    // Only a previously sealed overlay supersedes the transaction root. Never scan all history
-    // for another Prepared version and accidentally expose unsealed work.
-    if (sealed.isValid()) baseVersion = sealed;
-    const auto &base = baseInfo.selected;
-    if (!base.version.isValid() || (!base.isVirtualDefault() && !base.authority.isValid()))
-        return fail(QStringLiteral("write base has no exact authority"));
-    if (removed || baseVersion.isDefaultPixel() || intent.inputKind == KisPageWriteInputKind::Semantic) {
-        KisSurfaceEpochState surface;
-        if (!publication.resolveSurfaceLocked(intent.key.surface, overlay, &surface))
-            return fail(QStringLiteral("write surface does not resolve"));
-        selection->surfaceLayout = surface.allocationDescriptor();
-    } else if (!baseInfo.descriptor)
-        return fail(QStringLiteral("write base descriptor is unavailable"));
-    else selection->layout = std::move(baseInfo.descriptor);
-    selection->recoverableBefore = baseInfo.recoverableBefore;
-    selection->binding = std::move(baseInfo.binding);
-    *write = {};
-    write->baseVersion = baseVersion;
-    write->version = KisPageVersion{intent.key, baseInfo.nextGeneration};
-    write->source = base.authority;
-    write->transaction = transaction.id;
-    write->writeMode = removed || baseVersion.isDefaultPixel() ? KisPageWriteMode::DiscardContents : intent.mode;
-    if (!selection->descriptor().isValid() || !write->version.isValid())
-        return fail(QStringLiteral("write identity or layout is unavailable"));
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
-
-KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(KisPageWriteInput &write)
+KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(
+    KisPageWriteInput &write, const KisReplicaHandle &target)
 {
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
@@ -2963,7 +3104,7 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(KisPa
         }
         write.source = current.authority;
     }
-    return metadata->applyOwner(write.version.key, write.leaseTransition());
+    return metadata->applyOwner(write.version.key, write.leaseTransition(target));
 }
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::publishLeaseWrite(KisPageTransition write)
@@ -2973,19 +3114,18 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::publishLeaseWrite(KisPa
     return metadata->publishLeaseWrite(write);
 }
 
-KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
+bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     const KisPageTransaction &transaction, const KisPageWriteIntent &intent,
     const std::shared_ptr<KisPageReplicaProvider> &provider, KisPageAccessRequirement access,
     KisPageWriteSelection &selection, KisPagePublicationCoordinator &publication,
     KisPageIdleCapacity capacity,
-    QMutexLocker<QMutex> &locker, KisCpuWriteBindingReservation &writable,
+    QMutexLocker<QMutex> &locker, KisReplicaHandle &target, KisCpuWriteBindingReservation &writable,
     KisPageStoreDiagnosticTimer &diagnostic, KisPagePrivateWrite *native)
 {
     auto &write = selection.write;
     const auto &descriptor = selection.descriptor();
     const auto &before = selection.recoverableBefore;
     auto &spare = capacity.replica;
-    const auto fallback = select(intent);
     const auto retireUnused = qScopeGuard([&] {
         if (!spare.isValid()) return;
         // Give abandoned optional capacity its first retirement attempt
@@ -3007,14 +3147,14 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         || write.baseVersion.isDefaultPixel() || !write.source.isValid()
         || !(provider->providerId() == write.source.provider)
         || !(provider->providerEpoch() == write.source.providerEpoch)
-        || writable.isValid()) return fallback;
+        || writable.isValid()) return false;
 
     const auto transientLimit = budget->maxTransientVersionsPerPage();
     if (transientLimit != std::numeric_limits<quint32>::max()
-        && !metadata->canAddTransientVersion(write.version, transientLimit)) return fallback;
+        && !metadata->canAddTransientVersion(write.version, transientLimit)) return false;
 
     const bool reuseCapacity = spare.isValid();
-    if (!reuseCapacity && !before.isValid()) return fallback;
+    if (!reuseCapacity && !before.isValid()) return false;
 
     // Cold short-lived storage only. The existing owners retain every live
     // fact after install; neither adapter receives a second terminal ledger.
@@ -3057,7 +3197,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
     // Check the source before pinning the independent before or preparing
     // fallible storage. This observes eligibility but acquires no write claim.
     physical = KisCpuBackingHandoff::prepare(provider, reuseCapacity ? spare : write.source, write.version, descriptor, reuseCapacity ? std::move(capacity.binding) : selection.binding);
-    if (!physical.isValid()) return fallback;
+    if (!physical.isValid()) return false;
     prepared.emplace();
     // The caller already retains this exact source provider across the plan
     // and its cleanup. Only an independent provider needs another ledger owner.
@@ -3070,43 +3210,43 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
             prepared->beforeProvider = ownerLedger->provider(source.provider, source.providerEpoch);
             beforeProvider = prepared->beforeProvider.get();
         }
-        if (!beforeProvider) return fallback;
+        if (!beforeProvider) return false;
         prepared->beforeBinding = reuseCapacity && selection.binding
             ? selection.binding : beforeProvider->cpuResidentBinding(source);
         prepared->sourceBytes = prepared->beforeBinding
             ? prepared->beforeBinding->acquireRead(source.allocationIdentity(), true) : nullptr;
         prepared->beforePinned = bool(prepared->sourceBytes);
-        if (!prepared->beforePinned) return fallback;
+        if (!prepared->beforePinned) return false;
     }
-    auto recoverable = write;
-    if (!reuseCapacity) {
-        recoverable.source = before;
-    }
-    recoverable.target = physical.target();
-    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, recoverable.target);
+    // All stable selection facts stay in the original input. Only the source
+    // may differ for recovery; the target is owned by physical until accepted.
+    const auto &acceptedSource = reuseCapacity ? write.source : before;
+    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, physical.target());
     if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
-        publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, recoverable.leaseTransition())
-            : metadata->prepareRecoverableWrite(transaction, recoverable.leaseTransition(KisPageTransitionKind::AcquireRecoverableWrite));
+        auto lease = write.leaseTransition(physical.target(), reuseCapacity
+            ? KisPageTransitionKind::AcquireWrite : KisPageTransitionKind::AcquireRecoverableWrite);
+        lease.source = acceptedSource;
+        publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, lease)
+            : metadata->prepareRecoverableWrite(transaction, lease);
     }
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepared, 1);
     locker.relock();
     if (!prepared->accounting.isValid()
-        || (!native && !prepared->publication->metadata.isValid())) return fallback;
+        || (!native && !prepared->publication->metadata.isValid())) return false;
 
     // All fallible storage exists before taking the physical claim. Metadata
     // install rechecks actual blockers and the exact recovery identity.
     if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
-    const auto plan = reuseCapacity ? KisPageWritePlanKind::ReuseWorkingCapacity : select(intent, nullptr, true);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
-    if (!physical.tryClaim()) return fallback;
+    if (!physical.tryClaim()) return false;
     const bool installed = native
-        ? metadata->acceptPrivateTarget(recoverable, native, transientLimit, nullptr,
+        ? metadata->acceptPrivateTarget(write, acceptedSource, physical.target(), native, transientLimit, nullptr,
               reuseCapacity ? std::shared_ptr<KisCpuResidentBinding>{} : prepared->beforeBinding)
         : reuseCapacity
         ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)
         : metadata->installRecoverableWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup);
-    if (!installed) return fallback;
+    if (!installed) return false;
     writable = physical.commit();
     const bool accounted = ownerLedger->commitBackingHandoff(std::move(prepared->accounting), writable.binding());
     Q_ASSERT(writable.isValid() && accounted);
@@ -3125,7 +3265,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         Q_ASSERT(bytes);
         const auto rowBytes = descriptor.minimumRowBytes();
         for (int y = 0; y < descriptor.pageExtent.height(); ++y)
-            std::memcpy(bytes + quint64(y) * recoverable.target.layout.rowStride,
+            std::memcpy(bytes + quint64(y) * physical.target().layout.rowStride,
                 static_cast<const quint8 *>(prepared->sourceBytes) + quint64(y) * write.source.layout.rowStride,
                 size_t(rowBytes));
         locker.relock();
@@ -3134,7 +3274,7 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
         locker.unlock();
         auto *bytes = static_cast<quint8 *>(writable.pinResident());
         Q_ASSERT(bytes);
-        const auto &layout = recoverable.target.layout;
+        const auto &layout = physical.target().layout;
         const auto &pixel = descriptor.format.defaultPixel;
         for (int y = 0; y < layout.pageExtent.height(); ++y)
             for (int x = 0; x < layout.pageExtent.width(); ++x)
@@ -3142,8 +3282,13 @@ KisPageWritePlanKind KisPageWriteCoordinator::prepareWritePlanLocked(
                             pixel.constData(), size_t(pixel.size()));
         locker.relock();
     }
-    write = recoverable;
-    return plan;
+    if (native) {
+        Q_ASSERT(&target == &native->target && target == physical.target());
+    } else {
+        target = physical.target(); // Original preallocated request is the owner.
+    }
+    if (!reuseCapacity) write.source = before;
+    return true;
 }
 
 KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
@@ -3152,7 +3297,8 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
     KisBackingBudgetClass budgetClass,
     QString *error,
     const KisPageVersion &target,
-    KisPageRetirementRecordPointer *preparedRetirement)
+    KisPageRetirementRecordPointer *preparedRetirement,
+    KisReplicaSourceUse sourceUse)
 {
     if (!descriptor.isValid() || domain == KisPageAccessDomain::Unknown
         || static_cast<size_t>(budgetClass) >= budgetClassCount
@@ -3175,7 +3321,7 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
         return {};
     }
     KisBackingBudgetDelta delta;
-    auto &bucket = delta.buckets[static_cast<size_t>(budgetClass)];
+    auto &bucket = delta.bucket(static_cast<size_t>(budgetClass));
     qint64 *reserved = kisPageDomainComponent(bucket, domain);
     if (!reserved) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing reservation domain is invalid"));
@@ -3190,21 +3336,29 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
         && budgetClass != KisBackingBudgetClass::OptionalCache
         && budgetClass != KisBackingBudgetClass::IdleCapacity
         && budgetClass != KisBackingBudgetClass::MetadataArena) {
-        auto &debt = delta.buckets[static_cast<size_t>(KisBackingBudgetClass::RetirementDebt)];
+        auto &debt = delta.bucket(static_cast<size_t>(KisBackingBudgetClass::RetirementDebt));
         *kisPageDomainComponent(debt, domain) = qint64(bytes);
     }
     KisPageBackingPreparation prepared;
     prepared.reservation = budget->reserve(delta, error);
     if (!prepared.reservation.isValid()) return {};
     try {
-        if (preparedRetirement) {
-            if (!*preparedRetirement || (*preparedRetirement)->storage.budget != budget) {
-                KisPageStoreDetail::setError(error, QStringLiteral("prepared backing retirement storage has changed"));
-                return {};
-            }
+        KisPageRetirementRecordPointer local;
+        if (!preparedRetirement) {
+            local = kisPreparePageRetirementRecord(budget);
+            preparedRetirement = &local;
+        }
+        if (!*preparedRetirement || (*preparedRetirement)->storage.budget != budget) {
+            KisPageStoreDetail::setError(error, QStringLiteral("prepared backing retirement storage has changed"));
+            return {};
+        }
+        // Every provider result already has its funded terminal record.
+        // Fresh also requires installation capacity before creating pixels.
+        // Immutable aliases may join an existing group without that node;
+        // registerBacking prepares it only for an actual new physical group.
+        if (sourceUse != KisReplicaSourceUse::ImmutableAlias)
             (*preparedRetirement)->preparePhysicalStorage();
-            prepared.retirement = std::move(*preparedRetirement);
-        } else prepared.retirement = kisPreparePageRetirementRecord(budget);
+        prepared.retirement = std::move(*preparedRetirement);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing retirement record budget storage was refused"));
         return {};
@@ -3227,10 +3381,8 @@ KisPageMetadataTransitionResult KisPageWriteCoordinator::cancelLeaseWrite(KisPag
 
 KisPageWritePlanKind KisPageWriteCoordinator::select(
     const KisPageWriteIntent &intent,
-    const KisMutationPageEntry *pending, bool recoverablePrepared) const
+    const KisMutationPageEntry *pending) const
 {
-    if (intent.inputKind != KisPageWriteInputKind::Semantic && recoverablePrepared)
-        return KisPageWritePlanKind::RecoverableHandoff;
     if (intent.inputKind != KisPageWriteInputKind::Semantic
         && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady))
         && intent.mode == KisPageWriteMode::PreserveContents) {
@@ -3258,7 +3410,8 @@ KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
 {
     if (synchronousCopy) *synchronousCopy = false;
     if (intent.inputKind == KisPageWriteInputKind::Semantic)
-        return {};
+        return initialization ? provider.prepareSynchronousSource(write.operation, initialization,
+            write.version, descriptor, KisReplicaSourceUse::ImmutableAlias, priority) : KisReplicaOperation{};
     const auto plan = select(intent);
     if (plan == KisPageWritePlanKind::FreshPayload)
         return payload ? provider.prepareSynchronousCpuPayload(
@@ -3353,6 +3506,12 @@ KisCompletionTicket KisPageWriteCoordinator::initializeFreshReplica(
     return completion.succeeded() ? transfer.completion : KisCompletionTicket{};
 }
 
+KisPageVersion KisMutationPageEntry::preparedTargetVersion() const
+{
+    return state != KisMutationPageEntryState::IntentOnly && coldPageStorage
+        ? coldPageStorage->target.version : KisPageVersion{};
+}
+
 void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
                                            const KisPageWriteIntent &intent,
                                            const KisPageWriteInput &write,
@@ -3360,14 +3519,15 @@ void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
 {
     Q_ASSERT(entry.key() == intent.key && entry.state == KisMutationPageEntryState::IntentOnly);
     Q_ASSERT(write.version.key == entry.key() && !write.version.isDefaultPixel());
+    Q_ASSERT(entry.coldPageStorage && entry.coldPageStorage->target.version == write.version);
     Q_ASSERT(state == KisMutationPageEntryState::MutableReady
              || state == KisMutationPageEntryState::PrivatePrepared
              || state == KisMutationPageEntryState::AliasAccepted);
     const quint8 semanticRemoval = entry.intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval);
     entry.intent = intent;
     entry.intent.flags |= semanticRemoval;
-    entry.baseVersion = write.baseVersion;
-    entry.targetGeneration = write.version.generation;
+    entry.baseGeneration = write.baseVersion.generation;
+    entry.baseDefaultPixelRevision = write.baseVersion.defaultPixelRevision;
     entry.state = state;
 }
 
@@ -3386,8 +3546,8 @@ void KisPageWriteCoordinator::recordAliasAccepted(KisMutationPageEntry &entry)
 void KisPageWriteCoordinator::recordCancelled(KisMutationPageEntry &entry)
 {
     Q_ASSERT(entry.state == KisMutationPageEntryState::MutableReady || entry.hasPrivateResult());
-    entry.baseVersion = {};
-    entry.targetGeneration = {};
+    entry.baseGeneration = {};
+    entry.baseDefaultPixelRevision = 0;
     entry.state = KisMutationPageEntryState::IntentOnly;
 }
 
@@ -3398,17 +3558,16 @@ void KisPageWriteCoordinator::recordExposure(KisMutationPageEntry &entry, bool e
 }
 
 KisPageWriteInput KisPageWriteCoordinator::writeInput(const KisMutationPageEntry &entry,
-                                                           KisPageTransactionId transaction,
-                                                           const KisReplicaHandle &source,
-                                                           const KisReplicaHandle &target) const
+                                                    KisPageTransactionId transaction) const
 {
+    const auto *result = entry.coldPageStorage;
+    Q_ASSERT(result && entry.state != KisMutationPageEntryState::IntentOnly);
     KisPageWriteInput write;
-    write.baseVersion = entry.baseVersion;
-    write.version = entry.preparedTargetVersion();
+    write.baseVersion = {entry.key(), entry.baseGeneration, entry.baseDefaultPixelRevision};
+    write.version = result->target.version;
     write.writeMode = entry.intent.mode;
     write.transaction = transaction;
-    write.source = source;
-    write.target = target;
+    write.source = result->source;
     return write;
 }
 
@@ -3416,17 +3575,17 @@ bool KisPageWriteCoordinator::beginActivity(KisPageTransactionId transaction,
                                              qsizetype TransactionActivity::*member,
                                              QMutexLocker<QMutex> &lock, QString *error)
 {
+    TransactionActivity *found = nullptr;
     const auto required = [&]() -> std::optional<size_t> {
-        const auto *found = transactionActivities.find(transaction.value);
+        found = transactionActivities.find(transaction.value);
         if (!transaction.isValid() || (found && found->*member == std::numeric_limits<qsizetype>::max())) {
             KisPageStoreDetail::setError(error, QStringLiteral("mutation activity is unavailable or exhausted"));
             return {};
         }
         return found ? 0 : 1;
     };
-    return admitMutationRecords(transactionActivities, lock, required, [&] {
-        auto *found = transactionActivities.find(transaction.value);
-        if (!found) {
+    return admitMutationRecords(transactionActivities, lock, required, [&](size_t missing) {
+        if (missing) {
             TransactionActivity value;
             value.*member = 1;
             const bool inserted = transactionActivities.insertPrepared(transaction.value, value);
