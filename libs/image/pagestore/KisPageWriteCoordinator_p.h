@@ -306,8 +306,7 @@ public:
                                                 KisBackingBudgetClass budgetClass,
                                                 QString *error,
                                                 const KisPageVersion &target = {},
-                                                KisPageRetirementRecordPointer *preparedRetirement = nullptr,
-                                                KisReplicaSourceUse sourceUse = KisReplicaSourceUse::WritableCopy);
+                                                KisPageRetirementRecordPointer *preparedRetirement = nullptr);
 
     KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &, const KisReplicaHandle &target);
     // Both adapters try the same physical reuse/metadata/accounting protocol.

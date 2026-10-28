@@ -1501,8 +1501,7 @@ KisPageMutationSession::Private::prepareTarget(
         });
         lock.unlock();
         backing = owner->writeCoordinator.reserveBacking(descriptor, KisPageAccessDomain::CpuRam,
-            KisBackingBudgetClass::ActivePending, error, acquire.version, nullptr,
-            alias ? KisReplicaSourceUse::ImmutableAlias : KisReplicaSourceUse::WritableCopy);
+            KisBackingBudgetClass::ActivePending, error, acquire.version);
         if (!backing.reservation.isValid()) {
             if (storageRefused) *storageRefused = true;
             return {};
@@ -4270,7 +4269,6 @@ bool KisPageStore::adoptInitialPage(const KisPageVersion &version,
             for (qsizetype i = 0; i < replicas.size(); ++i)
                 if (d->owner.backingClass(replicas[i]) == KisBackingBudgetClass::Count) {
                     terminals[size_t(i)] = kisPreparePageRetirementRecord(&d->backingBudget);
-                    terminals[size_t(i)]->preparePhysicalStorage();
                 }
         } catch (const std::bad_alloc &) {
             KisPageStoreDetail::setError(error, QStringLiteral("initial backing retirement storage budget was refused"));

@@ -1817,10 +1817,10 @@ KisPageIdleCapacity KisPagePublicationCoordinator::takeIdleCapacityLocked(const 
     m_idleCapacity.erase(m_idleCapacity.iterator_to(*record));
     const auto deadline = std::exchange(record->idleDeadline, 0);
     if (deadline <= now) {
-        m_retirementQueue.acceptDetachedRecord(*record, record->replica);
+        m_retirementQueue.acceptDetachedRecord(*record, record->replica());
         return {};
     }
-    return {record->replica, record->backingNode.second.nativeBinding, record};
+    return {record->replica(), record->backingNode.second.nativeBinding, record};
     // Ledger retains the original record until retag or retirement.
 }
 
@@ -1834,11 +1834,11 @@ void KisPagePublicationCoordinator::collectExpiredIdleCapacityLocked(qint64 now,
     while (budget-- > 0 && !m_idleCapacity.empty()) {
         auto &record = m_idleCapacity.front();
         if (record.idleDeadline > now) break;
-        auto *indexed = m_metadata.exchangeIdleCapacity(record.replica.version.key, nullptr);
+        auto *indexed = m_metadata.exchangeIdleCapacity(record.replica().version.key, nullptr);
         Q_ASSERT(indexed == &record); Q_UNUSED(indexed);
         m_idleCapacity.pop_front();
         record.idleDeadline = 0;
-        m_retirementQueue.acceptDetachedRecord(record, record.replica);
+        m_retirementQueue.acceptDetachedRecord(record, record.replica());
     }
 }
 
@@ -1856,12 +1856,12 @@ void KisPagePublicationCoordinator::acceptCapacityLocked(const KisReplicaHandle 
         m_retirementQueue.acceptDetachedBacking(replica);
         return;
     }
-    Q_ASSERT(record->replica == replica && !record->is_linked());
+    Q_ASSERT(record->replica() == replica && !record->is_linked());
     auto *previous = m_metadata.exchangeIdleCapacity(replica.version.key, record);
     if (previous) {
         m_idleCapacity.erase(m_idleCapacity.iterator_to(*previous));
         previous->idleDeadline = 0;
-        m_retirementQueue.acceptDetachedRecord(*previous, previous->replica);
+        m_retirementQueue.acceptDetachedRecord(*previous, previous->replica());
     }
     record->idleDeadline = QDeadlineTimer::current().deadline() + IdleCapacityAgeMs;
     m_idleCapacity.push_back(*record);

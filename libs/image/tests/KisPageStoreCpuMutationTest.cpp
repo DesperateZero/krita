@@ -885,12 +885,6 @@ private Q_SLOTS:
     void virtualDefaultOnlyAllocatesTarget();
     void rejectedRetirementsPreserveDebtAndBudget();
     void retirementRecordRefusedBeforePhysicalResult();
-    void ledgerBackingNodesRefusedBeforePhysicalResult_data()
-    {
-        QTest::addColumn<bool>("physicalNode");
-        QTest::newRow("backing-node") << false;
-        QTest::newRow("physical-node") << true;
-    }
     void ledgerBackingNodesRefusedBeforePhysicalResult();
     void backingStorageEndpoints_data();
     void backingStorageEndpoints();
@@ -6066,7 +6060,7 @@ void KisPageStoreCpuMutationTest::retirementRecordRefusedBeforePhysicalResult()
         auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
             KisBackingBudgetClass::Current, &error);
         QVERIFY2(prepared.reservation.isValid() && prepared.retirement, qPrintable(error));
-        QVERIFY(live() > baseline + sizeof(KisPageRetirementRecord)); // Includes the independent physical record.
+        QVERIFY(live() >= baseline + sizeof(KisPageRetirementRecord)); // One resource allocation includes its account endpoint.
     }
     QCOMPARE(live(), baseline);
 }
@@ -6074,7 +6068,7 @@ void KisPageStoreCpuMutationTest::retirementRecordRefusedBeforePhysicalResult()
 void KisPageStoreCpuMutationTest::backingStorageEndpoints_data()
 {
     QTest::addColumn<int>("order");
-    for (int order = 0; order < 4; ++order)
+    for (int order = 0; order < 5; ++order)
         QTest::newRow(qPrintable(QString::number(order))) << order;
 }
 
@@ -6093,18 +6087,18 @@ void KisPageStoreCpuMutationTest::backingStorageEndpoints()
         { auto warm = kisPreparePageRetirementRecord(&child); }
         parentBaseline = live();
         terminal = kisPreparePageRetirementRecord(&child);
-        terminal->preparePhysicalStorage();
         tailBytes = live() - parentBaseline;
-        qInfo() << "BR1_BACKING_SEPARATE_BYTES" << tailBytes;
-        QVERIFY(terminal->physicalStorage);
-        QVERIFY(terminal->physicalStorage->storage == terminal->storage);
-        physical = std::move(terminal->physicalStorage);
+        qInfo() << "BR1_RESOURCE_ALLOCATION_BYTES" << tailBytes;
+        physical = terminal->retainPhysicalEndpoint();
+        QCOMPARE(physical.get(), &terminal->physical);
+        QCOMPARE(physical->allocation, terminal.get());
+        QCOMPARE(live(), parentBaseline + tailBytes);
         auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
         releasedProvider = provider;
         terminal->provider = std::move(provider);
         if (order == 0) {
             physical.reset();
-            QVERIFY(live() < parentBaseline + tailBytes);
+            QCOMPARE(live(), parentBaseline + tailBytes);
             terminal.reset();
             QVERIFY(releasedProvider.expired());
             QCOMPARE(live(), parentBaseline);
@@ -6112,8 +6106,8 @@ void KisPageStoreCpuMutationTest::backingStorageEndpoints()
             terminal.reset();
             QVERIFY(releasedProvider.expired()); // Dead terminal releases its real references.
             const auto physicalTail = live() - parentBaseline;
-            QVERIFY(physicalTail > 0 && physicalTail < tailBytes);
-            qInfo() << "BR1_BACKING_PHYSICAL_TAIL_BYTES" << physicalTail;
+            QCOMPARE(physicalTail, tailBytes); // One allocation, charged until its actual last obligation.
+            qInfo() << "BR1_RESOURCE_SHARED_TAIL_BYTES" << physicalTail;
             physical.reset();
             QCOMPARE(live(), parentBaseline);
         } else if (order == 2) {
@@ -6121,6 +6115,17 @@ void KisPageStoreCpuMutationTest::backingStorageEndpoints()
             terminal.reset();
             other.join();
             QVERIFY(releasedProvider.expired());
+            QCOMPARE(live(), parentBaseline);
+        } else if (order == 4) {
+            // A detached index hold can be disposed outside the gate after a
+            // rollback retry has already installed the same endpoint again.
+            auto detached = std::move(physical);
+            physical = terminal->retainPhysicalEndpoint();
+            detached.reset();
+            QCOMPARE(live(), parentBaseline + tailBytes);
+            terminal.reset();
+            QVERIFY(releasedProvider.expired());
+            physical.reset();
             QCOMPARE(live(), parentBaseline);
         }
     }
@@ -6130,7 +6135,7 @@ void KisPageStoreCpuMutationTest::backingStorageEndpoints()
         const auto detached = live();
         terminal.reset();
         QVERIFY(releasedProvider.expired());
-        QVERIFY(live() < detached);
+        QCOMPARE(live(), detached);
         physical.reset();
         QVERIFY(live() < detached);
     }
@@ -6139,7 +6144,6 @@ void KisPageStoreCpuMutationTest::backingStorageEndpoints()
 
 void KisPageStoreCpuMutationTest::ledgerBackingNodesRefusedBeforePhysicalResult()
 {
-    QFETCH(bool, physicalNode);
     Fixture f; QVERIFY(f.init(4, 1));
     KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
@@ -6154,17 +6158,14 @@ void KisPageStoreCpuMutationTest::ledgerBackingNodesRefusedBeforePhysicalResult(
     QVERIFY(warmFirst.isValid() && warmSecond.isValid()); warmFirst.release(); warmSecond.release();
     { auto warm = kisPreparePageRetirementRecord(&budget); }
     const quint64 baseline = live();
-    quint64 allBytes = 0, physicalBytes = 0;
+    quint64 allBytes = 0;
     {
         auto probe = kisPreparePageRetirementRecord(&budget);
-        probe->preparePhysicalStorage();
         allBytes = live() - baseline;
-        probe->physicalStorage = {};
-        physicalBytes = baseline + allBytes - live();
     }
     QCOMPARE(live(), baseline);
-    QVERIFY(physicalBytes && allBytes > physicalBytes);
-    const quint64 room = physicalNode ? allBytes - 1 : allBytes - physicalBytes - 1;
+    QVERIFY(allBytes >= sizeof(KisPageRetirementRecord));
+    const quint64 room = allBytes - 1;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - baseline - room);
     void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
     const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
@@ -6193,44 +6194,36 @@ void KisPageStoreCpuMutationTest::ledgerBackingNodesRefusedBeforePhysicalResult(
     QCOMPARE(live(), baseline + fillerBytes);
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
     auto local = kisPreparePageRetirementRecord(&budget);
-    local->preparePhysicalStorage();
     KisBackingBudgetController foreignBudget;
     auto foreign = kisPreparePageRetirementRecord(&foreignBudget);
-    foreign->preparePhysicalStorage();
-    std::swap(local->physicalStorage, foreign->physicalStorage);
-    QVERIFY(!owner.registerBacking(original, reservation, KisBackingBudgetClass::Current, &error, &local));
+    QVERIFY(!owner.registerBacking(original, reservation, KisBackingBudgetClass::Current, &error, &foreign));
     QVERIFY(error.contains(QStringLiteral("foreign")));
     QVERIFY(local && !local->backingNode.is_linked() && reservation.isValid());
     QCOMPARE(owner.backingClass(original), KisBackingBudgetClass::Count);
-    std::swap(local->physicalStorage, foreign->physicalStorage);
     QVERIFY2(owner.registerBacking(original, reservation, KisBackingBudgetClass::Current, &error, &local), qPrintable(error));
     QCOMPARE(physicalCalls, 0); // Resume registration; never recreate the provider result.
     KisBackingBudgetClass sourceClass = KisBackingBudgetClass::Count;
     auto record = owner.takeRetirementRecord(original, &sourceClass);
     QCOMPARE(sourceClass, KisBackingBudgetClass::Current);
-    QVERIFY(record && record->backingNode.is_linked() && !record->physicalStorage);
+    QVERIFY(record && record->backingNode.is_linked() && record->physical.is_linked());
     QVERIFY(!owner.takeRetirementRecord(original, &sourceClass)); // The same source cannot be accepted twice.
     QCOMPARE(sourceClass, KisBackingBudgetClass::Count);
     QVERIFY(owner.rollbackBackingRegistration(*record));
-    // Initial-adoption rollback hands the original terminal record back to its
-    // caller. Refilling its consumed installation nodes is cold and fallible.
+    // Rollback consumes the account hold, not its capacity. The same resource
+    // registers again at a full metadata budget, without refilling a second node.
     auto *identity = record.get();
     const size_t refillBytes = size_t(limits.metadataArenaBytes - live());
     void *refill = allocateTestStoragePressure(&budget, refillBytes, 1);
     const auto releaseRefill = qScopeGuard([&] { freeTestStoragePressure(&budget, refill, refillBytes, 1); });
-    auto refusedRefill = coordinator.reserveBacking(surface.allocationDescriptor(), cpu.domain,
-        KisBackingBudgetClass::Current, &error, {}, &record);
-    QVERIFY(!refusedRefill.reservation.isValid()); QCOMPARE(record.get(), identity);
-    QCOMPARE(live(), limits.metadataArenaBytes);
-    QVERIFY(f.provider->validate(original, surface.allocationDescriptor()));
-    freeTestStoragePressure(&budget, std::exchange(refill, nullptr), refillBytes, 1);
     auto retry = coordinator.reserveBacking(surface.allocationDescriptor(), cpu.domain,
         KisBackingBudgetClass::Current, &error, {}, &record);
     QVERIFY2(retry.reservation.isValid(), qPrintable(error)); QCOMPARE(retry.retirement.get(), identity);
+    QCOMPARE(live(), limits.metadataArenaBytes);
     QVERIFY(owner.registerBacking(original, retry.reservation, KisBackingBudgetClass::Current, &error, &retry.retirement));
     record = owner.takeRetirementRecord(original, &sourceClass); QCOMPARE(record.get(), identity);
     QCOMPARE(sourceClass, KisBackingBudgetClass::Current);
     QVERIFY(owner.rollbackBackingRegistration(*record)); retry.reservation.release();
+    freeTestStoragePressure(&budget, std::exchange(refill, nullptr), refillBytes, 1);
     record.reset();
     QCOMPARE(live(), baseline);
     QVERIFY(f.store->closeSession());
@@ -6255,8 +6248,7 @@ void KisPageStoreCpuMutationTest::ledgerBackingRegistrationExcludesDomainMovemen
     auto reservation = budget.reserve(delta, &f.error), aliasReservation = budget.reserve(delta, &f.error);
     QVERIFY(reservation.isValid() && aliasReservation.isValid());
     auto record = kisPreparePageRetirementRecord(&budget), aliasRecord = kisPreparePageRetirementRecord(&budget);
-    record->preparePhysicalStorage();
-    QVERIFY(!aliasRecord->physicalStorage);
+    QVERIFY(!record->physical.is_linked() && !aliasRecord->physical.is_linked());
     const auto alias = f.provider->prepareSynchronousSource(owner.nextOperationId(), source, {key(1), {1}},
         surface.allocationDescriptor(), KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
     QVERIFY(alias.isValid()); source.reset();
@@ -6473,7 +6465,7 @@ void KisPageStoreCpuMutationTest::terminalConsumptionRejectsMismatchedAcceptance
     QVERIFY(!f.owner.rollbackBackingRegistration(*record));
     // Test teardown repairs the deliberately corrupt provider envelope only.
     // This is not a production recovery path or permission to replay acceptance.
-    record->retirementResult.replica = record->replica;
+    record->retirementResult.replica = record->replica();
     QVERIFY(!f.retirement.retireRecord(*record));
     f.physical.provider->retirementOverride = {};
     QVERIFY(f.retirement.retireRecord(*record));
@@ -6594,12 +6586,12 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     QString error;
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto beforeRecord = live();
-    quint64 recordBytes = 0, installedBytes = 0;
+    quint64 recordBytes = 0;
     {
         auto probe = kisPreparePageRetirementRecord(&budget);
-        probe->preparePhysicalStorage(); recordBytes = live() - beforeRecord;
-        const auto before = live(); probe->physicalStorage = {};
-        installedBytes = before - live();
+        recordBytes = live() - beforeRecord;
+        auto account = probe->retainPhysicalEndpoint();
+        account.reset();
     }
     QCOMPARE(live(), beforeRecord);
     auto prepared = coordinator.reserveBacking(surface.allocationDescriptor(), KisPageAccessDomain::CpuRam,
@@ -6687,7 +6679,7 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     rejectFootprint = false;
     f.provider->rejectRetire = false;
     QVERIFY(queue.retireRecord(records.front()));
-    QCOMPARE(live(), limits.metadataArenaBytes - (orphan ? 0 : installedBytes)); // Only real inert storage remains.
+    QCOMPARE(live(), limits.metadataArenaBytes); // Shared endpoint capacity lasts until the original record is consumed.
     records.clear_and_dispose(KisPageRetirementRecordDeleter{});
     QCOMPARE(live(), limits.metadataArenaBytes - recordBytes);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam, quint64(0));
@@ -7627,7 +7619,7 @@ void KisPageStoreCpuMutationTest::genericEffectsTransferAtCapacity()
     QCOMPARE(records.size(), size_t(1));
     QCOMPARE(&records.front(), f.originalRetirementRecord);
     QCOMPARE(records.front().backgroundRetirement, background);
-    QCOMPARE(records.front().replica, f.replica);
+    QCOMPARE(records.front().replica(), f.replica);
     QVERIFY(!records.front().lastUse.isValid());
     f.physical.provider->rejectRetire = false;
     const auto attempts = f.physical.provider->retireCalls.load();
@@ -7856,7 +7848,9 @@ void KisPageStoreCpuMutationTest::completionCapacityReleasedBeforeNotification()
 
 void KisPageStoreCpuMutationTest::backingRegistrationObservationRefusal()
 {
-    for (int boundary : {1, 2, 3}) {
+    // Observation before/after the domain exclusion; no late node admission
+    // remains to require a third observation or a third failure boundary.
+    for (int boundary : {1, 2}) {
         Fixture f; QVERIFY(f.init(4, 1));
         KisBackingBudgetController budget;
         KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));

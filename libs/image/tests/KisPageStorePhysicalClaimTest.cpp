@@ -74,7 +74,7 @@ struct Fixture
     }
 };
 
-quint64 retirementStorageBytes(KisBackingBudgetController &budget, bool lastPhysical = true)
+quint64 retirementStorageBytes(KisBackingBudgetController &budget)
 {
     const auto live = [&] {
         return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
@@ -83,7 +83,6 @@ quint64 retirementStorageBytes(KisBackingBudgetController &budget, bool lastPhys
     { auto warm = kisPreparePageRetirementRecord(&budget); }
     const quint64 before = live();
     auto record = kisPreparePageRetirementRecord(&budget);
-    if (lastPhysical) record->preparePhysicalStorage();
     return live() - before;
 }
 
@@ -141,8 +140,8 @@ private Q_SLOTS:
     void ledgerAliasMembershipAtCapacity_data()
     {
         QTest::addColumn<bool>("reverse");
-        QTest::newRow("middle-representative-last") << false;
-        QTest::newRow("head-representative-last") << true;
+        QTest::newRow("middle-account-owner") << false;
+        QTest::newRow("head-account-owner") << true;
     }
     void ledgerAliasMembershipAtCapacity();
     void sharedCacheClassificationAndDebt_data()
@@ -559,7 +558,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     const auto firstNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({621}, target, {}).isValid()); KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, target);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             firstNodeBytes - retirementStorageBytes(budget, false));
+             firstNodeBytes); // Physical account holds the original allocation until the last alias.
     if (keepAlias) {
         QCOMPARE(ledger.backingClass(alias.replica), KisBackingBudgetClass::Current);
         const auto usage = budget.usage(); const auto &debt = usage.buckets[size_t(KisBackingBudgetClass::RetirementDebt)];
@@ -568,7 +567,7 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     }
     const auto terminalBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({622}, alias.replica, {}).isValid()); KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, alias.replica);
-    const quint64 retainedCache = terminalBytes - retirementStorageBytes(budget);
+    const quint64 retainedCache = terminalBytes - 2 * retirementStorageBytes(budget);
     const auto finalUsage = budget.usage();
     for (size_t i = 0; i < finalUsage.buckets.size(); ++i) {
         const auto &bucket = finalUsage.buckets[i];
@@ -803,10 +802,8 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     std::array<KisBackingBudgetReservation, 3> warm;
     for (auto &reservation : warm) { reservation = budget.reserve({}, &f.error); QVERIFY(reservation.isValid()); }
     for (auto &reservation : warm) reservation.release();
-    const auto allNodeBytes = retirementStorageBytes(budget);
-    const auto logicalNodeBytes = retirementStorageBytes(budget, false);
+    const auto recordBytes = retirementStorageBytes(budget);
     const auto baseline = live();
-    QVERIFY(allNodeBytes > logicalNodeBytes);
     std::array<KisReplicaHandle, 3> replicas{f.replica};
     std::array<KisPageRetirementRecordPointer, 3> records;
     std::array<KisBackingBudgetReservation, 3> reservations;
@@ -816,7 +813,6 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     const auto committed = f.provider->memoryUsage().committedBytes;
     for (size_t i = 0; i < records.size(); ++i) {
         records[i] = kisPreparePageRetirementRecord(&budget);
-        if (!i) records[i]->preparePhysicalStorage(); // Only the first physical group needs an installation node.
         reservations[i] = budget.reserve(initial, &f.error); QVERIFY(reservations[i].isValid());
         if (i) {
             auto result = f.provider->prepareSynchronousSource({700 + i}, source, {key(int(i)), {1}},
@@ -843,6 +839,25 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
         QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
                  f.replica.layout.byteSize); // One charge, including every new foreground alias.
     }
+    // Roll back the original member while its physical endpoint still serves
+    // real aliases. Same-resource retry reuses the endpoint at hard full; a
+    // different resource cannot overwrite that still-live account.
+    auto original = ledger.takeRetirementRecord(replicas[0]); QVERIFY(original);
+    auto *identity = original.get();
+    QVERIFY(KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, *original));
+    QVERIFY(original->physical.is_linked());
+    const auto unrelated = f.provider->requestReplica({709}, {key(8), {1}}, f.desc,
+        cpu.domain, KisPageAccessMode::Read, KisPagePriority::Normal);
+    QVERIFY(unrelated.isValid());
+    auto retry = budget.reserve(initial, &f.error); QVERIFY(retry.isValid());
+    QVERIFY(!ledger.registerBacking(unrelated.replica, retry, KisBackingBudgetClass::Current,
+        &f.error, &original));
+    QCOMPARE(original.get(), identity); QVERIFY(retry.isValid());
+    QVERIFY(f.provider->retire({710}, unrelated.replica, {}).isValid());
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    QVERIFY2(ledger.registerBacking(replicas[0], retry, KisBackingBudgetClass::Current,
+        &f.error, &original), qPrintable(f.error));
+    QVERIFY(!original); QCOMPARE(live(), limits.metadataArenaBytes);
     for (const auto &replica : replicas)
         QVERIFY(ledger.reclassifyBacking(replica, KisBackingBudgetClass::RetirementDebt));
     const std::array<size_t, 3> order = reverse ? std::array<size_t, 3>{2, 0, 1}
@@ -850,9 +865,9 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     for (size_t n = 0; n < order.size(); ++n) {
         const auto i = order[n];
         const auto before = live();
-        QVERIFY(f.provider->retire({710 + n}, replicas[i], {}).isValid());
+        QVERIFY(f.provider->retire({720 + n}, replicas[i], {}).isValid());
         KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, replicas[i]);
-        QCOMPARE(live(), before - (n == 2 ? allNodeBytes : logicalNodeBytes));
+        QCOMPARE(live(), before - (n == 2 ? 2 * recordBytes : i == 0 ? 0 : recordBytes));
         for (size_t j = n + 1; j < order.size(); ++j) {
             const auto &survivor = replicas[order[j]];
             QCOMPARE(ledger.backingClass(survivor), KisBackingBudgetClass::RetirementDebt);

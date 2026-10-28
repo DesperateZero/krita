@@ -9,6 +9,7 @@
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/set.hpp>
 #include <tuple>
+#include <atomic>
 struct KisPageRetirementWait;
 struct KisPagePreparedBackingChange;
 struct KisPagePhysicalBackingRecord;
@@ -44,17 +45,17 @@ struct KisPageBackingRecord
 
 struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>
 {
-    explicit KisPagePhysicalBackingRecord(KisMutationStorageAllocator<KisPagePhysicalBackingRecord> allocator)
-        : storage(std::move(allocator)) {}
+    // One physical/account endpoint in the original resource allocation. Its
+    // index hold can outlive that resource's first logical terminal when real
+    // aliases remain; it never retains that terminal's provider/permissions.
+    KisPageRetirementRecord *allocation = nullptr;
     KisReplicaPhysicalSlotIdentity identity;
-    // Independent actual allocation/refund lifetime. The first terminal may
-    // end before a surviving alias; it must not keep dead terminal bytes.
-    KisMutationStorageAllocator<KisPagePhysicalBackingRecord> storage;
+    quint64 bytes = 0;
     struct Key {
         using type = KisReplicaPhysicalSlotIdentity;
         const type &operator()(const KisPagePhysicalBackingRecord &record) const { return record.identity; }
     };
-    KisReplicaHandle representative;
+    KisPageBackingRecord *accountMember = nullptr;
     KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     quint64 domainRevision = 0;
     quint64 domainClaim = 0;
@@ -63,7 +64,7 @@ struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::int
     KisBackingBudgetClass chargedClass = KisBackingBudgetClass::Count;
     KisPageBackingRecord *members = nullptr;
 
-    quint64 byteSize() const { return representative.layout.byteSize; }
+    quint64 byteSize() const { return bytes; }
     bool shared() const { return members && members->next; }
     // Only the original physical record edits membership, under the ledger
     // gate. Budget projections copy this view without editing any links.
@@ -71,6 +72,7 @@ struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::int
     {
         Q_ASSERT(!record.physicalRecord);
         record.physicalRecord = this;
+        if (!accountMember) accountMember = &record;
         record.next = members;
         if (members) members->previous = &record;
         members = &record;
@@ -80,6 +82,7 @@ struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::int
         if (record.previous) record.previous->next = record.next;
         else members = record.next;
         if (record.next) record.next->previous = record.previous;
+        if (accountMember == &record) accountMember = members;
         record.previous = record.next = nullptr;
         record.physicalRecord = nullptr;
     }
@@ -154,10 +157,16 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
         : storage(std::move(allocator))
     {
         operationNode.second.retirement = this;
+        physical.allocation = this;
     }
-    KRITAIMAGE_EXPORT void preparePhysicalStorage();
+    // Transfer a memory hold for the one physical/account endpoint. No second
+    // allocation, admission or provider observation follows the original node.
+    KRITAIMAGE_EXPORT KisPagePhysicalBackingPointer retainPhysicalEndpoint() noexcept;
+    std::atomic<unsigned> storageReferences{1};
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
-    KisReplicaHandle replica;
+    // Registration, idle handoff and terminal consumption share this one
+    // identity. Taking terminal ownership freezes it; no second handle is made.
+    const KisReplicaHandle &replica() const noexcept { return backingNode.second.replica; }
     std::shared_ptr<KisPageReplicaProvider> provider;
     // Valid only on the non-owning publication idle chain; the ledger owns
     // this same record until checkout or original retirement handoff.
@@ -170,7 +179,7 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KisReplicaOperation retirementResult;
     KisPageProviderOperationNode operationNode;
     KisPageBackingNode backingNode;
-    KisPagePhysicalBackingPointer physicalStorage;
+    KisPagePhysicalBackingRecord physical;
     // Rare provider-result rejection: keep the preallocation reservation
     // charged until an unregistered physical replica reaches terminal retire.
     KisBackingBudgetReservation orphanReservation;

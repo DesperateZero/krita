@@ -12,6 +12,10 @@
 class KisPageOwnerLedgerTestAccess
 {
 public:
+    static bool withdrawRegistration(KisPageOwnerLedger &owner, KisPageRetirementRecord &record)
+    {
+        return owner.rollbackBackingRegistration(record);
+    }
     static bool withdrawRegistration(KisPageOwnerLedger &owner, const KisReplicaHandle &replica)
     {
         auto record = owner.takeRetirementRecord(replica);

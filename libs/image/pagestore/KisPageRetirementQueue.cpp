@@ -16,31 +16,48 @@
 #include <utility>
 #include <limits>
 
-void KisPagePhysicalBackingRecordDeleter::operator()(KisPagePhysicalBackingRecord *record) const noexcept
+namespace {
+void releaseResourceStorage(KisPageRetirementRecord *record) noexcept
 {
-    if (!record) return;
-    Q_ASSERT(!record->is_linked() && !record->members);
+    if (record->storageReferences.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    Q_ASSERT(!record->physical.is_linked() && !record->physical.members);
     auto storage = std::move(record->storage);
     std::destroy_at(record);
     storage.deallocate(record, 1);
 }
+}
 
-void KisPageRetirementRecord::preparePhysicalStorage()
+void KisPagePhysicalBackingRecordDeleter::operator()(KisPagePhysicalBackingRecord *record) const noexcept
 {
-    if (physicalStorage) return;
-    KisMutationStorageAllocator<KisPagePhysicalBackingRecord> allocator(storage);
-    auto *raw = allocator.allocate(1);
-    try { physicalStorage.reset(::new (raw) KisPagePhysicalBackingRecord(allocator)); }
-    catch (...) { allocator.deallocate(raw, 1); throw; }
+    if (!record) return;
+    // The detached index hold may be consumed after the same endpoint has
+    // been registered again. It releases storage only, never current state.
+    Q_ASSERT(record->allocation);
+    releaseResourceStorage(record->allocation);
+}
+
+KisPagePhysicalBackingPointer KisPageRetirementRecord::retainPhysicalEndpoint() noexcept
+{
+    Q_ASSERT(!physical.is_linked() && !physical.members);
+    const auto before = storageReferences.fetch_add(1, std::memory_order_relaxed);
+    Q_ASSERT(before >= 1); Q_UNUSED(before);
+    return KisPagePhysicalBackingPointer(&physical);
 }
 
 void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record) const noexcept
 {
     if (!record) return;
     Q_ASSERT(!record->backingNode.is_linked() && !record->operationNode.is_linked());
-    auto storage = std::move(record->storage);
-    std::destroy_at(record);
-    storage.deallocate(record, 1);
+    // The physical account may still serve another alias. End the consumed
+    // terminal's actual references now, independently of its allocation tail.
+    record->wait.reset();
+    record->retirementResult.error.clear();
+    record->backingNode.second.nativeBinding.reset();
+    record->backingNode.second.retirementHeadroom.release();
+    record->provider.reset();
+    record->orphanReservation.release();
+    record->admissionReservation.release();
+    releaseResourceStorage(record);
 }
 KisPageRetirementRecordPointer kisPreparePageRetirementRecord(KisBackingBudgetController *budget)
 {
@@ -257,9 +274,9 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record, Retire
         if (record.lastUse.isValid())
             status = m_owner.watchCompletion(record.lastUse, scheduleReady, &wait->subscription);
         if (status != KisPageReadinessStatus::Waiting) {
-            const auto binding = record.provider->cpuResidentBinding(record.replica);
+            const auto binding = record.provider->cpuResidentBinding(record.replica());
             status = binding ? binding->watchRetirementReadiness(
-                record.replica.allocationIdentity(), scheduleReady, &wait->subscription)
+                record.replica().allocationIdentity(), scheduleReady, &wait->subscription)
                 : KisPageReadinessStatus::Unavailable;
         }
     }
@@ -354,7 +371,7 @@ KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
         if (admission == KisPageOwnerLedger::RecordAdmission::Unregistered
             && record.orphanReservation.isValid() && !record.orphanDebtAdmitted) {
             // An orphan's provider footprint must be observed outside the ledger.
-            if (!m_owner.retainRetirementDebtReservation(record.replica, record.orphanReservation))
+            if (!m_owner.retainRetirementDebtReservation(record.replica(), record.orphanReservation))
                 return RetirementOutcome::OrphanAdmissionRefused;
             record.orphanDebtAdmitted = true;
             m_owner.prepareRetirementOperation(record, &operation);
@@ -364,7 +381,7 @@ KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
         KisReplicaOperation result;
         try {
             result = record.provider->retire(
-                operation, record.replica, record.lastUse);
+                operation, record.replica(), record.lastUse);
         } catch (const std::bad_alloc &) {
             // The provider did not return an accepted result. Keep this exact
             // record and let the original wait/retry policy resume it; the
@@ -396,7 +413,7 @@ void KisPageRetirementQueue::retireForClose(KisPageRetirementRecords &records)
     KisPageRetirementRecords admissionBlocked;
     bool released = false;
     auto consume = [&](KisPageRetirementRecords &source, KisPageRetirementRecords::iterator entry) {
-        m_metadata.removeCpuReadBinding(entry->replica);
+        m_metadata.removeCpuReadBinding(entry->replica());
         source.erase_and_dispose(entry, KisPageRetirementRecordDeleter{});
         released = true;
     };
@@ -432,11 +449,11 @@ void KisPageRetirementQueue::updatePeaksLocked()
 void KisPageRetirementQueue::defer(KisPageRetirementRecordPointer record, RetirementOutcome outcome)
 {
     prepareWait(*record, outcome);
-    Q_ASSERT(record->replica.isValid());
+    Q_ASSERT(record->replica().isValid());
     KisPageRetirementRecords admitted;
     admitted.push_back(*record.release());
     QMutexLocker lock(&m_mutex);
-    m_pendingBytes += admitted.front().replica.layout.byteSize;
+    m_pendingBytes += admitted.front().replica().layout.byteSize;
     enqueuePendingLocked(admitted, admitted.begin());
     updatePeaksLocked();
 }
@@ -446,7 +463,7 @@ void KisPageRetirementQueue::finishAttemptLocked(
 {
     --m_activeReplicas;
     if (retired) {
-        m_pendingBytes -= entry->replica.layout.byteSize;
+        m_pendingBytes -= entry->replica().layout.byteSize;
         m_nextRetryDelayMs = 1;
     } else {
         enqueuePendingLocked(batch, entry);
@@ -545,10 +562,10 @@ void KisPageRetirementQueue::retireOrDefer(
         }
         return;
     }
-    // Original checkout already transfers the registered provider and exact
-    // identity under the ledger gate. Generic/unregistered results retain
-    // their external input, including the caller's funded orphan preparation.
-    if (!original) { record->replica = replica; record->provider = provider; }
+    // Registered resources already carry their provider and exact identity.
+    // Only unregistered results retain the external input and the caller's
+    // funded orphan preparation.
+    if (!owned) { record->backingNode.second.replica = replica; record->provider = provider; }
     record->lastUse = lastUse;
     // Registered records already carry the registration-time permission.
     // An unregistered result fixes it once on entry to this original owner.
@@ -703,7 +720,7 @@ void KisPageRetirementQueue::acceptRecord(KisPageRetirementRecordPointer record)
     // Transfer needs neither a provider callback nor additional storage.
     const bool background = record->backgroundRetirement;
     QMutexLocker lock(&m_mutex);
-    m_pendingBytes += record->replica.layout.byteSize;
+    m_pendingBytes += record->replica().layout.byteSize;
     m_ready.push_back(*record.release());
     updatePeaksLocked();
     if (background) schedulePassLocked();

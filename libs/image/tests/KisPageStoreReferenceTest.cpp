@@ -10236,7 +10236,6 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
         // Only unpublished registration rollback may return this record for
         // fresh registration; a class writer cannot revive a linked transfer.
         QVERIFY(owner.rollbackBackingRegistration(*transferred));
-        transferred->preparePhysicalStorage();
         KisBackingBudgetDelta delta; delta.bucket(size_t(Class::ActivePending)).cpuRam = 4096;
         auto fee = budget.reserve(delta, &error);
         QVERIFY(owner.registerBacking(authorities[0], fee, Class::ActivePending, &error, &transferred));
@@ -10287,7 +10286,7 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     QCOMPARE(metadata(), limits.metadataArenaBytes); // Original D and paid service capacity suffice.
     QVERIFY(!rows[0].acceptedIdle);
     QVERIFY(rows[1].acceptedIdle);
-    QCOMPARE(rows[1].acceptedIdle->replica, *rows[1].supersededAuthority);
+    QCOMPARE(rows[1].acceptedIdle->replica(), *rows[1].supersededAuthority);
     QVERIFY(!rows[1].acceptedIdle->is_linked());
     QVERIFY(!rows[2].acceptedIdle);
     QCOMPARE(owner.backingClass(*rows[0].supersededAuthority), Class::RetainedHistory);
@@ -12787,7 +12786,7 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     KisPageRetirementQueue queue(owner, metadata, budget, references, &references,
         [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
     auto record = kisPreparePageRetirementRecord(&budget);
-    record->replica = result.replica; record->provider = provider;
+    record->backingNode.second.replica = result.replica; record->provider = provider;
     QVERIFY(!queue.retireRecord(*record)); // Actual provider returns Pending.
     const auto retirement = record->retirementOperation;
     QVERIFY(retirement.isValid());

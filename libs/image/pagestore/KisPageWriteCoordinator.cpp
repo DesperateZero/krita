@@ -3369,8 +3369,7 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
     KisBackingBudgetClass budgetClass,
     QString *error,
     const KisPageVersion &target,
-    KisPageRetirementRecordPointer *preparedRetirement,
-    KisReplicaSourceUse sourceUse)
+    KisPageRetirementRecordPointer *preparedRetirement)
 {
     if (!descriptor.isValid() || domain == KisPageAccessDomain::Unknown
         || static_cast<size_t>(budgetClass) >= budgetClassCount
@@ -3424,12 +3423,8 @@ KisPageBackingPreparation KisPageWriteCoordinator::reserveBacking(
             KisPageStoreDetail::setError(error, QStringLiteral("prepared backing retirement storage has changed"));
             return {};
         }
-        // Every provider result already has its funded terminal record.
-        // Fresh also requires installation capacity before creating pixels.
-        // Immutable aliases may join an existing group without that node;
-        // registerBacking prepares it only for an actual new physical group.
-        if (sourceUse != KisReplicaSourceUse::ImmutableAlias)
-            (*preparedRetirement)->preparePhysicalStorage();
+        // Physical account and terminal capacity share this original admitted
+        // resource allocation, for Fresh and real aliases alike.
         prepared.retirement = std::move(*preparedRetirement);
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing retirement record budget storage was refused"));

@@ -403,7 +403,7 @@ public:
     {
         auto &node = original.backingNode;
         if (!node.is_linked() || original.storage.budget != backingBudget
-            || node.second.retirement || !(node.second.replica == original.replica)) return false;
+            || node.second.retirement) return false;
         Q_ASSERT(!isPreparedBacking(node.second));
         auto *claimedPhysical = node.second.physicalRecord;
         Q_ASSERT(claimedPhysical);
@@ -439,8 +439,6 @@ public:
             return true;
         }
         Q_ASSERT(physical->members);
-        if (physical->representative == record.replica)
-            physical->representative = physical->members->replica;
         // Retirement admission already exposed and budgeted every surviving
         // owner class before provider destruction. Removing a terminal Debt alias
         // therefore cannot reveal an unprepared class here.
@@ -758,7 +756,6 @@ public:
             Q_ASSERT(change.after == KisBackingBudgetClass::IdleCapacity);
             auto *record = found->second.retirement;
             Q_ASSERT(!record || !record->is_linked());
-            if (record) record->replica = found->second.replica;
             *change.idleResult = record;
         }
     }
@@ -766,13 +763,10 @@ public:
     void moveRetirementHeadroom(const PhysicalBackingRecord &physical,
                                 KisPageAccessDomain target) noexcept
     {
-        // Handoff requires a sole physical owner and makes that owner the
-        // representative. Aliases cannot create another headroom. Retirement
-        // consumes/releases it before replacing the representative, so domain
-        // migration needs one lookup, not an alias-membership scan.
-        auto found = backings.find(physical.representative.allocationIdentity());
-        Q_ASSERT(found != backings.end());
-        auto &headroom = found->second.retirementHeadroom;
+        // The original member carrying headroom is already known. A logical
+        // generation change never rebuilds a representative or looks it up.
+        Q_ASSERT(physical.accountMember);
+        auto &headroom = physical.accountMember->retirementHeadroom;
         if (headroom.isValid())
             backingBudget->moveRetirementHeadroom(headroom.cookie, physical.domain,
                                                    target, physical.byteSize());
@@ -1297,59 +1291,32 @@ try {
         return false;
     }
 
-    KisPagePhysicalBackingPointer unusedPhysical;
     QMutexLocker locker(&d->mutex);
     const BackingKey key = replica.allocationIdentity();
     const PhysicalBackingKey physicalKey = physicalBackingKey(replica, footprint);
-    const auto validRegistration = [&] {
-        if (!d->backingBudget || reservation.owner != d->backingBudget
-            || d->backings.find(key) != d->backings.end() || d->isHandoffTarget(key)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("replica backing identity is already owned"));
-            return false;
-        }
-        const auto &physical = (*preparedRetirement)->physicalStorage;
-        if (physical && physical->storage != (*preparedRetirement)->storage) {
-            KisPageStoreDetail::setError(error, QStringLiteral("backing installation storage is foreign"));
-            return false;
-        }
-        return true;
-    };
-    if (!validRegistration()) return false;
-    auto physical = d->physicalBackings.find(physicalKey);
-    if (physical == d->physicalBackings.end() && !(*preparedRetirement)->physicalStorage) {
-        // Fresh arrived with this capacity before its provider call. Only an
-        // actual first alias/direct adoption needs late installation storage;
-        // its already funded terminal keeps refusal recoverable. Never do the
-        // allocation or provider observation under the ledger gate.
-        locker.unlock();
-        try { (*preparedRetirement)->preparePhysicalStorage(); }
-        catch (const std::bad_alloc &) {
-            KisPageStoreDetail::setError(error, QStringLiteral("backing installation storage was refused"));
-            return false;
-        }
-        footprint = observeBackingFootprint(replica);
-        if (!footprint.isValid() || footprint.bytes != replica.layout.byteSize
-            || !(physicalBackingKey(replica, footprint) == registrationPhysical)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("provider physical backing changed during storage preparation"));
-            return false;
-        }
-        locker.relock();
-        if (!validRegistration()) return false;
-        physical = d->physicalBackings.find(physicalKey);
+    if (!d->backingBudget || reservation.owner != d->backingBudget
+        || d->backings.find(key) != d->backings.end() || d->isHandoffTarget(key)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("replica backing identity is already owned"));
+        return false;
     }
+    auto physical = d->physicalBackings.find(physicalKey);
     const bool newPhysicalBacking = physical == d->physicalBackings.end();
     KisBackingBudgetDelta sharedChargeChange;
     KisBackingBudgetClass sharedAfterCharge = KisBackingBudgetClass::Count;
     if (newPhysicalBacking) {
+        if ((*preparedRetirement)->physical.is_linked()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("original resource account still belongs to another physical backing"));
+            return false;
+        }
         if (!d->backingBudget->reservationCovers(reservation.cookie,
                                                  budgetClass, footprint.domain,
                                                  footprint.bytes)) {
             KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain is not reserved"));
             return false;
         }
-        auto node = std::move((*preparedRetirement)->physicalStorage);
+        auto node = (*preparedRetirement)->retainPhysicalEndpoint();
         node->identity = physicalKey;
-        node->representative = replica;
+        node->bytes = footprint.bytes;
         node->domain = footprint.domain;
         node->domainRevision = footprint.revision;
         node->references[static_cast<size_t>(budgetClass)] = 1;
@@ -1388,7 +1355,6 @@ try {
             return false;
         }
         physical->references = next;
-        unusedPhysical = std::move((*preparedRetirement)->physicalStorage);
     }
     auto &node = (*preparedRetirement)->backingNode;
     node.first = key;
@@ -1398,6 +1364,10 @@ try {
     Q_ASSERT(installedBacking.second);
     auto &backing = installedBacking.first->second;
     physical->link(backing);
+    const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
+    Q_ASSERT(registered);
+    (*preparedRetirement)->provider = registered->provider;
+    (*preparedRetirement)->backgroundRetirement = registered->backgroundRetirement;
     backing.retirement = preparedRetirement->release();
 
     if (!newPhysicalBacking) {
@@ -1470,11 +1440,8 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecordLocked(
     KisPageRetirementRecordPointer record(std::exchange(backing.retirement, nullptr));
     if (record) {
         if (originalClass) *originalClass = backing.budgetClass;
-        const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
-        Q_ASSERT(registered);
-        record->replica = replica;
-        record->provider = registered ? registered->provider : std::shared_ptr<KisPageReplicaProvider>{};
-        record->backgroundRetirement = registered && registered->backgroundRetirement;
+        Q_ASSERT(record->replica() == replica && record->provider);
+        Q_UNUSED(replica);
     }
     return record;
 }
@@ -1613,7 +1580,7 @@ KisPageOwnerLedger::admitRetirementRecordLocked(KisPageRetirementRecord &record)
     auto &node = record.backingNode;
     if (!node.is_linked()) return RecordAdmission::Unregistered;
     if (!d->backingBudget || record.storage.budget != d->backingBudget
-        || !(node.second.replica == record.replica) || node.second.retirement
+        || node.second.retirement
         || !node.second.physicalRecord)
         return RecordAdmission::Refused;
     const auto found = d->backings.iterator_to(node);
@@ -1626,7 +1593,7 @@ KisPageOwnerLedger::admitRetirementRecordLocked(KisPageRetirementRecord &record)
     // an actual class transition needs to consult outstanding class claims.
     if (d->isPreparedBacking(node.second)) return RecordAdmission::Refused;
     if (record.admissionReservation.isValid()) {
-        const bool accepted = reclassifyBackingLocked(found, record.replica,
+        const bool accepted = reclassifyBackingLocked(found, record.replica(),
             KisBackingBudgetClass::RetirementDebt, &record.admissionReservation, nullptr);
         record.admissionReservation.release();
         if (accepted) {
@@ -1634,10 +1601,10 @@ KisPageOwnerLedger::admitRetirementRecordLocked(KisPageRetirementRecord &record)
             return RecordAdmission::Accepted;
         }
     }
-    if (record.orphanReservation.isValid() && reclassifyBackingLocked(found, record.replica,
+    if (record.orphanReservation.isValid() && reclassifyBackingLocked(found, record.replica(),
             KisBackingBudgetClass::RetirementDebt, &record.orphanReservation, nullptr))
         return RecordAdmission::Accepted;
-    if (!reclassifyBackingLocked(found, record.replica, KisBackingBudgetClass::RetirementDebt,
+    if (!reclassifyBackingLocked(found, record.replica(), KisBackingBudgetClass::RetirementDebt,
                                 nullptr, nullptr)) return RecordAdmission::Refused;
     record.orphanReservation.release();
     return RecordAdmission::Accepted;
@@ -1650,7 +1617,7 @@ KisPageReadinessStatus KisPageOwnerLedger::watchRetirementBudget(
     QMutexLocker lock(&d->mutex);
     const auto &node = record.backingNode;
     if (!node.is_linked() || !d->backingBudget || record.storage.budget != d->backingBudget
-        || !(node.second.replica == record.replica) || node.second.retirement
+        || node.second.retirement
         || d->isPreparedBacking(node.second) || node.second.retirementHeadroom.isValid())
         return KisPageReadinessStatus::Unavailable;
     const auto *physical = node.second.physicalRecord;
@@ -2057,7 +2024,7 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     auto *physical = backing->second.physicalRecord;
     Q_ASSERT(physical);
     if (physical->domainClaim || physical->classClaim
-        || physical->domain != source.domain || !(physical->representative == source)
+        || physical->domain != source.domain || physical->accountMember != &backing->second
         || physical->shared()) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing handoff physical owner is shared or busy"));
         return {};
@@ -2144,7 +2111,6 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     // Keep that original binding through later idle cycles as on native Fresh.
     if (!source->nativeBinding) source->nativeBinding = binding;
     Q_ASSERT(physical->classClaim == HandoffClaim);
-    physical->representative = target;
 
     // Detached optional capacity has no visible value to recover. A failed
     // private write returns to the original funded retirement endpoint.
@@ -2471,7 +2437,7 @@ KisVerifiedCompletion KisPageOwnerLedger::observeRetirementOperation(KisPageReti
             || node.first != record.retirementOperation.value) return {};
         if (record.retirementResult.isValid()) {
             const auto &result = record.retirementResult;
-            if (node.second.completion.isValid() || !(result.replica == record.replica)
+            if (node.second.completion.isValid() || !(result.replica == record.replica())
                 || !(result.operation == record.retirementOperation)
                 || !d->registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch)))
                 return {}; // Accepted but mismatched: never reissue or refund.
