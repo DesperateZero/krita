@@ -1611,7 +1611,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if required not in metadata_text:
                 errors.append("native validation no longer consumes the original result: " + required)
         retired = ("sealCpuPreparedPage", "sealCpuProof", "reservePrivateWrite",
-                   "KisPagePublicationProof", "borrowedMutation", "needsOwnedMutation")
+                   "KisPagePublicationProof", "borrowedMutation", "needsOwnedMutation",
+                   "KisPageNativeReadRef", "nativeRefs", "groupNativeRefs", "retainNativeReads",
+                   "releaseNativeReads", "nativeReadVersion", "nativeReadBindings")
         for symbol in retired:
             if any(symbol in code_only(p.read_text()) for p in page_store_source.parent.glob("KisPage*.*")
                    if p.suffix in (".h", ".cpp")):

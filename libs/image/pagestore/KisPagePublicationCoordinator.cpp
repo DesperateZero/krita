@@ -843,29 +843,19 @@ bool KisPagePublicationCoordinator::prepareNativeReadSelectionLocked(KisSurfaceI
     return true;
 }
 
-bool KisPagePublicationCoordinator::NativeReadSelection::resolve(const KisPageKey &key,
-    KisPageVersion *version, KisVersionSlotId *slot) const
+KisPageViewValue *KisPagePublicationCoordinator::NativeReadSelection::selectedValue(const KisPageKey &key) const
 {
-    if (!version || !slot || !key.isValid() || !root.isValid() || !(key.surface == surface.surface)) return false;
-    *slot = {};
+    Q_ASSERT(key.isValid() && root.isValid() && key.surface == surface.surface);
+    KisPageViewValue *value = nullptr;
     if (delta) {
         const auto found = delta->proofs.find(key);
-        if (found != delta->proofs.end()) {
-            *version = found->second.version();
-            *slot = found->second.metadataSlot();
-            return true;
-        }
-        if (delta->removals.count(key)) {
-            *version = {key, {1}, surface.defaultPixelRevision};
-            return true;
-        }
-    }
-    if (auto *value = root.selectedValue(key)) {
-        *version = value->version;
-        *slot = value->slot;
-    } else *version = {key, {1}, surface.defaultPixelRevision};
-    if (version->isDefaultPixel()) version->defaultPixelRevision = surface.defaultPixelRevision;
-    return true;
+        if (found != delta->proofs.end()) value = found->second.value;
+        else if (delta->removals.count(key)) return nullptr;
+        else value = root.selectedValue(key);
+    } else value = root.selectedValue(key);
+    // Range defaults resolve from the selected surface revision, including
+    // an explicit old default under a staged surface change.
+    return value && !value->version.isDefaultPixel() ? value : nullptr;
 }
 
 bool KisPagePublicationCoordinator::stageSurfaceDefaultPixelLocked(const KisPageTransaction &transaction,
@@ -1906,11 +1896,9 @@ bool KisPagePublicationCoordinator::captureDeltaLocked(
     *surfaces = state ? size_t(state->surfaceChanges.size()) : 0;
     if (capture.values.capacity() < *versions || capture.removedPages.capacity() < *removals
         || capture.stagedSurfaces.capacity() < *surfaces) return false;
-    capture.clearValues(); capture.removedPages.clear(); capture.stagedSurfaces.clear();
-    capture.valueStorage = state ? state->values.get() : nullptr;
+    capture.values.clear(); capture.removedPages.clear(); capture.stagedSurfaces.clear();
     if (state) {
         for (const auto &proof : state->proofs) {
-            KisPageViewValueStorage::retain(proof.second.value);
             capture.values.push_back(proof.second.value);
         }
         for (const auto &key : state->removals) capture.removedPages.push_back(key);

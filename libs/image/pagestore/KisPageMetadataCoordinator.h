@@ -24,7 +24,6 @@
 #include "KisPageStateMachine.h"
 
 class KisCpuResidentBinding;
-struct KisPageNativeReadRef;
 struct KisPagePrivateWrite;
 struct KisPageWriteInput;
 struct KisPageWriteSelection;
@@ -48,6 +47,7 @@ class KisPageHistoryCollector;
 class KisPageOwnerLedger;
 class KisPageWriteAdmission;
 struct KisPageWriteClaim;
+struct KisPageViewValue;
 class KisPageViewValueStorage;
 class KisBackingBudgetController;
 class KisPageReplicaProvider;
@@ -421,12 +421,16 @@ private:
     // grants a pin. Provider discovery must consume this same selection.
     KisCpuReadBinding selectCpuReadBinding(const KisPageVersion &, const KisCpuReadBinding &stale = {});
     KisReplicaHandle cpuReadReplica(const KisPageVersion &version) const;
-    size_t retainNativeReads(KisPageNativeReadRef *references, size_t &next, size_t count,
-        void *context, bool (*select)(void *, quint32, KisPageVersion *, KisVersionSlotId *),
-        KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
-    size_t releaseNativeReads(const KisPageNativeReadRef *references, size_t &next, size_t count, KisPageKey *revisit);
-    KisPageVersion nativeReadVersion(const KisPageNativeReadRef &reference, KisCpuReadBinding *binding = nullptr) const;
-    void nativeReadBindings(const KisPageNativeReadRef *references, quint32 *indices,
+    // Trusted original Values selected under the Store cut. A read edge owns
+    // identity memory. Order visits only actual Values; grid nulls are implicit
+    // defaults supplied by the selected surface and need no Value protocol.
+    size_t retainReadValues(KisPageViewValue *const *values, const quint32 *order,
+        size_t &next, size_t count, KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
+    size_t releaseReadValues(KisPageViewValue **values, const quint32 *order,
+        size_t &next, size_t count, KisPageKey *revisit);
+    // Caller holds this original Value through a root or actual read edge.
+    KisCpuReadBinding readValueBinding(const KisPageViewValue *value) const;
+    void readValueBindings(KisPageViewValue *const *values, quint32 *indices,
         size_t first, size_t count, KisCpuReadBinding *bindings) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;

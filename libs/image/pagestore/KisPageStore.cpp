@@ -3273,9 +3273,9 @@ public:
     explicit Private(KisPageStore::Private *store)
         : owner(store), defaults(std::less<quint64>{}, DefaultCache::allocator_type(&store->backingBudget)) {}
     static boost::intrusive_ptr<Private> create(KisPageStore::Private *owner,
-        size_t versions = 0, size_t removals = 0, size_t surfaces = 0, size_t references = 0)
+        size_t versions = 0, size_t removals = 0, size_t surfaces = 0)
     {
-        const Layout layout(sizeof(Private), versions, removals, surfaces, references);
+        const Layout layout(sizeof(Private), versions, removals, surfaces);
         void *raw = kisAllocateMutationStorage(&owner->backingBudget, layout.bytes, alignof(Private));
         Private *view;
         try { view = new (raw) Private(owner); }
@@ -3325,25 +3325,22 @@ public:
                 || !range.contains(key.page.column, key.page.row)) return false;
             const size_t index = size_t(qint64(key.page.row) - range.top()) * size_t(range.width())
                 + size_t(qint64(key.page.column) - range.left());
-            const auto &references = nativeRefs;
-            const auto &reference = references[index];
-            *version = reference.version.isValid() ? owner->metadata.nativeReadVersion(reference, binding)
+            const auto *value = values[index];
+            *version = value ? value->version
                 : KisPageVersion{key, KisPageGeneration{1}, stagedSurfaces.front().defaultPixelRevision};
+            if (binding && value) *binding = owner->metadata.readValueBinding(value);
             return version->isValid();
         }
         const auto found = std::lower_bound(values.begin(), values.end(), key,
             [&](const KisPageViewValue *candidate, const KisPageKey &key) { return lessKey(candidate->version.key, key); });
         if (found != values.end() && (*found)->version.key == key) {
             *version = (*found)->version;
-            if (binding && !version->isDefaultPixel()) {
-                // The original capture retained this exact slot in the same
-                // ordinal; radix grouping changes links, never array order.
-                const auto selected = owner->metadata.nativeReadVersion(nativeRefs[size_t(found - values.begin())], binding);
-                if (!(selected == *version)) return false;
-            }
+            if (binding && !version->isDefaultPixel())
+                *binding = owner->metadata.readValueBinding(*found);
             return true;
         }
-        if (!root.resolve(key, version))
+        KisPageViewValue *selected = nullptr;
+        if (root.resolveVersion(key, version, &selected) == KisImageEpochRootSnapshot::ResolutionKind::Missing)
             return false;
         if (overlayTransaction.isValid() && (version->isDefaultPixel()
             || std::binary_search(removedPages.begin(), removedPages.end(), key, lessKey))) {
@@ -3353,7 +3350,7 @@ public:
             *version = {key, KisPageGeneration{1}, surface.defaultPixelRevision};
         }
         if (binding && !version->isDefaultPixel())
-            *binding = owner->metadata.selectCpuReadBinding(*version);
+            *binding = owner->metadata.readValueBinding(selected);
         return true;
     }
     std::shared_ptr<const KisCpuDefaultReadBuffer> defaultReadBuffer(const KisPageVersion &version) const
@@ -3551,8 +3548,8 @@ void KisCapturedReadView::selectReadWindow(size_t first, size_t count,
     quint32 *indices, KisCpuReadBinding *bindings) const
 {
     Q_ASSERT(d && d->nativeRange && count <= 16
-        && first + count <= d->nativeRefs.size());
-    d->owner->metadata.nativeReadBindings(d->nativeRefs.data(), indices, first, count, bindings);
+        && first + count <= d->values.size());
+    d->owner->metadata.readValueBindings(d->values.data(), indices, first, count, bindings);
 }
 
 KisCpuReadGuard::~KisCpuReadGuard()
@@ -3694,21 +3691,17 @@ try
         return {};
     }
     KisCapturedReadView result;
-    result.d = KisCapturedReadView::Private::create(d.data(), 0, 0, 1,
-        size_t(pages.width()) * size_t(pages.height()));
+    result.d = KisCapturedReadView::Private::create(d.data(),
+        size_t(pages.width()) * size_t(pages.height()), 0, 1);
     auto &release = *result.d;
     release.nativeRange = true;
-    release.nativeRefs.resize(size_t(pages.width()) * size_t(pages.height()));
+    release.values.resize(size_t(pages.width()) * size_t(pages.height()));
     release.stagedSurfaces.resize(1);
     const auto keyAt = [&](quint32 i) {
         return KisPageKey{surface, {qint32(qint64(pages.left()) + qint64(i % quint32(pages.width()))),
                                    qint32(qint64(pages.top()) + qint64(i / quint32(pages.width())))}};
     };
-    for (size_t i = 0; i < release.nativeRefs.size(); ++i) {
-        release.nativeRefs[i].shard = quint32(d->metadata.shardFor(keyAt(quint32(i))));
-    }
-    release.groupNativeRefs(d->metadata.shardCount());
-    bindingCount = std::min({bindingCount, size_t(16), release.nativeRefs.size()});
+    bindingCount = std::min({bindingCount, size_t(16), release.values.size()});
     QMutexLocker lock(&d->mutex);
     KisPagePublicationCoordinator::NativeReadSelection selection;
     if (!d->operational || d->closing
@@ -3720,16 +3713,13 @@ try
     result.d->range = pages;
     result.d->rangeEpoch = selection.root.epoch();
     if (selector.kind == KisPageReadViewKind::TransactionOverlay) result.d->overlayTransaction = selector.transaction;
-    auto select = [&](quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
-        return selection.resolve(keyAt(ordinal), version, slot);
-    };
+    for (size_t i = 0; i < release.values.size(); ++i)
+        release.values[i] = selection.selectedValue(keyAt(quint32(i)));
+    const auto selectedValues = release.groupReadValues(d->metadata.shardCount());
     size_t next = release.next;
-    while (release.retained < release.nativeRefs.size()) {
-        const auto retained = d->metadata.retainNativeReads(release.nativeRefs.data(), next,
-            release.nativeRefs.size() - release.retained, &select,
-            [](void *context, quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
-                return (*static_cast<decltype(select) *>(context))(ordinal, version, slot);
-            }, firstBindings, bindingCount);
+    while (release.retained < selectedValues) {
+        const auto retained = d->metadata.retainReadValues(release.values.data(), release.readOrder.data(), next,
+            selectedValues - release.retained, firstBindings, bindingCount);
         release.retained += retained;
         if (!retained) {
             d->readCoordinator.releaseCapturedView(KisCapturedReadView::Private::takeRelease(result.d), &lock);
@@ -3810,9 +3800,9 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         auto &candidate = result.d ? static_cast<KisPageCapturedRelease &>(*result.d) : empty;
         const bool captured = d->publicationCoordinator.captureDeltaLocked(selector.transaction, candidate,
                                                                            &versions, &removals, &surfaces);
-        if (result.d && captured && candidate.nativeRefs.capacity() >= candidate.values.size()) break;
+        if (result.d && captured && candidate.readOrder.capacity() >= candidate.values.size()) break;
         versions = qMax(versions, candidate.values.size());
-        if (versions > KisPageNativeReadRef::End) {
+        if (versions > KisPageCapturedRelease::End) {
             KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
             return {};
         }
@@ -3823,7 +3813,7 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
             // before preparing the exact next cut, then reselect under the
             // owner gate. This preserves the original late-growth retry.
             result.d.reset();
-            result.d = KisCapturedReadView::Private::create(d, versions, removals, surfaces, versions);
+            result.d = KisCapturedReadView::Private::create(d, versions, removals, surfaces);
         } catch (const std::bad_alloc &) {
             locker.relock(); --d->activeProviderCalls;
             KisPageStoreDetail::setError(error, QStringLiteral("read scope version storage is unavailable"));
@@ -3832,7 +3822,7 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         locker.relock(); --d->activeProviderCalls;
     }
     auto &release = *result.d;
-    if (release.values.size() > KisPageNativeReadRef::End) {
+    if (release.values.size() > KisPageCapturedRelease::End) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
         return {};
     }
@@ -3842,11 +3832,7 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
             [](const auto &a, const auto &b) { return a.surface.value < b.surface.value; });
         result.d->overlayTransaction = selector.transaction;
     }
-    release.nativeRefs.resize(release.values.size());
-    for (size_t i = 0; i < release.values.size(); ++i) {
-        release.nativeRefs[i].shard = quint32(d->metadata.shardFor(release.values[i]->version.key));
-    }
-    release.groupNativeRefs(d->metadata.shardCount());
+    const auto selectedValues = release.groupReadValues(d->metadata.shardCount());
     const auto retained = d->epochs.retainSnapshot(root.epoch());
     if (!retained.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope retention could not be allocated"));
@@ -3854,22 +3840,12 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     }
     release.token = retained.token;
     QString failure;
-    // Full and range captures retain the same exact slots under the same
-    // publication cut. The full view additionally retains its immutable root
-    // and sparse key map for clone/export; neither needs token-per-page state.
-    auto select = [&](quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
-        const auto *value = release.values[ordinal];
-        *version = value->version;
-        *slot = value->slot;
-        return true;
-    };
+    // The original cut supplies final Values directly. The same read edge
+    // owns pixel authority and identity memory until this record returns it.
     size_t next = release.next;
-    while (release.retained < release.nativeRefs.size()) {
-        const auto count = d->metadata.retainNativeReads(release.nativeRefs.data(), next,
-            release.nativeRefs.size() - release.retained, &select,
-            [](void *context, quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
-                return (*static_cast<decltype(select) *>(context))(ordinal, version, slot);
-            });
+    while (release.retained < selectedValues) {
+        const auto count = d->metadata.retainReadValues(release.values.data(), release.readOrder.data(), next,
+            selectedValues - release.retained);
         release.retained += count;
         if (!count) {
             failure = QStringLiteral("read scope exact protection was refused");

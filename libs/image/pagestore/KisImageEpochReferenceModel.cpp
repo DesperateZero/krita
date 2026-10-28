@@ -812,9 +812,10 @@ KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshotWithChanges(
     return result;
 }
 
-Q_ALWAYS_INLINE KisImageEpochRootSnapshot::ResolutionKind
-KisImageEpochRootSnapshot::resolveVersion(const KisPageKey &key, KisPageVersion *version) const
+KisImageEpochRootSnapshot::ResolutionKind
+KisImageEpochRootSnapshot::resolveVersion(const KisPageKey &key, KisPageVersion *version, KisPageViewValue **selected) const
 {
+    if (selected) *selected = nullptr;
     // Roots are fully validated once, before they are installed in the model.
     // Revalidating the complete immutable manifest for every single-page read
     // turns an iterator walk into O(page_count^2).
@@ -823,8 +824,11 @@ KisImageEpochRootSnapshot::resolveVersion(const KisPageKey &key, KisPageVersion 
             *version = {};
         return ResolutionKind::Missing;
     }
-    if (resolvePageRoot(m_pageRoot, key, version))
+    if (auto *value = resolvePageValue(m_pageRoot, key)) {
+        if (version) *version = value->version;
+        if (selected) *selected = value;
         return ResolutionKind::Explicit;
+    }
 
     const auto *surface = m_surfaces ? findSurface(*m_surfaces, key.surface) : nullptr;
     if (!surface) {

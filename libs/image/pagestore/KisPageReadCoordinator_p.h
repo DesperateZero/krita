@@ -44,33 +44,27 @@ struct KisPageCapturedRelease
     // allocation before any protection is acquired; no per-array payer or
     // independent reallocation exists after capture starts.
     KRITAIMAGE_EXPORT static KisPageCapturedReleasePointer prepare(KisBackingBudgetController &budget,
-        size_t versions = 0, size_t removals = 0, size_t surfaces = 0, size_t references = 0);
+        size_t versions = 0, size_t removals = 0, size_t surfaces = 0);
     // The original capture body and its member capacities share this layout.
     // A standalone release record is used by the isolated coordinator tests.
     struct KRITAIMAGE_EXPORT Layout {
-        Layout(size_t body, size_t versions, size_t removals, size_t surfaces, size_t references);
+        Layout(size_t body, size_t versions, size_t removals, size_t surfaces);
         void bind(KisPageCapturedRelease &record, void *storage) const;
         size_t bytes, v, r, s, n;
-        size_t versionCount, removalCount, surfaceCount, referenceCount;
+        size_t versionCount, removalCount, surfaceCount;
     };
     void (*dispose)(KisPageCapturedRelease *, KisBackingBudgetController *) noexcept = nullptr;
-    KRITAIMAGE_EXPORT void groupNativeRefs(qsizetype shardCount);
+    static constexpr quint32 End = std::numeric_limits<quint32>::max();
+    KRITAIMAGE_EXPORT size_t groupReadValues(qsizetype shardCount);
     KisImageEpochSnapshotToken token;
-    ~KisPageCapturedRelease() { clearValues(); }
-    void clearValues() noexcept
-    {
-        for (auto *value : values) valueStorage->release(value);
-        values.clear();
-    }
-    // The original captured record retains its Store/metadata lifetime until
-    // disposal. Borrow that source; do not add a second owner per read scope.
-    KisPageViewValueStorage *valueStorage = nullptr;
+    // Selection borrows under the Store cut; only the retained prefix owns
+    // read edges. Unretained tail pointers must never be dereferenced on exit.
     KisMutationWorkspace::Array<KisPageViewValue *> values;
     KisMutationWorkspace::Array<KisPageKey> removedPages;
     KisMutationWorkspace::Array<KisSurfaceEpochState> stagedSurfaces;
-    KisMutationWorkspace::Array<KisPageNativeReadRef> nativeRefs;
+    KisMutationWorkspace::Array<quint32> readOrder;
     size_t retained = 0;
-    size_t next = 0;
+    size_t next = End;
     bool capturedScope = false;
     bool nativeRange = false;
     bool processing = false;

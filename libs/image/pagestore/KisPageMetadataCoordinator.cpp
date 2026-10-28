@@ -1071,7 +1071,10 @@ struct ShardRecordStore {
         const auto *selected = replica(native->nativeReplica);
         const auto selectedIdentity = selected ? selected->identity : KisReplicaAllocationIdentity{};
         native->nativeReplica = {};
-        native->nativeReaders = snapshot.nativeReaders;
+        // Cold import may seed the independent oracle count. Existing Values
+        // own their live read edges; a prepared snapshot cannot restore an
+        // edge already returned while its publication claim was outstanding.
+        if (!record->version.isValid()) record->readEdges = snapshot.nativeReaders;
         const KisVersionSlotId previousVersion = record->previousVersion;
         const KisVersionSlotId nextVersion = record->nextVersion;
         const KisVersionSlotId previousHistory = record->previousHistory;
@@ -1168,7 +1171,7 @@ struct ShardRecordStore {
         result.version = record.version;
         result.publication = record.publication;
         result.preparedBy = record.preparedBy;
-        result.nativeReaders = (&record.native)->nativeReaders;
+        result.nativeReaders = record.version.isDefaultPixel() ? 0 : record.readEdges;
         for (KisMetadataOverflowSlotId slot = Protection ? record.capturedReadViews : KisMetadataOverflowSlotId{}; slot.isValid();) {
             const KisMetadataOverflowNode *node = overflow(slot);
             Q_ASSERT(node && node->kind == KisMetadataOverflowKind::CapturedReadView);
@@ -1368,7 +1371,7 @@ struct ShardRecordStore {
         const auto *authority = replica(stored->authorityReplica);
         if (authority) result.authority = replicaHandle(*authority, stored->version);
         result.replicaCount = stored->replicaCount;
-        result.captured = stored->capturedReadViews.isValid() || stored->native.nativeReaders;
+        result.captured = stored->capturedReadViews.isValid() || (!stored->version.isDefaultPixel() && stored->readEdges);
         return result;
     }
 
@@ -1587,7 +1590,7 @@ struct ShardRecordStore {
         const auto *cpu = replica(record->authorityReplica);
         const bool accepted = record->publication == KisPagePublicationState::Published
             || (record->publication == KisPagePublicationState::Prepared && facts->sealedBy.isValid());
-        return accepted && !record->capturedReadViews.isValid() && !facts->nativeReaders
+        return accepted && !record->capturedReadViews.isValid() && !record->readEdges
             && record->replicaCount == 1 && cpu && cpu->domain == KisPageAccessDomain::CpuRam
             && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
             && !cpu->overflow.isValid() && !cpu->activeOperation.isValid() ? record : nullptr;
@@ -1667,7 +1670,7 @@ struct ShardRecordStore {
         if (releasedBinding) releasedBinding->swap(facts->nativeBinding);
         if (facts->sealedBy.isValid()) { --arenas->sealedCpuValues; facts->sealedBy = {}; facts->exportedStamp = 0; }
         record->indexed = false;
-        const bool recordErased = record->frameHeld
+        const bool recordErased = record->frameHeld || record->readEdges
             || !record->detachLifetime()
             || arenas->versions.erase(slot);
         Q_ASSERT(indexErased && recordErased);
@@ -2123,7 +2126,7 @@ bool readableVersionLocked(const KisPageValueCell &version)
     return version.publication == KisPagePublicationState::Published
         || version.publication == KisPagePublicationState::Historical
         || (version.publication == KisPagePublicationState::Prepared
-            && (version.capturedReadViews.isValid() || version.native.nativeReaders));
+            && (version.capturedReadViews.isValid() || (!version.version.isDefaultPixel() && version.readEdges)));
 }
 
 template<class Shard>
@@ -2298,7 +2301,7 @@ void KisPageMetadataCoordinator::Private::releaseMemory(
     auto *shard = shardFor(this, key);
     QMutexLocker lock(&shard->mutex);
     auto *value = shard->arenas.versions.get(slot);
-    if (!value || value->indexed || value->frameHeld
+    if (!value || value->indexed || value->frameHeld || value->readEdges
         || value->viewMemoryState.load(std::memory_order_acquire)) return;
     if (value->initialIdentity) {
         const auto page = shard->pages.find(key);
@@ -2326,8 +2329,12 @@ void KisPageMetadataCoordinator::Private::detachLiveValues() noexcept
             while (page != shard->pages.end() && count < 16) {
                 const auto slot = page->second.firstVersion;
                 if (!slot.isValid()) { ++page; continue; }
-                const auto *value = shard->records.version(slot);
+                auto *value = shard->records.version(slot);
                 Q_ASSERT(value);
+                // Facade disposal is quiescent; actual captured capabilities
+                // retain the Store facade. Only cold oracle seed counts can
+                // remain here, and escaped raw trees grant memory only.
+                value->readEdges = 0;
                 shard->records.remove(&page->second, value->version,
                     &released[count].descriptor, &released[count].binding, slot);
                 ++count;
@@ -4168,109 +4175,128 @@ KisCpuReadBinding KisPageMetadataCoordinator::selectCpuReadBinding(
         ? selectCpuReadBindingLocked(*shard, *record) : KisCpuReadBinding{};
 }
 
-size_t KisPageMetadataCoordinator::retainNativeReads(KisPageNativeReadRef *references, size_t &next, size_t count,
-    void *context, bool (*select)(void *, quint32, KisPageVersion *, KisVersionSlotId *),
-    KisCpuReadBinding *firstBindings, size_t bindingCount)
+size_t KisPageMetadataCoordinator::retainReadValues(KisPageViewValue *const *values,
+    const quint32 *order, size_t &next, size_t count, KisCpuReadBinding *firstBindings, size_t bindingCount)
 {
     auto *core = m_core.load(std::memory_order_acquire);
-    if (!core || !count || !references || !select || next == KisPageNativeReadRef::End
-        || references[next].shard >= core->shards.size()) return 0;
-    const auto shardIndex = references[next].shard;
+    if (!core || !count) return 0;
+    Q_ASSERT(values && order && next != std::numeric_limits<quint32>::max());
+    const auto shardOf = [&](const KisPageViewValue *value) {
+        Q_ASSERT(value);
+        return kisStablePageKeyHash(value->version.key) % core->shards.size();
+    };
+    const auto shardIndex = shardOf(values[next]);
     auto *shard = core->shards[shardIndex].get();
     QMutexLocker lock(&shard->mutex);
     size_t retained = 0;
-    for (; retained < count && retained < 16 && next != KisPageNativeReadRef::End; ++retained) {
-        auto &reference = references[next];
-        KisPageVersion identity;
-        KisVersionSlotId slot;
-        if (reference.shard != shardIndex || !select(context, quint32(next), &identity, &slot)
-            || !identity.isValid() || reference.version.isValid()
-            || reference.shard != kisStablePageKeyHash(identity.key) % core->shards.size()) break;
-        if (identity.isDefaultPixel()) { next = reference.next; continue; }
-        auto page = shard->pages.find(identity.key);
-        if (page == shard->pages.end() || !shard->canMutate(identity.key, page->second)
-            || (!slot.isValid() && !shard->records.findVersion(identity, &slot))) break;
-        auto *version = shard->records.version(slot);
-        if (!version || !(version->version == identity)) break;
-        auto *facts = &version->native;
-        if (version->publication == KisPagePublicationState::Unpublished
-            || version->publication == KisPagePublicationState::Retiring
-            || facts->nativeReaders == std::numeric_limits<quint32>::max()) break;
-        ++facts->nativeReaders;
-        ++page->second.revision;
-        reference.version = slot;
-        if (next < bindingCount) {
-            Q_ASSERT(firstBindings && !firstBindings[next]);
-            firstBindings[next] = selectCpuReadBindingLocked(*shard, *version);
+    for (; retained < count && retained < 16; ++retained) {
+        auto *value = static_cast<KisPageValueCell *>(values[next]);
+        if (shardOf(value) != shardIndex) break;
+        Q_ASSERT(shard->arenas.versions.get(value->slot) == value);
+        if (value->readEdges == std::numeric_limits<quint32>::max()) break;
+        if (!value->version.isDefaultPixel()) {
+            auto page = shard->pages.find(value->version.key);
+            if (page == shard->pages.end() || !shard->canMutate(value->version.key, page->second)
+                || value->publication == KisPagePublicationState::Unpublished
+                || value->publication == KisPagePublicationState::Retiring) break;
+            ++page->second.revision;
+            if (next < bindingCount) {
+                Q_ASSERT(firstBindings && !firstBindings[next]);
+                firstBindings[next] = selectCpuReadBindingLocked(*shard, *value);
+            }
         }
-        next = reference.next;
+        // An unindexed default still needs its identity, but never pins
+        // optional materialized pixels. No second memory retain is needed.
+        if (!value->readEdges && !value->indexed && !value->frameHeld) value->attachLifetime();
+        ++value->readEdges;
+        next = order[next];
     }
     return retained;
 }
 
-size_t KisPageMetadataCoordinator::releaseNativeReads(const KisPageNativeReadRef *references,
-    size_t &next, size_t count, KisPageKey *revisit)
+size_t KisPageMetadataCoordinator::releaseReadValues(KisPageViewValue **values,
+    const quint32 *order, size_t &next, size_t count, KisPageKey *revisit)
 {
     auto *core = m_core.load(std::memory_order_acquire);
-    if (!core || !count || !references || !revisit || next == KisPageNativeReadRef::End
-        || references[next].shard >= core->shards.size()) return 0;
-    const auto shardIndex = references[next].shard;
+    if (!count) return 0;
+    Q_ASSERT(core && values && order && revisit && next != std::numeric_limits<quint32>::max());
+    const auto shardOf = [&](const KisPageViewValue *value) {
+        Q_ASSERT(value);
+        return kisStablePageKeyHash(value->version.key) % core->shards.size();
+    };
+    const auto shardIndex = shardOf(values[next]);
     auto *shard = core->shards[shardIndex].get();
+    MetadataReleasedReferences releasedReferences;
     QMutexLocker lock(&shard->mutex);
-    size_t released = 0;
-    for (; released < count && released < 16 && next != KisPageNativeReadRef::End; ++released) {
-        const auto &reference = references[next];
-        if (reference.shard != shardIndex) break;
+    size_t released = 0, limit = std::min(count, size_t(16));
+    for (; released < limit; ++released) {
+        auto *value = static_cast<KisPageValueCell *>(values[next]);
+        if (shardOf(value) != shardIndex) break;
         revisit[released] = {};
-        if (!reference.version.isValid()) { next = reference.next; continue; }
-        auto *version = shard->records.version(reference.version);
-        if (!version) break;
-        auto page = shard->pages.find(version->version.key);
-        if (page == shard->pages.end() || !shard->canMutate(version->version.key, page->second)) break;
-        auto *facts = &version->native;
-        if (!facts->nativeReaders) break;
-        if (!--facts->nativeReaders && page->second.firstHistory.isValid()) revisit[released] = version->version.key;
-        ++page->second.revision;
-        next = reference.next;
+        Q_ASSERT(value->readEdges && shard->arenas.versions.get(value->slot) == value);
+        if (!--value->readEdges) {
+            const auto page = shard->pages.find(value->version.key);
+            if (page != shard->pages.end() && page->second.firstHistory.isValid())
+                revisit[released] = value->version.key;
+            if (!value->indexed && !value->frameHeld && value->detachLifetime()) {
+                if (value->initialIdentity && page != shard->pages.end() && !page->second.hasMetadata()
+                    && page->second.publishedVersion == value->slot) page->second.publishedVersion = {};
+                releasedReferences.descriptor.swap(value->native.descriptor);
+                releasedReferences.binding.swap(value->native.nativeBinding);
+                const bool erased = shard->arenas.versions.erase(value->slot);
+                Q_ASSERT(erased); Q_UNUSED(erased);
+                // Finish this bounded batch before destroying the one
+                // detached payload outside the gate. Ordinary edge returns
+                // do not initialize an array of shared-reference holders.
+                limit = released + 1;
+            }
+        }
+        // A monotone return is never blocked by a publication claim. Existing
+        // candidate snapshots can only be conservative; they cannot write the
+        // original read count back. Clear this consumed fact before continuing.
+        values[next] = nullptr;
+        next = order[next];
     }
     return released;
 }
 
-KisPageVersion KisPageMetadataCoordinator::nativeReadVersion(const KisPageNativeReadRef &reference,
-    KisCpuReadBinding *binding) const
+KisCpuReadBinding KisPageMetadataCoordinator::readValueBinding(const KisPageViewValue *value) const
 {
-    const auto *core = m_core.load(std::memory_order_acquire);
-    if (!core || reference.shard >= core->shards.size() || !reference.version.isValid()) return {};
-    const auto *shard = core->shards[reference.shard].get();
+    if (!value || value->version.isDefaultPixel()) return {};
+    const auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), value->version.key);
+    Q_ASSERT(shard);
     QMutexLocker lock(&shard->mutex);
-    const auto *version = shard->records.version(reference.version);
-    if (!version) return {};
-    const auto *facts = &version->native;
-    if (!facts->nativeReaders) return {};
-    if (binding) *binding = selectCpuReadBindingLocked(*shard, *version);
-    return version->version;
+    Q_ASSERT(value->readEdges || value->rootEdges.load(std::memory_order_acquire));
+    return selectCpuReadBindingLocked(*shard, *static_cast<const KisPageValueCell *>(value));
 }
 
-void KisPageMetadataCoordinator::nativeReadBindings(const KisPageNativeReadRef *references,
+void KisPageMetadataCoordinator::readValueBindings(KisPageViewValue *const *values,
     quint32 *indices, size_t first, size_t count, KisCpuReadBinding *bindings) const
 {
     Q_ASSERT(count <= 16);
     const auto *core = m_core.load(std::memory_order_acquire);
-    if (!core) return;
-    for (size_t i = 0; i < count; ++i) indices[i] = quint32(first + i);
-    std::sort(indices, indices + count, [&](quint32 a, quint32 b) { return references[a].shard < references[b].shard; });
-    for (size_t i = 0; i < count;) {
-        const auto shardIndex = references[indices[i]].shard;
-        if (shardIndex >= core->shards.size()) return;
+    Q_ASSERT(core);
+    quint32 shards[16];
+    size_t selected = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto *value = values[first + i];
+        if (!value || value->version.isDefaultPixel()) continue;
+        indices[selected++] = quint32(first + i);
+        shards[i] = quint32(kisStablePageKeyHash(value->version.key) % core->shards.size());
+    }
+    const auto selectedShard = [&](quint32 i) { return shards[i - first]; };
+    std::sort(indices, indices + selected, [&](quint32 a, quint32 b) { return selectedShard(a) < selectedShard(b); });
+    for (size_t i = 0; i < selected;) {
+        const auto shardIndex = selectedShard(indices[i]);
         const auto *shard = core->shards[shardIndex].get();
         QMutexLocker lock(&shard->mutex);
         do {
             const auto index = indices[i++];
             Q_ASSERT(!bindings[index - first]);
-            const auto *version = shard->records.version(references[index].version);
-            if (version && version->native.nativeReaders)
-                bindings[index - first] = selectCpuReadBindingLocked(*shard, *version);
-        } while (i < count && references[indices[i]].shard == shardIndex);
+            const auto *value = static_cast<const KisPageValueCell *>(values[index]);
+            Q_ASSERT(value->readEdges);
+            bindings[index - first] = selectCpuReadBindingLocked(*shard, *value);
+        } while (i < selected && selectedShard(indices[i]) == shardIndex);
     }
 }
 
@@ -4742,7 +4768,7 @@ void KisPageEditValues::release(KisPagePrivateWrite **rows, size_t count) noexce
                     if (!value->indexed) {
                         released[end].descriptor.swap(value->native.descriptor);
                         released[end].binding.swap(value->native.nativeBinding);
-                        if (value->detachLifetime()) {
+                        if (!value->readEdges && value->detachLifetime()) {
                             const bool erased = shard->arenas.versions.erase(row.location.value);
                             Q_ASSERT(erased); Q_UNUSED(erased);
                         }
@@ -5380,7 +5406,7 @@ bool KisPageMetadataCoordinator::discardHistory(
             const auto *record = shard->records.version(slot);
             if (record->publication != KisPagePublicationState::Historical
                 || record->rootEdges.load(std::memory_order_acquire)
-                || record->capturedReadViews.isValid() || record->native.nativeReaders
+                || record->capturedReadViews.isValid() || (!record->version.isDefaultPixel() && record->readEdges)
                 || (!record->authorityReplica.isValid()
                     && !(record->version.isDefaultPixel() && !record->replicaCount))) continue;
             bool eligible = true;

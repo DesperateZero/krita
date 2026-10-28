@@ -79,7 +79,7 @@ private:
     // Semantic default selection and explicit tree membership are distinct
     // facts obtained by the same lookup. Public resolve keeps its bool API.
     enum class ResolutionKind { Missing, Default, Explicit };
-    ResolutionKind resolveVersion(const KisPageKey &, KisPageVersion *) const;
+    ResolutionKind resolveVersion(const KisPageKey &, KisPageVersion *, KisPageViewValue **selected = nullptr) const;
     // Only a retained capture supplies these sorted immutable inputs. Export
     // directly into one exact-sized manifest; no intermediate root/delta copy.
     KisImageEpochSnapshot snapshotWithChanges(KisPageViewValue *const *values, size_t versionCount,
@@ -114,6 +114,7 @@ private:
     friend class KisImageEpochReferenceModel;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStore;
+    friend class KisCapturedReadView;
     friend class KisPageStoreReferenceTest;
 };
 

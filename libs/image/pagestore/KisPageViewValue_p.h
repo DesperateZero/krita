@@ -17,7 +17,7 @@ struct KisPagePrivateWrite;
 struct KisPageViewValue {
     KisPageVersion version;
     KisVersionSlotId slot;
-    // The existing indexed/Frame lifetime suppresses pointless last-view
+    // The existing indexed/Frame/read lifetime suppresses pointless last-view
     // callbacks. The shard gate owns this bit; tree references own low bits.
     static constexpr quint64 OriginalLifetime = quint64(1) << 63;
     std::atomic<quint64> viewMemoryState{0};
@@ -25,6 +25,10 @@ struct KisPageViewValue {
     // copies and candidates. The epoch gate writes; the Store admission gate
     // excludes publication while metadata tests this at its retirement cut.
     std::atomic<quint64> rootEdges{0};
+    // The original shard gate owns actual captured/range read edges. They
+    // retain identity memory as well as non-default pixel authority; mutable
+    // placement snapshots never overwrite this count.
+    quint32 readEdges = 0;
     void attachLifetime() noexcept
     { viewMemoryState.fetch_or(OriginalLifetime, std::memory_order_release); }
     bool detachLifetime() noexcept

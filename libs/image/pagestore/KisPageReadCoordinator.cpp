@@ -957,18 +957,17 @@ void KisPageCapturedReleaseDeleter::operator()(KisPageCapturedRelease *record) c
 }
 
 KisPageCapturedRelease::Layout::Layout(size_t body, size_t versions, size_t removals,
-    size_t surfaces, size_t references)
-    : bytes(body), versionCount(versions), removalCount(removals),
-      surfaceCount(surfaces), referenceCount(references)
+    size_t surfaces)
+    : bytes(body), versionCount(versions), removalCount(removals), surfaceCount(surfaces)
 {
     static_assert(alignof(KisPageCapturedRelease) >= alignof(KisPageVersion)
         && alignof(KisPageCapturedRelease) >= alignof(KisPageKey)
         && alignof(KisPageCapturedRelease) >= alignof(KisSurfaceEpochState)
-        && alignof(KisPageCapturedRelease) >= alignof(KisPageNativeReadRef));
+        && alignof(KisPageCapturedRelease) >= alignof(quint32));
     v = KisMutationWorkspace::append<KisPageViewValue *>(bytes, versions);
     r = KisMutationWorkspace::append<KisPageKey>(bytes, removals);
     s = KisMutationWorkspace::append<KisSurfaceEpochState>(bytes, surfaces);
-    n = KisMutationWorkspace::append<KisPageNativeReadRef>(bytes, references);
+    n = KisMutationWorkspace::append<quint32>(bytes, versions);
 }
 
 void KisPageCapturedRelease::Layout::bind(KisPageCapturedRelease &record, void *storage) const
@@ -977,38 +976,48 @@ void KisPageCapturedRelease::Layout::bind(KisPageCapturedRelease &record, void *
     record.values.bind(reinterpret_cast<KisPageViewValue **>(start + v), versionCount);
     record.removedPages.bind(reinterpret_cast<KisPageKey *>(start + r), removalCount);
     record.stagedSurfaces.bind(reinterpret_cast<KisSurfaceEpochState *>(start + s), surfaceCount);
-    record.nativeRefs.bind(reinterpret_cast<KisPageNativeReadRef *>(start + n), referenceCount);
+    record.readOrder.bind(reinterpret_cast<quint32 *>(start + n), versionCount);
 }
 
 KisPageCapturedReleasePointer KisPageCapturedRelease::prepare(KisBackingBudgetController &budget,
-    size_t versions, size_t removals, size_t surfaces, size_t references)
+    size_t versions, size_t removals, size_t surfaces)
 {
-    const Layout layout(sizeof(KisPageCapturedRelease), versions, removals, surfaces, references);
+    const Layout layout(sizeof(KisPageCapturedRelease), versions, removals, surfaces);
     auto *storage = kisAllocateMutationStorage(&budget, layout.bytes, alignof(KisPageCapturedRelease));
     KisPageCapturedReleasePointer record(new (storage) KisPageCapturedRelease, KisPageCapturedReleaseDeleter{&budget});
     layout.bind(*record, storage);
     return record;
 }
 
-void KisPageCapturedRelease::groupNativeRefs(qsizetype shardCount)
+size_t KisPageCapturedRelease::groupReadValues(qsizetype shardCount)
 {
-    Q_ASSERT(nativeRefs.size() <= KisPageNativeReadRef::End);
-    constexpr auto end = KisPageNativeReadRef::End;
-    next = nativeRefs.empty() ? end : 0;
-    for (size_t i = 0; i < nativeRefs.size(); ++i)
-        nativeRefs[i].next = i + 1 == nativeRefs.size() ? end : quint32(i + 1);
-    if (shardCount <= 1) return; // An unconfigured Store will reject capture.
-    // Stable LSD radix on links: original ordinals and the 16-byte records
-    // never move. The two temporary bucket arrays are bounded by 512 bytes.
+    Q_ASSERT(values.size() <= End);
+    constexpr auto end = End;
+    readOrder.resize(values.size());
+    next = end;
+    size_t count = 0;
+    quint32 previous = end;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (!values[i]) continue; // Implicit defaults require no Value protection.
+        if (previous == end) next = i;
+        else readOrder[previous] = quint32(i);
+        previous = quint32(i);
+        ++count;
+    }
+    if (previous != end) readOrder[previous] = end;
+    if (count < 2 || shardCount <= 1) return count;
+    // Stable radix changes only ordinal links, never the original Value order.
+    // No persistent slot/shard copy or second identity owner is required.
     for (unsigned shift = 0; (quint64(shardCount - 1) >> shift) != 0; shift += 6) {
         quint32 heads[64], tails[64];
         std::fill_n(heads, 64, end);
         std::fill_n(tails, 64, end);
         for (quint32 i = quint32(next); i != end;) {
-            const auto after = nativeRefs[i].next;
-            const auto bucket = (nativeRefs[i].shard >> shift) & 63;
+            const auto after = readOrder[i];
+            const auto shard = kisStablePageKeyHash(values[i]->version.key) % size_t(shardCount);
+            const auto bucket = (shard >> shift) & 63;
             if (heads[bucket] == end) heads[bucket] = i;
-            else nativeRefs[tails[bucket]].next = i;
+            else readOrder[tails[bucket]] = i;
             tails[bucket] = i;
             i = after;
         }
@@ -1017,11 +1026,12 @@ void KisPageCapturedRelease::groupNativeRefs(qsizetype shardCount)
         for (unsigned bucket = 0; bucket < 64; ++bucket) {
             if (heads[bucket] == end) continue;
             if (tail == end) next = heads[bucket];
-            else nativeRefs[tail].next = heads[bucket];
+            else readOrder[tail] = heads[bucket];
             tail = tails[bucket];
         }
-        if (tail != end) nativeRefs[tail].next = end;
+        if (tail != end) readOrder[tail] = end;
     }
+    return count;
 }
 
 bool KisPageReadCoordinator::releaseCapturedView(
@@ -1074,9 +1084,9 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
     };
     while (pending.retained) {
         KisPageKey revisit[16];
-        const auto released = m_metadata.releaseNativeReads(pending.nativeRefs.data(), pending.next,
-            pending.retained, revisit);
-        if (!released) return blocked();
+        const auto released = m_metadata.releaseReadValues(pending.values.data(), pending.readOrder.data(),
+            pending.next, pending.retained, revisit);
+        Q_ASSERT(released); // A retained edge only decreases; publication cannot refuse it.
         pending.retained -= released;
         for (size_t i = 0; i < released; ++i)
             if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i], true);

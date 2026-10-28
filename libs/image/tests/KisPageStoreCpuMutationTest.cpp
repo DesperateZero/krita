@@ -441,12 +441,12 @@ struct ReadTerminalFixture
         }
         if (!metadata.registerPage(page, &error)) return false;
         if (capture) {
-            capture->valueStorage = KisPageViewTestAccess::values(metadata).get();
-            auto *selected = capture->valueStorage->pin(replica.version);
+            auto source = KisPageViewTestAccess::values(metadata);
+            auto *selected = source->pin(replica.version);
             if (!selected) return false;
             capture->values.push_back(selected);
-            capture->nativeRefs.resize(1);
-            capture->nativeRefs[0].shard = quint32(metadata.shardFor(replica.version.key));
+            source->release(selected); // Registered identity is stable at this cut.
+            capture->groupReadValues(metadata.shardCount());
         }
         retirement.prepareTask(); history.prepareTask(budget); read.prepareTask();
         ready = physical.completions->allocatePending(
@@ -2980,13 +2980,10 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
 {
     QFETCH(int, exit);
     ReadTerminalFixture f;
-    auto release = KisPageCapturedRelease::prepare(f.budget, 1, 0, 0, 1);
+    auto release = KisPageCapturedRelease::prepare(f.budget, 1);
     QVERIFY2(f.init(release.get()), qPrintable(f.error));
     size_t next = release->next;
-    release->retained = f.metadata.retainNativeReads(release->nativeRefs.data(), next, 1, &f.replica.version,
-        [](void *context, quint32, KisPageVersion *out, KisVersionSlotId *) {
-            *out = *static_cast<KisPageVersion *>(context); return true;
-        });
+    release->retained = f.metadata.retainReadValues(release->values.data(), release->readOrder.data(), next, 1);
     QCOMPARE(release->retained, size_t(1));
     const quint64 storageBytes = kisPageStorageBytes(release.get(), alignof(KisPageCapturedRelease));
     const size_t fillerBytes = size_t(f.limits.metadataArenaBytes - f.live());

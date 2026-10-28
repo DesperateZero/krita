@@ -8443,46 +8443,55 @@ void KisPageStoreReferenceTest::nativeShardChainPartialCapture()
     for (int shards : {1,8,64,65,4096}) for (size_t limit : {size_t(0),size_t(1),size_t(17),size_t(64),size_t(131)}) {
         auto page = pageWithHistory(3);
         const auto identity = page.versions.last().version;
+        const auto refusal = page.versions[1].version;
+        page.versions[1].nativeReaders = std::numeric_limits<quint32>::max();
         KisPageMetadataCoordinator metadata;
         QVERIFY(metadata.configure(shards)); QVERIFY(metadata.registerPage(page));
+        auto source = metadata.viewValues();
+        auto *value = source->pin(identity);
+        auto *full = source->pin(refusal);
+        QVERIFY(value && full);
+        source->release(value); source->release(full);
         KisBackingBudgetController budget;
-        constexpr size_t count = 131;
-        auto release = KisPageCapturedRelease::prepare(budget, 0, 0, 0, count);
-        release->nativeRefs.resize(count);
-        std::array<KisPageVersion, count> selected;
-        for (size_t i = 0; i < count; ++i) {
-            selected[i] = i % 3 == 0 ? identity : KisPageVersion{{{1},{qint32(i),-2}}, {1}, 1};
-            release->nativeRefs[i].shard = quint32(metadata.shardFor(selected[i].key));
+        if (!limit) {
+            auto blank = KisPageCapturedRelease::prepare(budget, 32);
+            blank->values.resize(32);
+            QCOMPARE(blank->groupReadValues(shards), size_t(0));
+            QCOMPARE(blank->next, size_t(KisPageCapturedRelease::End));
+            KisCpuReadBinding bindings[16]; quint32 indices[16];
+            metadata.readValueBindings(blank->values.data(), indices, 16, 16, bindings);
+            for (const auto &binding : bindings) QVERIFY(!binding);
         }
-        release->groupNativeRefs(shards);
-        std::array<bool, count> visited{};
-        size_t accepted = 0, real = 0;
-        auto select = [&](quint32 ordinal, KisPageVersion *out) {
-            if (accepted == limit) return false;
-            if (ordinal >= count || visited[ordinal]) return false;
-            visited[ordinal] = true;
-            *out = selected[ordinal];
-            ++accepted;
-            real += !out->isDefaultPixel();
-            return true;
-        };
+        constexpr size_t count = 131;
+        auto release = KisPageCapturedRelease::prepare(budget, count * 3);
+        release->values.resize(count * 3);
+        for (size_t i = 0; i < count * 3; ++i) release->values[i] = i % 3 == 0 ? value : nullptr;
+        QCOMPARE(release->groupReadValues(shards), count);
+        size_t cursor = release->next, real = 0;
+        for (size_t i = 0; i < limit; ++i) {
+            real += release->values[cursor] != nullptr;
+            cursor = release->readOrder[cursor];
+        }
+        // A real count-overflow refusal follows the successful prefix. Its
+        // immutable key may start another shard run, which must not skip it.
+        if (limit < count) release->values[cursor] = full;
         size_t next = release->next;
         while (release->retained < count) {
-            const auto n = metadata.retainNativeReads(release->nativeRefs.data(), next, count - release->retained,
-                &select, [](void *context, quint32 ordinal, KisPageVersion *out, KisVersionSlotId *) {
-                    return (*static_cast<decltype(select) *>(context))(ordinal, out);
-                });
+            const auto n = metadata.retainReadValues(release->values.data(), release->readOrder.data(),
+                next, count - release->retained);
             QVERIFY(n <= 16);
             if (!n) break;
             release->retained += n;
         }
         QCOMPARE(release->retained, limit);
+        QCOMPARE(value->viewMemoryState.load(), KisPageViewValue::OriginalLifetime);
         KisPageStateSnapshot state; QVERIFY(metadata.pageSnapshot(page.key, &state));
         QCOMPARE(state.findVersion(identity)->nativeReaders, quint32(real));
         size_t released = 0;
         while (release->retained) {
             KisPageKey revisit[16];
-            const auto n = metadata.releaseNativeReads(release->nativeRefs.data(), release->next, release->retained, revisit);
+            const auto n = metadata.releaseReadValues(release->values.data(), release->readOrder.data(),
+                release->next, release->retained, revisit);
             QVERIFY(n > 0 && n <= 16);
             release->retained -= n;
             released += n;
@@ -8490,6 +8499,7 @@ void KisPageStoreReferenceTest::nativeShardChainPartialCapture()
         QCOMPARE(released, limit);
         QVERIFY(metadata.pageSnapshot(page.key, &state));
         QCOMPARE(state.findVersion(identity)->nativeReaders, quint32(0));
+        QCOMPARE(full->readEdges, std::numeric_limits<quint32>::max()); // Failed tail was never returned.
     }
 }
 
@@ -8503,34 +8513,24 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     const auto identity = version.version;
     KisPageMetadataCoordinator metadata;
     QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(page));
-    KisPageNativeReadRef a, b;
-    a.shard = b.shard = quint32(metadata.shardFor(identity.key));
-    auto selected = identity;
-    const auto select = +[](void *context, quint32, KisPageVersion *version, KisVersionSlotId *) {
-        *version = *static_cast<KisPageVersion *>(context); return true;
-    };
+    auto source = metadata.viewValues();
+    auto *a = source->pin(identity);
+    QVERIFY(a);
+    auto *b = a;
+    const auto slot = a->slot;
+    source->release(a); // Original registered identity, no independent view ref.
+    const quint32 end = KisPageCapturedRelease::End;
     size_t next = 0;
-    QCOMPARE(metadata.retainNativeReads(&a, next, 1, &selected, select), size_t(1));
-    // A locator is only an acceleration of an exact version selection. It
-    // must not let a stale generation or a different version acquire a pin.
-    struct Located { KisPageVersion version; KisVersionSlotId slot; } located{identity, a.version};
-    const auto selectLocated = +[](void *context, quint32, KisPageVersion *version, KisVersionSlotId *slot) {
-        const auto &input = *static_cast<Located *>(context);
-        *version = input.version; *slot = input.slot; return true;
-    };
-    KisPageNativeReadRef rejected;
-    rejected.shard = a.shard;
-    ++located.slot.generation;
+    QCOMPARE(metadata.retainReadValues(&a, &end, next, 1), size_t(1));
+    // Untrusted identity/slot input is validated at the actual memory-source
+    // boundary; a trusted original Value is not resolved by slot again.
+    auto stale = slot; ++stale.generation;
+    QVERIFY(!source->pin(identity, stale));
+    QVERIFY(!source->pin(page.versions.first().version, slot));
     next = 0;
-    QCOMPARE(metadata.retainNativeReads(&rejected, next, 1, &located, selectLocated), size_t(0));
-    located.slot = a.version;
-    located.version = page.versions.first().version;
-    next = 0;
-    QCOMPARE(metadata.retainNativeReads(&rejected, next, 1, &located, selectLocated), size_t(0));
-    located.version = identity;
-    next = 0;
-    QCOMPARE(metadata.retainNativeReads(&b, next, 1, &located, selectLocated), size_t(1));
-    QCOMPARE(metadata.nativeReadVersion(a), identity);
+    QCOMPARE(metadata.retainReadValues(&b, &end, next, 1), size_t(1));
+    QCOMPARE(a->version, identity);
+    QCOMPARE(a->viewMemoryState.load(), KisPageViewValue::OriginalLifetime);
     KisPageStateSnapshot actual;
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
     QCOMPARE(actual.findVersion(identity)->nativeReaders, quint32(2));
@@ -8550,22 +8550,71 @@ void KisPageStoreReferenceTest::nativeRangeProtectionRoundtrip()
     QVERIFY(!KisPageStateMachine{}.apply(actual, discard).accepted);
     KisPageKey revisit;
     next = 0;
-    QCOMPARE(metadata.releaseNativeReads(&a, next, 1, &revisit), size_t(1)); QVERIFY(!revisit.isValid());
-    QCOMPARE(metadata.nativeReadVersion(b), identity);
+    QCOMPARE(metadata.releaseReadValues(&a, &end, next, 1, &revisit), size_t(1)); QVERIFY(!revisit.isValid());
+    QVERIFY(!a); QCOMPARE(b->version, identity);
     next = 0;
-    QCOMPARE(metadata.releaseNativeReads(&b, next, 1, &revisit), size_t(1)); QCOMPARE(revisit, page.key);
-    next = 0;
-    QCOMPARE(metadata.releaseNativeReads(&b, next, 1, &revisit), size_t(0));
-    QVERIFY(!metadata.nativeReadVersion(a).isValid());
+    QCOMPARE(metadata.releaseReadValues(&b, &end, next, 1, &revisit), size_t(1)); QCOMPARE(revisit, page.key);
+    QVERIFY(!b);
+    QCOMPARE(metadata.releaseReadValues(&b, &end, next, 0, &revisit), size_t(0));
     QVERIFY(metadata.pageSnapshot(page.key, &actual));
     QVERIFY(KisPageStateMachine{}.apply(actual, discard).accepted);
-    auto overflow = page;
-    overflow.findVersion(identity)->nativeReaders = std::numeric_limits<quint32>::max();
-    KisPageMetadataCoordinator full;
-    QVERIFY(full.configure(4)); QVERIFY(full.registerPage(overflow));
-    a = {}; a.shard = quint32(full.shardFor(identity.key));
+
+    // Release under a real prepared publication claim must complete without
+    // invalidating its conservative plan or resurrecting the snapshot count.
+    auto commitPage = pageWithHistory(1);
+    const KisPageVersion target{commitPage.key, commitPage.nextGeneration, 0};
+    ++commitPage.nextGeneration.value;
+    const auto authority = replica(target, 1, 1, target.generation.value);
+    commitPage.versions.append({target, KisPagePublicationState::Prepared,
+        {{authority, KisReplicaValidity::Valid, {}, {}, 0, {}}}, authority, tx, {}});
+    KisPageMetadataCoordinator claimed;
+    QVERIFY(claimed.configure(4)); QVERIFY(claimed.registerPage(commitPage));
+    auto claimedSource = claimed.viewValues();
+    auto *held = claimedSource->pin(target); QVERIFY(held); claimedSource->release(held);
     next = 0;
-    QCOMPARE(full.retainNativeReads(&a, next, 1, &selected, select), size_t(0));
+    QCOMPARE(claimed.retainReadValues(&held, &end, next, 1), size_t(1));
+    KisPageTransition commit;
+    commit.kind = KisPageTransitionKind::CommitTransaction;
+    commit.version = target; commit.transaction = tx; commit.imageEpoch = {2};
+    const KisPageTransaction transaction{tx, {1}};
+    auto prepared = claimed.preparePublication(transaction, {2}, {commit});
+    QVERIFY(prepared.isValid());
+    next = 0;
+    QCOMPARE(claimed.releaseReadValues(&held, &end, next, 1, &revisit), size_t(1));
+    QVERIFY(!held);
+    QVERIFY(claimed.installPublication(std::move(prepared), transaction, {2}));
+    QVERIFY(claimed.pageSnapshot(page.key, &actual));
+    QCOMPARE(actual.findVersion(target)->nativeReaders, quint32(0));
+    // Explicit default identities survive optional metadata cache removal,
+    // but their read edge does not falsely retain reproducible pixel storage.
+    for (bool rawMemory : {false, true}) {
+        auto defaults = pageWithHistory(0);
+        const KisPageVersion oldDefault{defaults.key, {1}, 7};
+        defaults.versions.append({oldDefault, KisPagePublicationState::Historical, {}, {}, {}, {}});
+        KisPageMetadataCoordinator cache;
+        QVERIFY(cache.configure(4)); QVERIFY(cache.registerPage(defaults));
+        auto cacheSource = cache.viewValues();
+        auto *value = cacheSource->pin(oldDefault); QVERIFY(value);
+        cacheSource->release(value);
+        next = 0;
+        QCOMPARE(cache.retainReadValues(&value, &end, next, 1), size_t(1));
+        if (rawMemory) KisPageViewValueStorage::retain(value);
+        auto *raw = value;
+        quint32 removed = 0;
+        QVERIFY(cache.discardHistory(defaults.key, &oldDefault, 1, &removed));
+        QCOMPARE(removed, quint32(1));
+        QCOMPARE(value->version, oldDefault);
+        QCOMPARE(value->readEdges, quint32(1));
+        QCOMPARE(value->viewMemoryState.load(), KisPageViewValue::OriginalLifetime + quint64(rawMemory));
+        next = 0;
+        QCOMPARE(cache.releaseReadValues(&value, &end, next, 1, &revisit), size_t(1));
+        QVERIFY(!value);
+        if (rawMemory) {
+            QCOMPARE(raw->readEdges, quint32(0));
+            QCOMPARE(raw->viewMemoryState.load(), quint64(1));
+            cacheSource->release(raw);
+        }
+    }
 }
 
 void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter_data()

@@ -211,7 +211,7 @@ public:
         KisImageEpochRootSnapshot root;
         const KisPagePublicationDelta *delta = nullptr;
         KisSurfaceEpochState surface;
-        bool resolve(const KisPageKey &, KisPageVersion *, KisVersionSlotId *) const;
+        KisPageViewValue *selectedValue(const KisPageKey &) const;
     };
     bool prepareNativeReadSelectionLocked(KisSurfaceId, const KisPageReadView &,
                                          NativeReadSelection *) const;

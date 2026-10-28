@@ -109,14 +109,6 @@ struct KisPageWriteSelection {
     { Q_ASSERT(layout || surfaceLayout); return layout ? *layout : *surfaceLayout; }
 };
 
-struct KisPageNativeReadRef {
-    static constexpr quint32 End = std::numeric_limits<quint32>::max();
-    KisVersionSlotId version;
-    quint32 shard = 0;
-    quint32 next = End;
-};
-static_assert(sizeof(KisPageNativeReadRef) == 16);
-
 struct KisPageReplicaState {
     KisReplicaAllocationIdentity identity;
     quint64 layoutRevision = 0;
@@ -185,7 +177,7 @@ struct KisPageValueState {
     bool frameHeld = false;
     bool indexed = false;
     bool initialIdentity = false;
-    // Layout, readiness and native read retention belong to this value. They
+    // Layout and readiness belong to this value. They
     // have no independent slot identity, allocation, or reservation lifetime.
     struct Native {
         std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
@@ -197,7 +189,6 @@ struct KisPageValueState {
         quint64 exportedStamp = 0;
         std::shared_ptr<KisCpuResidentBinding> nativeBinding;
         KisReplicaSlotId nativeReplica;
-        quint32 nativeReaders = 0;
     } native;
 };
 
