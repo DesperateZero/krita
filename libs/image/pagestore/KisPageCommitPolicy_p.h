@@ -3,12 +3,18 @@
 #define KIS_PAGE_COMMIT_POLICY_P_H
 #include "KisPageStateMachine.h"
 
-// No ownership, allocation or replica/protection representation. All guards
-// precede the first edit callback. The caller owns the input stability window.
-template<class Version, class Visit, class Edit>
-QString kisPageCommitPolicy(KisImageEpochId publishedEpoch, KisPageGeneration nativeGeneration,
-    const KisPageTransition &transition,
-    Version *prepared, Version *published, Visit visit, Edit edit)
+// Only these two facts belong to commit policy. Production acceptance need
+// not construct a complete generic transition to pass them between owners.
+struct KisPageCommitFacts {
+    KisPageTransactionId transaction;
+    KisImageEpochId imageEpoch;
+};
+
+// No ownership/allocation/replica projection. Validation and edits may be
+// separated only by the caller's complete original-page claim.
+template<class Prepared, class Published, class Transition, class Visit>
+QString kisPageValidateCommit(KisImageEpochId publishedEpoch, KisPageGeneration nativeGeneration,
+    const Transition &transition, Prepared *prepared, Published *published, Visit visit)
 {
     if (nativeGeneration.isValid())
         return QStringLiteral("page has an unaccepted native write reservation");
@@ -29,6 +35,13 @@ QString kisPageCommitPolicy(KisImageEpochId publishedEpoch, KisPageGeneration na
         return QStringLiteral("transaction commit does not select its latest prepared generation");
     if (!published || prepared->version.generation.value <= published->version.generation.value)
         return QStringLiteral("transaction would not advance the published generation");
+    return {};
+}
+
+template<class Prepared, class Published, class Transition, class Visit, class Edit>
+void kisPageApplyCommit(const Transition &transition, Prepared *prepared, Published *published,
+                        Visit visit, Edit edit)
+{
     edit(*published, KisPagePublicationState::Historical, published->preparedBy);
     visit([&](auto &candidate) {
         if (candidate.publication == KisPagePublicationState::Prepared
@@ -37,6 +50,16 @@ QString kisPageCommitPolicy(KisImageEpochId publishedEpoch, KisPageGeneration na
             edit(candidate, KisPagePublicationState::Historical, KisPageTransactionId{});
     });
     edit(*prepared, KisPagePublicationState::Published, KisPageTransactionId{});
+}
+
+template<class Prepared, class Published, class Transition, class Visit, class Edit>
+QString kisPageCommitPolicy(KisImageEpochId publishedEpoch, KisPageGeneration nativeGeneration,
+    const Transition &transition, Prepared *prepared, Published *published, Visit visit, Edit edit)
+{
+    const auto failure = kisPageValidateCommit(publishedEpoch, nativeGeneration,
+        transition, prepared, published, visit);
+    if (!failure.isEmpty()) return failure;
+    kisPageApplyCommit(transition, prepared, published, visit, edit);
     return {};
 }
 #endif

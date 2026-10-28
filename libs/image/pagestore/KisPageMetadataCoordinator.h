@@ -15,6 +15,8 @@
 #include <memory>
 #include <array>
 #include <atomic>
+#include <optional>
+#include <vector>
 
 #include "KisMutationStorage_p.h"
 
@@ -444,10 +446,13 @@ private:
         // retry a revision race or retain its input until capacity returns.
         bool needsReprepare() const { return m_failure == Failure::Conflict; }
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
-        bool needsMutationCapacity() const { return m_owner && m_failure == Failure::Capacity; }
+        bool needsAcceptanceCapacity() const { return m_owner && m_failure == Failure::Capacity; }
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
                                            KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
+        KisPageRetirementRecord *originalBacking(const KisPageVersion &) const;
+        void forEachDetachedBacking(void *, void (*)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
+        KisPagePublicationRows originalRows() const { return m_rows; }
 
     private:
         class Data;
@@ -460,7 +465,9 @@ private:
         struct MutationCapacityDeleter { void operator()(MutationCapacity *) const noexcept; };
         using MutationCapacityPointer = std::unique_ptr<MutationCapacity, MutationCapacityDeleter>;
         MutationCapacityPointer m_mutationCapacity;
+        std::optional<std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>>> m_ownedRows;
         KisPagePublicationRows m_rows;
+        KisImageEpochId m_minimumEpoch;
         size_t m_count = 0;
         KisPageTransaction m_transaction;
         std::shared_ptr<const quint8> m_owner;
@@ -489,8 +496,7 @@ private:
         qsizetype clearBatch(qsizetype maximumWorkUnits);
         void dispose(const std::shared_ptr<DeferredMetadataCleanupStatistics> &statistics);
         // Installed canonical dispositions; no authority survives rejection.
-        void forEachDetachedBacking(void *context,
-            void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
+
 
     private:
         PreparedPublication::DataPointer data;
@@ -531,17 +537,24 @@ private:
     // Original publication rows retain each semantic input and its acceptance
     // position through prepare/install/finish. External capabilities have
     // already been checked by publication; this is not a second proof issuer.
-    PreparedPublication prepareMutation(const KisPageTransaction &transaction,
+    PreparedPublication prepareAcceptance(const KisPageTransaction &transaction,
                                         KisPagePublicationRows rows,
-                                        QString *error = nullptr) const;
+                                        QString *error = nullptr, KisImageEpochId minimumEpoch = {},
+                                        bool detachCurrent = false,
+                                        const PublicationChange *generic = nullptr, qsizetype genericCount = 0) const;
+    PreparedPublication prepareAcceptance(const KisPageTransaction &,
+        std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>> &&,
+        QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
+        const PublicationChange *generic = nullptr, qsizetype genericCount = 0) const;
     // Unlocked continuation of the same frozen D. Retains existing capacity
     // and positions; only newly invalidated native rows reserve more slots.
-    bool prepareMutationCapacity(PreparedPublication &, QString *error = nullptr) const;
-    bool installMutation(PreparedPublication &&prepared,
+    bool prepareAcceptanceCapacity(PreparedPublication &, QString *error = nullptr) const;
+    bool installAcceptance(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
-                         QString *error = nullptr);
+                         QString *error = nullptr, KisImageEpochId epoch = {},
+                         DeferredPublicationCleanup *cleanup = nullptr, PreparationKind kind = PreparationKind::Publication);
     // The original rows remain alive until this unlocked post-acceptance cleanup.
-    void finishMutation(KisPagePublicationRows);
+    void finishAcceptance(KisPagePublicationRows);
     // Logical half only. The write coordinator must independently retain the
     // exact before, prepare provider retag/descriptor/budget/terminal storage,
     // and acquire physical claims before installation. Rejection consumes the
@@ -569,12 +582,7 @@ private:
                             KisImageEpochId epoch,
                             QString *error = nullptr,
                             DeferredPublicationCleanup *deferredCleanup = nullptr);
-    bool installPublicationImpl(PreparedPublication &&prepared,
-                                const KisPageTransaction &transaction,
-                                KisImageEpochId epoch,
-                                QString *error,
-                                PreparationKind kind,
-                                DeferredPublicationCleanup *deferredCleanup);
+
 
     friend class KisPageStore;
     friend class KisPageWriteCoordinator;

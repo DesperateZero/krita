@@ -12,6 +12,7 @@
 #include "KisPageStateMachine.h"
 
 class KisCpuResidentBinding;
+struct KisPageRetirementRecord;
 
 // Borrowed from the original configured metadata core. Its page directory
 // only inserts nodes, so the enclosing Store/operation retains this address.
@@ -73,6 +74,10 @@ struct KisPageWriteSelection {
 struct KisPagePrivateWrite {
     KisReplicaHandle target;
     KisReplicaHandle source;
+    // Original target registration follows acquisition through the one fee
+    // accept/cancel. The native reservation/session retains its lifetime;
+    // ledger still checks exact ownership and takes its physical class claim.
+    KisPageRetirementRecord *backing = nullptr;
     struct NativeProof {
         KisPageTransactionId transaction;
         quint64 providerValidationStamp = 0;

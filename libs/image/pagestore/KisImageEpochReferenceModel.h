@@ -285,6 +285,7 @@ private:
         KisRetainedImageEpochSnapshot m_retainedAfter;
         KisPageTransactionId m_transaction;
         quint64 m_revision = 0;
+        KisPageTransactionState m_expectedState = KisPageTransactionState::Prepared;
         bool m_mayDetachPrevious = false;
         bool m_requiresDetachedPrevious = false;
         friend class KisImageEpochReferenceModel;
@@ -292,15 +293,23 @@ private:
 
     // Publication supplies the complete owner-validated write set. A refused
     // candidate may be retried or replaced without replaying an incremental delta.
-    bool preparePublication(KisPageTransactionId transaction, const struct KisPageOperationPublication &delta,
-                            QString *error = nullptr);
-    bool preparePublication(KisPageTransactionId transaction, const KisPagePublicationDelta &delta,
-                            QString *error = nullptr);
+    template<class Versions, class Surfaces, class Removals>
+    static bool validateEpochDelta(const KisImageEpochRootSnapshot &, const Versions &,
+        const Surfaces &, const Removals &, size_t *, QString *);
     template<class Proofs, class Surfaces, class Removals>
     bool prepareImpl(KisPageTransactionId transaction, const Proofs &proofs,
-                     const Surfaces &surfaces, const Removals &removals, bool complete, QString *error);
+                     const Surfaces &surfaces, const Removals &removals, QString *error);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
                                  bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+    PreparedCommit prepareCommit(const KisPageTransaction &transaction,
+        const struct KisPageOperationPublication &publication, KisImageEpochCommitResult *failure,
+        bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+    PreparedCommit prepareCommit(const KisPageTransaction &transaction,
+        const KisPagePublicationDelta &publication, KisImageEpochCommitResult *failure,
+        bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+    template<class Publication>
+    PreparedCommit prepareCommitImpl(const KisPageTransaction &, const Publication *,
+        KisImageEpochCommitResult *, bool retainAfter, KisSurfaceId derivedExtentSurface);
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);
     bool installReservedRoot(PreparedRootReservation &candidate, void *context,
                              InstallMetadataFunction installMetadata,

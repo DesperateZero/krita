@@ -1199,9 +1199,9 @@ private Q_SLOTS:
     void canonicalDetachmentKeepsOriginalCharge();
     void closeContinuesAfterDebtRelease_data();
     void closeContinuesAfterDebtRelease();
-    void publicationCleanupUsesBoundedBackgroundPasses();
+    void nativePublicationDoesNotQueueCandidateCleanup();
     void hostLogicalCompletionIsPreparedOnce();
-    void commitRevalidatesReadLeaseRevision();
+    void commitPreservesReadLeaseWithoutRebuildingInput();
     void publicationWhileCapturedReadersChange();
     void commitRebasesAfterDisjointPublication_data();
     void commitRebasesAfterDisjointPublication();
@@ -3680,7 +3680,7 @@ void KisPageStoreCpuMutationTest::commitPreparationClaimsAndLateCapture()
     QVERIFY(f.store->closeSession());
 }
 
-void KisPageStoreCpuMutationTest::publicationCleanupUsesBoundedBackgroundPasses()
+void KisPageStoreCpuMutationTest::nativePublicationDoesNotQueueCandidateCleanup()
 {
     Fixture f; QVERIFY(f.init());
     constexpr int pages = 17;
@@ -3725,8 +3725,8 @@ void KisPageStoreCpuMutationTest::publicationCleanupUsesBoundedBackgroundPasses(
         QVERIFY2(segment.seal(&f.error), qPrintable(f.error));
     }
     // Late protection prepares only native arena capacity, no general page
-    // candidate/cleanup job. The subsequent real root commit still has its
-    // bounded publication cleanup and is tested below.
+    // candidate/cleanup job. The real root commit consumes the independent
+    // Prepared input through the same protocol without a native Data tail.
     auto statistics = f.store->publicationStatistics();
     QCOMPARE(statistics.metadataCleanupDeferredCandidates - baselineCleanup.metadataCleanupDeferredCandidates, quint64(0));
     QCOMPARE(statistics.metadataCleanupPendingCandidates, qsizetype(0));
@@ -3736,25 +3736,16 @@ void KisPageStoreCpuMutationTest::publicationCleanupUsesBoundedBackgroundPasses(
     const auto committed = f.store->commit(tx, f.store->preparedPages(tx));
     QVERIFY(committed.isValid());
     statistics = f.store->publicationStatistics();
-    QCOMPARE(statistics.metadataCleanupDeferredCandidates - baselineCleanup.metadataCleanupDeferredCandidates, quint64(1));
-    QCOMPARE(statistics.metadataCleanupPendingCandidates, qsizetype(1));
-    QCOMPARE(statistics.metadataCleanupPeakPendingCandidates, qsizetype(1));
-    QCOMPARE(statistics.metadataCleanupPendingUnits, qsizetype(pages));
-    QCOMPARE(statistics.metadataCleanupPeakPendingUnits, qsizetype(pages));
+    QCOMPARE(statistics.metadataCleanupDeferredCandidates, baselineCleanup.metadataCleanupDeferredCandidates);
+    QCOMPARE(statistics.metadataCleanupPendingCandidates, qsizetype(0));
+    QCOMPARE(statistics.metadataCleanupPendingUnits, qsizetype(0));
     QCOMPARE(quint8(f.pixel({}, pages - 1)[0]), quint8(0x80 + pages - 1));
 
     resume.release(); unblock.dismiss(); kisDrainPageStoreReclamation();
     statistics = f.store->publicationStatistics();
-    QCOMPARE(statistics.metadataCleanupPendingCandidates, qsizetype(0));
-    QCOMPARE(statistics.metadataCleanupCompletedCandidates - baselineCleanup.metadataCleanupCompletedCandidates, quint64(1));
-    QCOMPARE(statistics.metadataCleanupPendingUnits, qsizetype(0));
-    QCOMPARE(statistics.metadataCleanupUnits - baselineCleanup.metadataCleanupUnits, quint64(pages));
-    QVERIFY(statistics.metadataCleanupPasses >= baselineCleanup.metadataCleanupPasses + 2);
-    QVERIFY(statistics.metadataCleanupMaximumUnitsPerPass > 0);
-    QVERIFY(statistics.metadataCleanupMaximumUnitsPerPass <= 16);
-    QVERIFY(statistics.metadataCleanupNanoseconds >= statistics.metadataCleanupMaximumPassNanoseconds);
-    QVERIFY(statistics.metadataCleanupQueueNanoseconds >= statistics.metadataCleanupMaximumQueueNanoseconds);
-    QVERIFY(statistics.metadataCleanupMaximumQueueNanoseconds > 0);
+    QCOMPARE(statistics.metadataCleanupCompletedCandidates, baselineCleanup.metadataCleanupCompletedCandidates);
+    QCOMPARE(statistics.metadataCleanupUnits, baselineCleanup.metadataCleanupUnits);
+    QCOMPARE(statistics.metadataCleanupPasses, baselineCleanup.metadataCleanupPasses);
     auto old = retained.readResidentPage(key(pages - 1)); QVERIFY(old.isValid());
     QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x60 + pages - 1));
     old = {}; retained = {};
@@ -3793,10 +3784,10 @@ void KisPageStoreCpuMutationTest::hostLogicalCompletionIsPreparedOnce()
     QVERIFY(f.store->closeSession());
 }
 
-void KisPageStoreCpuMutationTest::commitRevalidatesReadLeaseRevision()
+void KisPageStoreCpuMutationTest::commitPreservesReadLeaseWithoutRebuildingInput()
 {
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
-    auto retained = f.store->captureReadView(); // select non-fused publication
+    auto retained = f.store->captureReadView(); // real old consumer prevents detachment
     const auto tx = f.store->beginCurrentTransaction();
     auto mutation = f.begin(tx); auto write = mutation.beginWrite(key());
     QVERIFY(write.isValid()); static_cast<quint8 *>(write.data())[0] = 0x73;
@@ -3810,8 +3801,8 @@ void KisPageStoreCpuMutationTest::commitRevalidatesReadLeaseRevision()
         concurrentRead = std::make_unique<KisReadLease>(f.store->resolve(request, request.readiness));
     });
     QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
-    QCOMPARE(attempts, 2); QVERIFY(concurrentRead && concurrentRead->isValid());
-    QCOMPARE(f.store->publicationStatistics().metadataRepreparations, quint64(1));
+    QCOMPARE(attempts, 1); QVERIFY(concurrentRead && concurrentRead->isValid());
+    QCOMPARE(f.store->publicationStatistics().metadataRepreparations, quint64(0));
     QCOMPARE(static_cast<const quint8 *>(concurrentRead->cpuData())[0], quint8(0x31));
     QCOMPARE(quint8(f.pixel()[0]), quint8(0x73));
     f.store->release(std::move(*concurrentRead)); concurrentRead.reset(); retained = {};
@@ -9754,9 +9745,9 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         // physical authority, rather than an exported generic proof, qualify.
         KisPagePublicationChange birth;
         birth.replacement = KisPagePublicationChange::Replacement(&native);
-        auto first = f.metadata.prepareMutation(tx, {&birth, 1}, &f.error);
+        auto first = f.metadata.prepareAcceptance(tx, {&birth, 1}, &f.error);
         QVERIFY2(first.isValid(), qPrintable(f.error));
-        QVERIFY(f.metadata.installMutation(std::move(first), tx, &f.error));
+        QVERIFY(f.metadata.installAcceptance(std::move(first), tx, &f.error));
         auto &input = inputs[2 * i + 1];
         input.replacement = {version.key, {}, true, nullptr};
         // This direct metadata fixture supplies a version detachment, not an
@@ -9768,7 +9759,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
     capture.kind = KisPageTransitionKind::RetainCapturedVersion;
     capture.version = targets[1].version; capture.transaction = tx.id; capture.readView = {191};
     if (mode == 2) QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
-    auto candidate = f.metadata.prepareMutation(tx, {inputs.data(), inputs.size()}, &f.error);
+    auto candidate = f.metadata.prepareAcceptance(tx, {inputs.data(), inputs.size()}, &f.error);
     QVERIFY2(candidate.isValid(), qPrintable(f.error));
     std::array<bool, 5> planned{};
     for (size_t i = 0; i < inputs.size(); ++i) planned[i] = inputs[i].detachesSuperseded;
@@ -9788,7 +9779,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
     }
     if (mode == 4) { candidate = {}; fee.release(); }
     else {
-        const bool installed = f.metadata.installMutation(std::move(candidate), tx, &f.error);
+        const bool installed = f.metadata.installAcceptance(std::move(candidate), tx, &f.error);
         QCOMPARE(installed, mode != 1);
         if (installed && fee.isValid()) f.owner.commitBackingChanges(std::move(fee));
         else fee.release();
@@ -9805,7 +9796,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
             ? KisBackingBudgetClass::OptionalCache : KisBackingBudgetClass::ActivePending);
     }
     if (mode == 1) {
-        QVERIFY(candidate.needsMutationCapacity());
+        QVERIFY(candidate.needsAcceptanceCapacity());
         QVERIFY(!candidate.isValid());
         // Reprepare the same original D while the late reader is still live.
         // Only its row loses detachment; no invalidation list remaps ordinals.
@@ -9821,10 +9812,10 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         // A replacement preparation still needs storage at this same hard
         // limit. Only continuing the retained original D can complete here.
         auto repeatedInputs = inputs;
-        auto repeated = f.metadata.prepareMutation(tx, {repeatedInputs.data(), repeatedInputs.size()}, &f.error);
+        auto repeated = f.metadata.prepareAcceptance(tx, {repeatedInputs.data(), repeatedInputs.size()}, &f.error);
         QVERIFY(!repeated.isValid());
         QVERIFY(repeated.wasStorageRefused());
-        QVERIFY2(f.metadata.prepareMutationCapacity(candidate, &f.error), qPrintable(f.error));
+        QVERIFY2(f.metadata.prepareAcceptanceCapacity(candidate, &f.error), qPrintable(f.error));
         QVERIFY(candidate.isValid());
         QCOMPARE(f.live(), f.limits.metadataArenaBytes); // External-only repair allocates nothing.
         QCOMPARE(f.metadata.metrics().preparedMutationPages, beforeRepair.preparedMutationPages);
@@ -9834,10 +9825,10 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         retryChanges.append({targets[0], KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::OptionalCache});
         fee = f.owner.prepareBackingChanges(std::move(retryChanges), {}, &f.error);
         QVERIFY2(fee.isValid(), qPrintable(f.error));
-        QVERIFY(f.metadata.installMutation(std::move(candidate), tx, &f.error));
-        QVERIFY(!candidate.needsMutationCapacity());
+        QVERIFY(f.metadata.installAcceptance(std::move(candidate), tx, &f.error));
+        QVERIFY(!candidate.needsAcceptanceCapacity());
         f.owner.commitBackingChanges(std::move(fee));
-        f.metadata.finishMutation({inputs.data(), inputs.size()});
+        f.metadata.finishAcceptance({inputs.data(), inputs.size()});
         KisPageMetadataCoordinator::VersionInfo info;
         QVERIFY(f.metadata.versionSnapshot(targets[0].version, &info));
         QVERIFY(!info.version.isValid());
@@ -9847,7 +9838,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
         QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
     }
-    if (mode != 1 && mode != 4) f.metadata.finishMutation({inputs.data(), inputs.size()});
+    if (mode != 1 && mode != 4) f.metadata.finishAcceptance({inputs.data(), inputs.size()});
     candidate = {}; fee.release();
     QVERIFY(f.epochs.abort(tx)); f.operational = false;
     auto records = f.owner.takeShutdownRetirementRecords();
@@ -10346,9 +10337,9 @@ void KisPageStoreCpuMutationTest::publicationMetadataWorkIgnoresRetainedHistory(
     const auto before = kisPageStoreMetadataMetrics(*f.store);
     QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
     const auto committed = kisPageStoreMetadataMetrics(*f.store);
-    QCOMPARE(committed.publicationVersionInputs - before.publicationVersionInputs, quint64(2));
+    QCOMPARE(committed.publicationVersionInputs - before.publicationVersionInputs, quint64(0));
     QCOMPARE(committed.publicationVersionInstalls - before.publicationVersionInstalls, quint64(2));
-    QCOMPARE(committed.publicationHistoryNodesPrepared - before.publicationHistoryNodesPrepared, quint64(1));
+    QCOMPARE(committed.publicationHistoryNodesPrepared - before.publicationHistoryNodesPrepared, quint64(0));
     QCOMPARE(committed.publicationHistoryNodesTransferred - before.publicationHistoryNodesTransferred, quint64(1));
     QCOMPARE(committed.publicationAdditionRecordsPrepared, before.publicationAdditionRecordsPrepared);
     QCOMPARE(committed.publicationAdditionRecordsTransferred, before.publicationAdditionRecordsTransferred);

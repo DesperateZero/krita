@@ -62,6 +62,7 @@ struct KisPagePublicationChange {
         bool removal = false;
         KisPagePrivateWrite *native = nullptr;
         bool borrowed = false;
+        const KisPagePublicationIdentity *originalProof = nullptr;
         Replacement() { new (&payload.owned) Owned{}; }
         Replacement(const KisPageKey &key, const KisPagePublicationIdentity &proof,
                     bool removed = false, KisPagePrivateWrite *result = nullptr)
@@ -69,17 +70,24 @@ struct KisPagePublicationChange {
         { new (&payload.owned) Owned{key, proof}; }
         explicit Replacement(KisPagePrivateWrite *result) : native(result), borrowed(true)
         { Q_ASSERT(result); }
-        const KisPageKey &key() const { return borrowed ? native->target.version.key : payload.owned.key; }
-        const KisPageVersion &version() const { return borrowed ? native->target.version : payload.owned.proof.version; }
+        explicit Replacement(const KisPagePublicationIdentity *proof) : originalProof(proof)
+        { Q_ASSERT(proof); new (&payload.owned) Owned{}; }
+        const KisPageKey &key() const
+        { return borrowed ? native->target.version.key : originalProof ? originalProof->version.key : payload.owned.key; }
+        const KisPageVersion &version() const { return borrowed ? native->target.version : originalProof ? originalProof->version : payload.owned.proof.version; }
         KisPageTransactionId transaction() const
-        { return borrowed ? native->proof.transaction : payload.owned.proof.transaction; }
+        { return borrowed ? native->proof.transaction : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
         bool hasProof() const
-        { return borrowed ? native->proof.isValid() && native->target.version.isValid() : payload.owned.proof.isValid(); }
-        bool nativeProof() const { return borrowed || payload.owned.proof.native; }
+        { return borrowed ? native->proof.isValid() && native->target.version.isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
+        bool nativeProof() const { return borrowed || (originalProof ? originalProof->native : payload.owned.proof.native); }
+        KisVersionSlotId metadataSlot() const
+        { return borrowed ? native->acceptedSlot : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
+        quint64 validationStamp() const
+        { return borrowed ? native->proof.providerValidationStamp : originalProof ? originalProof->stamp : payload.owned.proof.stamp; }
         KisPagePublicationIdentity proofValue() const
         {
             return borrowed ? KisPagePublicationIdentity{native->target.version, native->proof.transaction,
-                native->proof.providerValidationStamp, true, native->acceptedSlot} : payload.owned.proof;
+                native->proof.providerValidationStamp, true, native->acceptedSlot} : originalProof ? *originalProof : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;
@@ -103,7 +111,10 @@ struct KisPagePublicationChange {
     // Preparation's position is only a hint across unlocked work. Acceptance
     // checks its current key, then records the verified position consumed by
     // replacement without changing the selection table's structure.
-    size_t acceptedOverlayIndex = 0;
+    union {
+        size_t acceptedOverlayIndex = 0; // Prepared destination's selected position.
+        void *canonicalRecord; // Independent input's actual release/authority output.
+    };
     KisPagePreparedBackingChange backingPreparation;
     struct MetadataAcceptance {
         KisPagePublicationChange *input = nullptr;

@@ -1056,7 +1056,9 @@ public:
         // original result and transfers its already funded retirement record.
         if (!owner->metadata.cancelPrivateResult(&page))
             qFatal("CPU private result lost its cancellation reservation");
-        owner->retirementQueue.acceptDetachedBacking(page.target);
+        if (!page.backing) qFatal("CPU private result lost its original backing");
+        owner->retirementQueue.acceptDetachedRecord(*page.backing, page.target);
+        page.backing = nullptr;
         owner->writeCoordinator.recordCancelled(*entry);
         if (entry->isCpuWrite())
             ++owner->mutationStats.pagesCancelled;
@@ -1220,9 +1222,9 @@ public:
         const KisPageAccessRequirement cpu{
             KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
         const auto selected = owner->owner.providerFor(cpu);
-        if (!selected || !selected->capabilities().synchronousOperations
-            || !selected->capabilities().nativeCpuMutation
-            || !selected->capabilities().synchronousWriteCopy) {
+        const auto capabilities = selected ? selected->capabilities() : KisReplicaCapabilities{};
+        if (!selected || !capabilities.synchronousOperations
+            || !capabilities.nativeCpuMutation || !capabilities.synchronousWriteCopy) {
             KisPageStoreDetail::setError(error, QStringLiteral(
                 "native CPU mutation provider is unavailable or ambiguous"));
             return false;
@@ -1471,6 +1473,7 @@ KisPageMutationSession::Private::prepareTarget(
         });
         KisPageBackingPreparation backing;
         KisReplicaOperation allocation;
+        KisPageRetirementRecord *registeredBacking = nullptr;
         bool ownsNewTarget = false;
         bool accepted = false;
         // Fresh and alias retain the same funded rejection obligation. An
@@ -1480,7 +1483,7 @@ KisPageMutationSession::Private::prepareTarget(
             if (lock.isLocked()) lock.unlock();
             if (!accepted && ownsNewTarget) {
                 writable.reset();
-                owner->retirementQueue.retireOrDefer(allocation.replica, targetProvider, {}, std::move(backing));
+                owner->retirementQueue.retireOrDefer(allocation.replica, targetProvider, {}, std::move(backing), registeredBacking);
             }
             backing = {};
             lock.relock();
@@ -1510,8 +1513,10 @@ KisPageMutationSession::Private::prepareTarget(
             return {};
         }
         backing.retirement->backingNode.second.nativeBinding = binding;
+        auto *preparedBacking = backing.retirement.get();
         const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
             allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
+        if (backingOwned) registeredBacking = preparedBacking;
         const bool finalPayload = !alias && intent.inputKind == KisPageWriteInputKind::FinalPayload && directPayload;
         if (!alias && !finalPayload && ownsNewTarget) {
             writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
@@ -1527,6 +1532,7 @@ KisPageMutationSession::Private::prepareTarget(
             if (error && error->isEmpty()) *error = QStringLiteral("CPU mutation native allocation/access failed");
             return {};
         }
+        auto *oldBacking = previous ? previous->backing : nullptr;
         std::optional<KisReplicaHandle> oldTarget;
         if (previous) oldTarget.emplace(previous->target);
         accepted = previous ? owner->metadata.replacePrivateWrite(page, allocation.replica)
@@ -1534,9 +1540,11 @@ KisPageMutationSession::Private::prepareTarget(
                 owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias);
         if (!accepted) return {};
         page->binding = std::move(binding);
+        page->backing = registeredBacking;
         if (previous) {
             page->writable.reset();
-            owner->retirementQueue.acceptDetachedBacking(*oldTarget);
+            if (!oldBacking) qFatal("CPU alias lost its original prior backing");
+            owner->retirementQueue.acceptDetachedRecord(*oldBacking, *oldTarget);
         }
         finalAccepted = finalPayload;
         result.payloadInitialized = directPayload;

@@ -3248,7 +3248,9 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         : metadata->installRecoverableWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup);
     if (!installed) return false;
     writable = physical.commit();
+    auto *originalBacking = prepared->accounting.originalRecord();
     const bool accounted = ownerLedger->commitBackingHandoff(std::move(prepared->accounting), writable.binding());
+    if (native) native->backing = originalBacking;
     Q_ASSERT(writable.isValid() && accounted);
     Q_UNUSED(accounted);
     spare = {}; // The original ledger now owns the target identity.

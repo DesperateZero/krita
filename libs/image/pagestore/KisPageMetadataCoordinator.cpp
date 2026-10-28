@@ -976,24 +976,22 @@ struct ShardRecordStore {
         }
     }
 
-    bool setPublication(MetadataPage *page,
-                        const KisPageVersion &identity,
-                        KisPagePublicationState publication,
-                        KisPageTransactionId preparedBy)
+    bool setPublication(MetadataPage *page, KisVersionRecord *record,
+                        KisPagePublicationState publication, KisPageTransactionId preparedBy)
     {
-        KisVersionSlotId slot;
-        if (!findVersion(identity, &slot))
-            return false;
-        KisVersionRecord *record = version(slot);
-        if (!record)
-            return false;
-        if (record->publication == publication && record->preparedBy == preparedBy)
-            return true;
+        if (!record) return false;
+        if (record->publication == publication && record->preparedBy == preparedBy) return true;
         unindexPublication(page, record);
         record->publication = publication;
         record->preparedBy = preparedBy;
         indexPublication(page, record);
         return true;
+    }
+    bool setPublication(MetadataPage *page, const KisPageVersion &identity,
+                        KisPagePublicationState publication, KisPageTransactionId preparedBy)
+    {
+        KisVersionSlotId slot;
+        return findVersion(identity, &slot) && setPublication(page, version(slot), publication, preparedBy);
     }
 
     void unindexPhysical(const KisVersionRecord &record)
@@ -1673,22 +1671,46 @@ struct ShardRecordStore {
         // every consumer reaches them through this version under the shard gate.
         // All-D claims and (for Published) the epoch owner's no-consumer check
         // precede this update. The caller installs the new facts before unlock.
-        unindexPublication(page, record);
-        unlinkVersion(page, record);
+        const bool samePublication = record->publication == publication;
+        const bool keepVersionTail = page->lastVersion == oldSlot;
+        const bool keepPublicationTail = samePublication
+            && (publication == KisPagePublicationState::Published
+                || (publication == KisPagePublicationState::Prepared && page->lastMutable == oldSlot));
+        if (!keepPublicationTail) unindexPublication(page, record);
+        if (!keepVersionTail) unlinkVersion(page, record);
         const auto slot = arenas->versions.rebind(oldSlot);
         Q_ASSERT(slot.isValid());
         releasedDescriptor->swap(facts->descriptor);
         releasedBinding->swap(facts->nativeBinding);
         arenas->cpuProofs -= bool(facts->stamp);
         arenas->cpuReadBindings -= bool(*releasedBinding);
+        // A new permission incarnation does not change the tail's logical
+        // position or cardinality. Update only links that name the old slot;
+        // other cases retain the actual unlink/append semantics.
+        if (keepVersionTail) {
+            if (record->previousVersion.isValid()) version(record->previousVersion)->nextVersion = slot;
+            else page->firstVersion = slot;
+            page->lastVersion = slot;
+        }
+        if (keepPublicationTail && publication == KisPagePublicationState::Prepared) {
+            if (page->firstMutable == oldSlot) page->firstMutable = slot;
+            else {
+                auto *previous = version(page->firstMutable); Q_ASSERT(previous);
+                while (!(previous->nextMutable == oldSlot)) {
+                    previous = version(previous->nextMutable); Q_ASSERT(previous);
+                }
+                previous->nextMutable = slot;
+            }
+            page->lastMutable = slot;
+        }
         record->slot = slot;
         assignNative(record, cpu, replicaSlot, native, publication);
         const bool exact = exactVersions.replaceExact(old, oldSlot, record->version, slot);
         const bool physical = physicalSlots.replaceExact(oldPhysical, replicaSlot,
             native.target.physicalSlotIdentity(), replicaSlot);
         Q_ASSERT(exact && physical); Q_UNUSED(exact); Q_UNUSED(physical);
-        linkVersion(page, record);
-        indexPublication(page, record);
+        if (!keepVersionTail) linkVersion(page, record);
+        if (!keepPublicationTail) indexPublication(page, record);
         return slot;
     }
 
@@ -1846,6 +1868,16 @@ struct ShardRecordStore {
     }
 };
 
+struct MetadataShard;
+struct MetadataReleasedReferences {
+    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+};
+struct MetadataAcceptanceReferences : MetadataReleasedReferences {
+    KisReplicaHandle targetAuthority;
+    KisReplicaHandle source;
+};
+
 struct MetadataShard : KisPageMetadataShardMetrics {
     explicit MetadataShard(std::shared_ptr<MetadataBudgetAuthority> authority,
                            KisMutationStorageAllocator<char> storage)
@@ -1922,7 +1954,7 @@ struct MetadataShard : KisPageMetadataShardMetrics {
         bool releaseCapacity, KisVersionSlotId replacement,
         ShardRecordStore::ReservationSet *reservation,
         std::shared_ptr<const KisPageAllocationDescriptor> *releasedDescriptor,
-        std::shared_ptr<KisCpuResidentBinding> *releasedBinding)
+        std::shared_ptr<KisCpuResidentBinding> *releasedBinding, KisVersionSlotId sourceSlot = {})
     {
         KisVersionSlotId accepted;
         if (replacement.isValid()) {
@@ -1930,9 +1962,11 @@ struct MetadataShard : KisPageMetadataShardMetrics {
                 KisPagePublicationState::Prepared, replacement);
             ++nativeSlotReplacements;
         } else if (!native || !(version == native->target.version)) {
-            if (releaseCapacity) records.remove(&page, version, releasedDescriptor, releasedBinding);
+            if (releaseCapacity) records.remove(&page, version, releasedDescriptor, releasedBinding, sourceSlot);
             else {
-                const bool updated = records.setPublication(&page, version, KisPagePublicationState::Historical, {});
+                const bool updated = sourceSlot.isValid()
+                    ? records.setPublication(&page, records.version(sourceSlot), KisPagePublicationState::Historical, {})
+                    : records.setPublication(&page, version, KisPagePublicationState::Historical, {});
                 Q_ASSERT(updated); Q_UNUSED(updated);
                 ++publicationHistoryNodesTransferred;
             }
@@ -1948,6 +1982,104 @@ struct MetadataShard : KisPageMetadataShardMetrics {
         }
         ++page.revision;
         ++installedMutationPages;
+    }
+
+    template<class Visit> void visitMutable(MetadataPage &page, Visit visit)
+    {
+        for (auto slot = page.firstMutable; slot.isValid();) {
+            auto *record = records.version(slot);
+            Q_ASSERT(record);
+            slot = record->nextMutable; // An edit may unlink this original node.
+            visit(*record);
+        }
+    }
+    struct IncomingCommit {
+        const KisPageVersion &version;
+        KisPagePublicationState publication = KisPagePublicationState::Prepared;
+        KisPageTransactionId preparedBy;
+    };
+    bool validPublication(MetadataPage &page, const KisPagePublicationChange &input,
+                          const KisPagePublicationChange::MetadataAcceptance &work,
+                          KisPageTransactionId transaction, KisImageEpochId epoch) const
+    {
+        const auto *native = input.replacement.native;
+        const auto *published = records.version(page.publishedVersion);
+        if (!published || (native ? page.activity.nativeWrite != native || !native->reserved
+                || !native->completed || !native->proof.isValid() || !(native->proof.transaction == transaction)
+                : bool(page.activity.nativeWrite))) return false;
+        if (input.supersededAuthority && input.supersededAuthority->isValid()
+            && !(records.projectReplica(published->authorityReplica) == *input.supersededAuthority)) return false;
+        const auto visit = [&](auto apply) {
+            for (auto slot = page.firstMutable; slot.isValid();) {
+                const auto *record = records.version(slot); Q_ASSERT(record);
+                apply(*record); slot = record->nextMutable;
+            }
+        };
+        const KisPageCommitFacts facts{transaction, epoch};
+        if (native) {
+            const IncomingCommit incoming{native->target.version, KisPagePublicationState::Prepared, transaction};
+            return kisPageValidateCommit(page.publishedEpoch, KisPageGeneration{}, facts, &incoming, published, visit).isEmpty();
+        }
+        const auto *target = records.version(work.replacementSlot);
+        if (!target || !(target->version == input.replacement.version())) return false;
+        if (input.canonicalRecord) {
+            const auto *original = static_cast<const MetadataAcceptanceReferences *>(input.canonicalRecord);
+            if (!(records.projectReplica(target->authorityReplica) == original->targetAuthority)) return false;
+        }
+        if (input.replacement.nativeProof() && input.replacement.validationStamp()) {
+            const auto *authority = arenas.facts.get(target->facts);
+            if (!authority || authority->stamp != input.replacement.validationStamp()
+                || !(authority->transaction == transaction)) return false;
+        }
+        return kisPageValidateCommit(page.publishedEpoch, KisPageGeneration{}, facts, target, published, visit).isEmpty();
+    }
+    void installPublished(MetadataPage &page, KisPagePublicationChange &input,
+        const KisPagePublicationChange::MetadataAcceptance &work, KisPageTransactionId transaction, KisImageEpochId epoch, ShardRecordStore::ReservationSet *reservation,
+        std::shared_ptr<const KisPageAllocationDescriptor> *releasedDescriptor,
+        std::shared_ptr<KisCpuResidentBinding> *releasedBinding)
+    {
+        auto *native = input.replacement.native;
+        auto *published = records.version(page.publishedVersion); Q_ASSERT(published);
+        const bool reuse = native && work.replacementSlot.isValid();
+        const KisPageCommitFacts facts{transaction, epoch};
+        const auto edit = [&](auto &record, auto state, auto preparedBy) {
+            if constexpr (!std::is_same_v<std::decay_t<decltype(record)>, IncomingCommit>) {
+                if (record.slot == page.publishedVersion && input.detachesSuperseded) {
+                    if (!reuse) records.remove(&page, record.version, releasedDescriptor, releasedBinding, record.slot);
+                } else {
+                    const bool changed = records.setPublication(&page, &record, state, preparedBy);
+                    Q_ASSERT(changed); Q_UNUSED(changed);
+                    publicationHistoryNodesTransferred += state == KisPagePublicationState::Historical;
+                    ++publicationVersionInstalls;
+                }
+            }
+        };
+        const auto visit = [&](auto apply) { visitMutable(page, apply); };
+        KisVersionSlotId accepted;
+        if (native) {
+            const IncomingCommit incoming{native->target.version, KisPagePublicationState::Prepared, transaction};
+            kisPageApplyCommit(facts, &incoming, published, visit, edit);
+            if (reuse) {
+                const KisPageVersion before = published->version; // Rebinding overwrites this very record.
+                accepted = records.replaceUnused(&page, before, *native,
+                    releasedDescriptor, releasedBinding, KisPagePublicationState::Published, work.replacementSlot);
+                ++nativeSlotReplacements;
+            } else {
+                Q_ASSERT(reservation);
+                accepted = records.putNativeReserved(&page, *native, reservation, KisPagePublicationState::Published);
+                ++publicationAdditionRecordsTransferred;
+            }
+            ++publicationVersionInstalls;
+            acceptNativeResult(page, accepted, *native);
+        } else {
+            accepted = work.replacementSlot;
+            auto *target = records.version(accepted); Q_ASSERT(target);
+            kisPageApplyCommit(facts, target, published, visit, edit);
+        }
+        page.publishedVersion = accepted;
+        page.publishedEpoch = epoch;
+        ++page.revision;
+        ++installedPublicationPages;
     }
 
     MetadataPageActivity activityImage(const KisPageKey &key, const MetadataPage &page) const
@@ -2284,7 +2416,7 @@ public:
     // The same paid values serve the transition and installation, without a
     // second Qt-to-install copy or independent representation of protection.
     using Version = KisPageWorkingVersion;
-    static DataPointer create(const Storage &storage, size_t count, size_t shardCount, size_t genericCount);
+    static DataPointer create(const Storage &storage, size_t count, size_t shardCount);
     ~Data();
     void invoke() override;
     void dispose() noexcept override { DataDeleter{}(this); }
@@ -2298,39 +2430,28 @@ public:
         // The directory is append-only through that group's pin. Keep the
         // original location; revalidate mutable facts under the shard mutex.
         MetadataMap<KisPageKey, MetadataPage>::iterator originalPage;
-        KisVersionSlotId replacementSlot;
         quint64 revision = 0;
         KisPageVersion version;
         size_t inputOrdinal = 0;
         size_t shardIndex = 0;
         bool activityReservation = false;
-        bool releaseUnusedCapacity = false;
-        KisPagePrivateWrite *native = nullptr;
-        bool reuseNativeSlots = false;
         size_t arenaGrowthIndex = std::numeric_limits<size_t>::max();
         std::shared_ptr<const KisPageAllocationDescriptor> releasedDescriptor;
         std::shared_ptr<KisCpuResidentBinding> releasedReadBinding;
         KisPageKey key() const { return version.key; }
     };
-    // Only transitions that actually install a general header/record image
-    // have this payload. It lives in the SAME original trailing allocation.
-    struct GenericPublication {
-        explicit GenericPublication(KisPageWorkingStorage storage)
-            : installRecords(decltype(installRecords)::allocator_type(storage)) {}
-        KisPageStateSnapshot next;
-        KisPageWorkingArray<Version, 2> installRecords;
-    };
     struct Publication {
         explicit Publication(KisPageWorkingStorage storage)
-            : deltas(decltype(deltas)::allocator_type(storage)) {}
+            : installRecords(decltype(installRecords)::allocator_type(storage)),
+              deltas(decltype(deltas)::allocator_type(storage)) {}
         struct PublicationDelta {
             KisPageVersion version;
             KisPagePublicationState publication;
             KisPageTransactionId preparedBy;
-            bool detach = false;
         };
+        KisPageStateSnapshot next;
+        KisPageWorkingArray<Version, 2> installRecords;
         KisPageWorkingArray<PublicationDelta, 2> deltas;
-        GenericPublication *generic = nullptr;
     };
     struct ShardArenaGrowth {
         explicit ShardArenaGrowth(KisPageWorkingStorage storage) : blocks(storage) {}
@@ -2361,7 +2482,7 @@ public:
             pin = std::shared_ptr<MetadataShard>(std::shared_ptr<MetadataShard>{}, shard);
         }
         auto &growth = arenaGrowth.back();
-        // Zero-demand native entries between additions need no reservation,
+        // Existing generic records between additions need no reservation,
         // but remain in the same bounded identity revalidation range.
         growth.entryCount = i - growth.firstEntry + 1;
         growth.totalDemand.versions += demand.versions;
@@ -2372,6 +2493,9 @@ public:
         entry.arenaGrowthIndex = arenaGrowth.size() - 1;
     }
 
+    size_t claimRows();
+    void releaseClaims(size_t);
+    void installRows(bool mutation, bool recoverable, bool privateWrite, KisImageEpochId);
     void cancel() noexcept;
     size_t batchEnd(size_t first, size_t limit) const
     {
@@ -2411,35 +2535,22 @@ public:
     // Publication images belong only to root/lease candidates. Mutation
     // acceptance borrows its original rows and never creates these entries.
     Payload<Publication> publications;
-    Payload<GenericPublication> genericPublications;
-    void popPublication()
-    {
-        if (publications.empty()) return;
-        if (publications.back().generic) {
-            Q_ASSERT(publications.back().generic == &genericPublications.back());
-            genericPublications.pop_back();
-        }
-        publications.pop_back();
-    }
+    void popPublication() { if (!publications.empty()) publications.pop_back(); }
     // Page keys and projected versions are already unique. This candidate is
     // immutable before any authority lookup; one sorted paid array avoids
     // buckets and one charged allocation for every copied version identity.
     struct BackingAuthority {
         KisPageVersion version;
         KisReplicaHandle replica;
-        bool detached = false;
-        KisPageRetirementRecord *acceptedIdle = nullptr;
     };
     Array<BackingAuthority> backingAuthorities;
 
 private:
     Data(const Storage &allocator, size_t units, Entry *entryData, size_t entryCount,
          Publication *publicationData, size_t publicationCount,
-         GenericPublication *genericData, size_t genericCount,
          ShardArenaGrowth *growthData, size_t growthCount)
         : storage(allocator), allocationUnits(units), arenaGrowth(growthData, growthCount)
         , entries(entryData, entryCount), publications(publicationData, publicationCount)
-        , genericPublications(genericData, genericCount)
         , backingAuthorities(storage.borrowed()) {}
 
     template<class T> static size_t appendPayload(size_t &bytes, size_t count)
@@ -2456,14 +2567,13 @@ private:
 
 KisPageMetadataCoordinator::PreparedPublication::DataPointer
 KisPageMetadataCoordinator::PreparedPublication::Data::create(
-    const Storage &storage, size_t count, size_t shardCount, size_t genericCount)
+    const Storage &storage, size_t count, size_t shardCount)
 {
     static_assert(alignof(Data) <= alignof(AllocationUnit));
     const size_t publicationCount = count;
     size_t bytes = sizeof(Data);
     const size_t entryOffset = appendPayload<Entry>(bytes, count);
     const size_t publicationOffset = appendPayload<Publication>(bytes, publicationCount);
-    const size_t genericOffset = appendPayload<GenericPublication>(bytes, genericCount);
     const size_t growthOffset = appendPayload<ShardArenaGrowth>(bytes, shardCount);
     const size_t units = (bytes + sizeof(AllocationUnit) - 1) / sizeof(AllocationUnit);
     KisMutationStorageAllocator<AllocationUnit> allocator(storage);
@@ -2473,7 +2583,6 @@ KisPageMetadataCoordinator::PreparedPublication::Data::create(
         return DataPointer(new (raw) Data(storage, units,
             reinterpret_cast<Entry *>(base + entryOffset), count,
             reinterpret_cast<Publication *>(base + publicationOffset), publicationCount,
-            reinterpret_cast<GenericPublication *>(base + genericOffset), genericCount,
             reinterpret_cast<ShardArenaGrowth *>(base + growthOffset), shardCount));
     } catch (...) { allocator.deallocate(raw, units); throw; }
 }
@@ -2515,6 +2624,142 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::cancel() noexcept
     }
 }
 
+size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows()
+{
+    qsizetype claimed = 0;
+    // All claims are checked before changing any state. Never hold multiple
+    // shard locks; a competing mutation is rejected/deferred while claimed.
+    // Claims live only inside this synchronous call, with no provider work,
+    // root construction, callback or external completion wait inside the
+    // claim interval. Individual shard mutex acquisition can still wait.
+    for (size_t first = 0; first < entries.size();) {
+        const size_t end = batchEnd(first, entries.size());
+        QMutexLocker locker(&entries[first].shardOwner->mutex);
+        for (size_t i = first; i < end; ++i) {
+            auto &entry = entries[i];
+            auto page = entry.originalPage;
+            if (!entry.shardOwner->canMutate(entry.key(), page->second))
+                break;
+            if (page->second.revision != entry.revision)
+                break;
+            Q_ASSERT(entry.activityReservation);
+            // Keep the existing reservation until this Data is cleaned outside
+            // installation. Clearing the transient claim cannot then erase/free
+            // an otherwise empty activity node under the publication gate.
+            page->second.activity.publicationClaim = this;
+            ++claimed;
+        }
+        if (claimed != qsizetype(end)) break;
+        first = end;
+    }
+    return size_t(claimed);
+}
+
+void KisPageMetadataCoordinator::PreparedPublication::Data::releaseClaims(size_t claimed)
+{
+    for (size_t first = 0; first < claimed;) {
+        const size_t end = batchEnd(first, claimed);
+        QMutexLocker locker(&entries[first].shardOwner->mutex);
+        for (size_t i = first; i < end; ++i)
+            entries[i].originalPage->second.activity.publicationClaim = nullptr;
+        first = end;
+    }
+}
+
+void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
+    bool mutation, bool recoverable, bool privateWrite, KisImageEpochId epoch)
+{
+    Q_ASSERT(publications.empty() || publications.size() == entries.size());
+    for (size_t first = 0; first < entries.size();) {
+        const size_t end = batchEnd(first, entries.size());
+        QMutexLocker locker(&entries[first].shardOwner->mutex);
+        for (size_t i = first; i < end; ++i) {
+            auto &entry = entries[i];
+            auto *publication = &publications[i];
+            auto page = entry.originalPage;
+            Q_ASSERT(page->second.activity.publicationClaim == this);
+            quint64 installedHistoryLinks = 0;
+            if (!mutation) {
+                installedHistoryLinks +=
+                    quint64(std::count_if(publication->deltas.cbegin(), publication->deltas.cend(), [](const auto &delta) {
+                        return delta.publication == KisPagePublicationState::Historical;
+                    }));
+                installedHistoryLinks +=
+                    quint64(std::count_if(publication->installRecords.cbegin(), publication->installRecords.cend(), [](const auto &addition) {
+                            return addition.publication == KisPagePublicationState::Historical;
+                        }));
+            }
+            // Epoch allocation may have skipped an identity on an earlier failed
+            // root build. These transitions use the epoch only as a newer tag.
+            if (recoverable) {
+                auto &reservation = arenaGrowth.at(entry.arenaGrowthIndex).reservations;
+                for (const auto &record : publication->installRecords) {
+                    const bool installed = entry.shardOwner->records.putReserved(&page->second, record, &reservation);
+                    Q_ASSERT(installed);
+                    Q_UNUSED(installed);
+                }
+                const bool headerInstalled = entry.shardOwner->installReservedHeader(entry.key(), &page->second, publication->next);
+                Q_ASSERT(headerInstalled);
+                Q_UNUSED(headerInstalled);
+                ++page->second.revision;
+                ++entry.shardOwner->publicationAdditionRecordsTransferred;
+                entry.shardOwner->publicationVersionInstalls += publication->installRecords.size();
+            } else {
+                if (!privateWrite) publication->next.publishedEpoch = epoch;
+
+                for (const auto &delta : std::as_const(publication->deltas)) {
+                    const bool updated = entry.shardOwner->records.setPublication(&page->second,
+                        delta.version, delta.publication, delta.preparedBy);
+                    Q_ASSERT(updated); Q_UNUSED(updated);
+                }
+                const auto additionRecords = quint64(publication->installRecords.size());
+                auto &reservation = arenaGrowth.at(entry.arenaGrowthIndex).reservations;
+                const bool additionsInstalled = entry.shardOwner->records.installPreparedAdditionsReserved(
+                    &page->second, &publication->installRecords, &reservation);
+                Q_ASSERT(additionsInstalled); Q_UNUSED(additionsInstalled);
+                if (privateWrite && publication->next.writer.baseAuthority.isValid()) {
+                    const auto &writer = publication->next.writer;
+                    KisVersionSlotId base;
+                    KisReplicaSlotId authority;
+                    const bool found = entry.shardOwner->records.findVersion(writer.baseVersion, &base)
+                        && entry.shardOwner->records.findReplicaSlot(base, writer.baseAuthority, &authority);
+                    Q_ASSERT(found); Q_UNUSED(found);
+                    // AcquireWrite checked overflow. The original revision
+                    // claim excludes new readers through this single pin edit.
+                    ++entry.shardOwner->records.replica(authority)->pinCount;
+                }
+                entry.shardOwner->publicationAdditionRecordsTransferred += additionRecords;
+                const bool headerInstalled = entry.shardOwner->installReservedHeader(
+                    entry.key(), &page->second, publication->next);
+                Q_ASSERT(headerInstalled); Q_UNUSED(headerInstalled);
+                entry.shardOwner->publicationVersionInstalls += additionRecords;
+                ++page->second.revision;
+                entry.shardOwner->publicationVersionInstalls += quint64(publication->deltas.size());
+            }
+
+            entry.shardOwner->publicationHistoryNodesTransferred += installedHistoryLinks;
+            ++(mutation ? entry.shardOwner->installedMutationPages
+                        : entry.shardOwner->installedPublicationPages);
+            // All page facts were claimed before the first install; after this
+            // page's final write no later step can overwrite a new reader/last-use
+            // mutation here. Release under the same lock, not a third lock pass.
+            page->second.activity.publicationClaim = nullptr;
+        }
+        first = end;
+    }
+    // Arena capacity was admitted for the whole shard batch. Reclaim only
+    // after every page consumed its slots; per-page reclaim could detach an
+    // empty block reserved for a later claimed page.
+    for (auto &growth : arenaGrowth) {
+        QMutexLocker locker(&growth.shardOwner->mutex);
+        growth.reservations.cancel(&growth.shardOwner->records);
+        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks(
+            &growth.shardOwner->budgetCharge);
+    }
+    installed = true;
+    owner.reset();
+}
+
 // Storage needed by the original mutation rows: real installation capacity,
 // independent external shard lifetimes and references that must leave after
 // unlocking. No second per-page semantic input or preparation activity.
@@ -2525,7 +2770,7 @@ public:
     struct Group {
         explicit Group(KisPageWorkingStorage storage) : blocks(storage) {}
         MetadataGrowthResult prepare(KisPagePublicationRows rows, size_t first, size_t end,
-                                     KisPageTransactionId transaction, QString *error)
+                                     KisPageTransactionId transaction, QString *error, KisImageEpochId epoch = {})
         {
             QMutexLocker lock(&shard->mutex);
             const auto valid = [&] {
@@ -2537,8 +2782,9 @@ public:
                         ? static_cast<MetadataPage *>(native->location.page) : nullptr
                         : static_cast<MetadataPage *>(work.page);
                     if (!page || !shard->canMutate(input.mutationVersion().key, *page)
-                        || !shard->validDetachment(*page, input.mutationVersion(), native, transaction,
-                            input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot))
+                        || (epoch.isValid() ? !shard->validPublication(*page, input, work, transaction, epoch)
+                            : !shard->validDetachment(*page, input.mutationVersion(), native, transaction,
+                                input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot)))
                         return false;
                 }
                 return true;
@@ -2557,25 +2803,25 @@ public:
         ShardRecordStore::ReservationSet reservation;
         MetadataArenas::ReleasedBlocks released;
     };
-    struct ReleasedReferences {
-        std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-        std::shared_ptr<KisCpuResidentBinding> binding;
-    };
+    using ReleasedReferences = MetadataReleasedReferences;
+    using CanonicalReferences = MetadataAcceptanceReferences;
     static MutationCapacityPointer create(const KisMutationStorageAllocator<char> &storage,
-                                          size_t count, size_t pinCount, size_t releaseCount)
+                                          size_t count, size_t pinCount, size_t releaseCount, size_t canonicalCount = 0)
     {
         static_assert(alignof(Group) <= alignof(Unit));
         size_t bytes = sizeof(MutationCapacity);
         KisMutationWorkspace::append<Group>(bytes, count);
         const auto pinOffset = KisMutationWorkspace::append<std::shared_ptr<MetadataShard>>(bytes, pinCount);
         const auto releaseOffset = KisMutationWorkspace::append<ReleasedReferences>(bytes, releaseCount);
+        const auto canonicalOffset = KisMutationWorkspace::append<CanonicalReferences>(bytes, canonicalCount);
         const size_t units = (bytes + sizeof(Unit) - 1) / sizeof(Unit);
         KisMutationStorageAllocator<Unit> allocator(storage);
         auto *raw = allocator.allocate(units);
         auto *base = reinterpret_cast<char *>(raw);
         return MutationCapacityPointer(new (raw) MutationCapacity(allocator, units,
             reinterpret_cast<std::shared_ptr<MetadataShard> *>(base + pinOffset),
-            reinterpret_cast<ReleasedReferences *>(base + releaseOffset)));
+            reinterpret_cast<ReleasedReferences *>(base + releaseOffset),
+            reinterpret_cast<CanonicalReferences *>(base + canonicalOffset)));
     }
     Group &append(std::shared_ptr<MetadataShard> shard)
     {
@@ -2591,6 +2837,10 @@ public:
     ReleasedReferences *appendReleased()
     {
         return new (references + referenceCount++) ReleasedReferences;
+    }
+    CanonicalReferences *appendCanonical()
+    {
+        return new (canonicalReferences + canonicalReferenceCount++) CanonicalReferences;
     }
     // Only real installation capacity enters this mutable group sequence.
     // External-only groups retain one shard pointer in the same allocation.
@@ -2622,6 +2872,7 @@ public:
     {
         finish();
         while (referenceCount) references[--referenceCount].~ReleasedReferences();
+        while (canonicalReferenceCount) canonicalReferences[--canonicalReferenceCount].~CanonicalReferences();
         while (count) groups()[--count].~Group();
         while (pinCount) pins[--pinCount].~shared_ptr();
     }
@@ -2630,9 +2881,11 @@ public:
     MutationCapacityPointer next;
     std::shared_ptr<MetadataShard> *pins;
     ReleasedReferences *references;
+    CanonicalReferences *canonicalReferences;
     size_t count = 0;
     size_t finished = 0;
     size_t referenceCount = 0;
+    size_t canonicalReferenceCount = 0;
     size_t pinCount = 0;
 private:
     Group *groups()
@@ -2641,8 +2894,8 @@ private:
         return reinterpret_cast<Group *>(reinterpret_cast<char *>(this) + offset);
     }
     MutationCapacity(const KisMutationStorageAllocator<Unit> &allocator, size_t size,
-                     std::shared_ptr<MetadataShard> *owners, ReleasedReferences *released)
-        : storage(allocator), units(size), pins(owners), references(released) {}
+                     std::shared_ptr<MetadataShard> *owners, ReleasedReferences *released, CanonicalReferences *canonical)
+        : storage(allocator), units(size), pins(owners), references(released), canonicalReferences(canonical) {}
 };
 
 void KisPageMetadataCoordinator::PreparedPublication::MutationCapacityDeleter::operator()(MutationCapacity *value) const noexcept
@@ -2658,7 +2911,8 @@ KisPageMetadataCoordinator::PreparedPublication::PreparedPublication() = default
 KisPageMetadataCoordinator::PreparedPublication::~PreparedPublication() = default;
 KisPageMetadataCoordinator::PreparedPublication::PreparedPublication(PreparedPublication &&other) noexcept
     : data(std::move(other.data)), m_mutationCapacity(std::move(other.m_mutationCapacity)),
-      m_rows(std::exchange(other.m_rows, {})),
+      m_ownedRows(std::move(other.m_ownedRows)), m_rows(std::exchange(other.m_rows, {})),
+      m_minimumEpoch(other.m_minimumEpoch),
       m_count(std::exchange(other.m_count, 0)), m_transaction(other.m_transaction),
       m_owner(std::move(other.m_owner)), m_failure(other.m_failure) {}
 KisPageMetadataCoordinator::PreparedPublication &
@@ -2666,7 +2920,8 @@ KisPageMetadataCoordinator::PreparedPublication::operator=(PreparedPublication &
 {
     if (this != &other) {
         data = std::move(other.data); m_mutationCapacity = std::move(other.m_mutationCapacity);
-        m_rows = std::exchange(other.m_rows, {});
+        m_ownedRows = std::move(other.m_ownedRows);
+        m_rows = std::exchange(other.m_rows, {}); m_minimumEpoch = other.m_minimumEpoch;
         m_count = std::exchange(other.m_count, 0); m_transaction = other.m_transaction;
         m_owner = std::move(other.m_owner); m_failure = other.m_failure;
     }
@@ -2674,7 +2929,7 @@ KisPageMetadataCoordinator::PreparedPublication::operator=(PreparedPublication &
 }
 bool KisPageMetadataCoordinator::PreparedPublication::isValid() const
 {
-    return (m_owner && m_failure != Failure::Capacity) || (data && data->owner);
+    return m_failure != Failure::Capacity && (m_owner || (data && data->owner));
 }
 
 KisReplicaHandle
@@ -2683,14 +2938,32 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
 {
     if (detached) *detached = false;
     if (idleResult) *idleResult = nullptr;
+    if (m_minimumEpoch.isValid() && m_rows) {
+        const auto found = std::lower_bound(m_rows.begin(), m_rows.end(), version.key,
+            [](const auto &row, const auto &key) { return MetadataKeyLess{}(row.replacement.key(), key); });
+        if (found != m_rows.end() && found->replacement.key() == version.key && !found->replacement.removal) {
+            if (found->supersededAuthority && found->supersededAuthority->version == version) {
+                if (detached) *detached = found->detachesSuperseded;
+                if (idleResult && found->detachesSuperseded) *idleResult = &found->acceptedIdle;
+                return *found->supersededAuthority;
+            }
+            if (found->replacement.version() == version) {
+                if (found->replacement.native) return found->replacement.native->target;
+                const auto *original = static_cast<const MutationCapacity::CanonicalReferences *>(found->canonicalRecord);
+                if (!original) return {};
+                // Fees consume this real independent input without entering
+                // metadata under the ledger gate. Original slot/stamp/authority
+                // are revalidated before installation, then claimed as one D.
+                return original->targetAuthority;
+            }
+        }
+    }
     if (!data) return {};
     const auto found = std::lower_bound(data->backingAuthorities.begin(),
         data->backingAuthorities.end(), version, [](const auto &entry, const KisPageVersion &key) {
             return MetadataKeyLess{}(entry.version, key);
         });
     if (found != data->backingAuthorities.end() && found->version == version) {
-        if (detached) *detached = found->detached;
-        if (idleResult && found->detached) *idleResult = &found->acceptedIdle;
         return found->replica;
     }
     // Recoverable candidates already retain the exact base and target values
@@ -2698,16 +2971,33 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
     // without another paid copy. Unrelated authorities remain indexed.
     if (data->kind == PreparationKind::RecoverableWrite) {
         for (const auto &publication : data->publications)
-            for (const auto &record : publication.generic->installRecords)
+            for (const auto &record : publication.installRecords)
                 if (record.version == version) return record.authority;
     }
     return {};
 }
 
+KisPageRetirementRecord *KisPageMetadataCoordinator::PreparedPublication::originalBacking(const KisPageVersion &version) const
+{
+    const auto found = std::lower_bound(m_rows.begin(), m_rows.end(), version.key,
+        [](const auto &row, const auto &key) { return MetadataKeyLess{}(row.replacement.key(), key); });
+    return found != m_rows.end() && found->replacement.native && found->replacement.version() == version
+        ? found->replacement.native->backing : nullptr;
+}
+
 bool KisPageMetadataCoordinator::PreparedPublication::hasDetachedBacking() const
 {
-    return data && std::any_of(data->backingAuthorities.begin(), data->backingAuthorities.end(),
-        [](const auto &entry) { return entry.detached; });
+    return m_minimumEpoch.isValid() && std::any_of(m_rows.begin(), m_rows.end(),
+        [](const auto &row) { return row.detachesSuperseded; });
+}
+
+void KisPageMetadataCoordinator::PreparedPublication::forEachDetachedBacking(void *context,
+    void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const
+{
+    if (!m_minimumEpoch.isValid()) return;
+    for (const auto &row : m_rows)
+        if (row.detachesSuperseded && row.supersededAuthority && row.supersededAuthority->isValid())
+            visit(context, *row.supersededAuthority, row.acceptedIdle);
 }
 
 KisPageMetadataCoordinator::DeferredPublicationCleanup::DeferredPublicationCleanup() = default;
@@ -2871,14 +3161,24 @@ KisPageMetadataCoordinator::prepareRestoration(KisImageEpochId minimumEpoch,
 }
 
 KisPageMetadataCoordinator::PreparedPublication
-KisPageMetadataCoordinator::prepareMutation(const KisPageTransaction &transaction,
+KisPageMetadataCoordinator::prepareAcceptance(const KisPageTransaction &transaction,
                                             KisPagePublicationRows rows,
-                                            QString *error) const
+                                            QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
+                                            const PublicationChange *generic, qsizetype genericCount) const
 try {
     PreparedPublication result;
     auto *d = m_core.load(std::memory_order_acquire);
     const size_t count = rows.size();
-    if (!d || d->shards.empty() || !transaction.isValid() || (count && !rows)) return result;
+    const bool published = minimumEpoch.isValid();
+    result.m_minimumEpoch = minimumEpoch;
+    if (!d || d->shards.empty() || !transaction.isValid() || (count && !rows)
+        || (published && minimumEpoch.value <= transaction.baseEpoch.value)) return result;
+    if (genericCount) {
+        auto genericPreparation = preparePublicationImpl(transaction, minimumEpoch, nullptr, genericCount,
+            false, error, PreparationKind::Publication, nullptr, generic);
+        if (!genericPreparation.isValid()) return genericPreparation;
+        result.data = std::move(genericPreparation.data);
+    }
     if (!count) {
         result.m_transaction = transaction;
         result.m_owner = d->publicationOwner;
@@ -2895,10 +3195,15 @@ try {
     bool ordered = true;
     for (size_t i = 0; i < count; ++i) {
         auto &input = rows[i];
+        if (published) {
+            input.superseded = {}; input.supersededAuthority = nullptr;
+            input.acceptedIdle = nullptr; input.canonicalRecord = nullptr;
+            if (!(input.replacement.key() == input.replacement.version().key) && !input.replacement.removal) return {};
+        }
         input.metadataAcceptance = {};
         if (!input.replacement.key().isValid()
             || (input.superseded.version.key.isValid() && !input.superseded.isValid())) return {};
-        if (!input.hasMutation()) continue;
+        if (published ? input.replacement.removal : !input.hasMutation()) continue;
         auto *native = input.replacement.native;
         if (native && (!native->reserved || !native->completed || !native->proof.isValid()
             || !(native->proof.transaction == transaction.id))) return {};
@@ -2911,7 +3216,10 @@ try {
         if (!work.shard) return {};
         ordered &= i + 1 == mutations && (!previous || !before(work, *previous));
         previous = &work;
-        if (native) {
+        if (published) {
+            input.detachesSuperseded = false;
+            releases += !native;
+        } else if (native) {
             input.detachesSuperseded = input.detachesSuperseded && !native->freshMetadataRequired
                 && input.expectedStamp() && input.expectedAuthority()
                 && !(input.mutationVersion() == native->target.version);
@@ -2922,6 +3230,48 @@ try {
     using It = KisPublicationMemberIterator<KisPagePublicationChange::MetadataAcceptance,
                                            &KisPagePublicationChange::metadataAcceptance>;
     if (!ordered) std::sort(It(rows.begin()), It(rows.end()), before);
+    if (published) {
+        for (size_t first = 0; first < mutations;) {
+            auto *shard = static_cast<MetadataShard *>(rows[first].metadataAcceptance.shard);
+            size_t end = first + 1;
+            while (end < mutations && end - first < 16
+                && rows[end].metadataAcceptance.shard == shard) ++end;
+            QMutexLocker lock(&shard->mutex);
+            for (size_t i = first; i < end; ++i) {
+                auto &work = rows[i].metadataAcceptance;
+                auto *native = work.input->replacement.native;
+                MetadataPage *page = nullptr;
+                if (native) page = static_cast<MetadataPage *>(native->location.page);
+                else {
+                    const auto found = shard->pages.find(work.input->replacement.key());
+                    if (found != shard->pages.end()) page = &found->second;
+                    work.replacementSlot = work.input->replacement.metadataSlot();
+                    auto *target = shard->records.version(work.replacementSlot);
+                    if (!target || !(target->version == work.input->replacement.version())) {
+                        if (!shard->records.findVersion(work.input->replacement.version(), &work.replacementSlot)) return {};
+                    }
+                }
+                work.page = page;
+                if (!page || !shard->canMutate(work.input->replacement.key(), *page)
+                    || !shard->validPublication(*page, *work.input, work, transaction.id, minimumEpoch)) return {};
+                const auto *current = shard->records.version(page->publishedVersion); Q_ASSERT(current);
+                if (native) {
+                    ++shard->preparedPublicationPages;
+                    // A writer may be based on an earlier Prepared result. Its
+                    // source is then distinct from the old committed authority.
+                    // Retain only that genuinely independent canonical output.
+                    const bool distinct = native->source.isValid() && !(native->source.version == current->version);
+                    work.input->supersededAuthority = distinct ? nullptr : &native->source;
+                    releases += distinct;
+                }
+                work.input->detachesSuperseded = detachCurrent && shard->records.canDetachPublished(current->version);
+                // Reusing an existing slot must also preserve its incarnation.
+                if (native && !shard->records.canReplaceUnused(current->version))
+                    native->freshMetadataRequired = true;
+            }
+            first = end;
+        }
+    }
     size_t capacityGroups = 0, retainedShards = 0;
     for (size_t first = 0; first < mutations;) {
         auto &head = rows[first].metadataAcceptance;
@@ -2932,8 +3282,9 @@ try {
             const auto &input = *rows[i].metadataAcceptance.input;
             if (i > first && rows[i - 1].metadataAcceptance.input->mutationVersion().key == input.mutationVersion().key)
                 return {};
-            external |= !input.replacement.native;
-            head.needsStorage |= input.replacement.native && !input.detachesSuperseded;
+            external |= !input.replacement.native || (published && !input.supersededAuthority);
+            head.needsStorage |= input.replacement.native
+                && (!input.detachesSuperseded || input.replacement.native->freshMetadataRequired);
         }
         if (head.needsStorage) ++capacityGroups;
         else if (external) ++retainedShards;
@@ -2946,7 +3297,7 @@ try {
             while (end < mutations && rows[end].metadataAcceptance.shard == shard) ++end;
             const auto externalPrepared = [&](size_t i) {
                 const auto &work = rows[i].metadataAcceptance;
-                return !work.input->replacement.native && work.page;
+                return !published && !work.input->replacement.native && work.page;
             };
             size_t preparedCount = 0;
             for (size_t i = first; i < end; ++i) preparedCount += externalPrepared(i);
@@ -2959,7 +3310,7 @@ try {
     });
     if (capacityGroups || retainedShards) {
         result.m_mutationCapacity = PreparedPublication::MutationCapacity::create(
-            d->budgetAuthority->storage<char>(), capacityGroups, retainedShards, releases);
+            d->budgetAuthority->storage<char>(), capacityGroups, retainedShards, published ? 0 : releases, published ? releases : 0);
         for (size_t first = 0; first < mutations;) {
             const auto &head = rows[first].metadataAcceptance;
             size_t end = first + 1;
@@ -2970,7 +3321,7 @@ try {
                 group = &result.m_mutationCapacity->append(shard);
                 for (size_t i = first; i < end; ++i) {
                     auto &work = rows[i].metadataAcceptance;
-                    if (work.input->replacement.native && !work.input->detachesSuperseded) {
+                    if (work.input->replacement.native && (!work.input->detachesSuperseded || work.input->replacement.native->freshMetadataRequired)) {
                         work.prepared = group;
                         ++group->demand.versions; ++group->demand.replicas;
                     }
@@ -2980,35 +3331,53 @@ try {
             // External directory nodes live until their retained shard dies.
             // Bind each original position once, in bounded preparation gates.
             for (size_t batch = first; batch < end;) {
-                while (batch < end && rows[batch].metadataAcceptance.input->replacement.native) ++batch;
+                while (batch < end && rows[batch].metadataAcceptance.input->replacement.native
+                    && (!published || rows[batch].metadataAcceptance.input->supersededAuthority)) ++batch;
                 if (batch == end) break;
                 const size_t batchEnd = std::min(end, batch + 16);
                 QMutexLocker lock(&shard->mutex);
                 for (size_t i = batch; i < batchEnd; ++i) {
                     auto &work = rows[i].metadataAcceptance;
                     auto &input = *work.input;
-                    if (input.replacement.native) continue;
+                    if (input.replacement.native && (!published || input.supersededAuthority)) continue;
                     if (!retained) {
                         result.m_mutationCapacity->retainShard(shard);
                         retained = true;
                     }
-                    const auto found = shard->pages.find(input.mutationVersion().key);
-                    if (found == shard->pages.end()
-                        || !shard->canMutate(found->first, found->second)
-                        || !shard->validDetachment(found->second, input.mutationVersion(), nullptr,
-                            transaction.id, input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot)) return {};
-                    input.detachesSuperseded = input.detachesSuperseded
+                    MetadataPage *page = published ? static_cast<MetadataPage *>(work.page) : nullptr;
+                    if (!published) {
+                        const auto found = shard->pages.find(input.mutationVersion().key);
+                        if (found != shard->pages.end()) page = &found->second;
+                    }
+                    if (!page || !shard->canMutate(input.mutationVersion().key, *page)
+                        || (published ? !shard->validPublication(*page, input, work, transaction.id, minimumEpoch)
+                            : !shard->validDetachment(*page, input.mutationVersion(), nullptr,
+                                transaction.id, input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot))) return {};
+                    if (!published) input.detachesSuperseded = input.detachesSuperseded
                         && shard->records.canDetachPrepared(input.mutationVersion());
-                    if (input.detachesSuperseded)
-                        work.prepared = result.m_mutationCapacity->appendReleased();
-                    work.page = &found->second;
-                    ++shard->preparedMutationPages;
-                    ++shard->publicationHistoryNodesPrepared;
+                    if (published || input.detachesSuperseded) {
+                        if (published) {
+                            auto *references = result.m_mutationCapacity->appendCanonical();
+                            if (!input.replacement.native)
+                                work.prepared = static_cast<MetadataReleasedReferences *>(references);
+                            const auto *current = shard->records.version(page->publishedVersion); Q_ASSERT(current);
+                            references->source = shard->records.projectReplica(current->authorityReplica);
+                            if (!input.replacement.native) {
+                                const auto *target = shard->records.version(work.replacementSlot); Q_ASSERT(target);
+                                references->targetAuthority = shard->records.projectReplica(target->authorityReplica);
+                            }
+                            input.supersededAuthority = &references->source;
+                            input.canonicalRecord = references;
+                        } else work.prepared = result.m_mutationCapacity->appendReleased();
+                    }
+                    work.page = page;
+                    ++(published ? shard->preparedPublicationPages : shard->preparedMutationPages);
+                    if (!published) ++shard->publicationHistoryNodesPrepared;
                 }
                 batch = batchEnd;
             }
             if (group) {
-                const auto grown = group->prepare(rows, first, end, transaction.id, error);
+                const auto grown = group->prepare(rows, first, end, transaction.id, error, minimumEpoch);
                 if (grown != MetadataGrowthResult::Ready) {
                     result.m_failure = grown == MetadataGrowthResult::Stale
                         ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
@@ -3033,7 +3402,17 @@ catch (const std::bad_alloc &) {
     return refused;
 }
 
-bool KisPageMetadataCoordinator::prepareMutationCapacity(PreparedPublication &prepared, QString *error) const
+KisPageMetadataCoordinator::PreparedPublication KisPageMetadataCoordinator::prepareAcceptance(
+    const KisPageTransaction &transaction, KisPagePublicationChanges &&owned, QString *error,
+    KisImageEpochId epoch, bool detachCurrent, const PublicationChange *generic, qsizetype genericCount) const
+{
+    auto result = prepareAcceptance(transaction, KisPagePublicationRows{owned.data(), owned.size()},
+                                    error, epoch, detachCurrent, generic, genericCount);
+    if (result.isValid()) result.m_ownedRows.emplace(std::move(owned));
+    return result;
+}
+
+bool KisPageMetadataCoordinator::prepareAcceptanceCapacity(PreparedPublication &prepared, QString *error) const
 try {
     auto *d = m_core.load(std::memory_order_acquire);
     const auto fail = [&](PreparedPublication::Failure failure, const QString &message) {
@@ -3044,7 +3423,7 @@ try {
         KisPageStoreDetail::setError(error, message);
         return false;
     };
-    if (!prepared.needsMutationCapacity() || !d || prepared.m_owner != d->publicationOwner)
+    if (!prepared.needsAcceptanceCapacity() || !d || prepared.m_owner != d->publicationOwner)
         return fail(PreparedPublication::Failure::Conflict, QStringLiteral("mutation preparation is stale or not awaiting capacity"));
     const auto rows = prepared.m_rows;
     const size_t count = prepared.m_count;
@@ -3080,7 +3459,7 @@ try {
                 ++group->demand.versions; ++group->demand.replicas;
             }
             if (group) {
-                const auto grown = group->prepare(rows, first, end, prepared.m_transaction.id, error);
+                const auto grown = group->prepare(rows, first, end, prepared.m_transaction.id, error, prepared.m_minimumEpoch);
                 if (grown != MetadataGrowthResult::Ready)
                     return fail(grown == MetadataGrowthResult::Stale ? PreparedPublication::Failure::Conflict
                         : PreparedPublication::Failure::Storage, QStringLiteral("mutation capacity repair was refused"));
@@ -3101,27 +3480,35 @@ catch (const std::bad_alloc &) {
     return false;
 }
 
-void KisPageMetadataCoordinator::DeferredPublicationCleanup::forEachDetachedBacking(
-    void *context, void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const
-{
-    if (!data || !data->installed) return;
-    for (const auto &entry : data->backingAuthorities)
-        if (entry.detached) visit(context, entry.replica, entry.acceptedIdle);
-}
 
-bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
-    const KisPageTransaction &transaction, QString *error)
+bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepared,
+    const KisPageTransaction &transaction, QString *error, KisImageEpochId epoch,
+    DeferredPublicationCleanup *deferredCleanup, PreparationKind kind)
 {
     // The original D is the sole mutation capability. Root/lease candidates
     // cannot be consumed as a mutation, even when their identities match.
-    auto rows = std::exchange(prepared.m_rows, {});
+    const auto rows = prepared.m_rows;
     const size_t count = std::exchange(prepared.m_count, 0);
-    auto foreignPublication = std::move(prepared.data);
     auto owner = std::move(prepared.m_owner);
+    auto data = std::move(prepared.data);
+    const bool mutation = kind != PreparationKind::Publication;
+    const bool published = prepared.m_minimumEpoch.isValid() || (data && data->minimumEpoch.isValid());
+    const bool canDeferCleanup = deferredCleanup && deferredCleanup->isEmpty();
+    const auto transferCleanup = qScopeGuard([&] {
+        if (canDeferCleanup && data) deferredCleanup->data = std::move(data);
+    });
     auto *d = m_core.load(std::memory_order_acquire);
-    if ((count && !rows) || !owner || foreignPublication || !d
-        || prepared.m_failure == PreparedPublication::Failure::Capacity || owner != d->publicationOwner
-        || !(prepared.m_transaction == transaction)) return false;
+    if ((count && !rows) || !d || (!owner && !data)
+        || (owner && (owner != d->publicationOwner || !(prepared.m_transaction == transaction)))
+        || epoch.isValid() != published || (prepared.m_minimumEpoch.isValid() && epoch.value < prepared.m_minimumEpoch.value)
+        || prepared.m_failure == PreparedPublication::Failure::Capacity
+        || (deferredCleanup && !canDeferCleanup)
+        || (data && (data->owner != d->publicationOwner || data->kind != kind
+            || data->minimumEpoch.isValid() == mutation || !(data->transaction == transaction)
+            || (published && epoch.value < data->minimumEpoch.value)))) {
+        KisPageStoreDetail::setError(error, QStringLiteral("metadata acceptance capability is stale or foreign"));
+        return false;
+    }
     const auto batchEnd = [rows](size_t first, size_t limit) {
         size_t end = first + 1;
         while (end < limit && end - first < 16
@@ -3132,7 +3519,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
     // and installing. Keep its one gate instead of creating publication
     // claims whose only consumer would be this same locked call. Larger or
     // multi-shard input still uses the original all-D claim protocol.
-    const bool singleWindow = count && batchEnd(0, count) == count;
+    const bool singleWindow = count && !data && batchEnd(0, count) == count;
     std::optional<QMutexLocker<QMutex>> shardLock;
     size_t claimed = 0;
     bool needsCapacity = false;
@@ -3151,13 +3538,18 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
                 ? static_cast<MetadataPage *>(native->location.page) : nullptr
                 : static_cast<MetadataPage *>(work.page);
             if (!page || !shard->canMutate(version.key, *page)) break;
-            if (!shard->validDetachment(*page, version, native, transaction.id,
-                                        input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot)) break;
+            if (published ? !shard->validPublication(*page, input, work, transaction.id, epoch)
+                : !shard->validDetachment(*page, version, native, transaction.id,
+                    input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot)) break;
+            const auto *current = published ? shard->records.version(page->publishedVersion) : nullptr;
+            const auto &sourceVersion = published ? current->version : version;
             const bool reuse = native && !work.prepared;
-            work.replacementSlot = reuse
-                ? shard->records.replacementSlot(version, input.superseded.metadataSlot) : KisVersionSlotId{};
-            const bool available = reuse ? work.replacementSlot.isValid()
-                : !input.detachesSuperseded || shard->records.canDetachPrepared(version);
+            if (native) work.replacementSlot = reuse
+                ? shard->records.replacementSlot(sourceVersion, published ? page->publishedVersion : input.superseded.metadataSlot)
+                : KisVersionSlotId{};
+            const bool available = reuse ? input.detachesSuperseded && work.replacementSlot.isValid()
+                : !input.detachesSuperseded || (published ? shard->records.canDetachPublished(sourceVersion)
+                                                          : shard->records.canDetachPrepared(sourceVersion));
             if (!available) {
                 if (!needsCapacity && reuse) ++shard->nativeCapacityRetries;
                 needsCapacity = true;
@@ -3180,7 +3572,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
             for (size_t i = first; i < end; ++i) {
                 auto &work = rows[i].metadataAcceptance;
                 if (!singleWindow) static_cast<MetadataPage *>(work.page)->activity.publicationClaim = nullptr;
-                work.replacementSlot = {};
+                if (work.input->replacement.native) work.replacementSlot = {};
             }
             shardLock.reset();
             first = end;
@@ -3189,17 +3581,44 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
         if (count) {
             auto *shard = static_cast<MetadataShard *>(rows[0].metadataAcceptance.shard);
             QMutexLocker lock(&shard->mutex);
-            ++shard->rejectedMutationInstalls;
+            ++(published ? shard->rejectedPublicationInstalls : shard->rejectedMutationInstalls);
         }
         const bool retry = claimed == count && needsCapacity;
         if (retry) {
             prepared.m_rows = rows;
             prepared.m_count = count;
             prepared.m_owner = std::move(owner);
+            prepared.data = std::move(data);
             prepared.m_failure = PreparedPublication::Failure::Capacity;
         }
         KisPageStoreDetail::setError(error, QStringLiteral("mutation acceptance lost identity or capacity"));
         return false;
+    }
+    if (data) {
+        const size_t genericClaimed = data->claimRows();
+        if (genericClaimed != data->entries.size()) {
+            data->releaseClaims(genericClaimed);
+            for (size_t first = 0; first < count;) {
+                const size_t end = batchEnd(first, count);
+                auto *shard = static_cast<MetadataShard *>(rows[first].metadataAcceptance.shard);
+                QMutexLocker gate(&shard->mutex);
+                for (size_t i = first; i < end; ++i)
+                    static_cast<MetadataPage *>(rows[i].metadataAcceptance.page)->activity.publicationClaim = nullptr;
+                first = end;
+            }
+            if (!data->entries.empty()) {
+                QMutexLocker gate(&data->entries.front().shardOwner->mutex);
+                ++(mutation ? data->entries.front().shardOwner->rejectedMutationInstalls
+                            : data->entries.front().shardOwner->rejectedPublicationInstalls);
+            }
+            prepared.m_failure = PreparedPublication::Failure::Conflict;
+            KisPageStoreDetail::setError(error, QStringLiteral("generic output changed before complete acceptance"));
+            return false;
+        }
+        // Both subsets are now claimed. No fallible work remains before all
+        // original facts and genuine header outputs reach their one accept cut.
+        data->installRows(mutation, kind == PreparationKind::RecoverableWrite,
+            kind == PreparationKind::PrivateWrite, epoch);
     }
     // Input kind and storage lifetime no longer choose a whole-D protocol.
     // Every row consumes the same claims, disposition and installation policy.
@@ -3216,15 +3635,18 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
             Q_ASSERT(page && (singleWindow || page->activity.publicationClaim == &rows[0]));
             std::shared_ptr<const KisPageAllocationDescriptor> oldDescriptor;
             std::shared_ptr<KisCpuResidentBinding> oldBinding;
-            auto *released = native ? nullptr
-                : static_cast<PreparedPublication::MutationCapacity::ReleasedReferences *>(work.prepared);
+            auto *released = published && input.canonicalRecord
+                ? static_cast<MetadataReleasedReferences *>(static_cast<MetadataAcceptanceReferences *>(input.canonicalRecord))
+                : native ? nullptr : static_cast<MetadataReleasedReferences *>(work.prepared);
             auto *releasedDescriptor = released ? &released->descriptor : &oldDescriptor;
             auto *releasedBinding = released ? &released->binding : &oldBinding;
             auto *group = input.replacement.native
                 ? static_cast<PreparedPublication::MutationCapacity::Group *>(work.prepared) : nullptr;
             auto *reservation = group ? &group->reservation : nullptr;
-            shard->installDetachment(*page, version, native, input.detachesSuperseded,
-                                     work.replacementSlot, reservation, releasedDescriptor, releasedBinding);
+            if (published) shard->installPublished(*page, input, work, transaction.id, epoch,
+                reservation, releasedDescriptor, releasedBinding);
+            else shard->installDetachment(*page, version, native, input.detachesSuperseded,
+                work.replacementSlot, reservation, releasedDescriptor, releasedBinding, input.superseded.metadataSlot);
             if (native) {
                 native->descriptor.swap(oldDescriptor);
                 native->binding.swap(oldBinding);
@@ -3247,7 +3669,7 @@ bool KisPageMetadataCoordinator::installMutation(PreparedPublication &&prepared,
     return true;
 }
 
-void KisPageMetadataCoordinator::finishMutation(KisPagePublicationRows rows)
+void KisPageMetadataCoordinator::finishAcceptance(KisPagePublicationRows rows)
 {
     for (auto &row : rows) {
         auto &work = row.metadataAcceptance;
@@ -3273,8 +3695,8 @@ bool KisPageMetadataCoordinator::installRecoverableWrite(PreparedPublication &&p
                                                         QString *error,
                                                         DeferredPublicationCleanup *deferredCleanup)
 {
-    return installPublicationImpl(std::move(prepared), transaction, {}, error,
-                                  PreparationKind::RecoverableWrite, deferredCleanup);
+    return installAcceptance(std::move(prepared), transaction, error, {}, deferredCleanup,
+                             PreparationKind::RecoverableWrite);
 }
 
 KisPageMetadataCoordinator::PreparedPublication
@@ -3290,8 +3712,8 @@ bool KisPageMetadataCoordinator::installLeaseWrite(PreparedPublication &&prepare
                                                     QString *error,
                                                     DeferredPublicationCleanup *deferredCleanup)
 {
-    return installPublicationImpl(std::move(prepared), transaction, {}, error,
-        PreparationKind::PrivateWrite, deferredCleanup);
+    return installAcceptance(std::move(prepared), transaction, error, {}, deferredCleanup,
+                             PreparationKind::PrivateWrite);
 }
 
 KisPageMetadataCoordinator::PreparedPublication
@@ -3317,6 +3739,33 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata publication identity is invalid"));
         return result;
     }
+    if (!mutation && !restoration) {
+        const auto kindAt = [&](qsizetype i) { return changes ? changes[i].kind : transitions[i].kind; };
+        size_t commits = 0;
+        for (qsizetype i = 0; i < count; ++i) commits += kindAt(i) == KisPageTransitionKind::CommitTransaction;
+        if (commits) {
+            KisPagePublicationChanges rows{d->budgetAuthority->storage<KisPagePublicationChange>()};
+            std::vector<PublicationChange, KisMutationStorageAllocator<PublicationChange>> sparse{
+                d->budgetAuthority->storage<PublicationChange>()};
+            rows.reserve(commits); sparse.reserve(size_t(count) - commits);
+            for (qsizetype i = 0; i < count; ++i) {
+                const auto &version = changes ? changes[i].version : transitions[i].version;
+                if (kindAt(i) == KisPageTransitionKind::CommitTransaction) {
+                    if (!changes && (!(transitions[i].transaction == transaction.id)
+                        || !(transitions[i].imageEpoch == minimumEpoch))) return {};
+                    auto *native = nativeWrite(version);
+                    if (native) rows.emplace_back(KisPagePublicationChange::Replacement{native});
+                    else rows.emplace_back(KisPagePublicationChange::Replacement{version.key,
+                        KisPagePublicationIdentity{version, transaction.id, 0, false}});
+                } else sparse.push_back({kindAt(i), version, changes ? changes[i].target : transitions[i].target});
+            }
+            std::sort(rows.begin(), rows.end(), [](const auto &a, const auto &b) {
+                return MetadataKeyLess{}(a.replacement.key(), b.replacement.key());
+            });
+            return prepareAcceptance(transaction, std::move(rows), error, minimumEpoch,
+                detachUnprotectedCurrent, sparse.data(), qsizetype(sparse.size()));
+        }
+    }
     const size_t mutationCount = size_t(count);
     const auto storageOwner = d->budgetAuthority->storage<char>();
     const size_t bytesPerPage = sizeof(PreparedPublication::Data::Entry)
@@ -3324,12 +3773,8 @@ try {
     if (mutationCount > size_t(std::numeric_limits<qint64>::max()) / bytesPerPage)
         throw std::bad_alloc();
     size_t shardCount = 0;
-    size_t genericCount = 0;
-    const auto needsGeneric = [&](qsizetype i) {
-        return versions || (changes ? changes[i].kind : transitions[i].kind) != KisPageTransitionKind::CommitTransaction;
-    };
     if (mutationCount) {
-        if (count == 1) { shardCount = 1; genericCount = needsGeneric(0); }
+        if (count == 1) { shardCount = 1; }
         else {
             // configure() bounds shards at4096. This stack capacity census
             // supplies no page authority; the existing preparation below
@@ -3339,12 +3784,11 @@ try {
                 const auto &key = versions ? versions[i].key
                     : changes ? changes[i].version.key : transitions[i].version.key;
                 usedShards.set(kisStablePageKeyHash(key) % d->shards.size());
-                genericCount += needsGeneric(i);
             }
             shardCount = usedShards.count();
         }
     }
-    auto data = PreparedPublication::Data::create(storageOwner, mutationCount, shardCount, genericCount);
+    auto data = PreparedPublication::Data::create(storageOwner, mutationCount, shardCount);
     const auto storage = data->storage.borrowed();
     data->owner = d->publicationOwner;
     data->transaction = transaction;
@@ -3440,7 +3884,6 @@ try {
                 auto &entry = data->entries[i];
                 KisPageTransition input;
                 const auto &transition = transitionAt(entry.inputOrdinal, input);
-                const bool write = transition.kind == KisPageTransitionKind::CommitTransaction;
                 const auto page = shard->pages.find(transition.version.key);
                 if (page == shard->pages.cend() || !page->second.revisionCanAdvance()
                     || page->second.activity.publicationClaim) {
@@ -3448,75 +3891,10 @@ try {
                     return result;
                 }
                 entry.originalPage = page;
-                const auto *activity = &page->second.activity;
                 entry.revision = page->second.revision;
                 auto &publication = data->publications[i];
-                const auto *published = shard->records.version(page->second.publishedVersion);
-                Q_ASSERT(published);
-                const KisPageVersion current = published->version;
-                // This only prepares a disposition. The epoch owner must
-                // revalidate its no-consumer fact at atomic installation;
-                // this page's exact protection is covered by its revision.
-                entry.releaseUnusedCapacity = detachUnprotectedCurrent && write
-                    && !(current == transition.version) && shard->records.canDetachPublished(current);
-                if (write) {
-                    // Borrow only original semantic rows while their shard
-                    // is locked. Native input remains owned by the caller;
-                    // the existing revision claim covers the later install.
-                    if (activity->nativeWrite) {
-                        entry.native = activity->nativeWrite;
-                        if (!entry.native->completed || !entry.native->proof.isValid()
-                            || !(entry.native->target.version == transition.version)
-                            || !(entry.native->proof.transaction == transaction.id)) return result;
-                    }
-                    entry.reuseNativeSlots = entry.native && entry.releaseUnusedCapacity
-                        && shard->records.canReplaceUnused(current);
-                    KisVersionRecord incoming;
-                    const KisVersionRecord *target = nullptr;
-                    if (entry.native) {
-                        incoming.version = entry.native->target.version;
-                        incoming.publication = KisPagePublicationState::Prepared;
-                        incoming.preparedBy = transaction.id;
-                        target = &incoming;
-                    } else {
-                        KisVersionSlotId slot;
-                        if (shard->records.findVersion(transition.version, &slot))
-                            target = shard->records.version(slot);
-                    }
-                    // The exact native reservation above is consumed by
-                    // this conversion; other mutable facts stay in place.
-                    const auto failure = kisPageCommitPolicy(page->second.publishedEpoch, KisPageGeneration{}, transition,
-                        target, static_cast<const KisVersionRecord *>(published),
-                        [&](auto visit) {
-                            for (auto slot = page->second.firstMutable; slot.isValid();) {
-                                const auto *record = shard->records.version(slot);
-                                Q_ASSERT(record);
-                                visit(*record);
-                                slot = record->nextMutable;
-                            }
-                        },
-                        [&](const auto &record, auto state, auto preparedBy) {
-                            const bool incomingNative = entry.native && &record == &incoming;
-                            const bool detach = entry.releaseUnusedCapacity && record.version == current;
-                            const auto authority = incomingNative ? entry.native->target
-                                : shard->records.projectReplica(record.authorityReplica);
-                            if (authority.isValid())
-                                data->backingAuthorities.push_back({record.version, authority, detach});
-                            if (!incomingNative) {
-                                publication.deltas.push_back({record.version, state, preparedBy, detach});
-                                ++shard->publicationVersionInputs;
-                            }
-                        });
-                    if (!failure.isEmpty()) {
-                        KisPageStoreDetail::setError(error, failure);
-                        return result;
-                    }
-                    continue;
-                }
-                data->genericPublications.push_back(PreparedPublication::Data::GenericPublication(storage));
-                publication.generic = &data->genericPublications.back();
-                publication.generic->next = shard->header(transition.version.key, page->second);
-                auto &facts = publication.generic->installRecords;
+                publication.next = shard->header(transition.version.key, page->second);
+                auto &facts = publication.installRecords;
                 if (writePreparation) facts.reserve(2);
                 const auto include = [&](const KisPageVersion &identity) {
                     if (std::any_of(facts.cbegin(), facts.cend(), [&](const auto &v) { return v.version == identity; }))
@@ -3533,8 +3911,8 @@ try {
                     }
                 };
                 if (!privateWrite)
-                    include({publication.generic->next.key, publication.generic->next.publishedGeneration,
-                        publication.generic->next.publishedDefaultPixelRevision});
+                    include({publication.next.key, publication.next.publishedGeneration,
+                        publication.next.publishedDefaultPixelRevision});
                 if (writePreparation)
                     include(transition.baseVersion);
                 include(transition.version);
@@ -3563,14 +3941,11 @@ try {
         const auto &publication = data->publications[i];
         if (!writePreparation) {
             for (const auto &delta : publication.deltas)
-                shard->publicationHistoryNodesPrepared += !delta.detach
-                    && delta.publication == KisPagePublicationState::Historical;
-            if (publication.generic)
-                for (const auto &record : publication.generic->installRecords)
-                    shard->publicationHistoryNodesPrepared += record.publication == KisPagePublicationState::Historical;
+                shard->publicationHistoryNodesPrepared += delta.publication == KisPagePublicationState::Historical;
+            for (const auto &record : publication.installRecords)
+                shard->publicationHistoryNodesPrepared += record.publication == KisPagePublicationState::Historical;
         }
-        shard->publicationAdditionRecordsPrepared += publication.generic ? publication.generic->installRecords.size()
-            - (recoverable ? 1 : 0) : (data->entries[i].native ? 1 : 0);
+        shard->publicationAdditionRecordsPrepared += publication.installRecords.size() - (recoverable ? 1 : 0);
     };
     const auto recordPreparationWork = qScopeGuard([&] {
         // Includes accepted policy work when a later allocation/revalidation
@@ -3587,17 +3962,13 @@ try {
     for (size_t i = 0; i < data->entries.size(); ++i) {
         auto &entry = data->entries[i];
         auto &publication = data->publications[i];
-        if (!publication.generic) {
-            ++preparedPolicies;
-            continue;
-        }
+
         KisPageTransition input;
         const auto &transition = transitionAt(entry.inputOrdinal, input);
         KisPageWorkingResult step(storage);
         auto &before = step.next;
-        before.setHeader(publication.generic->next);
-        before.versions = std::move(publication.generic->installRecords);
-        const KisPageVersion previous{before.key, before.publishedGeneration, before.publishedDefaultPixelRevision};
+        before.setHeader(publication.next);
+        before.versions = std::move(publication.installRecords);
         // The expensive deterministic work is outside the shard lock and is
         // reused at installation. Revision revalidation includes leases,
         // Only coordinator-owned state reaches this private capability. Like
@@ -3632,14 +4003,12 @@ try {
             return version.authority.isValid() && (!writePreparation
                 || (!(version.version == transition.baseVersion) && !(version.version == transition.version)));
         };
-        for (auto &delta : publication.deltas)
-            delta.detach = entry.releaseUnusedCapacity && delta.version == previous;
         if (data->backingAuthorities.empty())
             data->backingAuthorities.reserve(size_t(std::count_if(step.next.versions.cbegin(),
                 step.next.versions.cend(), copiedAuthority)));
         for (const auto &version : std::as_const(step.next.versions))
             if (copiedAuthority(version)) data->backingAuthorities.push_back(
-                {version.version, version.authority, entry.releaseUnusedCapacity && version.version == previous});
+                {version.version, version.authority});
         if (privateWrite) {
             // The original base and all of its protection stay in the arena.
             // The next writer identifies its one pin delta; the strict page
@@ -3649,7 +4018,7 @@ try {
                 return !(record.version == transition.version);
             }), records.end());
             Q_ASSERT(records.size() == 1);
-            publication.generic->installRecords = std::move(records);
+            publication.installRecords = std::move(records);
         } else if (recoverable) {
             // Strict revision revalidation covers every replica/reader fact
             // used here. Install only this exact base and the new target, in
@@ -3665,7 +4034,7 @@ try {
             }), records.end());
             Q_ASSERT(records.size() == 2 && records[0].version == transition.baseVersion
                 && records[1].version == transition.version);
-            publication.generic->installRecords = std::move(records);
+            publication.installRecords = std::move(records);
         } else {
             for (size_t index = inputCount; index < step.next.versions.size(); ++index) {
                 const auto &version = step.next.versions[index];
@@ -3680,7 +4049,7 @@ try {
                 // replica/protection values can be destroyed during prepare.
                 auto &records = step.next.versions;
                 records.erase(records.begin(), records.begin() + inputCount);
-                publication.generic->installRecords = std::move(records);
+                publication.installRecords = std::move(records);
             }
         }
         // Ordinary publication only changes publication fields. Recoverable
@@ -3688,7 +4057,7 @@ try {
         // any intervening reader/pin/last-use change rejects that candidate.
         ++preparedPolicies;
         // Headers never own version records at install.
-        publication.generic->next = step.next.header();
+        publication.next = step.next.header();
         Q_ASSERT(step.effects.empty());
     }
     for (size_t first = 0; first < data->entries.size();) {
@@ -3705,20 +4074,13 @@ try {
                 return result;
             }
             auto &publication = data->publications[i];
-            auto demand = publication.generic ? shard->records.batchDemand(publication.generic->installRecords)
-                                              : MetadataArenaDemand{};
-            const bool nativeAddition = !publication.generic && entry.native && !entry.reuseNativeSlots;
-            if (nativeAddition) { demand.versions = 1; demand.replicas = 1; }
+            auto demand = shard->records.batchDemand(publication.installRecords);
             recordPolicyWork(i);
             ++recordedPolicies;
-            qsizetype physicalInsertions = nativeAddition ? 1 : 0;
-            if (publication.generic)
-                for (const auto &record : publication.generic->installRecords)
-                    physicalInsertions += record.replicas.size();
-            if (entry.reuseNativeSlots) continue; // No new record/index capacity or arena cleanup.
+            qsizetype physicalInsertions = 0;
+            for (const auto &record : publication.installRecords) physicalInsertions += record.replicas.size();
             data->addArenaDemand(i, demand,
-                (publication.generic ? qsizetype(publication.generic->installRecords.size()) - (recoverable ? 1 : 0)
-                                     : (nativeAddition ? 1 : 0)), physicalInsertions);
+                qsizetype(publication.installRecords.size()) - (recoverable ? 1 : 0), physicalInsertions);
         }
         first = end;
     }
@@ -3774,8 +4136,7 @@ try {
             bool stillValid = entry.shardOwner->canMutate(entry.key(), page->second)
                 && page->second.revision == entry.revision;
             const bool genericReady = !stillValid
-                || !data->publications[i].generic
-                || entry.shardOwner->ensureActivityCapacity(entry.key(), &data->publications[i].generic->next, error);
+                || entry.shardOwner->ensureActivityCapacity(entry.key(), &data->publications[i].next, error);
             if (!stillValid || !genericReady || !entry.shardOwner->reservePublicationActivity(page->second)) {
                 KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication activity"));
                 result.m_failure = !stillValid
@@ -3808,232 +4169,9 @@ bool KisPageMetadataCoordinator::installPublication(PreparedPublication &&prepar
                                                     QString *error,
                                                     DeferredPublicationCleanup *deferredCleanup)
 {
-    return installPublicationImpl(std::move(prepared),
-                                  transaction,
-                                  epoch,
-                                  error,
-                                  PreparationKind::Publication,
-                                  deferredCleanup);
+    return installAcceptance(std::move(prepared), transaction, error, epoch, deferredCleanup);
 }
 
-bool KisPageMetadataCoordinator::installPublicationImpl(PreparedPublication &&prepared,
-                                                        const KisPageTransaction &transaction,
-                                                        KisImageEpochId epoch,
-                                                        QString *error,
-                                                        PreparationKind kind,
-                                                        DeferredPublicationCleanup *deferredCleanup)
-{
-    const bool mutation = kind != PreparationKind::Publication;
-    const bool recoverable = kind == PreparationKind::RecoverableWrite;
-    const bool privateWrite = kind == PreparationKind::PrivateWrite;
-    // Consume even on rejection: callers must prepare again after a conflict.
-    prepared.m_rows = {};
-    prepared.m_count = 0;
-    prepared.m_owner.reset();
-    auto data = std::move(prepared.data);
-    const auto recordRejectedInstall = [&] {
-        if (!data || data->entries.empty() || !data->entries.front().shardOwner)
-            return;
-        QMutexLocker locker(&data->entries.front().shardOwner->mutex);
-        ++(mutation ? data->entries.front().shardOwner->rejectedMutationInstalls
-                    : data->entries.front().shardOwner->rejectedPublicationInstalls);
-    };
-    const bool canDeferCleanup = deferredCleanup && deferredCleanup->isEmpty();
-    const auto transferCleanup = qScopeGuard([&] {
-        if (canDeferCleanup && data)
-            deferredCleanup->data = std::move(data);
-    });
-    auto *d = m_core.load(std::memory_order_acquire);
-    if ((deferredCleanup && !canDeferCleanup) || !data || !d
-        || data->owner != d->publicationOwner || data->kind != kind
-        || data->minimumEpoch.isValid() == mutation
-        || !(data->transaction == transaction)
-        || (!mutation && (!epoch.isValid() || epoch.value < data->minimumEpoch.value))
-        || (mutation && epoch.isValid())) {
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata publication capability is stale or foreign"));
-        recordRejectedInstall();
-        return false;
-    }
-    qsizetype claimed = 0;
-    // All claims are checked before changing any state. Never hold multiple
-    // shard locks; a competing mutation is rejected/deferred while claimed.
-    // Claims live only inside this synchronous call, with no provider work,
-    // root construction, callback or external completion wait inside the
-    // claim interval. Individual shard mutex acquisition can still wait.
-    for (size_t first = 0; first < data->entries.size();) {
-        const size_t end = data->batchEnd(first, data->entries.size());
-        QMutexLocker locker(&data->entries[first].shardOwner->mutex);
-        for (size_t i = first; i < end; ++i) {
-            auto &entry = data->entries[i];
-            auto page = entry.originalPage;
-            if (!entry.shardOwner->canMutate(entry.key(), page->second))
-                break;
-            if (page->second.revision != entry.revision)
-                break;
-            Q_ASSERT(entry.activityReservation);
-            // Keep the existing reservation until this Data is cleaned outside
-            // installation. Clearing the transient claim cannot then erase/free
-            // an otherwise empty activity node under the publication gate.
-            page->second.activity.publicationClaim = data.get();
-            ++claimed;
-        }
-        if (claimed != qsizetype(end)) break;
-        first = end;
-    }
-    if (claimed != qsizetype(data->entries.size())) {
-        // No page was edited. Release every claim already acquired.
-        for (size_t first = 0; first < size_t(claimed);) {
-            const size_t end = data->batchEnd(first, size_t(claimed));
-            QMutexLocker locker(&data->entries[first].shardOwner->mutex);
-            for (size_t i = first; i < end; ++i)
-                data->entries[i].originalPage->second.activity.publicationClaim = nullptr;
-            first = end;
-        }
-        KisPageStoreDetail::setError(error, QStringLiteral("metadata changed after publication preparation"));
-        recordRejectedInstall();
-        return false;
-    }
-    Q_ASSERT(data->publications.empty() || data->publications.size() == data->entries.size());
-    for (size_t first = 0; first < data->entries.size();) {
-        const size_t end = data->batchEnd(first, data->entries.size());
-        QMutexLocker locker(&data->entries[first].shardOwner->mutex);
-        for (size_t i = first; i < end; ++i) {
-            auto &entry = data->entries[i];
-            auto *publication = &data->publications[i];
-            auto page = entry.originalPage;
-            Q_ASSERT(page->second.activity.publicationClaim == data.get());
-            quint64 installedHistoryLinks = 0;
-            if (!mutation) {
-                installedHistoryLinks +=
-                    quint64(std::count_if(publication->deltas.cbegin(), publication->deltas.cend(), [](const auto &delta) {
-                        return !delta.detach && delta.publication == KisPagePublicationState::Historical;
-                    }));
-                if (publication->generic)
-                    installedHistoryLinks +=
-                        quint64(std::count_if(publication->generic->installRecords.cbegin(), publication->generic->installRecords.cend(), [](const auto &addition) {
-                            return addition.publication == KisPagePublicationState::Historical;
-                        }));
-            }
-            // Epoch allocation may have skipped an identity on an earlier failed
-            // root build. These transitions use the epoch only as a newer tag.
-            KisVersionSlotId acceptedNativeSlot;
-            if (recoverable) {
-                auto &reservation = data->arenaGrowth.at(entry.arenaGrowthIndex).reservations;
-                for (const auto &record : publication->generic->installRecords) {
-                    const bool installed = entry.shardOwner->records.putReserved(&page->second, record, &reservation);
-                    Q_ASSERT(installed);
-                    Q_UNUSED(installed);
-                }
-                const bool headerInstalled = entry.shardOwner->installReservedHeader(entry.key(), &page->second, publication->generic->next);
-                Q_ASSERT(headerInstalled);
-                Q_UNUSED(headerInstalled);
-                ++page->second.revision;
-                ++entry.shardOwner->publicationAdditionRecordsTransferred;
-                entry.shardOwner->publicationVersionInstalls += publication->generic->installRecords.size();
-            } else {
-                if (!privateWrite && publication->generic) publication->generic->next.publishedEpoch = epoch;
-                if (!publication->generic && entry.native) {
-                    auto &records = entry.shardOwner->records;
-                    if (entry.reuseNativeSlots) {
-                        const auto previous = records.version(page->second.publishedVersion)->version;
-                        acceptedNativeSlot = records.replaceUnused(&page->second, previous, *entry.native,
-                            &entry.releasedDescriptor, &entry.releasedReadBinding, KisPagePublicationState::Published);
-                        ++entry.shardOwner->nativeSlotReplacements;
-                    } else {
-                        auto &reservation = data->arenaGrowth.at(entry.arenaGrowthIndex).reservations;
-                        acceptedNativeSlot = records.putNativeReserved(&page->second, *entry.native, &reservation,
-                            KisPagePublicationState::Published);
-                        ++entry.shardOwner->publicationAdditionRecordsTransferred;
-                    }
-                    ++entry.shardOwner->publicationVersionInstalls;
-                }
-                for (const auto &delta : std::as_const(publication->deltas)) {
-                    if (delta.detach) {
-                        if (entry.reuseNativeSlots) continue; // The old value was replaced in its original storage.
-                        Q_ASSERT(entry.releaseUnusedCapacity
-                            && entry.shardOwner->records.canDetachPublished(delta.version));
-                        entry.shardOwner->records.remove(&page->second, delta.version,
-                            &entry.releasedDescriptor, &entry.releasedReadBinding);
-                        continue;
-                    }
-                    const bool updated = entry.shardOwner->records.setPublication(&page->second,
-                                                                             delta.version,
-                                                                             delta.publication,
-                                                                             delta.preparedBy);
-                    Q_ASSERT(updated);
-                    Q_UNUSED(updated);
-                }
-                if (!publication->generic) {
-                    if (!acceptedNativeSlot.isValid()) {
-                        const bool found = entry.shardOwner->records.findVersion(entry.version, &acceptedNativeSlot);
-                        Q_ASSERT(found); Q_UNUSED(found);
-                    }
-                    // CommitTransaction changes exactly this published head.
-                    // Current writer, handoff, next generation and protection
-                    // remain authoritative; the full-D revision claim holds.
-                    page->second.publishedVersion = acceptedNativeSlot;
-                    page->second.publishedEpoch = epoch;
-                } else {
-                    const auto additionRecords = quint64(publication->generic->installRecords.size());
-                    auto &reservation = data->arenaGrowth.at(entry.arenaGrowthIndex).reservations;
-                    const bool additionsInstalled = entry.shardOwner->records.installPreparedAdditionsReserved(&page->second,
-                                                                                                          &publication->generic->installRecords,
-                                                                                                          &reservation);
-                    Q_ASSERT(additionsInstalled);
-                    Q_UNUSED(additionsInstalled);
-                    if (privateWrite && publication->generic->next.writer.baseAuthority.isValid()) {
-                        const auto &writer = publication->generic->next.writer;
-                        KisVersionSlotId base;
-                        KisReplicaSlotId authority;
-                        const bool found = entry.shardOwner->records.findVersion(writer.baseVersion, &base)
-                            && entry.shardOwner->records.findReplicaSlot(base, writer.baseAuthority, &authority);
-                        Q_ASSERT(found); Q_UNUSED(found);
-                        // AcquireWrite already checked overflow. No intervening
-                        // reader can pass the revision claim above; update only
-                        // its pin, preserving every unrelated protection node.
-                        ++entry.shardOwner->records.replica(authority)->pinCount;
-                    }
-                    entry.shardOwner->publicationAdditionRecordsTransferred += additionRecords;
-                    const bool headerInstalled = entry.shardOwner->installReservedHeader(entry.key(), &page->second, publication->generic->next);
-                    Q_ASSERT(headerInstalled);
-                    Q_UNUSED(headerInstalled);
-                    entry.shardOwner->publicationVersionInstalls += additionRecords;
-                }
-                ++page->second.revision;
-                entry.shardOwner->publicationVersionInstalls += quint64(publication->deltas.size());
-            }
-            if (entry.native) {
-                auto *native = entry.native;
-                if (!acceptedNativeSlot.isValid()) {
-                    const bool found = entry.shardOwner->records.findVersion(native->target.version, &acceptedNativeSlot);
-                    Q_ASSERT(found); Q_UNUSED(found);
-                }
-                entry.shardOwner->acceptNativeResult(page->second, acceptedNativeSlot, *native);
-            }
-            entry.shardOwner->publicationHistoryNodesTransferred += installedHistoryLinks;
-            ++(mutation ? entry.shardOwner->installedMutationPages
-                        : entry.shardOwner->installedPublicationPages);
-            // All page facts were claimed before the first install; after this
-            // page's final write no later step can overwrite a new reader/last-use
-            // mutation here. Release under the same lock, not a third lock pass.
-            page->second.activity.publicationClaim = nullptr;
-        }
-        first = end;
-    }
-    // Arena capacity was admitted for the whole shard batch. Reclaim only
-    // after every page consumed its slots; per-page reclaim could detach an
-    // empty block reserved for a later claimed page.
-    for (auto &growth : data->arenaGrowth) {
-        QMutexLocker locker(&growth.shardOwner->mutex);
-        growth.reservations.cancel(&growth.shardOwner->records);
-        growth.releasedBlocks = growth.shardOwner->arenas.takeEmptyBlocks(
-            &growth.shardOwner->budgetCharge);
-    }
-    data->installed = true;
-    data->owner.reset();
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
 
 KisPageMetadataCoordinator::KisPageMetadataCoordinator() = default;
 

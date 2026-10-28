@@ -769,9 +769,9 @@ void KisTiledDataManagerTest::testPageStoreDisjointOwnerPublication()
         // The finished facade can remain alive without retaining the original
         // page admission or blocking the next operation on that page.
         if (ending == 2) {
-            // Hard pressure can refuse the original cancellation's working
-            // storage. After relief its existing orphan task must finish,
-            // without destroying this facade or starting another operation.
+            // Existing paid capacity may complete acceptance at the hard
+            // limit. If preparation refuses instead, relief must let the
+            // original orphan finish without a new operation or facade exit.
             QTRY_COMPARE_WITH_TIMEOUT(store->sessionStats().activeCpuWritePages, qsizetype(0), 5000);
         } else {
             QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
@@ -786,9 +786,9 @@ void KisTiledDataManagerTest::testPageStoreDisjointOwnerPublication()
     dm.readBytes(reinterpret_cast<quint8 *>(b.data()), 64, 0, 1, 1);
     qInfo() << "disjoint owners" << siblingAccepted << finished << injected << a.toHex() << b.toHex();
     QVERIFY(siblingAccepted);
-    QCOMPARE(finished, ending == 0);
+    if (ending != 2) QCOMPARE(finished, ending == 0);
     QCOMPARE(injected, ending == 2);
-    QCOMPARE(a, ending == 0 ? first : warm ? initial : blank);
+    QCOMPARE(a, finished ? first : warm ? initial : blank);
     // No shared history was requested. An already successful independent
     // operation cannot be rolled back by this iterator's later refusal.
     QCOMPARE(b, second);
@@ -3295,7 +3295,9 @@ void KisTiledDataManagerTest::testPageStoreHistorySegmentRefusal()
     KisPageStoreDiagnosticRecorder recorder(true, store);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
         if (phase == KisPageStoreDiagnosticPhase::MutationAdapterInstalled) ++installations;
-        if (failure != 2 || phase != KisPageStoreDiagnosticPhase::CommitEpochPrepare || injected) return;
+        if (failure != 2 || phase != KisPageStoreDiagnosticPhase::CommitTransitionPreflight || injected) return;
+        // Exercise remaining acceptance work. Spare storage may be reclaimed
+        // at this hard limit, so success remains legal if actual admission fits.
         injected = true;
         const auto usage = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
         count = size_t(kisPageProcessStorageLimit() - usage.live.cpuRam - usage.reserved.cpuRam);
@@ -3303,6 +3305,7 @@ void KisTiledDataManagerTest::testPageStoreHistorySegmentRefusal()
     });
     QString error;
     const auto sealed = store->mutationStatistics().pagesSealed;
+    bool firstCommitAccepted = false;
     if (failure == 0) {
         QVERIFY(!backend->checkpointHistoryMutation(owner, &error,
             [&](const auto &changes, QString *message) {
@@ -3320,10 +3323,12 @@ void KisTiledDataManagerTest::testPageStoreHistorySegmentRefusal()
         QVERIFY(dm.checkpointStrokeMutation(owner, &error));
         QCOMPARE(store->readScopeStatistics().capturedReadViewsCreated, captures);
         QVERIFY(!backend->captureReadView().isValid());
-    } else QVERIFY(!dm.tryCommit(&error));
+    } else firstCommitAccepted = dm.tryCommit(&error);
     recorder.setPhaseObserver({});
     if (filler) freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
-    QVERIFY(injected); if (failure != 1) QVERIFY(!error.isEmpty());
+    QVERIFY(injected);
+    if (failure != 1 && !firstCommitAccepted) QVERIFY(!error.isEmpty());
+    if (firstCommitAccepted) QVERIFY(error.isEmpty());
     QCOMPARE(installations, failure ? 1 : 0);
     QCOMPARE(store->mutationStatistics().pagesSealed - sealed, quint64(failure ? 2 : 0));
     QVERIFY(tile->lockForRead()); QCOMPARE(tile->data()[0], quint8(failure ? 0x71 : 0x31)); tile->unlockForRead();

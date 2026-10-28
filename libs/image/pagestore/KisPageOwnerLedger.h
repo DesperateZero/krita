@@ -38,6 +38,9 @@ struct KisBackingClassChange
     // on commit; the publication gate protects the ledger-owned record until
     // its immediate Idle handover. Cancellation never publishes a pointer.
     KisPageRetirementRecord **idleResult = nullptr;
+    // Internal original-result location. Caller retains it through the ledger
+    // preparation window; this is not a capability at an external boundary.
+    KisPageRetirementRecord *original = nullptr;
 };
 
 /**
@@ -81,6 +84,8 @@ public:
     KisBackingHandoffReservation(KisBackingHandoffReservation &&) noexcept;
     KisBackingHandoffReservation &operator=(KisBackingHandoffReservation &&) noexcept;
     bool isValid() const { return m_owner; }
+    KisPageRetirementRecord *originalRecord() const
+    { return m_owner ? m_source->second.retirement : nullptr; }
     void release() noexcept;
 private:
     // The original caller already owns this one-shot lifetime. Its physical

@@ -490,7 +490,14 @@ public:
     bool resolveBackingChange(const KisBackingClassChange &change,
                               ResolvedBackingChange *resolved, QString *error)
     {
-        const auto found = backings.find(change.replica.allocationIdentity());
+        auto *original = change.original;
+        if (original && (!original->backingNode.is_linked() || original->storage.budget != backingBudget
+            || original->backingNode.second.retirement != original)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("original backing class input lost ownership"));
+            return false;
+        }
+        const auto found = original ? backings.iterator_to(original->backingNode)
+                                    : backings.find(change.replica.allocationIdentity());
         if (!change.replica.isValid() || found == backings.end()
             || found->second.budgetClass != change.before
             || !(found->second.replica == change.replica)

@@ -1026,15 +1026,15 @@ class KisPageStoreReferenceTest : public QObject
         {
             rows.clear();
             if (count < 0 || (!versions && count)) return {};
-            if (!count) return owner.prepareMutation(transaction, {});
+            if (!count) return owner.prepareAcceptance(transaction, {});
             rows.reserve(size_t(count));
             for (qsizetype i = 0; i < count; ++i)
                 rows.push_back({{versions[i].key, {}, true},
                     {versions[i], transaction.id, 1, false}});
-            return owner.prepareMutation(transaction, {rows.data(), rows.size()});
+            return owner.prepareAcceptance(transaction, {rows.data(), rows.size()});
         }
         void finish(KisPageMetadataCoordinator &owner)
-        { owner.finishMutation({rows.data(), rows.size()}); }
+        { owner.finishAcceptance({rows.data(), rows.size()}); }
     };
 
     static void attachEffects(KisPageMetadataCoordinator &metadata, MetadataEffectReceiver &receiver)
@@ -2239,7 +2239,7 @@ void KisPageStoreReferenceTest::publicationAuthoritySnapshotMatchesVersionIdenti
     std::shuffle(transitions.begin(), transitions.end(), random);
     auto prepared = coordinator.preparePublication(transaction, {2}, transitions);
     QVERIFY(prepared.isValid());
-    QCOMPARE(coordinator.footprint().pageActivities, quint64(32));
+    QCOMPARE(coordinator.footprint().pageActivities, quint64(0));
     for (const auto &entry : expected) {
         QCOMPARE(prepared.backingAuthority(entry.first), entry.second);
         auto absent = entry.first;
@@ -2336,7 +2336,7 @@ void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
 
     batch = make();
     QVERIFY(batch.isValid());
-    QCOMPARE(coordinator.footprint().pageActivities, quint64(2));
+    QCOMPARE(coordinator.footprint().pageActivities, quint64(0));
     batch = {};
     QVERIFY(!batch.isValid());
     QCOMPARE(coordinator.footprint().pageActivities, quint64(0));
@@ -2362,6 +2362,7 @@ void KisPageStoreReferenceTest::preparedMetadataPublicationIsBoundAndOneShot()
 
 void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges()
 {
+    for (int event = 0; event < 4; ++event) {
     const KisPageTransaction transaction{KisPageTransactionId{72}, KisImageEpochId{1}};
     KisPageMetadataCoordinator coordinator;
     MetadataEffectReceiver receiver;
@@ -2388,15 +2389,7 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
     auto make = [&]() {
         return coordinator.preparePublication(transaction, KisImageEpochId{2}, transitions);
     };
-    auto batch = make();
-    auto reject = [&]() {
-        const bool rejected =
-            !coordinator.installPublication(std::move(batch), transaction, KisImageEpochId{2});
-        KisPageStateSnapshot first, second;
-        return rejected && !batch.isValid() && coordinator.pageSnapshot(pageKey(0), &first)
-            && coordinator.pageSnapshot(pageKey(1), &second) && first.publishedGeneration.value == 1
-            && second.publishedGeneration.value == 1;
-    };
+    auto batch = make(); QVERIFY(batch.isValid());
     KisPageTransition read;
     read.kind = KisPageTransitionKind::AcquireRead;
     read.version = pageVersion(1, 1);
@@ -2408,9 +2401,12 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
     });
     reader.join();
     QVERIFY(acquired);
-    QVERIFY(reject()); // later page fails; the earlier claimed page is untouched
-    batch = make();
-    QVERIFY(batch.isValid());
+    if (event == 0) {
+        QVERIFY(coordinator.installPublication(std::move(batch), transaction, {2}));
+        KisPageStateSnapshot page; QVERIFY(coordinator.pageSnapshot(pageKey(1), &page));
+        QCOMPARE(page.versions.first().replicas.first().readLeases, QVector<KisPageLeaseId>{read.lease});
+        continue;
+    }
     KisCompletionRegistry completions;
     const KisCompletionDomain source = KisCompletionDomain::HostLogical;
     const auto completionSource = completions.registerSource(source);
@@ -2422,8 +2418,12 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
     const auto afterRelease = coordinator.metrics();
     QCOMPARE(afterRelease.fullSnapshotExports, beforeRelease.fullSnapshotExports);
     QCOMPARE(afterRelease.localTransitionSequences, beforeRelease.localTransitionSequences + 1);
-    QVERIFY(reject());
-    batch = make();
+    if (event == 1) {
+        QVERIFY(coordinator.installPublication(std::move(batch), transaction, {2}));
+        KisPageStateSnapshot page; QVERIFY(coordinator.pageSnapshot(pageKey(1), &page));
+        QCOMPARE(page.versions.first().replicas.first().pendingLastUses, QVector<KisCompletionTicket>{ticket});
+        continue;
+    }
     QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
     KisPageTransition unverified;
     unverified.kind = KisPageTransitionKind::AcknowledgeLastUse;
@@ -2436,14 +2436,23 @@ void KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndComp
     const auto afterAcknowledge = coordinator.metrics();
     QCOMPARE(afterAcknowledge.fullSnapshotExports, beforeAcknowledge.fullSnapshotExports);
     QCOMPARE(afterAcknowledge.localTransitionSequences, beforeAcknowledge.localTransitionSequences + 1);
-    QVERIFY(reject());
-
-    batch = make();
+    if (event == 2) {
+        QVERIFY(coordinator.installPublication(std::move(batch), transaction, {2}));
+        KisPageStateSnapshot page; QVERIFY(coordinator.pageSnapshot(pageKey(1), &page));
+        QVERIFY(page.versions.first().replicas.first().pendingLastUses.isEmpty());
+        continue;
+    }
     KisPageTransition abort;
     abort.kind = KisPageTransitionKind::AbortTransaction;
     abort.transaction = transaction.id;
     QVERIFY(coordinator.applyOwner(pageKey(1), abort).accepted);
-    QVERIFY(reject());
+    QVERIFY(!coordinator.installPublication(std::move(batch), transaction, {2}));
+    QVERIFY(!batch.isValid());
+    for (int i = 0; i < 2; ++i) {
+        KisPageStateSnapshot page; QVERIFY(coordinator.pageSnapshot(pageKey(i), &page));
+        QCOMPARE(page.publishedGeneration, KisPageGeneration{1});
+    }
+    }
 }
 
 void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomically()
@@ -2493,8 +2502,11 @@ void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomic
     read.target = replica(read.version, 1, 1, 1);
     read.lease = KisPageLeaseId{20};
     QVERIFY(coordinator.applyOwner(read.version.key, read).accepted);
+    bool rejectEpoch = true;
     auto install = [&](KisImageEpochId epoch) {
-        return coordinator.installPublication(std::move(batch), transaction, epoch);
+        // A rejected metadata handover must not publish the candidate root.
+        return coordinator.installPublication(std::move(batch), transaction,
+            rejectEpoch ? KisImageEpochId{1} : epoch);
     };
     auto candidate = model.prepareCommit(transaction, nullptr);
     QVERIFY(candidate.isValid());
@@ -2507,6 +2519,7 @@ void KisPageStoreReferenceTest::metadataInstallationPrecedesRootAndRejectsAtomic
     KisPageStateSnapshot page;
     QVERIFY(coordinator.pageSnapshot(pageKey(0), &page));
     QCOMPARE(page.publishedGeneration.value, quint64(1));
+    rejectEpoch = false;
     batch = coordinator.preparePublication(transaction, KisImageEpochId{2}, transitions);
     candidate = model.prepareCommit(transaction, nullptr);
     QVERIFY(candidate.isValid());
@@ -2635,8 +2648,10 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     setPublicationDelta(ownedOriginal, original);
     const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto before = live();
-    QVERIFY(model.prepare(original));
-    QVERIFY(live() > before);
+    if (!complete) {
+        QVERIFY(model.prepare(original));
+        QVERIFY(live() > before);
+    }
     const auto accepted = model.transaction(tx.id);
     KisPreparedPageSet changed = complete ? original : KisPreparedPageSet{};
     changed.transaction = tx.id;
@@ -2653,15 +2668,20 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     const auto acceptedBytes = live();
     // All prepared extents belong to one immutable value, including a large
     // separate array. Refusal unwinds every partial charge, preserving old input.
-    const quint64 headroom = refusal ? 2048 : 0;
+    const quint64 headroom = !complete && refusal ? 2048 : 0;
     const size_t fillerBytes = size_t(limits.metadataArenaBytes - live() - headroom);
     void *filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
     const auto freeFiller = qScopeGuard([&] { if (filler) freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
     QCOMPARE(model.activeTransaction(tx.id), tx); // Native queries export no arrays.
-    QVERIFY(model.preparePublication(tx.id, ownedOriginal)); // Identical full facts reuse the original storage.
     QString error;
-    QVERIFY(!(complete ? model.preparePublication(tx.id, ownedChanged, &error) : model.prepare(changed, &error)));
+    KisImageEpochCommitResult failed;
+    if (complete) {
+        QVERIFY(!model.prepareCommit(tx, ownedChanged, &failed).isValid());
+        error = failed.error;
+    } else {
+        QVERIFY(!model.prepare(changed, &error));
+    }
     QVERIFY(error.contains(QStringLiteral("storage admission")));
     QCOMPARE(model.activeTransaction(tx.id), tx);
     QCOMPARE(live(), limits.metadataArenaBytes - headroom);
@@ -2671,14 +2691,15 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     QCOMPARE(refused.changes, accepted.changes);
     QCOMPARE(refused.surfaceChanges, accepted.surfaceChanges);
     QCOMPARE(refused.removedPages, accepted.removedPages);
-    QVERIFY(complete ? model.preparePublication(tx.id, ownedChanged) : model.prepare(changed));
-    auto candidate = model.prepareCommit(tx, nullptr);
+    if (!complete) QVERIFY(model.prepare(changed));
+    auto candidate = complete ? model.prepareCommit(tx, ownedChanged, nullptr) : model.prepareCommit(tx, nullptr);
     QVERIFY(candidate.isValid());
     const auto preparedBytes = live();
     const size_t installFillerBytes = size_t(limits.metadataArenaBytes - live());
     void *installFiller = allocateTestStoragePressure(parent.get(), installFillerBytes, 1);
     const auto freeInstallFiller = qScopeGuard([&] { freeTestStoragePressure(parent.get(), installFiller, installFillerBytes, 1); });
-    if (complete) QVERIFY(model.preparePublication(tx.id, ownedChanged)); // Preserve the prepared root's revision.
+    // Direct root preparation never changes or registers the original input.
+    if (complete) QCOMPARE(model.transaction(tx.id).state, KisPageTransactionState::Open);
     QVERIFY(model.installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
     QCOMPARE(live(), limits.metadataArenaBytes);
     // The original committed record remains charged until collection.
@@ -2745,7 +2766,7 @@ void KisPageStoreReferenceTest::epochDeltaExtentsShareOneLifetime()
     QVERIFY(model.initialize(initial));
     const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto baseline = live();
-    const auto tx = model.beginTransaction({1}); QVERIFY(tx.isValid());
+    auto tx = model.beginTransaction({1}); QVERIFY(tx.isValid());
     KisCompletionRegistry completions;
     const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
@@ -2754,43 +2775,43 @@ void KisPageStoreReferenceTest::epochDeltaExtentsShareOneLifetime()
     for (int i = 0; i < surfaces; ++i) full.surfaceChanges.append(
         {initial.surfaces[i], surfaceEpochState({quint64(i + 1)}, 3, 0x31)});
     for (int i = 0; i < removals; ++i) full.removedPages.append(pageKey(i));
-    KisPreparedPageSet small; small.transaction = tx.id;
-    if (!(separate & 1)) { small.proofs = {full.proofs.first()}; small.proofs.first().authority.version.generation = {2}; }
-    if (!(separate & 2)) small.surfaceChanges = {{initial.surfaces.first(), surfaceEpochState({1}, 2, 0x29)}};
-    if (!(separate & 4)) small.removedPages = {pageKey(1)};
-    auto owned = std::make_unique<KisPagePublicationDelta>(KisMutationStorageAllocator<char>(&budget));
-    auto tiny = std::make_unique<KisPagePublicationDelta>(KisMutationStorageAllocator<char>(&budget));
-    setPublicationDelta(*owned, full); setPublicationDelta(*tiny, small);
-    const auto beforeValue = live();
-    QVERIFY(model.preparePublication(tx.id, *tiny));
-    const quint64 packedBytes = live() - beforeValue;
-    const auto saved = model.transaction(tx.id);
     std::vector<quint64> extents;
     if (separate & 1) extents.push_back(kisPageStorageAllocationBytes(size_t(versions) * sizeof(KisPageVersion), alignof(KisPageVersion)));
     if (separate & 2) extents.push_back(kisPageStorageAllocationBytes(size_t(surfaces) * sizeof(KisSurfaceEpochChange), alignof(KisSurfaceEpochChange)));
     if (separate & 4) extents.push_back(kisPageStorageAllocationBytes(size_t(removals) * sizeof(KisPageKey), alignof(KisPageKey)));
-    quint64 expectedBytes = packedBytes;
-    for (const auto bytes : extents) expectedBytes += bytes;
+    auto beforeValue = live();
+    QVERIFY(model.prepare(full));
+    const quint64 expectedBytes = live() - beforeValue;
+    quint64 packedBytes = expectedBytes;
+    for (const auto bytes : extents) packedBytes -= bytes;
+    QVERIFY(packedBytes > 0 && packedBytes <= 32 * 1024);
+    QVERIFY(model.abort(tx)); QCOMPARE(model.collectFinishedTransactions(), qsizetype(1));
+    tx = model.beginTransaction({1}); QVERIFY(tx.isValid());
+    full.transaction = tx.id;
+    for (auto &proof : full.proofs) proof.transaction = tx.id;
+    beforeValue = live();
+    const auto saved = model.transaction(tx.id);
     if (refusal >= 0) {
         quint64 room = refusal ? packedBytes : 0;
         for (int i = 1; i < refusal; ++i) room += extents[size_t(i - 1)];
         void *filler = allocateTestStoragePressure(parent.get(), size_t(limits.metadataArenaBytes - live() - room), 1);
         const auto cleanup = qScopeGuard([&] { freeTestStoragePressure(filler); });
         const auto charged = live();
-        QVERIFY(!model.preparePublication(tx.id, *owned));
+        QVERIFY(!model.prepare(full));
         QCOMPARE(live(), charged); // Every admitted prefix was actually refunded.
         const auto unchanged = model.transaction(tx.id);
         QCOMPARE(unchanged.changes, saved.changes);
         QCOMPARE(unchanged.surfaceChanges, saved.surfaceChanges);
         QCOMPARE(unchanged.removedPages, saved.removedPages);
     }
-    QVERIFY(model.preparePublication(tx.id, *owned));
+    QVERIFY(model.prepare(full));
     QCOMPARE(live() - beforeValue, expectedBytes);
     qInfo() << "BR1_EPOCH_DELTA_EXTENTS" << separate << packedBytes << expectedBytes;
     const auto acceptedBytes = live();
-    QVERIFY(model.preparePublication(tx.id, *owned)); QCOMPARE(live(), acceptedBytes);
+    if (!full.proofs.isEmpty()) QVERIFY(!model.prepare(full)); // Incremental generations must advance.
+    QCOMPARE(live(), acceptedBytes);
     // Independent source storage can disappear before query/construction.
-    owned.reset(); tiny.reset();
+    full = {}; // Independent source arrays can disappear after genuine preparation.
     const auto accepted = model.transaction(tx.id);
     QCOMPARE(accepted.changes.size(), qsizetype(versions));
     QCOMPARE(accepted.surfaceChanges.size(), qsizetype(surfaces));
@@ -2858,16 +2879,23 @@ void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChange
     KisPreparedPageSet written; written.transaction = tx.id;
     written.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
     KisPreparedPageSet removed; removed.transaction = tx.id; removed.removedPages = {pageKey(0)};
-    QVERIFY(model.prepare(firstRemoval ? removed : written));
+    if (!complete) QVERIFY(model.prepare(firstRemoval ? removed : written));
     const auto &next = firstRemoval ? written : removed;
     KisPagePublicationDelta owned{KisMutationStorageAllocator<char>{}};
     setPublicationDelta(owned, next);
-    QCOMPARE(complete ? model.preparePublication(tx.id, owned) : model.prepare(next), complete);
-    const auto saved = model.transaction(tx.id);
     const bool endsRemoved = complete ? !firstRemoval : firstRemoval;
-    QCOMPARE(saved.changes.isEmpty(), endsRemoved);
-    QCOMPARE(saved.removedPages.isEmpty(), !endsRemoved);
-    QVERIFY(model.commit(tx).isCommitted());
+    if (complete) {
+        auto root = model.prepareCommit(tx, owned, nullptr);
+        QVERIFY(root.isValid());
+        QCOMPARE(model.transaction(tx.id).state, KisPageTransactionState::Open);
+        QVERIFY(model.installCommit(std::move(root), nullptr, nullptr).isCommitted());
+    } else {
+        QVERIFY(!model.prepare(next));
+        const auto saved = model.transaction(tx.id);
+        QCOMPARE(saved.changes.isEmpty(), endsRemoved);
+        QCOMPARE(saved.removedPages.isEmpty(), !endsRemoved);
+        QVERIFY(model.commit(tx).isCommitted());
+    }
     KisPageVersion version;
     QCOMPARE(model.captureCommittedRoot().containsPage(pageKey(0), &version), !endsRemoved);
     if (!endsRemoved) QCOMPARE(version, pageVersion(0, 2));
@@ -5681,7 +5709,7 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     QVERIFY(candidate.isValid());
     if (!mutation) QVERIFY(metadata->footprint().versionArena.directoryEntries > directoryEntries);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-    if (install) QVERIFY(mutation ? metadata->installMutation(std::move(candidate), transaction)
+    if (install) QVERIFY(mutation ? metadata->installAcceptance(std::move(candidate), transaction)
                                  : metadata->installPublication(std::move(candidate), transaction, {2}, nullptr, &cleanup));
     if (install && mutation) mutationInput.finish(*metadata);
     metadata.reset();
@@ -7227,7 +7255,8 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
     const auto metrics = coordinator.metrics();
     QVERIFY(metrics.publicationVersionInputs <= 4);
     QCOMPARE(metrics.fullSnapshotExports, quint64(0));
-    QCOMPARE(metrics.publicationHistoryNodesPrepared, historyNodes);
+    QCOMPARE(metrics.publicationHistoryNodesPrepared,
+        transition.kind == KisPageTransitionKind::CommitTransaction ? quint64(0) : historyNodes);
     QCOMPARE(metrics.publicationHistoryNodesTransferred, quint64(0));
     QCOMPARE(metrics.publicationAdditionRecordsPrepared, additionRecords);
     QCOMPARE(metrics.publicationAdditionRecordsTransferred, quint64(0));
@@ -7327,18 +7356,18 @@ void KisPageStoreReferenceTest::indexedPublicationIgnoresRetainedHistory()
     transition.imageEpoch = {2};
     auto candidate = coordinator.preparePublication(tx, {2}, {transition});
     QVERIFY(candidate.isValid());
-    QCOMPARE(coordinator.metrics().publicationVersionInputs, quint64(2));
+    QCOMPARE(coordinator.metrics().publicationVersionInputs, quint64(0));
     QCOMPARE(coordinator.metrics().fullSnapshotExports, quint64(0));
     const auto expected = KisPageStateMachine().apply(page, transition);
     QVERIFY(expected.accepted);
     const auto ready = coordinator.metrics();
-    QCOMPARE(ready.publicationHistoryNodesPrepared, quint64(1));
+    QCOMPARE(ready.publicationHistoryNodesPrepared, quint64(0));
     QCOMPARE(ready.publicationHistoryNodesTransferred, quint64(0));
     QCOMPARE(ready.publicationAdditionRecordsPrepared, quint64(0));
     QCOMPARE(ready.publicationAdditionRecordsTransferred, quint64(0));
     QVERIFY(expected.effects.isEmpty());
     QVERIFY(coordinator.installPublication(std::move(candidate), tx, {2}));
-    QCOMPARE(coordinator.metrics().publicationHistoryNodesTransferred, ready.publicationHistoryNodesPrepared);
+    QCOMPARE(coordinator.metrics().publicationHistoryNodesTransferred, quint64(1));
     QCOMPARE(coordinator.metrics().fullSnapshotExports, quint64(0));
     KisPageStateSnapshot actual;
     QVERIFY(coordinator.pageSnapshot(page.key, &actual));
@@ -7354,7 +7383,9 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     QFETCH(int, shards);
     const bool mutation = kind == 2, synthesizedDefault = kind == 3;
     const KisPageTransaction tx{{74}, {1}};
+    MetadataEffectReceiver receiver;
     auto coordinator = std::make_unique<KisPageMetadataCoordinator>();
+    attachEffects(*coordinator, receiver);
     QVERIFY(coordinator->configure(shards));
     KisPageMetadataCoordinator foreign;
     QVERIFY(foreign.configure(4));
@@ -7394,13 +7425,13 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
                               : coordinator->preparePublication(tx, {2}, transitions);
     QVERIFY(candidate.isValid());
     const auto reservedFootprint = coordinator->footprint();
-    QCOMPARE(reservedFootprint.pageActivities, mutation ? quint64(0) : quint64(pages));
+    QCOMPARE(reservedFootprint.pageActivities, synthesizedDefault ? quint64(pages) : quint64(0));
     if (pages && !mutation && synthesizedDefault) {
         QVERIFY(reservedFootprint.versionArena.outstandingReservations > 0);
         QVERIFY(reservedFootprint.exactVersionIndex.outstandingReservations > 0);
     }
     const auto prepared = coordinator->metrics();
-    QCOMPARE(prepared.publicationHistoryNodesPrepared, quint64(pages));
+    QCOMPARE(prepared.publicationHistoryNodesPrepared, kind == 0 || kind == 1 ? quint64(0) : quint64(pages));
     QCOMPARE(prepared.publicationHistoryNodesTransferred, quint64(0));
     QCOMPARE(prepared.publicationAdditionRecordsPrepared, quint64(synthesizedDefault ? pages : 0));
     QCOMPARE(prepared.publicationAdditionRecordsTransferred, quint64(0));
@@ -7422,10 +7453,15 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
             change.writer = {51};
             change.operation = {52};
         } else {
-            change.kind = KisPageTransitionKind::AcquireRead;
-            change.version = expected.at(changedPage).versions.first().version;
-            change.target = expected.at(changedPage).versions.first().authority;
-            change.lease = {19};
+            if (synthesizedDefault) {
+                change.kind = KisPageTransitionKind::AcquireRead;
+                change.version = expected.at(changedPage).versions.first().version;
+                change.target = expected.at(changedPage).versions.first().authority;
+                change.lease = {19};
+            } else {
+                change.kind = KisPageTransitionKind::AbortTransaction;
+                change.transaction = tx.id;
+            }
         }
         const auto changed = KisPageStateMachine().apply(expected.at(changedPage), change);
         QVERIFY(changed.accepted);
@@ -7441,7 +7477,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     }
     const auto install = [&](KisPageMetadataCoordinator &owner) {
         if (!mutation) return owner.installPublication(std::move(candidate), tx, {2});
-        const bool accepted = owner.installMutation(std::move(candidate), tx);
+        const bool accepted = owner.installAcceptance(std::move(candidate), tx);
         if (accepted) mutationInput.finish(owner);
         candidate = {}; // The original mutation carrier owns only capacity/pins.
         return accepted;
@@ -7470,7 +7506,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     const auto installed = coordinator->metrics();
     QCOMPARE(installed.publicationHistoryNodesPrepared, prepared.publicationHistoryNodesPrepared);
     QCOMPARE(installed.publicationHistoryNodesTransferred,
-             success ? prepared.publicationHistoryNodesPrepared : quint64(0));
+             success ? quint64(pages) : quint64(0));
     QCOMPARE(installed.publicationAdditionRecordsPrepared, prepared.publicationAdditionRecordsPrepared);
     QCOMPARE(installed.publicationAdditionRecordsTransferred,
              success ? prepared.publicationAdditionRecordsPrepared : quint64(0));
@@ -7499,28 +7535,27 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
 {
     QFETCH(int, history);
     QFETCH(bool, reject);
-    const KisPageTransaction tx{{74}, {1}};
     auto page = pageWithHistory(history);
     const KisPageVersion target{page.key, page.nextGeneration, 0};
     const auto authority = replica(target, 1, 1, 20000);
     page.versions.append({target,
-                          KisPagePublicationState::Prepared,
+                          KisPagePublicationState::Historical,
                           {{authority, KisReplicaValidity::Valid, {}, {}, 0, {}}},
                           authority,
-                          tx.id,
+                          {},
                           {}});
     ++page.nextGeneration.value;
     KisPageTransition transition;
-    transition.kind = KisPageTransitionKind::CommitTransaction;
+    transition.kind = KisPageTransitionKind::RestoreCommittedVersion;
     transition.version = target;
-    transition.transaction = tx.id;
+    transition.transaction = {};
     transition.imageEpoch = {2};
     const auto expected = KisPageStateMachine().apply(page, transition);
     QVERIFY(expected.accepted);
     auto coordinator = std::make_unique<KisPageMetadataCoordinator>();
     QVERIFY(coordinator->configure(4));
     QVERIFY(coordinator->registerPage(page));
-    auto candidate = coordinator->preparePublication(tx, {2}, {transition});
+    auto candidate = coordinator->prepareRestoration({2}, {transition});
     QVERIFY(candidate.isValid());
     // The prepared candidate retains one original page location across
     // directory growth, late revision changes and coordinator destruction.
@@ -7552,7 +7587,7 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
     }
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     const bool installed =
-        coordinator->installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup);
+        coordinator->installPublication(std::move(candidate), {}, {2}, nullptr, &cleanup);
     QCOMPARE(installed, !reject);
     // The transient claim ends at install, while this original reservation
     // keeps actual activity storage alive until deferred physical cleanup.
@@ -7611,7 +7646,7 @@ void KisPageStoreReferenceTest::mutationCandidateStorageAtSharedCapacity()
     void *remaining = allocateTestStoragePressure(parent.get(), remainingBytes, 1);
     const auto releaseRemaining = qScopeGuard([&] { freeTestStoragePressure(parent.get(), remaining, remainingBytes, 1); });
     QCOMPARE(live(*parent), limits.metadataArenaBytes);
-    if (install) QVERIFY(metadata.installMutation(std::move(candidate), tx));
+    if (install) QVERIFY(metadata.installAcceptance(std::move(candidate), tx));
     else candidate = {};
     for (const auto &version : versions) {
         KisPageStateSnapshot page; QVERIFY(metadata.pageSnapshot(version.key, &page));
@@ -7680,13 +7715,9 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
         QVERIFY(changed.accepted);
         QVERIFY(metadata.applyOwner(read.version.key, read).accepted);
         expected[late] = changed.next;
-        QVERIFY(!metadata.installPublication(std::move(stale), tx, {2}));
-        QCOMPARE(metadata.metrics().publicationHistoryNodesTransferred, quint64(0));
-        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
-        auto candidate = metadata.preparePublication(tx, {2}, transitions);
-        QVERIFY(candidate.isValid());
         KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-        QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup));
+        QVERIFY(metadata.installPublication(std::move(stale), tx, {2}, nullptr, &cleanup));
+        QVERIFY(cleanup.isEmpty());
         for (int i = 0; i < transitions.size(); ++i) {
             const auto oracle = KisPageStateMachine().apply(expected[i], transitions[i]);
             QVERIFY(oracle.accepted);
@@ -7694,13 +7725,23 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
             QVERIFY(metadata.pageSnapshot(transitions[i].version.key, &actual));
             comparePageRecords(actual, oracle.next);
         }
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+        // A real restoration still owns sparse generic output and its Data
+        // cleanup. Check its bounded tail, including destruction of the owner.
+        QVector<KisPageVersion> before;
+        for (const auto &page : expected) before.append(page.versions.first().version);
+        auto restore = metadata.prepareRestoration({3}, before.constData(), before.size());
+        QVERIFY(restore.isValid());
+        QVERIFY(metadata.installPublication(std::move(restore), {}, {3}, nullptr, &cleanup));
         QCOMPARE(metadata.footprint().pageActivities, quint64(33));
         QCOMPARE(cleanup.clearBatch(17), qsizetype(17));
         QCOMPARE(metadata.footprint().pageActivities, quint64(16));
-        coordinator.reset(); // Group pins survive both partial cleanup and original owner.
+        coordinator.reset(); // Both real independent tails may outlive the owner.
+        stale = {};
         qsizetype remaining = 0;
         while (!cleanup.isEmpty()) remaining += cleanup.clearBatch(1);
         QCOMPARE(remaining, qsizetype(16));
+
     }
 }
 
@@ -7781,7 +7822,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     auto candidate = prepare(); QVERIFY(candidate.isValid());
     QVERIFY(childLive() > before);
-    QCOMPARE(metadata->footprint().pageActivities, kind == 3 ? quint64(0) : quint64(1));
+    QCOMPARE(metadata->footprint().pageActivities, kind == 0 || kind == 3 ? quint64(0) : quint64(1));
     auto expected = KisPageStateMachine().apply(page, transition);
     QVERIFY(expected.accepted);
     if (kind == 1) {
@@ -7801,21 +7842,21 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
         const auto changed = KisPageStateMachine().apply(page, read); QVERIFY(changed.accepted);
         page = changed.next;
         // Detachment accepts reader churn and preserves the newest protection.
-        if (kind == 3) expected = KisPageStateMachine().apply(page, transition);
+        if (kind == 0 || kind == 3) expected = KisPageStateMachine().apply(page, transition);
     }
     fillerBytes = size_t(limits.metadataArenaBytes - parentLive());
     filler = allocateTestStoragePressure(parent.get(), fillerBytes, 1);
     QCOMPARE(parentLive(), limits.metadataArenaBytes);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-    const bool success = outcome != 1 && (outcome != 2 || kind == 3);
+    const bool success = outcome != 1 && (outcome != 2 || kind == 0 || kind == 3);
     if (outcome == 1) candidate = {};
     else {
         const bool installed = kind == 1
             ? metadata->installRecoverableWrite(std::move(candidate), tx, nullptr, &cleanup)
-            : kind == 3 ? metadata->installMutation(std::move(candidate), tx)
+            : kind == 3 ? metadata->installAcceptance(std::move(candidate), tx)
                         : metadata->installPublication(std::move(candidate), tx, {2}, nullptr, &cleanup);
         QCOMPARE(installed, success);
-        QCOMPARE(cleanup.isEmpty(), kind == 3);
+        QCOMPARE(cleanup.isEmpty(), kind == 0 || kind == 3);
         QVERIFY(childLive() > before); // Transfer has not freed candidate storage.
     }
     QVERIFY(!candidate.isValid());
@@ -7831,11 +7872,11 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     if (outcome == 3) {
         metadata.reset(); budget.reset();
         QVERIFY(parentLive() > parentBaseline); // Original arenas and control storage remain physical.
-        if (kind == 3) candidate = {};
+        if (kind == 0 || kind == 3) candidate = {};
         else QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
         QCOMPARE(parentLive(), parentBaseline);
     } else {
-        if (kind == 3) candidate = {};
+        if (kind == 0 || kind == 3) candidate = {};
         if (!cleanup.isEmpty()) QCOMPARE(cleanup.clearBatch(1), qsizetype(1));
         QCOMPARE(metadata->footprint().versionArena.outstandingReservations, quint64(0));
         QCOMPARE(metadata->footprint().replicaArena.outstandingReservations, quint64(0));
@@ -7921,7 +7962,7 @@ void KisPageStoreReferenceTest::preparedPublicationMatchesFullReferenceTransitio
             if (!expected.accepted)
                 continue;
             QVERIFY(expected.effects.isEmpty());
-            QVERIFY(mutation ? coordinator.installMutation(std::move(batch), transaction)
+            QVERIFY(mutation ? coordinator.installAcceptance(std::move(batch), transaction)
                              : coordinator.installPublication(std::move(batch),
                                                               transaction,
                                                               KisImageEpochId{2}));
@@ -8533,7 +8574,7 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (outcome == 2) prepared = {};
     else if (outcome == 3) QVERIFY(!foreign.installRecoverableWrite(std::move(prepared), tx));
-    else if (outcome == 4) QVERIFY(!metadata->installMutation(std::move(prepared), tx));
+    else if (outcome == 4) QVERIFY(!metadata->installAcceptance(std::move(prepared), tx));
     else QCOMPARE(metadata->installRecoverableWrite(std::move(prepared), tx, &error, &cleanup), success);
     QVERIFY(!prepared.isValid());
     QVERIFY(!metadata->installRecoverableWrite(std::move(prepared), tx));
@@ -10853,48 +10894,48 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     QVERIFY(coordinator->acceptPrivateValidation(native, tx.id, 1, 1));
     KisPagePublicationChange birth;
     birth.replacement = KisPagePublicationChange::Replacement(&native);
-    auto first = coordinator->prepareMutation(tx, {&birth, 1});
+    auto first = coordinator->prepareAcceptance(tx, {&birth, 1});
     QVERIFY(first.isValid());
-    QVERIFY(coordinator->installMutation(std::move(first), tx));
-    coordinator->finishMutation({&birth, 1});
+    QVERIFY(coordinator->installAcceptance(std::move(first), tx));
+    coordinator->finishAcceptance({&birth, 1});
     first = {};
     KisPagePublicationChange input{{version.key, {}, true}, {version, tx.id, 1, false}};
     input.detachesSuperseded = true;
-    auto candidate = coordinator->prepareMutation(tx, {&input, 1});
+    auto candidate = coordinator->prepareAcceptance(tx, {&input, 1});
     QVERIFY(candidate.isValid());
     QVERIFY(input.detachesSuperseded);
     KisPageTransition capture;
     capture.kind = KisPageTransitionKind::RetainCapturedVersion;
     capture.version = version; capture.transaction = tx.id; capture.readView = {19};
     QVERIFY(coordinator->applyOwner(version.key, capture).accepted);
-    QVERIFY(!coordinator->installMutation(std::move(candidate), tx));
+    QVERIFY(!coordinator->installAcceptance(std::move(candidate), tx));
     QVERIFY(!candidate.isValid());
-    QVERIFY(candidate.needsMutationCapacity());
+    QVERIFY(candidate.needsAcceptanceCapacity());
     QVERIFY(!input.detachesSuperseded);
     if (outcome == 0) {
         auto moved = std::move(candidate);
-        QVERIFY(!candidate.needsMutationCapacity());
+        QVERIFY(!candidate.needsAcceptanceCapacity());
         candidate = std::move(moved);
-        QVERIFY(candidate.needsMutationCapacity());
-        QVERIFY(coordinator->prepareMutationCapacity(candidate));
+        QVERIFY(candidate.needsAcceptanceCapacity());
+        QVERIFY(coordinator->prepareAcceptanceCapacity(candidate));
         QVERIFY(candidate.isValid());
-        QVERIFY(coordinator->installMutation(std::move(candidate), tx));
-        coordinator->finishMutation({&input, 1});
+        QVERIFY(coordinator->installAcceptance(std::move(candidate), tx));
+        coordinator->finishAcceptance({&input, 1});
         KisPageMetadataCoordinator::VersionInfo info;
         QVERIFY(coordinator->versionSnapshot(version, &info));
         QCOMPARE(info.publication, KisPagePublicationState::Historical);
     } else if (outcome == 1) {
-        QVERIFY(!foreign.prepareMutationCapacity(candidate));
+        QVERIFY(!foreign.prepareAcceptanceCapacity(candidate));
     } else if (outcome == 2) {
         QVERIFY(!coordinator->installPublication(std::move(candidate), tx, {2}));
     } else if (outcome == 3) {
-        QVERIFY(!coordinator->installMutation(std::move(candidate), tx));
+        QVERIFY(!coordinator->installAcceptance(std::move(candidate), tx));
     } else if (outcome == 4) {
         coordinator.reset(); // Pending capacity still retains the original shard.
-        QVERIFY(!foreign.prepareMutationCapacity(candidate));
+        QVERIFY(!foreign.prepareAcceptanceCapacity(candidate));
     } else candidate = {};
     QVERIFY(!candidate.isValid());
-    QVERIFY(!candidate.needsMutationCapacity());
+    QVERIFY(!candidate.needsAcceptanceCapacity());
     candidate = {};
     coordinator.reset();
     budget.reset(); // The controller's own storage owner and reservation slots end here.
@@ -10936,26 +10977,26 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     };
     auto batch = make();
     QVERIFY(batch.isValid());
-    QVERIFY(!foreign.installMutation(std::move(batch), tx));
+    QVERIFY(!foreign.installAcceptance(std::move(batch), tx));
     QVERIFY(!batch.isValid());
     batch = make();
     auto wrong = tx;
     ++wrong.id.value;
-    QVERIFY(!coordinator.installMutation(std::move(batch), wrong));
+    QVERIFY(!coordinator.installAcceptance(std::move(batch), wrong));
     batch = make();
     wrong = tx;
     ++wrong.baseEpoch.value;
-    QVERIFY(!coordinator.installMutation(std::move(batch), wrong));
+    QVERIFY(!coordinator.installAcceptance(std::move(batch), wrong));
     batch = make();
     QVERIFY(!coordinator.installPublication(std::move(batch), tx, {2}));
     auto invalid = changes;
     invalid.append(changes.first());
     QVERIFY(!mutationInput.prepare(coordinator, tx, invalid.constData(), invalid.size()).isValid());
     // A nonempty directory must exist and partial superseded identity is invalid.
-    QVERIFY(!coordinator.prepareMutation(tx, {static_cast<KisPagePublicationChange *>(nullptr), 1}).isValid());
+    QVERIFY(!coordinator.prepareAcceptance(tx, {static_cast<KisPagePublicationChange *>(nullptr), 1}).isValid());
     KisPagePublicationChange incomplete{{changes.first().key, {}, true},
         {{changes.first().key, {}}, tx.id, 1, false}};
-    QVERIFY(!coordinator.prepareMutation(tx, {&incomplete, 1}).isValid());
+    QVERIFY(!coordinator.prepareAcceptance(tx, {&incomplete, 1}).isValid());
     wrong = tx;
     ++wrong.id.value;
     QVERIFY(!mutationInput.prepare(coordinator, wrong, changes.constData(), changes.size()).isValid());
@@ -10973,7 +11014,7 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     }
     batch = coordinator.preparePublication(tx, {2}, publication);
     QVERIFY(batch.isValid());
-    QVERIFY(!coordinator.installMutation(std::move(batch), tx));
+    QVERIFY(!coordinator.installAcceptance(std::move(batch), tx));
     batch = make();
     KisPageTransition read;
     read.kind = KisPageTransitionKind::AcquireRead;
@@ -10994,7 +11035,7 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     QVERIFY(coordinator.applyOwner(write.version.key, write).accepted);
     // A real semantic conflict on the second page rejects ALL edits. A mere
     // reader revision change is no longer a reason to discard the candidate.
-    QVERIFY(!coordinator.installMutation(std::move(batch), tx));
+    QVERIFY(!coordinator.installAcceptance(std::move(batch), tx));
     for (int x = 0; x < 2; ++x) {
         KisPageStateSnapshot state;
         QVERIFY(coordinator.pageSnapshot(pageKey(x), &state));
@@ -11004,8 +11045,8 @@ void KisPageStoreReferenceTest::preparedMutationIsAtomicAndBound()
     QVERIFY(coordinator.applyOwner(write.version.key, write).accepted);
     batch = make();
     QVERIFY(batch.isValid());
-    QVERIFY(coordinator.installMutation(std::move(batch), tx));
-    QVERIFY(!coordinator.installMutation(std::move(batch), tx));
+    QVERIFY(coordinator.installAcceptance(std::move(batch), tx));
+    QVERIFY(!coordinator.installAcceptance(std::move(batch), tx));
     for (int x = 0; x < 2; ++x) {
         KisPageStateSnapshot state;
         QVERIFY(coordinator.pageSnapshot(pageKey(x), &state));
@@ -11083,7 +11124,7 @@ void KisPageStoreReferenceTest::preparedMutationPreservesLateProtection()
     QVERIFY(coordinator.pageSnapshot(version.key, &current));
     const auto reference = KisPageStateMachine().apply(current, detach);
     QVERIFY(reference.accepted);
-    QVERIFY(coordinator.installMutation(std::move(candidate), tx));
+    QVERIFY(coordinator.installAcceptance(std::move(candidate), tx));
     KisPageStateSnapshot actual;
     QVERIFY(coordinator.pageSnapshot(version.key, &actual));
     QVERIFY(KisPageStateMachine().validateInvariants(actual));
@@ -11563,24 +11604,35 @@ void KisPageStoreReferenceTest::denseEpochMergePreservesCardinality()
         for (int i = 8; i < 12; ++i) add(i);
         for (int i = 16; i < 24; ++i) add(i);
     }
+    KisPagePublicationDelta originalDelta{KisMutationStorageAllocator<char>(&budget)};
+    std::vector<KisPagePublicationChange> originalRows;
+    size_t originalProofs = 0, originalRemovals = 0;
+    const auto prepareRoot = [&] {
+        if (!producer) return model.prepareCommit(tx, nullptr);
+        if (producer == 1) return model.prepareCommit(tx, originalDelta, nullptr);
+        const KisPagePublicationRows borrowed(originalRows.data(), originalRows.size());
+        const KisPageOperationPublication operation{{borrowed, originalProofs},
+            {borrowed, originalRemovals}, {nullptr, 0}};
+        return model.prepareCommit(tx, operation, nullptr);
+    };
     const auto prepare = [&](const KisPreparedPageSet &input) {
         if (!producer) return model.prepare(input);
         if (producer == 1) {
-            KisPagePublicationDelta owned{KisMutationStorageAllocator<char>(&budget)};
-            setPublicationDelta(owned, input);
-            return model.preparePublication(input.transaction, owned);
+            setPublicationDelta(originalDelta, input);
+            return prepareRoot().isValid();
         }
-        std::vector<KisPagePublicationChange> rows;
+        originalRows.clear();
+        auto &rows = originalRows;
+        originalProofs = size_t(input.proofs.size()); originalRemovals = size_t(input.removedPages.size());
         for (const auto &proof : input.proofs) rows.emplace_back(
             KisPagePublicationChange::Replacement{proof.authority.version.key, KisPagePublicationIdentity(proof)});
         for (const auto &key : input.removedPages) rows.emplace_back(
             KisPagePublicationChange::Replacement{key, {}, true}, KisPagePublicationIdentity{}, true);
         const auto less = KisPagePublicationDelta::PageLess{};
         std::sort(rows.begin(), rows.end(), [&](const auto &a, const auto &b) { return less(a.replacement.key(), b.replacement.key()); });
-        const KisPagePublicationRows borrowed(rows.data(), rows.size());
-        const KisPageOperationPublication operation{{borrowed, size_t(input.proofs.size())},
-            {borrowed, size_t(input.removedPages.size())}, {nullptr, 0}};
-        return model.preparePublication(input.transaction, operation);
+        // Borrowed input constructs and cancels a root without registering
+        // an independent transaction delta or changing its original state.
+        return prepareRoot().isValid();
     };
     KisPreparedPageSet first; first.transaction = tx.id;
     if (producer) {
@@ -11616,13 +11668,13 @@ void KisPageStoreReferenceTest::denseEpochMergePreservesCardinality()
     for (const auto &proof : delta.proofs) expected[proof.authority.version.key.page.column] = proof.authority.version;
     for (const auto &key : delta.removedPages) expected.erase(key.page.column);
     const auto before = model.captureCommittedRoot();
-    auto cancelled = model.prepareCommit(tx, nullptr); QVERIFY(cancelled.isValid());
+    auto cancelled = prepareRoot(); QVERIFY(cancelled.isValid());
     cancelled = {}; // Construction and cancellation must not change the accepted delta/count.
     QCOMPARE(model.captureCommittedRoot().epoch(), before.epoch());
-    auto rejected = model.prepareCommit(tx, nullptr); QVERIFY(rejected.isValid());
+    auto rejected = prepareRoot(); QVERIFY(rejected.isValid());
     const auto refusal = model.installCommit(std::move(rejected), nullptr, +[](void *, KisImageEpochId) { return false; });
     QVERIFY(!refusal.isCommitted()); QCOMPARE(model.captureCommittedRoot().epoch(), before.epoch());
-    const auto committed = model.commit(tx); QVERIFY2(committed.isCommitted(), qPrintable(committed.error));
+    const auto committed = producer ? model.installCommit(prepareRoot(), nullptr, nullptr) : model.commit(tx); QVERIFY2(committed.isCommitted(), qPrintable(committed.error));
     QVector<KisPageVersion> manifest;
     for (const auto &item : expected) manifest.append(item.second);
     QCOMPARE(committed.root.pageCount(), manifest.size());
