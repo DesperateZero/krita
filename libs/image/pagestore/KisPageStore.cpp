@@ -673,7 +673,8 @@ public:
         : writes(&owner->backingBudget), coldPages(owner) {}
     struct PageSlot;
     struct Page : KisPagePrivateWrite {
-        Page() : publicationRow(KisPagePublicationChange::Replacement(this)) {}
+        explicit Page(KisPageEditValues &edit)
+            : KisPagePrivateWrite(edit), publicationRow(KisPagePublicationChange::Replacement(this)) {}
         KisPagePublicationChange publicationRow;
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
@@ -697,6 +698,7 @@ public:
             size_t bytes() const { return sizeof(Block) + count * sizeof(PageSlot); }
         };
         KisBackingBudgetController *budget = nullptr;
+        KisPageEditValues values;
         Block *blocks = nullptr;
         PageSlot *free = nullptr;
         PageSlot *released = nullptr;
@@ -708,6 +710,8 @@ public:
         ColdPageSet &operator=(ColdPageSet &&other) noexcept {
             if (this != &other) {
                 clear(); budget = other.budget;
+                Q_ASSERT(!other.live);
+                values = std::move(other.values);
                 blocks = std::exchange(other.blocks, nullptr);
                 free = std::exchange(other.free, nullptr);
                 released = std::exchange(other.released, nullptr);
@@ -720,21 +724,28 @@ public:
         ColdPageSet &operator=(const ColdPageSet &) = delete;
         ~ColdPageSet() { clear(); }
         size_t storageBytes() const noexcept {
-            return capacityBytes;
+            return capacityBytes + values.storageBytes();
         }
         void clearValues() noexcept {
             if (!live && !released) return;
             free = released = nullptr;
             live = 0;
-            for (auto *block = blocks; block; block = block->next)
+            for (auto *block = blocks; block; block = block->next) {
+                KisPagePrivateWrite *rows[KisPageEditValues::ReleaseBatch];
+                size_t count = 0;
+                for (size_t i = 0; i < block->count; ++i)
+                    if (block->slots()[i].page) rows[count++] = &*block->slots()[i].page;
+                values.release(rows, count);
                 for (size_t i = block->count; i > 0; --i) {
                     auto *slot = block->slots() + i - 1;
                     slot->page.reset();
                     slot->next = free;
                     free = slot;
                 }
+            }
         }
         void clear() noexcept {
+            clearValues();
             while (blocks) {
                 auto *block = blocks;
                 blocks = block->next;
@@ -758,12 +769,22 @@ public:
                 // The scope gate excludes reuse until this unlocked cleanup
                 // returns. No provider/binding destructor runs under its gate.
                 while (head) {
-                    auto *slot = head;
-                    head = slot->next;
-                    slot->page.reset();
-                    slot->next = owner->free;
-                    owner->free = slot;
-                    --owner->live;
+                    KisPagePrivateWrite *rows[KisPageEditValues::ReleaseBatch];
+                    size_t count = 0;
+                    auto *end = head;
+                    do {
+                        rows[count++] = &*end->page;
+                        end = end->next;
+                    } while (end && count < KisPageEditValues::ReleaseBatch);
+                    owner->values.release(rows, count);
+                    while (head != end) {
+                        auto *slot = head;
+                        head = slot->next;
+                        slot->page.reset();
+                        slot->next = owner->free;
+                        owner->free = slot;
+                        --owner->live;
+                    }
                 }
             }
         };
@@ -774,7 +795,7 @@ public:
                 // Start small for sparse/no-op ranges. Once that actual work
                 // fills, group the remaining admitted rows up to one bounded
                 // block; their addresses never move during acceptance/retry.
-                const size_t count = blocks ? std::min(size_t(16), std::max(size_t(2), admitted > live ? admitted - live : 0)) : 2;
+                const size_t count = blocks ? std::min(KisPageEditValues::ReleaseBatch, std::max(size_t(2), admitted > live ? admitted - live : 0)) : 2;
                 const size_t bytes = sizeof(Block) + count * sizeof(PageSlot);
                 auto *block = new (kisAllocateMutationStorage(budget, bytes, alignof(Block))) Block;
                 capacityBytes += kisPageStorageBytes(block, alignof(Block));
@@ -790,7 +811,7 @@ public:
                 }
             }
             auto *slot = free;
-            auto *page = &slot->page.emplace();
+            auto *page = &slot->page.emplace(values);
             free = slot->next;
             slot->next = nullptr;
             page->storage = slot;

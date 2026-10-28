@@ -2217,7 +2217,7 @@ public:
         if (!core || !native.reserved || !location.page
             || location.shardIndex >= core->shards.size()) return nullptr;
         auto *shard = core->shards[location.shardIndex].get();
-        return location.shard.get() == shard ? shard : nullptr;
+        return location.shard == shard ? shard : nullptr;
     }
 
     std::shared_ptr<KisBackingBudgetController> standaloneBudget;
@@ -3248,7 +3248,7 @@ bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepare
             auto *native = input.replacement.native;
             // Both sources retain their original location. Only actual shard
             // facts are revalidated after preparation's unlocked window.
-            auto *page = native ? native->location.shard.get() == shard
+            auto *page = native ? native->location.shard == shard
                 ? static_cast<MetadataPage *>(native->location.page) : nullptr
                 : static_cast<MetadataPage *>(work.page);
             if (!page || !shard->canMutate(version.key, *page)) break;
@@ -4502,25 +4502,92 @@ bool KisPageMetadataCoordinator::bindCpuProofIssuer(quint64 issuer, const KisCom
     return true;
 }
 
+KisPageEditValues::~KisPageEditValues()
+{
+    Q_ASSERT(!m_values);
+}
+
+KisPageEditValues::KisPageEditValues(KisPageEditValues &&other) noexcept
+{
+    *this = std::move(other);
+}
+
+KisPageEditValues &KisPageEditValues::operator=(KisPageEditValues &&other) noexcept
+{
+    if (this == &other) return *this;
+    Q_ASSERT(!m_values && !other.m_values);
+    // Only empty operation capacity moves; original live rows never move to
+    // another edit. Preserve the allocator that funded any spilled storage.
+    m_shards.reset();
+    if (other.m_shards) m_shards.emplace(std::move(*other.m_shards));
+    other.m_shards.reset();
+    return *this;
+}
+
+size_t KisPageEditValues::storageBytes() const noexcept
+{
+    return m_shards && m_shards->capacity() > Holds::internal_capacity()
+        ? kisPageStorageBytes(m_shards->data(), alignof(Hold)) : 0;
+}
+
+void KisPageEditValues::release(KisPagePrivateWrite **rows, size_t count) noexcept
+{
+    Q_ASSERT(count <= ReleaseBatch);
+    size_t live = 0;
+    for (size_t i = 0; i < count; ++i) {
+        Q_ASSERT(rows[i] && &rows[i]->edit == this && !rows[i]->reserved);
+        if (rows[i]->value) rows[live++] = rows[i];
+    }
+    if (live) {
+        // Sort bounded borrowed positions only. Neither Values nor their
+        // original rows move, and cleanup allocates no second carrier.
+        std::sort(rows, rows + live, [](const auto *a, const auto *b) {
+            return std::less<void *>{}(a->location.shard, b->location.shard);
+        });
+        const auto release = [&](MetadataReleasedReferences *released) {
+            for (size_t first = 0; first < live;) {
+                auto *shard = static_cast<MetadataShard *>(rows[first]->location.shard);
+                QMutexLocker lock(&shard->mutex);
+                size_t end = first;
+                do {
+                    auto &row = *rows[end];
+                    auto *value = row.value;
+                    Q_ASSERT(value->frameHeld);
+                    shard->records.exactVersions.cancelReservation(&row.location.exact);
+                    shard->records.physicalSlots.cancelReservation(&row.location.physical);
+                    value->frameHeld = false;
+                    if (!value->indexed) {
+                        released[end].descriptor.swap(value->native.descriptor);
+                        released[end].binding.swap(value->native.nativeBinding);
+                        const bool erased = shard->arenas.versions.erase(row.location.value);
+                        Q_ASSERT(erased); Q_UNUSED(erased);
+                    }
+                    row.value = nullptr;
+                    ++end;
+                } while (end < live && rows[end]->location.shard == shard);
+                first = end;
+            }
+            Q_ASSERT(m_values >= live);
+            m_values -= live;
+        };
+        // A true one-row lifetime uses the same policy without initializing
+        // a whole batch's terminal references. Destruction leaves every gate.
+        if (live == 1) {
+            MetadataReleasedReferences released;
+            release(&released);
+        } else {
+            MetadataReleasedReferences released[ReleaseBatch];
+            release(released);
+        }
+    }
+    if (!m_values && m_shards) m_shards->clear();
+}
+
 KisPagePrivateWrite::~KisPagePrivateWrite()
 {
     if (!value) return;
-    Q_ASSERT(!reserved && location.shard && value->frameHeld);
-    auto *shard = static_cast<MetadataShard *>(location.shard.get());
-    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-    std::shared_ptr<KisCpuResidentBinding> binding;
-    QMutexLocker lock(&shard->mutex);
-    shard->records.exactVersions.cancelReservation(&location.exact);
-    shard->records.physicalSlots.cancelReservation(&location.physical);
-    value->frameHeld = false;
-    if (!value->indexed) {
-        descriptor.swap(value->native.descriptor);
-        binding.swap(value->native.nativeBinding);
-        const bool erased = shard->arenas.versions.erase(location.value);
-        Q_ASSERT(erased); Q_UNUSED(erased);
-    }
-    value = nullptr;
-    lock.unlock();
+    KisPagePrivateWrite *row = this;
+    edit.release(&row, 1);
 }
 
 bool KisPageMetadataCoordinator::preparePrivateValue(const KisPageWriteInput &write,
@@ -4532,6 +4599,7 @@ try {
     const size_t index = kisStablePageKeyHash(write.version.key) % core->shards.size();
     auto *shard = core->shards[index].get();
     const auto storage = core->budgetAuthority->storage<char>();
+    native->edit.retain(core->shards[index], storage);
     MetadataArenaGrowth growth(storage.borrowed());
     QMutexLocker lock(&shard->mutex);
     const auto found = shard->pages.find(write.version.key);
@@ -4562,12 +4630,13 @@ try {
     value->firstReplica = value->authorityReplica = replica;
     value->replicaCount = 1;
     value->primaryReplica.ownerVersion = slot;
-    native->location.shard = core->shards[index];
+    native->location.shard = shard;
     native->location.page = page;
     native->location.shardIndex = index;
     native->location.value = slot;
     native->value = value;
     value->frameHeld = true;
+    ++native->edit.m_values;
     native->location.exact = std::move(reservation.exactVersions);
     native->location.physical = std::move(reservation.physicalSlots);
     ++shard->nativeValuesPrepared;
@@ -4599,7 +4668,7 @@ void KisPageMetadataCoordinator::discardPrivateValue(KisPagePrivateWrite *native
     auto *core = m_core.load(std::memory_order_acquire);
     Q_ASSERT(core && !native->reserved && native->location.shardIndex < core->shards.size());
     auto *shard = core->shards[native->location.shardIndex].get();
-    Q_ASSERT(native->location.shard.get() == shard);
+    Q_ASSERT(native->location.shard == shard);
     QMutexLocker lock(&shard->mutex);
     discardPrivateValueLocked(*shard, *native);
 }
@@ -4617,12 +4686,12 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
         || native->location.shardIndex >= core->shards.size()) return false;
     size_t shardIndex = native->location.shardIndex;
     auto *shard = core->shards[shardIndex].get();
-    if (native->location.shard.get() != shard || native->reserved || !target.isValid()
+    if (native->location.shard != shard || native->reserved || !target.isValid()
         || !(write.baseVersion.key == write.version.key)
         || !(target.version == write.version) || !write.transaction.isValid()
         || !write.operation.isValid()) return false;
     QMutexLocker lock(&shard->mutex);
-    const auto *preparedValue = native->location.shard.get() == shard
+    const auto *preparedValue = native->location.shard == shard
         ? shard->arenas.versions.get(native->location.value) : nullptr;
     if (!preparedValue || preparedValue != native->value || preparedValue->indexed
         || !(preparedValue->version == write.version)) return false;

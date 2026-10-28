@@ -10,9 +10,48 @@
 #include "KisPageMetadataArena_p.h"
 #include "KisPageMetadataIndex_p.h"
 #include "KisPageStateMachine.h"
+#include <boost/container/small_vector.hpp>
+#include <functional>
 
 class KisCpuResidentBinding;
 struct KisPageRetirementRecord;
+struct KisPagePrivateWrite;
+
+// Metadata memory belongs to the original edit's row storage. One hold per
+// touched shard replaces per-row shared ownership. This is not another edit
+// capability, transaction or retention edge; the rows still own their Values.
+class KRITAIMAGE_EXPORT KisPageEditValues
+{
+public:
+    static constexpr size_t ReleaseBatch = 16;
+    KisPageEditValues() = default;
+    ~KisPageEditValues();
+    KisPageEditValues(KisPageEditValues &&) noexcept;
+    KisPageEditValues &operator=(KisPageEditValues &&) noexcept;
+    KisPageEditValues(const KisPageEditValues &) = delete;
+    KisPageEditValues &operator=(const KisPageEditValues &) = delete;
+    // Up to ReleaseBatch distinct, nonreserved rows from this edit. Caller
+    // owns structural exclusion, just as during original-row construction.
+    void release(KisPagePrivateWrite **rows, size_t count) noexcept;
+    size_t storageBytes() const noexcept;
+private:
+    using Hold = std::shared_ptr<void>;
+    using Holds = boost::container::small_vector<Hold, 4, KisMutationStorageAllocator<Hold>>;
+    template<class Shard>
+    void retain(const std::shared_ptr<Shard> &shard, const KisMutationStorageAllocator<char> &storage)
+    {
+        if (!m_shards) m_shards.emplace(Holds::allocator_type(storage));
+        const auto before = [](const Hold &a, const void *b) { return std::less<const void *>{}(a.get(), b); };
+        const auto at = std::lower_bound(m_shards->begin(), m_shards->end(), shard.get(), before);
+        // Convert/copy shared ownership only when this edit first touches the
+        // shard; even a temporary per-row shared_ptr would defeat that rule.
+        if (at == m_shards->end() || at->get() != shard.get()) m_shards->insert(at, shard);
+    }
+    std::optional<Holds> m_shards;
+    size_t m_values = 0;
+    friend class KisPageMetadataCoordinator;
+    friend class KisPageStoreReferenceTest;
+};
 
 // Borrowed from the original configured metadata core. Its page directory
 // only inserts nodes, so the enclosing Store/operation retains this address.
@@ -166,10 +205,11 @@ struct KisPageValueCell {
 // The stable original edit row borrows its one final Value. It never owns a
 // second target/layout/binding/proof and cannot be copied into another writer.
 struct KisPagePrivateWrite {
-    KisPagePrivateWrite() = default;
+    explicit KisPagePrivateWrite(KisPageEditValues &edit) : edit(edit) {}
     KRITAIMAGE_EXPORT ~KisPagePrivateWrite();
     KisPagePrivateWrite(const KisPagePrivateWrite &) = delete;
     KisPagePrivateWrite &operator=(const KisPagePrivateWrite &) = delete;
+    KisPageEditValues &edit;
     KisPageValueCell *value = nullptr;
     KisReplicaHandle source;
     KisPageRetirementRecord *backing = nullptr;
@@ -193,7 +233,7 @@ struct KisPagePrivateWrite {
     struct Location {
         using ExactIndex = KisShardSlotIndex<KisPageVersion, KisVersionSlotId>;
         using PhysicalIndex = KisShardSlotIndex<KisReplicaPhysicalSlotIdentity, KisReplicaSlotId>;
-        std::shared_ptr<void> shard; // arena lifetime only, never a content/history edge
+        void *shard = nullptr; // arena lifetime belongs to the original edit
         void *page = nullptr;
         size_t shardIndex = 0;
         KisVersionSlotId value;

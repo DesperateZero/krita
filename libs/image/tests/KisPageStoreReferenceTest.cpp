@@ -1346,6 +1346,7 @@ private Q_SLOTS:
     void preparedMetadataClaimsDoNotLoseConcurrentReaders();
     void preparedPublicationMatchesFullReferenceTransitions();
     void nativeValueFrameLifetime();
+    void editValuesGroupLifetimeAndPressure();
     void privatePreparedBackingReplacement_data();
     void privatePreparedBackingReplacement();
     void preparedMutationIsAtomicAndBound();
@@ -6843,14 +6844,16 @@ void KisPageStoreReferenceTest::privateMutationLocationsAreNotAuthority()
             // fall back without changing which page receives the target.
             write.baseSlot = hint == 4 ? different.write.baseSlot : selected.write.baseSlot;
         }
-        KisPagePrivateWrite result;
+        KisPageEditValues resultValues;
+        KisPagePrivateWrite result(resultValues);
         QVERIFY(coordinator.preparePrivateValue(write, &result, nullptr));
         QVERIFY(coordinator.acceptPrivateTarget(write, write.source, target, &result, 32, nullptr,
                                                 {}, completedAtAcceptance));
         QCOMPARE(result.completed, completedAtAcceptance);
         QCOMPARE(result.source, write.source);
         static_assert(!std::is_copy_constructible_v<KisPagePrivateWrite>);
-        KisPagePrivateWrite copied;
+        KisPageEditValues copiedValues;
+        KisPagePrivateWrite copied(copiedValues);
         QVERIFY(!coordinator.completePrivateWrite(&copied));
         QVERIFY(!coordinator.cancelPrivateResult(&copied));
         QVERIFY(!other.completePrivateWrite(&result));
@@ -7055,6 +7058,7 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
         QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
         QVERIFY(metadata->bindCpuProofIssuer(1, completion));
         const KisPageTransaction tx{{74}, {1}};
+        KisPageEditValues editValues;
         std::array<std::unique_ptr<KisPagePrivateWrite>, 2> rows;
         std::weak_ptr<void> shard;
         for (int i = 0; i != (cancel ? 1 : 2); ++i) {
@@ -7065,10 +7069,11 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             input.target = replica(input.version, 1, 1, quint64(2 + i));
             input.transaction = tx.id; input.operation = {quint64(19 + i)};
             auto &row = rows[size_t(i)];
-            row = std::make_unique<KisPagePrivateWrite>();
+            row = std::make_unique<KisPagePrivateWrite>(editValues);
             QVERIFY(metadata->preparePrivateValue(KisPageWriteInput(input), row.get(), nullptr));
             const auto *originalValue = row->value;
-            shard = row->location.shard;
+            shard = editValues.m_shards->front();
+            QCOMPARE(editValues.m_shards->size(), size_t(1));
             QVERIFY(metadata->acceptPrivateTarget(KisPageWriteInput(input), input.source, input.target, row.get(), 64));
             const KisPagePublicationIdentity locator{row->version(), tx.id, 0, true, row->valueSlot()};
             QVERIFY(!metadata->ownsCpuValue(locator, 1)); // Memory/writer ownership is not a seal.
@@ -7121,6 +7126,92 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
     }
 }
 
+void KisPageStoreReferenceTest::editValuesGroupLifetimeAndPressure()
+{
+    KisBackingBudgetController budget;
+    KisPageBackingLimits limits;
+    limits.metadataArenaBytes = 8 * 1024 * 1024;
+    QVERIFY(budget.configureLimits(limits, nullptr));
+    KisPageEditValues edit;
+    auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+    metadata->attachBackingBudget(budget);
+    QVERIFY(metadata->configure(8));
+    std::array<KisPageVersion, 8> bases;
+    for (int x = 0; x < 1000; ++x) {
+        const auto base = pageVersion(x, 1);
+        const size_t shard = kisStablePageKeyHash(base.key) % bases.size();
+        if (!bases[shard].isValid()) bases[shard] = base;
+    }
+    for (const auto &base : bases) {
+        QVERIFY(base.isValid());
+        QVERIFY(metadata->registerPage(initialPageState(base, replica(base, 1, 1, quint64(base.key.page.column + 1)))));
+    }
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto fill = [&] {
+        const auto usage = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        KisBackingBudgetDelta delta;
+        delta.bucket(size_t(KisBackingBudgetClass::MetadataArena)).cpuRam =
+            qint64(limits.metadataArenaBytes - usage.live.cpuRam - usage.reserved.cpuRam);
+        return budget.reserve(delta, nullptr);
+    };
+    std::array<std::unique_ptr<KisPagePrivateWrite>, 8> rows;
+    const auto prepare = [&](size_t i) {
+        if (!rows[i]) rows[i] = std::make_unique<KisPagePrivateWrite>(edit);
+        KisPageWriteInput input;
+        input.baseVersion = bases[i]; input.version = bases[i];
+        ++input.version.generation.value; input.transaction = {74};
+        return metadata->preparePrivateValue(input, rows[i].get(), nullptr);
+    };
+    for (size_t i = 0; i < 4; ++i) QVERIFY(prepare(i));
+    QCOMPARE(edit.m_values, size_t(4)); QCOMPARE(edit.m_shards->size(), size_t(4));
+    QCOMPARE(edit.storageBytes(), size_t(0));
+    auto pressure = fill(); QVERIFY(pressure.isValid());
+    const auto fullLive = live();
+    QVERIFY(!prepare(4));
+    QVERIFY(!rows[4]->hasValue());
+    QCOMPARE(edit.m_values, size_t(4)); QCOMPARE(edit.m_shards->size(), size_t(4));
+    QCOMPARE(live(), fullLive);
+    pressure.release();
+    for (size_t i = 4; i < rows.size(); ++i) QVERIFY(prepare(i));
+    QCOMPARE(edit.m_shards->size(), size_t(8));
+    QVERIFY(edit.storageBytes() > 0);
+    const auto capacity = edit.storageBytes();
+    int disposed = 0;
+    for (size_t i : {size_t(0), size_t(1)}) {
+        rows[i]->descriptor() = std::shared_ptr<const KisPageAllocationDescriptor>(
+            new KisPageAllocationDescriptor, [&](const auto *value) {
+                // This locks the shards: the terminal reference must already
+                // have left every group gate before its last destructor.
+                metadata->metrics(); ++disposed; delete value;
+            });
+    }
+    for (auto &row : rows) metadata->discardPrivateValue(row.get());
+    KisPagePrivateWrite *first[] = {rows[6].get(), rows[0].get(), rows[5].get(), rows[1].get()};
+    edit.release(first, 4);
+    QCOMPARE(disposed, 2); QCOMPARE(edit.m_values, size_t(4));
+    KisPagePrivateWrite *last[] = {rows[7].get(), rows[2].get(), rows[4].get(), rows[3].get()};
+    edit.release(last, 4);
+    QCOMPARE(edit.m_values, size_t(0)); QVERIFY(edit.m_shards->empty());
+    QCOMPARE(edit.storageBytes(), capacity);
+    for (auto &row : rows) row.reset();
+    // The same edit reuses its actual shard capacity at a hard-full budget.
+    const auto warmLive = live();
+    pressure = fill(); QVERIFY(pressure.isValid());
+    for (size_t i = 0; i < rows.size(); ++i) QVERIFY(prepare(i));
+    QCOMPARE(live(), warmLive); QCOMPARE(edit.storageBytes(), capacity);
+    pressure.release();
+    for (auto &row : rows) metadata->discardPrivateValue(row.get());
+    std::array<std::weak_ptr<void>, 8> holds;
+    for (size_t i = 0; i < holds.size(); ++i) holds[i] = (*edit.m_shards)[i];
+    metadata.reset();
+    for (const auto &hold : holds) QVERIFY(!hold.expired());
+    for (auto &row : rows) row.reset();
+    for (const auto &hold : holds) QVERIFY(hold.expired());
+    QCOMPARE(edit.m_values, size_t(0));
+    KisPageEditValues moved(std::move(edit));
+    QCOMPARE(moved.storageBytes(), capacity); QCOMPARE(edit.storageBytes(), size_t(0));
+}
+
 void KisPageStoreReferenceTest::privatePreparedBackingReplacement_data()
 {
     QTest::addColumn<int>("variant");
@@ -7141,12 +7232,14 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
     write.source = page.versions.first().authority;
     write.version = pageVersion(0, 2); write.target = replica(write.version, 1, 1, 2);
     write.transaction = {74}; write.operation = {19}; write.writer = {19};
-    KisPagePrivateWrite result;
+    KisPageEditValues resultValues;
+    KisPagePrivateWrite result(resultValues);
     QVERIFY(metadata.preparePrivateValue(KisPageWriteInput(write), &result, nullptr));
     QVERIFY(metadata.acceptPrivateTarget(KisPageWriteInput(write), write.source, write.target, &result, 64));
     if (variant != 3) QVERIFY(metadata.completePrivateWrite(&result));
     auto replacement = replica(write.version, 1, 1, 3);
-    KisPagePrivateWrite foreign;
+    KisPageEditValues foreignValues;
+    KisPagePrivateWrite foreign(foreignValues);
     auto *selected = variant == 1 ? &foreign : &result;
     if (variant == 2) QVERIFY(metadata.cancelPrivateResult(&result));
     if (variant == 4) replacement.version = pageVersion(0, 3);
@@ -8442,7 +8535,8 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
     // final publication, including the exact before's late protection.
     KisPageMetadataCoordinator metadata;
     QVERIFY(metadata.configure(4)); QVERIFY(metadata.registerPage(input));
-    KisPagePrivateWrite result;
+    KisPageEditValues resultValues;
+    KisPagePrivateWrite result(resultValues);
     QVERIFY(metadata.preparePrivateValue(KisPageWriteInput(write), &result, nullptr));
     auto collision = write; collision.target.allocation = write.source.allocation;
     QVERIFY(!metadata.acceptPrivateTarget(KisPageWriteInput(collision), collision.source, collision.target, &result, 64));
@@ -9636,7 +9730,8 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     const auto slot = writes.handleAt(0);
     KisPageTransition prepared;
     prepared.version = pageVersion(0, 2);
-    KisPagePrivateWrite cold;
+    KisPageEditValues coldValues;
+    KisPagePrivateWrite cold(coldValues);
     QVERIFY(metadata.configure(1));
     const auto initial = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
     QVERIFY(metadata.registerPage(initial));
@@ -10759,7 +10854,8 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     prepared.operation = {71};
     prepared.writer = {81};
     prepared.writeMode = intent.mode;
-    KisPagePrivateWrite pendingResult;
+    KisPageEditValues pendingResultValues;
+    KisPagePrivateWrite pendingResult(pendingResultValues);
     QVERIFY(metadata.configure(4));
     QVERIFY(metadata.registerPage(initialPageState(prepared.baseVersion, prepared.source)));
     QVERIFY(metadata.preparePrivateValue(KisPageWriteInput(prepared), &pendingResult, nullptr));
@@ -10999,7 +11095,8 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     write.version = version; write.target = authority; write.transaction = tx.id;
     write.operation = {17}; write.writer = {18};
     {
-    KisPagePrivateWrite native;
+    KisPageEditValues nativeValues;
+    KisPagePrivateWrite native(nativeValues);
     QVERIFY(coordinator->preparePrivateValue(KisPageWriteInput(write), &native, nullptr));
     QVERIFY(coordinator->acceptPrivateTarget(KisPageWriteInput(write), write.source, write.target, &native, 64));
     QVERIFY(coordinator->completePrivateWrite(&native));

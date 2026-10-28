@@ -9591,7 +9591,8 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
     KisSurfaceEpochState surface; QVERIFY(f.epochs.root({1}).surfaceState({1}, &surface));
     const auto descriptor = surface.allocationDescriptor();
     KisPageWriteCoordinator write(f.metadata, f.epochs, f.budget, f.owner);
-    std::array<KisPagePrivateWrite, 2> native;
+    KisPageEditValues editValues;
+    std::array<KisPagePrivateWrite, 2> native{KisPagePrivateWrite{editValues}, KisPagePrivateWrite{editValues}};
     std::array<KisReplicaHandle, 2> targets;
     const auto prepare = [&](size_t i) {
         const KisPageVersion version{key(), {2 + i}};
@@ -9744,7 +9745,8 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         acquire.version = version; acquire.target = result.replica; acquire.transaction = tx.id;
         acquire.operation = f.owner.nextOperationId(); acquire.writer = f.owner.nextWriterToken();
         acquire.writeMode = KisPageWriteMode::DiscardContents;
-        KisPagePrivateWrite native;
+        KisPageEditValues nativeValues;
+        KisPagePrivateWrite native(nativeValues);
         QVERIFY(f.metadata.preparePrivateValue(KisPageWriteInput(acquire), &native, &f.error));
         native.descriptor() = std::allocate_shared<const KisPageAllocationDescriptor>(
             KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor());
