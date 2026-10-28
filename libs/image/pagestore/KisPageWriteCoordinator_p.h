@@ -319,7 +319,7 @@ public:
         const std::shared_ptr<KisPageReplicaProvider> &, KisPageAccessRequirement,
         KisPageWriteSelection &, KisPagePublicationCoordinator &,
         KisPageIdleCapacity idleCapacity,
-        QMutexLocker<QMutex> &, KisReplicaHandle &target,
+        QMutexLocker<QMutex> &, KisReplicaHandle *target,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
         KisPagePrivateWrite *native = nullptr);
     KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);

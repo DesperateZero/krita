@@ -3188,7 +3188,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     const std::shared_ptr<KisPageReplicaProvider> &provider, KisPageAccessRequirement access,
     KisPageWriteSelection &selection, KisPagePublicationCoordinator &publication,
     KisPageIdleCapacity capacity,
-    QMutexLocker<QMutex> &locker, KisReplicaHandle &target, KisCpuWriteBindingReservation &writable,
+    QMutexLocker<QMutex> &locker, KisReplicaHandle *target, KisCpuWriteBindingReservation &writable,
     KisPageStoreDiagnosticTimer &diagnostic, KisPagePrivateWrite *native)
 {
     auto &write = selection.write;
@@ -3354,9 +3354,10 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         locker.relock();
     }
     if (native) {
-        Q_ASSERT(&target == &native->target && target == physical.target());
+        Q_ASSERT(!target && native->target() == physical.target());
     } else {
-        target = physical.target(); // Original preallocated request is the owner.
+        Q_ASSERT(target);
+        *target = physical.target(); // Original preallocated request is the owner.
     }
     if (!reuseCapacity) write.source = before;
     return true;
@@ -3580,7 +3581,7 @@ KisCompletionTicket KisPageWriteCoordinator::initializeFreshReplica(
 KisPageVersion KisMutationPageEntry::preparedTargetVersion() const
 {
     return state != KisMutationPageEntryState::IntentOnly && coldPageStorage
-        ? coldPageStorage->target.version : KisPageVersion{};
+        ? coldPageStorage->version() : KisPageVersion{};
 }
 
 void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
@@ -3590,7 +3591,7 @@ void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
 {
     Q_ASSERT(entry.key() == intent.key && entry.state == KisMutationPageEntryState::IntentOnly);
     Q_ASSERT(write.version.key == entry.key() && !write.version.isDefaultPixel());
-    Q_ASSERT(entry.coldPageStorage && entry.coldPageStorage->target.version == write.version);
+    Q_ASSERT(entry.coldPageStorage && entry.coldPageStorage->version() == write.version);
     Q_ASSERT(state == KisMutationPageEntryState::MutableReady
              || state == KisMutationPageEntryState::PrivatePrepared
              || state == KisMutationPageEntryState::AliasAccepted);
@@ -3635,7 +3636,7 @@ KisPageWriteInput KisPageWriteCoordinator::writeInput(const KisMutationPageEntry
     Q_ASSERT(result && entry.state != KisMutationPageEntryState::IntentOnly);
     KisPageWriteInput write;
     write.baseVersion = {entry.key(), entry.baseGeneration, entry.baseDefaultPixelRevision};
-    write.version = result->target.version;
+    write.version = result->version();
     write.writeMode = entry.intent.mode;
     write.transaction = transaction;
     write.source = result->source;

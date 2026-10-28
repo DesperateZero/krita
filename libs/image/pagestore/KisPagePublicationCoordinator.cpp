@@ -2153,11 +2153,11 @@ void KisPagePublicationCoordinator::preparePrivateLayoutLocked(KisPagePrivateWri
     const KisPageAllocationDescriptor &descriptor,
     std::shared_ptr<const KisPageAllocationDescriptor> selected)
 {
-    Q_ASSERT(!result.reserved && !result.descriptor);
+    Q_ASSERT(!result.reserved && !result.descriptor());
     Q_ASSERT(!selected || selected.get() == &descriptor);
     if (!selected) selected = std::allocate_shared<const KisPageAllocationDescriptor>(
         KisMutationStorageAllocator<KisPageAllocationDescriptor>::retained(&m_budget), descriptor);
-    result.descriptor = std::move(selected);
+    result.descriptor() = std::move(selected);
     // This unregistered original result is not visible through metadata yet.
     // Only its successful acceptance publishes a descriptor change. A local
     // preparation/refusal must not invalidate another default/restore candidate.

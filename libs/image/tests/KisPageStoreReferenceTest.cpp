@@ -1345,6 +1345,7 @@ private Q_SLOTS:
     void lastRootDestructionIsIncrementalAndOffThread();
     void preparedMetadataClaimsDoNotLoseConcurrentReaders();
     void preparedPublicationMatchesFullReferenceTransitions();
+    void nativeValueFrameLifetime();
     void privatePreparedBackingReplacement_data();
     void privatePreparedBackingReplacement();
     void preparedMutationIsAtomicAndBound();
@@ -4147,9 +4148,9 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
     if (history >= 4095) {
         const auto footprint = coordinator.footprint();
         QVERIFY(footprint.versionArena.releasedBytes > 0);
-        QVERIFY(footprint.replicaArena.releasedBytes > 0);
+        QCOMPARE(footprint.replicaArena.releasedBytes, quint64(0));
         QCOMPARE(footprint.versionArena.activeBlocks, quint64(1));
-        QCOMPARE(footprint.replicaArena.activeBlocks, quint64(1));
+        QCOMPARE(footprint.replicaArena.activeBlocks, quint64(0));
     }
 
     // Published -> Historical can insert below an old cursor. Explicit restart
@@ -4193,8 +4194,8 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
 void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
 {
     QCOMPARE(sizeof(KisVersionSlotId), size_t(8));
-    QVERIFY(sizeof(KisPageValueCell) <= size_t(192));
-    QVERIFY(sizeof(KisReplicaRecord) <= size_t(128));
+    QVERIFY(sizeof(KisPageValueCell) <= size_t(320));
+    QVERIFY(sizeof(KisPageReplicaState) <= size_t(128));
     QVERIFY(sizeof(KisMetadataOverflowNode) <= size_t(64));
 
     KisCompletionRegistry completions;
@@ -4353,7 +4354,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         QCOMPARE(sample.footprint.replicas, records);
         QCOMPARE(sample.footprint.overflowArena.usedSlots, quint64(0));
         QCOMPARE(sample.footprint.versionArena.usedSlots, records);
-        QCOMPARE(sample.footprint.replicaArena.usedSlots, records);
+        QCOMPARE(sample.footprint.replicaArena.usedSlots, quint64(0));
         QCOMPARE(sample.footprint.exactVersionIndex.entries, records);
         QCOMPARE(sample.footprint.physicalSlotIndex.entries, records);
         QCOMPARE(sample.footprint.exactVersionIndex.outstandingReservations, quint64(0));
@@ -4365,7 +4366,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
                  sample.footprint.versionArena.attachedBlocks + sample.footprint.replicaArena.attachedBlocks
                      + sample.footprint.overflowArena.attachedBlocks);
         using VersionArena = KisShardSlotArena<KisPageValueCell, 16 * 1024>;
-        using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>;
+        using ReplicaArena = KisShardSlotArena<KisPageReplicaState, 32 * 1024>;
         QCOMPARE(sample.footprint.versionArena.allocatedBytes,
                  sample.footprint.versionArena.activeBlocks * VersionArena::blockByteSize());
         QCOMPARE(sample.footprint.replicaArena.allocatedBytes,
@@ -6494,6 +6495,10 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     for (quint64 i = 1; i <= 64; ++i) current.replicas.first().readLeases.append({i});
     current.replicas.first().pendingLastUses.append(lastUse);
     current.capturedReadViews.append({200});
+    // Keep a real additional placement in the surviving base. Single-replica
+    // values are inline and must not be forced to buy a removed replica slot.
+    if (variant != 0) current.replicas.append(
+        {replica(current.version, 99, 1, 300000), KisReplicaValidity::Valid, {}, {}, 0, {}});
     QVector<KisPageTransition> transitions;
     if (variant == 0) {
         KisPageTransition read;
@@ -6533,7 +6538,7 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         if (spare) {
             const auto fillerVersion = pageVersion(1, 1);
             auto fillerPage = initialPageState(fillerVersion, replica(fillerVersion, 99, 1, 200000));
-            for (quint64 i = 1; i < spare; ++i)
+            for (quint64 i = 1; i <= spare; ++i)
                 fillerPage.versions.first().replicas.append(
                     {replica(fillerVersion, 99, 1, 200000 + i), KisReplicaValidity::Valid, {}, {}, 0, {}});
             QVERIFY(coordinator.registerPage(fillerPage));
@@ -6844,7 +6849,8 @@ void KisPageStoreReferenceTest::privateMutationLocationsAreNotAuthority()
                                                 {}, completedAtAcceptance));
         QCOMPARE(result.completed, completedAtAcceptance);
         QCOMPARE(result.source, write.source);
-        auto copied = result;
+        static_assert(!std::is_copy_constructible_v<KisPagePrivateWrite>);
+        KisPagePrivateWrite copied;
         QVERIFY(!coordinator.completePrivateWrite(&copied));
         QVERIFY(!coordinator.cancelPrivateResult(&copied));
         QVERIFY(!other.completePrivateWrite(&result));
@@ -7034,6 +7040,78 @@ void KisPageStoreReferenceTest::indexedCompetingPreparedTransactions()
     comparePageRecords(actual, expected);
 }
 
+void KisPageStoreReferenceTest::nativeValueFrameLifetime()
+{
+    // A Frame keeps its result memory without becoming a content/history
+    // consumer. Replacement can retire the old value while delivery still
+    // holds the original row; destroying the facade cannot dangle that row.
+    for (bool cancel : {false, true}) {
+        auto metadata = std::make_unique<KisPageMetadataCoordinator>();
+        QVERIFY(metadata->configure(1));
+        const auto base = pageVersion(0, 1);
+        QVERIFY(metadata->registerPage(initialPageState(base, replica(base, 1, 1, 1))));
+        KisCompletionRegistry registry;
+        const auto completion = registry.allocatePending(registry.registerSource(KisCompletionDomain::HostLogical));
+        QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
+        QVERIFY(metadata->bindCpuProofIssuer(1, completion));
+        const KisPageTransaction tx{{74}, {1}};
+        std::array<std::unique_ptr<KisPagePrivateWrite>, 2> rows;
+        std::weak_ptr<void> shard;
+        for (int i = 0; i != (cancel ? 1 : 2); ++i) {
+            KisPageTransition input;
+            input.baseVersion = pageVersion(0, quint64(1 + i));
+            input.version = pageVersion(0, quint64(2 + i));
+            input.source = replica(input.baseVersion, 1, 1, quint64(1 + i));
+            input.target = replica(input.version, 1, 1, quint64(2 + i));
+            input.transaction = tx.id; input.operation = {quint64(19 + i)};
+            auto &row = rows[size_t(i)];
+            row = std::make_unique<KisPagePrivateWrite>();
+            QVERIFY(metadata->preparePrivateValue(KisPageWriteInput(input), row.get(), nullptr));
+            const auto *originalValue = row->value;
+            shard = row->location.shard;
+            QVERIFY(metadata->acceptPrivateTarget(KisPageWriteInput(input), input.source, input.target, row.get(), 64));
+            QVERIFY(metadata->completePrivateWrite(row.get()));
+            if (cancel) {
+                QVERIFY(metadata->cancelPrivateResult(row.get()));
+                QVERIFY(!row->acceptedSlot().isValid());
+            } else {
+                QVERIFY(metadata->acceptPrivateValidation(*row, tx.id, quint64(1 + i), 1));
+                KisPagePublicationChange birth{KisPagePublicationChange::Replacement(row.get())};
+                if (i) {
+                    birth.superseded = {input.baseVersion, tx.id, 1, true, rows[0]->acceptedSlot()};
+                    birth.supersededAuthority = &input.source;
+                    birth.detachesSuperseded = true;
+                }
+                auto candidate = metadata->prepareAcceptance(tx, {&birth, 1});
+                QVERIFY(candidate.isValid());
+                QVERIFY(metadata->installAcceptance(std::move(candidate), tx));
+                metadata->finishAcceptance({&birth, 1});
+                QVERIFY(row->acceptedSlot().isValid());
+            }
+            QCOMPARE(row->value, originalValue);
+            QCOMPARE(row->target(), input.target);
+            QCOMPARE(metadata->footprint().replicaArena.usedSlots, quint64(0));
+        }
+        if (!cancel) {
+            KisPageMetadataCoordinator::VersionInfo old;
+            QVERIFY(metadata->versionSnapshot(rows[0]->version(), &old));
+            QVERIFY(!old.version.isValid());
+            QVERIFY(!rows[0]->acceptedSlot().isValid());
+        }
+        // An old locator must not regain read/write authority merely because
+        // its Frame still keeps the detached arena cell in memory.
+        KisPageWriteSelection stale;
+        QCOMPARE(metadata->selectMutationBase(rows[0]->version(), false, &stale,
+            nullptr, &rows[0]->location.value), KisPageMetadataCoordinator::MutationBaseSelection::Absent);
+        const auto firstTarget = rows[0]->target();
+        metadata.reset();
+        QVERIFY(!shard.expired());
+        QCOMPARE(rows[0]->target(), firstTarget);
+        rows[0].reset(); rows[1].reset();
+        QVERIFY(shard.expired());
+    }
+}
+
 void KisPageStoreReferenceTest::privatePreparedBackingReplacement_data()
 {
     QTest::addColumn<int>("variant");
@@ -7059,7 +7137,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
     QVERIFY(metadata.acceptPrivateTarget(KisPageWriteInput(write), write.source, write.target, &result, 64));
     if (variant != 3) QVERIFY(metadata.completePrivateWrite(&result));
     auto replacement = replica(write.version, 1, 1, 3);
-    KisPagePrivateWrite foreign = result;
+    KisPagePrivateWrite foreign;
     auto *selected = variant == 1 ? &foreign : &result;
     if (variant == 2) QVERIFY(metadata.cancelPrivateResult(&result));
     if (variant == 4) replacement.version = pageVersion(0, 3);
@@ -7072,7 +7150,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
         QVERIFY(metadata.bindCpuProofIssuer(1, completion));
         KisPreparedPageProof proof;
-        proof.authority = result.target; proof.transaction = write.transaction;
+        proof.authority = result.target(); proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
         const KisPagePublicationIdentity identity(proof);
@@ -7106,7 +7184,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         QCOMPARE(metadata.cpuProof(identity, 1), proof);
     }
     QCOMPARE(metadata.replacePrivateWrite(selected, replacement), variant == 0);
-    QCOMPARE(result.target, variant == 0 ? replacement : write.target);
+    QCOMPARE(result.target(), variant == 0 ? replacement : write.target);
     KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, &actual));
     // Private targets cannot be captured/read as visible metadata, and the
     // exact before's authority/reader facts survive every refused replacement.
@@ -7120,7 +7198,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
         QVERIFY(metadata.bindCpuProofIssuer(1, completion));
         KisPreparedPageProof proof;
-        proof.authority = result.target; proof.transaction = write.transaction;
+        proof.authority = result.target(); proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         // Completion capability must name the original registered result;
         // neither a copied result nor the ordinary seal may complete it.
@@ -8414,7 +8492,7 @@ void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection()
     QVERIFY(candidate.isValid());
     // No replacement storage for either existing replica or its protections.
     QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
-    QCOMPARE(metadata.footprint().replicaArena.outstandingReservations, quint64(1));
+    QCOMPARE(metadata.footprint().replicaArena.outstandingReservations, quint64(0));
     const KisPageStateMachine machine;
     if (outcome == 2) {
         KisPageTransition read;
@@ -8523,7 +8601,7 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     QCOMPARE(metadata->metrics().fullSnapshotExports, quint64(0));
     const auto reserved = metadata->footprint();
     QVERIFY(reserved.versionArena.outstandingReservations > 0);
-    QVERIFY(reserved.replicaArena.outstandingReservations > 0);
+    QCOMPARE(reserved.replicaArena.outstandingReservations, quint64(0)); // Both surviving values have one inline replica.
     QVERIFY(reserved.overflowArena.outstandingReservations > 0);
     QCOMPARE(reserved.exactVersionIndex.outstandingReservations, quint64(1));
     QVERIFY(reserved.physicalSlotIndex.outstandingReservations > 0);
@@ -9528,7 +9606,12 @@ void KisPageStoreReferenceTest::mutationWriteSetRejectsLiveResourceErasure()
     KisPageTransition prepared;
     prepared.version = pageVersion(0, 2);
     KisPagePrivateWrite cold;
-    cold.target.version = prepared.version;
+    QVERIFY(metadata.configure(1));
+    const auto initial = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
+    QVERIFY(metadata.registerPage(initial));
+    prepared.baseVersion = initial.versions.first().version;
+    prepared.transaction = {91};
+    QVERIFY(metadata.preparePrivateValue(KisPageWriteInput(prepared), &cold, nullptr));
     entry.setColdPage(&cold);
     coordinator.recordTarget(entry, intent, KisPageWriteInput(prepared), KisMutationPageEntryState::MutableReady);
     QCOMPARE(entry.preparedTargetVersion(), prepared.version);
@@ -10647,8 +10730,11 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     prepared.writer = {81};
     prepared.writeMode = intent.mode;
     KisPagePrivateWrite pendingResult;
-    pendingResult.target = prepared.target;
-    pendingResult.source = prepared.source;
+    QVERIFY(metadata.configure(4));
+    QVERIFY(metadata.registerPage(initialPageState(prepared.baseVersion, prepared.source)));
+    QVERIFY(metadata.preparePrivateValue(KisPageWriteInput(prepared), &pendingResult, nullptr));
+    QVERIFY(metadata.acceptPrivateTarget(KisPageWriteInput(prepared), prepared.source, prepared.target, &pendingResult, 64));
+    QVERIFY(metadata.completePrivateWrite(&pendingResult));
     pendingEntry.setColdPage(&pendingResult);
     coordinator.recordTarget(pendingEntry, intent, KisPageWriteInput(prepared), KisMutationPageEntryState::MutableReady);
     intent.inputKind = KisPageWriteInputKind::Semantic;
@@ -10670,7 +10756,8 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     QCOMPARE(reconstructed.transaction, prepared.transaction);
     QCOMPARE(reconstructed.writeMode, prepared.writeMode);
     QCOMPARE(reconstructed.source, prepared.source);
-    QCOMPARE(pendingResult.target, prepared.target); // Target remains on the original accepted result.
+    QCOMPARE(pendingResult.target(), prepared.target);
+    QVERIFY(metadata.cancelPrivateResult(&pendingResult));
     const KisPageTransactionId transaction{91};
     QMutexLocker activityLock(&mutex);
     QVERIFY(coordinator.beginSessionActivity(transaction, activityLock));
@@ -10805,7 +10892,6 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
              4096u);
     KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, current);
     KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, pending);
-    QVERIFY(metadata.configure(4));
     QVERIFY(metadata.registerPage(initialPageState(pageVersion(3, 1),
                                                    replica(pageVersion(3, 1), 1, 1, 3))));
     const auto snapshotExportsBeforeAdmission = metadata.metrics().fullSnapshotExports;
@@ -10882,6 +10968,7 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     write.source = state.versions.first().authority;
     write.version = version; write.target = authority; write.transaction = tx.id;
     write.operation = {17}; write.writer = {18};
+    {
     KisPagePrivateWrite native;
     QVERIFY(coordinator->preparePrivateValue(KisPageWriteInput(write), &native, nullptr));
     QVERIFY(coordinator->acceptPrivateTarget(KisPageWriteInput(write), write.source, write.target, &native, 64));
@@ -10898,6 +10985,7 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     QVERIFY(coordinator->installAcceptance(std::move(first), tx));
     coordinator->finishAcceptance({&birth, 1});
     first = {};
+    }
     KisPagePublicationChange input{{version.key, {}, true}, {version, tx.id, 1, false}};
     input.detachesSuperseded = true;
     auto candidate = coordinator->prepareAcceptance(tx, {&input, 1});
@@ -14648,12 +14736,12 @@ void KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithin
     QVERIFY2(footprint.trackedBytesPerPage() <= 1536.0,
              qPrintable(QStringLiteral("tracked bytes/page: %1").arg(footprint.trackedBytesPerPage())));
     QCOMPARE(footprint.versionArena.usedSlots, quint64(pageCount));
-    QCOMPARE(footprint.replicaArena.usedSlots, quint64(pageCount));
+    QCOMPARE(footprint.replicaArena.usedSlots, quint64(0));
     QCOMPARE(footprint.overflowArena.usedSlots, quint64(0));
     QVERIFY(footprint.versionArena.allocatedBytes > 0);
-    QVERIFY(footprint.replicaArena.allocatedBytes > 0);
+    QCOMPARE(footprint.replicaArena.allocatedBytes, quint64(0));
     QVERIFY(footprint.versionArena.freeSlots > 0);
-    QVERIFY(footprint.replicaArena.freeSlots > 0);
+    QCOMPARE(footprint.replicaArena.freeSlots, quint64(0));
     QVERIFY(footprint.versionArena.highWaterSlots >= footprint.versionArena.usedSlots);
     QVERIFY(footprint.replicaArena.highWaterSlots >= footprint.replicaArena.usedSlots);
 

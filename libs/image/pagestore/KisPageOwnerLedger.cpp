@@ -2699,8 +2699,8 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
         const auto *result = row.replacement.native;
         if (!result || !result->reserved || (!result->completed && !complete)
             || !result->location.page || !result->location.shard) return false;
-        if (result->proof.isValid()) {
-            if (!(result->proof.transaction == transaction)) return false;
+        if (result->proof().isValid()) {
+            if (!(result->proof().transaction == transaction)) return false;
         } else { ++pending; if (!firstPending) firstPending = result; }
     }
     if (!pending) { KisPageStoreDetail::setError(error, {}); return true; }
@@ -2708,7 +2708,7 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
     KisPageMetadataCoordinator *metadata;
     quint64 issuer, stamp;
     std::shared_ptr<KisPageReplicaProvider> authorityProvider;
-    ProviderKey selected = providerKey(firstPending->target.provider, firstPending->target.providerEpoch);
+    ProviderKey selected = providerKey(firstPending->target().provider, firstPending->target().providerEpoch);
     {
         QMutexLocker locker(&d->mutex);
         metadata = d->cpuMetadata;
@@ -2725,14 +2725,14 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
     // consumed, just as they did for a refused individual validation.
     for (auto &row : rows) {
         auto *result = row.replacement.native;
-        if (row.replacement.removal || result->proof.isValid()) continue;
-        const auto key = providerKey(result->target.provider, result->target.providerEpoch);
+        if (row.replacement.removal || result->proof().isValid()) continue;
+        const auto key = providerKey(result->target().provider, result->target().providerEpoch);
         if (!authorityProvider || key != selected) {
-            authorityProvider = provider(result->target.provider, result->target.providerEpoch);
+            authorityProvider = provider(result->target().provider, result->target().providerEpoch);
             selected = key;
         }
-        if (!result->descriptor || !authorityProvider
-            || !authorityProvider->validateCpuBinding(result->target, *result->descriptor, result->binding)) {
+        if (!result->descriptor() || !authorityProvider
+            || !authorityProvider->validateCpuBinding(result->target(), *result->descriptor(), result->binding())) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
             return false;
         }

@@ -73,21 +73,21 @@ struct KisPagePublicationChange {
         explicit Replacement(const KisPagePublicationIdentity *proof) : originalProof(proof)
         { Q_ASSERT(proof); new (&payload.owned) Owned{}; }
         const KisPageKey &key() const
-        { return borrowed ? native->target.version.key : originalProof ? originalProof->version.key : payload.owned.key; }
-        const KisPageVersion &version() const { return borrowed ? native->target.version : originalProof ? originalProof->version : payload.owned.proof.version; }
+        { return borrowed ? native->version().key : originalProof ? originalProof->version.key : payload.owned.key; }
+        const KisPageVersion &version() const { return borrowed ? native->version() : originalProof ? originalProof->version : payload.owned.proof.version; }
         KisPageTransactionId transaction() const
-        { return borrowed ? native->proof.transaction : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
+        { return borrowed ? native->proof().transaction : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
         bool hasProof() const
-        { return borrowed ? native->proof.isValid() && native->target.version.isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
+        { return borrowed ? native->hasValue() && native->proof().isValid() && native->version().isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
         bool nativeProof() const { return borrowed || (originalProof ? originalProof->native : payload.owned.proof.native); }
         KisVersionSlotId metadataSlot() const
-        { return borrowed ? native->acceptedSlot : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
+        { return borrowed ? native->acceptedSlot() : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
         quint64 validationStamp() const
-        { return borrowed ? native->proof.providerValidationStamp : originalProof ? originalProof->stamp : payload.owned.proof.stamp; }
+        { return borrowed ? native->proof().stamp : originalProof ? originalProof->stamp : payload.owned.proof.stamp; }
         KisPagePublicationIdentity proofValue() const
         {
-            return borrowed ? KisPagePublicationIdentity{native->target.version, native->proof.transaction,
-                native->proof.providerValidationStamp, true, native->acceptedSlot} : originalProof ? *originalProof : payload.owned.proof;
+            return borrowed ? KisPagePublicationIdentity{native->version(), native->proof().transaction,
+                native->proof().stamp, true, native->acceptedSlot()} : originalProof ? *originalProof : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;

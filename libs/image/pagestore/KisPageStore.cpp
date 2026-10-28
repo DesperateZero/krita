@@ -678,7 +678,7 @@ public:
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
         PageSlot *storage = nullptr;
-        ~Page() { Q_ASSERT(!reserved && !location.value.isValid()); }
+        ~Page() { Q_ASSERT(!reserved); }
     };
     static_assert(sizeof(Page) <= 832);
     struct PageSlot {
@@ -1057,7 +1057,7 @@ public:
         if (!owner->metadata.cancelPrivateResult(&page))
             qFatal("CPU private result lost its cancellation reservation");
         if (!page.backing) qFatal("CPU private result lost its original backing");
-        owner->retirementQueue.acceptDetachedRecord(*page.backing, page.target);
+        owner->retirementQueue.acceptDetachedRecord(*page.backing, page.target());
         page.backing = nullptr;
         owner->writeCoordinator.recordCancelled(*entry);
         if (entry->isCpuWrite())
@@ -1175,7 +1175,8 @@ public:
         auto *page = static_cast<Page *>(entry.coldPage());
         Q_ASSERT(page && !page->reserved);
         owner->metadata.discardPrivateValue(page);
-        auto layout = std::move(page->descriptor);
+        auto layout = page->hasValue() ? std::move(page->descriptor())
+            : std::shared_ptr<const KisPageAllocationDescriptor>{};
         erasePage(entry);
         if (layout) {
             if (lock.isLocked()) lock.unlock();
@@ -1395,7 +1396,7 @@ KisPageMutationSession::Private::prepareTarget(
         selected = &localSelection.emplace();
         if (previous) {
             selected->write = owner->writeCoordinator.writeInput(*entry, transaction.id);
-            selected->layout = previous->descriptor;
+            selected->layout = previous->descriptor();
         } else if (!owner->publicationCoordinator.selectWriteBaseLocked(transaction, intent, selected, error)) return {};
     }
     auto &acquire = selected->write;
@@ -1464,7 +1465,7 @@ KisPageMutationSession::Private::prepareTarget(
         reused = owner->writeCoordinator.tryAcquireReusedTargetLocked(
             transaction, intent, targetProvider,
             {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, *selected,
-            owner->publicationCoordinator, std::exchange(idle, {}), lock, page->target, writable, diagnostic, page);
+            owner->publicationCoordinator, std::exchange(idle, {}), lock, nullptr, writable, diagnostic, page);
     } catch (const std::bad_alloc &) {
         if (storageRefused) *storageRefused = true;
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation write plan storage is unavailable"));
@@ -1515,7 +1516,7 @@ KisPageMutationSession::Private::prepareTarget(
                 KisPagePriority::Interactive, payload, initialization);
             ownsNewTarget = ownsPreparedReplica(allocation.replica, acquire.version, *targetProvider,
                 alias ? nullptr : &source)
-                && (!previous || !(allocation.replica.physicalSlotIdentity() == previous->target.physicalSlotIdentity()));
+                && (!previous || !(allocation.replica.physicalSlotIdentity() == previous->target().physicalSlotIdentity()));
             if (ownsNewTarget) binding = targetProvider->cpuResidentBinding(allocation.replica);
         } catch (const std::bad_alloc &) {
             if (storageRefused) *storageRefused = true;
@@ -1544,12 +1545,12 @@ KisPageMutationSession::Private::prepareTarget(
         }
         auto *oldBacking = previous ? previous->backing : nullptr;
         std::optional<KisReplicaHandle> oldTarget;
-        if (previous) oldTarget.emplace(previous->target);
+        if (previous) oldTarget.emplace(previous->target());
         accepted = previous ? owner->metadata.replacePrivateWrite(page, allocation.replica)
             : owner->metadata.acceptPrivateTarget(acquire, acquire.source, allocation.replica, page,
                 owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias);
         if (!accepted) return {};
-        page->binding = std::move(binding);
+        page->binding() = std::move(binding);
         page->backing = registeredBacking;
         if (previous) {
             page->writable.reset();
@@ -1559,10 +1560,10 @@ KisPageMutationSession::Private::prepareTarget(
         finalAccepted = finalPayload;
         result.payloadInitialized = directPayload;
     }
-    Q_ASSERT(page->descriptor);
+    Q_ASSERT(page->descriptor());
     if (!previous) {
         page->writable = std::move(writable);
-        if (!page->binding) page->binding = page->writable.binding();
+        if (!page->binding()) page->binding() = page->writable.binding();
         owner->writeCoordinator.recordTarget(*entry, intent, acquire, alias
             ? KisMutationPageEntryState::AliasAccepted
             : finalAccepted ? KisMutationPageEntryState::PrivatePrepared : KisMutationPageEntryState::MutableReady);
@@ -2192,7 +2193,7 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         initialized = target.payloadInitialized;
     }
     if (!entry->hasPrivateResult()) {
-        if (!validRect(*page->descriptor)) {
+        if (!validRect(*page->descriptor())) {
             KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
             return fail();
         }
@@ -2207,11 +2208,11 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         d->counters.maximumPins = qMax(d->counters.maximumPins, d->counters.activePins + 1);
         if (!initialized) {
             diagnostic.next(KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto rowBytes = quint64(affected.width()) * page->descriptor->format.pixelStride;
+            const auto rowBytes = quint64(affected.width()) * page->descriptor()->format.pixelStride;
             const int rows = affected.height();
             for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * page->target.layout.rowStride
-                                + quint64(affected.x()) * page->descriptor->format.pixelStride,
+                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * page->target().layout.rowStride
+                                + quint64(affected.x()) * page->descriptor()->format.pixelStride,
                             static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes));
             d->counters.payloadCopyBytes += rowBytes * rows;
         }
@@ -2337,10 +2338,10 @@ bool KisCpuWriteGuard::providerBacking(KisReplicaHandle *replica) const
     const auto *bound = m_execution ? &m_execution->entries()[m_entry] : nullptr;
     const auto *entry = bound ? bound->entry : owner->writes.at({m_entry, m_entryIncarnation});
     const auto *page = bound ? bound->page : entry ? owner->pageFor(entry) : nullptr;
-    if (!page || !entry->isExposed() || !page->target.isValid()
+    if (!page || !entry->isExposed() || !page->target().isValid()
         || !page->writable.isValid())
         return false;
-    *replica = page->target;
+    *replica = page->target();
     return true;
 }
 
@@ -2724,7 +2725,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         KisPageStoreDetail::setError(error, QStringLiteral("alias writable provider does not match its input"));
         return result;
     }
-    if (payload && !payload->isValidFor(*page->descriptor)) {
+    if (payload && !payload->isValidFor(*page->descriptor())) {
         d->state = Private::State::Failed;
         KisPageStoreDetail::setError(error, QStringLiteral("complete CPU payload layout is invalid"));
         return result;
@@ -2739,10 +2740,10 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     if (initialization) {
         KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationSourceInitialize, 1);
         if (!d->provider->copySynchronousSourceToCpu(initialization,
-                                                     *page->descriptor,
+                                                     *page->descriptor(),
                                                      data,
-                                                     page->target.layout.rowStride,
-                                                     page->target.layout.byteSize)) {
+                                                     page->target().layout.rowStride,
+                                                     page->target().layout.byteSize)) {
             page->writable.unpin();
             d->state = Private::State::Failed;
             KisPageStoreDetail::setError(error, QStringLiteral("alias pending initialization failed"));
@@ -2753,10 +2754,10 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     if (payload) {
         if (!payloadInitialized) {
             KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto rowBytes = page->descriptor->minimumRowBytes();
-            const int rows = page->descriptor->pageExtent.height();
+            const auto rowBytes = page->descriptor()->minimumRowBytes();
+            const int rows = page->descriptor()->pageExtent.height();
             for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target.layout.rowStride,
+                std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target().layout.rowStride,
                             static_cast<const quint8 *>(payload->data) + row * payload->rowStride,
                             size_t(rowBytes));
             counters.payloadCopyBytes += rowBytes * rows;
@@ -2764,11 +2765,11 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         // Full input supersedes a staged semantic default, without a redundant fill.
         page->resetPixel.clear();
     } else if (!page->resetPixel.isEmpty()) {
-        const auto &rect = page->descriptor->validRect;
+        const auto &rect = page->descriptor()->validRect;
         const auto &pixel = page->resetPixel;
         auto *pixels = static_cast<quint8 *>(data);
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
-            quint8 *row = pixels + quint64(y) * page->target.layout.rowStride;
+            quint8 *row = pixels + quint64(y) * page->target().layout.rowStride;
             for (int x = rect.left(); x <= rect.right(); ++x)
                 std::memcpy(row + quint64(x) * pixel.size(), pixel.constData(), size_t(pixel.size()));
         }
@@ -2787,8 +2788,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     result.m_entry = bound ? quint32(bound - execution->entries()) : handle.index;
     result.m_entryIncarnation = handle.incarnation;
     result.m_data = data;
-    result.m_rowStride = page->target.layout.rowStride;
-    result.m_byteSize = page->target.layout.byteSize;
+    result.m_rowStride = page->target().layout.rowStride;
+    result.m_byteSize = page->target().layout.byteSize;
     if (execution)
         execution->markTouched(size_t(bound - execution->entries()));
     KisPageStoreDetail::setError(error, {});
@@ -4788,7 +4789,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         reused = d->writeCoordinator.tryAcquireReusedTargetLocked(
             transaction, writeIntent, provider, access, selection,
             d->publicationCoordinator,
-            d->publicationCoordinator.takeIdleCapacityLocked(transition.version.key), locker, target, writable, diagnostic);
+            d->publicationCoordinator.takeIdleCapacityLocked(transition.version.key), locker, &target, writable, diagnostic);
     } catch (const std::bad_alloc &) {
         // The common plan restores this gate and destroys prepared candidates
         // outside it. All fallible preparation precedes physical handoff.
