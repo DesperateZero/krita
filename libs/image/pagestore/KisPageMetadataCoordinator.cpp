@@ -506,6 +506,8 @@ static_assert(sizeof(MetadataPageActivityFacts) == 32);
 
 
 struct MetadataPage {
+    KisPageWriteClaim writeClaim;
+    bool hasMetadata() const { return publishedVersion.isValid(); }
     KisVersionSlotId firstVersion;
     KisVersionSlotId lastVersion;
     KisVersionSlotId firstHistory;
@@ -528,7 +530,7 @@ struct MetadataPage {
     }
 };
 
-static_assert(sizeof(MetadataPage) == 136);
+static_assert(sizeof(MetadataPage) == 176);
 
 /**
  * Stack projection of original page facts and sparse generic payload. Public snapshots are never
@@ -1805,7 +1807,7 @@ struct MetadataShard : KisPageMetadataShardMetrics {
     }
 
     bool canMutate(const KisPageKey &, const MetadataPage &page) const
-    { return page.revisionCanAdvance() && !page.activity.publicationClaim; }
+    { return page.hasMetadata() && page.revisionCanAdvance() && !page.activity.publicationClaim; }
 
     void acceptNativeResult(MetadataPage &page, KisVersionSlotId slot, KisPagePrivateWrite &native)
     {
@@ -4216,6 +4218,43 @@ qsizetype KisPageMetadataCoordinator::shardFor(const KisPageKey &key) const
     return qsizetype(kisStablePageKeyHash(key) % d->shards.size());
 }
 
+KisPageWriteClaim *KisPageMetadataCoordinator::findWriteClaim(const KisPageKey &key) const
+{
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
+    if (!shard) return nullptr;
+    QMutexLocker lock(&shard->mutex);
+    const auto found = shard->pages.find(key);
+    return found == shard->pages.end() ? nullptr : &found->second.writeClaim;
+}
+
+KisPageWriteClaim *KisPageMetadataCoordinator::prepareWriteClaim(const KisPageKey &key, QString *error) try
+{
+    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
+    if (!shard) {
+        KisPageStoreDetail::setError(error, QStringLiteral("page control is unavailable"));
+        return nullptr;
+    }
+    {
+        QMutexLocker lock(&shard->mutex);
+        const auto found = shard->pages.find(key);
+        if (found != shard->pages.end()) return &found->second.writeClaim;
+    }
+    // Allocate/charge outside both Store and shard gates. A competing creator
+    // can win; only the stable original node is installed, and unused storage
+    // is destroyed after the shard gate is released.
+    decltype(shard->pages) prepared(shard->pages.get_allocator());
+    prepared.try_emplace(key);
+    auto node = prepared.extract(prepared.begin());
+    QMutexLocker lock(&shard->mutex);
+    auto result = shard->pages.insert(std::move(node));
+    auto *claim = &result.position->second.writeClaim;
+    lock.unlock();
+    return claim;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("page control storage budget was refused"));
+    return nullptr;
+}
+
 bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initial, QString *error) try
 {
     if (initial.nativeGeneration.isValid() || initial.nativeTransaction.isValid()) {
@@ -4238,13 +4277,30 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
     const MetadataArenaDemand demand = newMetadataDemand(initial.versions);
     const auto storageOwner = shard->budgetAuthority->storage<char>();
     MetadataArenaGrowth growth(storageOwner.borrowed());
+    decltype(shard->pages) prepared(shard->pages.get_allocator());
     QMutexLocker locker(&shard->mutex);
-    if ((shard->pages.find(initial.key) != shard->pages.end())) {
+    const auto registered = [&] {
+        const auto found = shard->pages.find(initial.key);
+        return found != shard->pages.end() && found->second.hasMetadata();
+    };
+    if (registered()) {
         KisPageStoreDetail::setError(error, QStringLiteral("page is already registered"));
         return false;
     }
+    auto found = shard->pages.find(initial.key);
+    if (found == shard->pages.end()) {
+        locker.unlock();
+        prepared.try_emplace(initial.key);
+        locker.relock();
+        found = shard->pages.find(initial.key);
+        if (found != shard->pages.end() && found->second.hasMetadata()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("page was registered while preparing page control"));
+            locker.unlock();
+            return false;
+        }
+    }
     const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &locker, [&] {
-        return !(shard->pages.find(initial.key) != shard->pages.end());
+        return !registered();
     }, error);
     if (storage != MetadataGrowthResult::Ready) {
         KisPageStoreDetail::setError(error,
@@ -4253,8 +4309,7 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
                      : QStringLiteral("metadata arena budget is exhausted"));
         return false;
     }
-    decltype(shard->pages) prepared(shard->pages.get_allocator());
-    prepared.try_emplace(initial.key);
+    found = shard->pages.find(initial.key);
     if (!shard->ensureActivityCapacity(initial.key, &initial, error)) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata owning capacity budget is exhausted"));
         return false;
@@ -4263,12 +4318,12 @@ bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initia
         const auto activity = shard->activities.find(initial.key);
         if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
     });
-    auto &page = prepared.begin()->second;
+    auto &page = found == shard->pages.end() ? prepared.begin()->second : found->second;
     if (!shard->assign(initial.key, &page, initial)) {
         KisPageStoreDetail::setError(error, QStringLiteral("metadata arena budget is exhausted"));
         return false;
     }
-    shard->pages.insert(prepared.extract(prepared.begin()));
+    if (found == shard->pages.end()) shard->pages.insert(prepared.extract(prepared.begin()));
     d->registeredPages.fetchAndAddRelease(1);
     KisPageStoreDetail::setError(error, {});
     return true;
@@ -4291,7 +4346,7 @@ bool KisPageMetadataCoordinator::pageSnapshot(const KisPageKey &key, KisPageStat
         return false;
     QMutexLocker locker(&shard->mutex);
     const auto pageIt = shard->pages.find(key);
-    if (pageIt == shard->pages.cend())
+    if (pageIt == shard->pages.cend() || !pageIt->second.hasMetadata())
         return false;
     *snapshot = shard->snapshot(key, pageIt->second);
     return true;
@@ -4312,7 +4367,7 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
     auto *shard = core->shards[shardIndex].get();
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.find(base.key);
-    if (page == shard->pages.cend()) {
+    if (page == shard->pages.cend() || !page->second.hasMetadata()) {
         KisPageStoreDetail::setError(error, QStringLiteral("write base metadata is absent"));
         return MutationBaseSelection::Absent;
     }
@@ -4391,7 +4446,7 @@ bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity,
     for (;;) {
         QMutexLocker lock(&shard->mutex);
         const auto page = shard->pages.find(identity.key);
-        if (page == shard->pages.cend()) return false;
+        if (page == shard->pages.cend() || !page->second.hasMetadata()) return false;
         const auto *published = shard->records.version(page->second.publishedVersion);
         Q_ASSERT(published);
         KisVersionSlotId slot;
@@ -5059,7 +5114,7 @@ bool KisPageMetadataCoordinator::canAddTransientVersion(const KisPageVersion &ta
         return limit > 0;
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.find(target.key);
-    if (page == shard->pages.cend())
+    if (page == shard->pages.cend() || !page->second.hasMetadata())
         return limit > 0;
     if (shard->records.findVersion(target))
         return true;
@@ -5083,7 +5138,7 @@ bool KisPageMetadataCoordinator::queryPublication(const KisPageKey &key,
         return false;
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.find(key);
-    if (page == shard->pages.cend())
+    if (page == shard->pages.cend() || !page->second.hasMetadata())
         return false;
     const auto *head = shard->records.version(page->second.publishedVersion);
     Q_ASSERT(head);
@@ -5117,7 +5172,7 @@ KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVer
         return result;
     QMutexLocker lock(&shard->mutex);
     const auto page = shard->pages.find(key);
-    if (page == shard->pages.cend())
+    if (page == shard->pages.cend() || !page->second.hasMetadata())
         return result;
     result.exists = true;
     result.total = qsizetype(page->second.historyCount);
@@ -5274,15 +5329,18 @@ KisPageMetadataCoordinator::PublicationHeads KisPageMetadataCoordinator::publica
     if (!d)
         return {};
     PublicationHeads result(d->budgetAuthority->storage<KisPageVersion>());
+    result.reserve(size_t(d->registeredPages.loadAcquire()));
     for (const auto &shard : d->shards) {
         QMutexLocker lock(&shard->mutex);
-        result.reserve(result.size() + shard->pages.size());
+        quint64 registered = 0;
         for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page) {
+            if (!page->second.hasMetadata()) continue;
+            ++registered;
             const auto *head = shard->records.version(page->second.publishedVersion);
             Q_ASSERT(head);
             result.push_back(head->version);
         }
-        shard->publicationDirectoryHeaders += quint64(shard->pages.size());
+        shard->publicationDirectoryHeaders += quint64(registered);
     }
     return result;
 }
@@ -5978,7 +6036,7 @@ void KisPageMetadataCoordinator::visitPageKeys(
     for (const auto &shard : d->shards) {
         QMutexLocker shardLock(&shard->mutex);
         for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
-            if (!historicalOnly || page->second.historyCount)
+            if (page->second.hasMetadata() && (!historicalOnly || page->second.historyCount))
                 visit(context, page->first); // Under shard lock: consumer must not reenter metadata.
     }
 }
@@ -6080,15 +6138,9 @@ bool KisPageMetadataCoordinator::queryLastUsePending(
 
 qsizetype KisPageMetadataCoordinator::pageCount() const
 {
-    qsizetype count = 0;
-    QMutexLocker configurationLocker(&m_configurationMutex);
-    const auto *d = m_core.load(std::memory_order_acquire);
-    if (!d) return 0;
-    for (const std::shared_ptr<MetadataShard> &shard : d->shards) {
-        QMutexLocker shardLocker(&shard->mutex);
-        count += shard->pages.size();
-    }
-    return count;
+    // Stable controls are never erased. Successful first content registration
+    // already maintains the exact content-page count; claim-only nodes do not.
+    return qsizetype(pageRegistrationCount());
 }
 
 KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
@@ -6167,7 +6219,7 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
         result.owningCapacityBytes += shard->mapAllocationBytes.load(std::memory_order_relaxed)
             + shard->records.exactVersions.allocatedBytes() + shard->records.physicalSlots.allocatedBytes()
             + quint64(sizeof(MetadataShard));
-        result.pages += quint64(shard->pages.size());
+        for (const auto &entry : shard->pages) result.pages += entry.second.hasMetadata();
         for (const auto &entry : shard->pages) result.pageActivities += !entry.second.activity.isEmpty();
         const quint64 pageBytes = quint64(shard->pages.size()) * sizeof(MetadataPage);
         const quint64 activityBytes = quint64(shard->activities.size()) * sizeof(MetadataGenericActivity);

@@ -10493,7 +10493,7 @@ void KisPageStoreCpuMutationTest::mutationStorageBudgetRejection()
 {
     QFETCH(int, bpp);
     quint64 directoryBytes = 0;
-    quint64 transactionBytes = 0, scopeBytes = 0;
+    quint64 transactionBytes = 0, scopeBytes = 0, controlBytes = 0;
     {
         Fixture probe; QVERIFY(probe.init(bpp));
         directoryBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
@@ -10504,9 +10504,14 @@ void KisPageStoreCpuMutationTest::mutationStorageBudgetRejection()
         QVERIFY(scope.isActive());
         scopeBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam - directoryBytes - transactionBytes;
         QVERIFY(scopeBytes > 0);
+        QVERIFY(scope.removePage(key(0), &probe.error));
+        controlBytes = probe.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam
+            - directoryBytes - transactionBytes - scopeBytes;
+        QVERIFY(controlBytes > 0);
+        QVERIFY(scope.cancel());
     }
     Fixture f;
-    KisPageBackingLimits limits; limits.metadataArenaBytes = directoryBytes + transactionBytes + scopeBytes;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = directoryBytes + transactionBytes + scopeBytes + controlBytes;
     QVERIFY(f.store->configureBackingLimits(limits)); QVERIFY(f.init(bpp));
     const auto tx = f.store->beginCurrentTransaction();
     auto mutation = f.begin(tx); QVERIFY(mutation.isActive());
@@ -10516,19 +10521,20 @@ void KisPageStoreCpuMutationTest::mutationStorageBudgetRejection()
     QVERIFY(mutation.cancel());
     QCOMPARE(f.store->sessionStats().activeCpuWritePages, qsizetype(0));
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             directoryBytes + transactionBytes + scopeBytes);
+             directoryBytes + transactionBytes + scopeBytes + controlBytes);
     mutation = {};
     // The one empty original scope remains charged and can serve retry.
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             directoryBytes + transactionBytes + scopeBytes);
+             directoryBytes + transactionBytes + scopeBytes + controlBytes);
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam,
              quint64(0));
-    // The failed second claim cannot prevent a subsequent inline operation.
-    auto retry = f.begin(tx); QVERIFY(retry.removePage(key(1), &f.error));
+    // The original PageControl is stable paid memory, not a recyclable key
+    // slot. Existing-key retry needs no new control; a new key must be funded.
+    auto retry = f.begin(tx); QVERIFY(retry.removePage(key(0), &f.error));
     QVERIFY(retry.cancel()); QVERIFY(f.store->abort(tx));
     retry = {}; QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             directoryBytes + scopeBytes);
+             directoryBytes + scopeBytes + controlBytes);
     QVERIFY(f.store->closeSession(&f.error));
 }
 

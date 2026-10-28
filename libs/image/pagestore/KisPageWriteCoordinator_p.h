@@ -55,6 +55,17 @@ struct KisPageWriteSelection;
 enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
 
+// Stored once in the stable PageControl. Only the containing Store gate
+// protects these fields; metadata's shard gate protects the surrounding page.
+struct KisPageWriteClaim {
+    enum class Origin : quint8 { NativeSession, ManagedRange, LegacyAdapter, GenericWrite };
+    quint64 token = 0;
+    Qt::HANDLE thread = nullptr;
+    KisPageWriteClaim *previous = nullptr;
+    KisPageWriteClaim *next = nullptr;
+    Origin origin = Origin::NativeSession;
+};
+
 enum class KisPageWriteInputKind : quint8 {
     MutableGuard,
     FinalPayload,
@@ -129,9 +140,11 @@ private:
     quint64 baseDefaultPixelRevision = 0;
     std::shared_ptr<const KisPageReplicaSource> initialization;
     KisPagePrivateWrite *coldPageStorage = nullptr;
+    KisPageWriteClaim *writeClaim = nullptr; // Stable original PageControl location.
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
 
     quint32 slotIndex = 0;
+    friend class KisPageWriteAdmission;
     friend class KisMutationWriteSet;
     friend class KisPageWriteCoordinator;
 };
@@ -185,6 +198,8 @@ private:
     Index prepareDirectory(qsizetype count) const;
     bool directoryHashed() const { return index && !publishedCount && index->size() > size_t(size()); }
 
+    KisPageMetadataCoordinator *claimMetadata = nullptr;
+    friend class KisPageWriteAdmission;
     std::optional<KisMutationPageEntry> inlineEntry;
     quint64 inlineIncarnation = 0;
     quint64 nextInlineIncarnation = 1;
@@ -204,12 +219,7 @@ private:
 class KRITAIMAGE_EXPORT KisPageWriteAdmission final
 {
 public:
-    enum class ClaimOrigin : quint8 {
-        NativeSession,
-        ManagedRange,
-        LegacyAdapter,
-        GenericWrite
-    };
+    using ClaimOrigin = KisPageWriteClaim::Origin;
     enum class Conflict : quint8 {
         None,
         ManagedOtherThread,
@@ -233,8 +243,8 @@ public:
 
         bool isValid() const;
         // No further execution/delivery may consume the original write rows.
-        // Admission retains the keys; this terminal owner retains only token.
-        void retainTokenForTerminal() noexcept;
+        // Stable PageControls retain the claims; this owner retains their chain.
+        void retainClaimsForTerminal() noexcept;
         bool isTerminal() const { return isValid() && !writeSet; }
         void release() noexcept;
         void releaseLocked() noexcept;
@@ -242,25 +252,25 @@ public:
     private:
         void releaseImpl(bool lockOwner) noexcept;
         KisPageWriteAdmission *owner = nullptr;
-        const KisMutationWriteSet *writeSet = nullptr;
+        KisMutationWriteSet *writeSet = nullptr;
+        KisPageWriteClaim *head = nullptr;
         quint64 token = 0;
 
         friend class KisPageWriteAdmission;
     };
 
-    KisPageWriteAdmission(QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
-                          KisBackingBudgetController *budget = nullptr,
+    KisPageWriteAdmission(KisPageMetadataCoordinator &, QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
                           const bool *operational = nullptr);
     qsizetype activeNativeClaimCountLocked() const;
     qsizetype activeGenericClaimCountLocked() const;
     Conflict conflictLocked(const KisPageKey &, Qt::HANDLE requester) const;
-    bool pageClaimedLocked(const KisPageKey &key) const { return m_claims.contains(key); }
+    bool pageClaimedLocked(const KisPageKey &) const;
     // Growth temporarily releases ownerLock. The caller retains the original
     // owner/transaction and serializes its write set independently (session
     // mutex or a private range). Never pass a mutable unprotected write set.
     bool claimDirectLocked(const KisPageKey &, quint64 ownerToken, QMutexLocker<QMutex> &, QString *error = nullptr);
     void releaseDirectLocked(const KisPageKey &, quint64 ownerToken) noexcept;
-    ClaimSet beginClaimSet(const KisMutationWriteSet &);
+    ClaimSet beginClaimSet(KisMutationWriteSet &);
     bool claimOne(ClaimSet &, KisMutationWriteSet::EntryHandle, QMutexLocker<QMutex> &, QString *error,
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
     bool releaseOneLocked(ClaimSet &, KisMutationWriteSet::EntryHandle) noexcept;
@@ -268,26 +278,31 @@ public:
     // refusal, even if that writer releases while unused growth is freed.
     Result claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error,
                   ClaimOrigin origin = ClaimOrigin::NativeSession);
-    // The caller has bound these unique keys to its original write-set rows
-    // under the session gate, and retains that gate across admission growth.
-    // Only dynamic competing claims need resolution here, not the write set.
-    bool claimRange(ClaimSet &, KisSurfaceId, const KisPageSnapshotArray<KisLogicalPageId> &,
-                    QMutexLocker<QMutex> &, QString *error);
+    // Borrow the existing execution bindings; no copied keys or second row directory.
+    struct Rows {
+        const void *data;
+        size_t count;
+        KisMutationPageEntry *(*at)(const void *, size_t);
+    };
+    bool claimRange(ClaimSet &, Rows, QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;
     bool ownsClaimLocked(const ClaimSet &, const KisPageKey &) const;
 
 private:
-    struct ActiveClaim {
-        quint64 token = 0;
-        ClaimOrigin origin = ClaimOrigin::NativeSession;
-        Qt::HANDLE thread = nullptr;
-    };
-
+    template<class Visit> Result claimEntries(ClaimSet &, Visit &&, QMutexLocker<QMutex> &,
+                                             QString *, ClaimOrigin);
+    bool valid(const ClaimSet &) const;
+    bool owned(const KisPageWriteClaim *, quint64 token, bool generic = false) const;
+    void attach(ClaimSet &, KisPageWriteClaim &, ClaimOrigin);
+    void unlink(ClaimSet &, KisPageWriteClaim &) noexcept;
+    KisPageWriteClaim *locate(const KisPageKey &, QMutexLocker<QMutex> &, QString *, bool *unlocked = nullptr);
     void release(ClaimSet &, bool lockOwner) noexcept;
 
+    KisPageMetadataCoordinator *m_metadata;
     QMutex *m_ownerMutex = nullptr;
     KisPageWaitCondition *m_ownerCondition = nullptr;
-    KisMutationAdmissionTable<KisPageKey, ActiveClaim> m_claims;
+    qsizetype m_nativeCount = 0;
+    qsizetype m_genericCount = 0;
     const bool *m_operational = nullptr;
     quint64 m_nextClaimToken = 1;
     friend class KisPageStoreReferenceTest;

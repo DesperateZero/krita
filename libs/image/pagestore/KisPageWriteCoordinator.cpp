@@ -2528,7 +2528,8 @@ KisMutationWriteSet::KisMutationWriteSet(KisBackingBudgetController *value)
     : overflow(value), index(std::in_place, Index::allocator_type(KisMutationStorageAllocator<KisPagePublicationSource *>(value))), budget(value) {}
 
 KisMutationWriteSet::KisMutationWriteSet(KisMutationWriteSet &&other) noexcept
-    : inlineEntry(std::move(other.inlineEntry))
+    : claimMetadata(std::exchange(other.claimMetadata, nullptr))
+    , inlineEntry(std::move(other.inlineEntry))
     , inlineIncarnation(std::exchange(other.inlineIncarnation, 0))
     , nextInlineIncarnation(std::exchange(other.nextInlineIncarnation, 0))
     , overflow(std::move(other.overflow))
@@ -2542,6 +2543,7 @@ KisMutationWriteSet::KisMutationWriteSet(KisMutationWriteSet &&other) noexcept
 KisMutationWriteSet &KisMutationWriteSet::operator=(KisMutationWriteSet &&other) noexcept
 {
     if (this != &other) {
+        claimMetadata = std::exchange(other.claimMetadata, nullptr);
         inlineEntry = std::move(other.inlineEntry);
         inlineIncarnation = std::exchange(other.inlineIncarnation, 0);
         nextInlineIncarnation = std::exchange(other.nextInlineIncarnation, 0);
@@ -2797,6 +2799,7 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
 
 void KisMutationWriteSet::clearValues() noexcept
 {
+    claimMetadata = nullptr;
     if (!size() && !publishedCount) {
         overflow.takeReleasedBlocks().reset();
         return;
@@ -2883,6 +2886,7 @@ KisPageWriteAdmission::ClaimSet &KisPageWriteAdmission::ClaimSet::operator=(Clai
         release();
         owner = std::exchange(other.owner, nullptr);
         writeSet = std::exchange(other.writeSet, nullptr);
+        head = std::exchange(other.head, nullptr);
         token = std::exchange(other.token, 0);
     }
     return *this;
@@ -2893,7 +2897,7 @@ bool KisPageWriteAdmission::ClaimSet::isValid() const
     return owner && token;
 }
 
-void KisPageWriteAdmission::ClaimSet::retainTokenForTerminal() noexcept
+void KisPageWriteAdmission::ClaimSet::retainClaimsForTerminal() noexcept
 {
     Q_ASSERT(isValid());
     writeSet = nullptr;
@@ -2918,34 +2922,27 @@ void KisPageWriteAdmission::ClaimSet::releaseImpl(bool lockOwner) noexcept
     token = 0;
 }
 
-KisPageWriteAdmission::KisPageWriteAdmission(QMutex &ownerMutex, KisPageWaitCondition &ownerCondition,
-                                               KisBackingBudgetController *budget, const bool *operational)
-    : m_ownerMutex(&ownerMutex)
-    , m_ownerCondition(&ownerCondition)
-    , m_claims(budget)
-    , m_operational(operational)
+KisPageWriteAdmission::KisPageWriteAdmission(KisPageMetadataCoordinator &metadata,
+    QMutex &ownerMutex, KisPageWaitCondition &ownerCondition, const bool *operational)
+    : m_metadata(&metadata), m_ownerMutex(&ownerMutex), m_ownerCondition(&ownerCondition),
+      m_operational(operational)
 {
 }
 
-qsizetype KisPageWriteAdmission::activeNativeClaimCountLocked() const
-{
-    return qsizetype(m_claims.size()) - activeGenericClaimCountLocked();
-}
+qsizetype KisPageWriteAdmission::activeNativeClaimCountLocked() const { return m_nativeCount; }
+qsizetype KisPageWriteAdmission::activeGenericClaimCountLocked() const { return m_genericCount; }
 
-qsizetype KisPageWriteAdmission::activeGenericClaimCountLocked() const
+bool KisPageWriteAdmission::pageClaimedLocked(const KisPageKey &key) const
 {
-    qsizetype count = 0;
-    m_claims.forEach([&](const KisPageKey &, const ActiveClaim &claim) {
-        count += claim.origin == ClaimOrigin::GenericWrite;
-    });
-    return count;
+    const auto *claim = m_metadata->findWriteClaim(key);
+    return claim && claim->token;
 }
 
 KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
     const KisPageKey &key, Qt::HANDLE requester) const
 {
-    const auto *found = m_claims.find(key);
-    if (!found) return Conflict::None;
+    const auto *found = m_metadata->findWriteClaim(key);
+    if (!found || !found->token) return Conflict::None;
     if (found->origin == ClaimOrigin::LegacyAdapter)
         return found->thread == requester ? Conflict::LegacySameThread : Conflict::LegacyBorrower;
     if (found->origin == ClaimOrigin::ManagedRange)
@@ -2953,42 +2950,65 @@ KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
     return found->thread == requester ? Conflict::WriterSameThread : Conflict::WriterOtherThread;
 }
 
-bool KisPageWriteAdmission::claimDirectLocked(const KisPageKey &key, quint64 ownerToken,
-                                              QMutexLocker<QMutex> &lock, QString *error)
+KisPageWriteClaim *KisPageWriteAdmission::locate(const KisPageKey &key,
+    QMutexLocker<QMutex> &lock, QString *error, bool *unlocked)
 {
-    const auto required = [&]() -> std::optional<size_t> {
-        if (!ownerToken || (m_operational && !*m_operational)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("write admission is unavailable"));
-            return {};
-        }
-        const auto *found = m_claims.find(key);
-        if (!found) return 1;
-        if (found->origin == ClaimOrigin::GenericWrite && found->token == ownerToken) return 0;
+    if (auto *claim = m_metadata->findWriteClaim(key)) return claim;
+    if (unlocked) *unlocked = true;
+    lock.unlock();
+    auto *claim = m_metadata->prepareWriteClaim(key, error);
+    lock.relock();
+    // A competing creator may have installed the control during a refused
+    // allocation. Its actual claim still decides contention versus failure.
+    return claim ? claim : m_metadata->findWriteClaim(key);
+}
+
+bool KisPageWriteAdmission::owned(const KisPageWriteClaim *claim, quint64 token, bool generic) const
+{
+    return claim && claim->token == token && token
+        && (claim->origin == ClaimOrigin::GenericWrite) == generic;
+}
+
+bool KisPageWriteAdmission::claimDirectLocked(const KisPageKey &key, quint64 ownerToken,
+    QMutexLocker<QMutex> &lock, QString *error)
+{
+    if (!ownerToken || (m_operational && !*m_operational)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write admission is unavailable"));
+        return false;
+    }
+    auto *claim = locate(key, lock, error);
+    if (!claim) return false;
+    if (m_operational && !*m_operational) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write admission is unavailable"));
+        return false;
+    }
+    if (owned(claim, ownerToken, true)) return true;
+    if (claim->token) {
         KisPageStoreDetail::setError(error, QStringLiteral("page is claimed by another writer"));
-        return {};
-    };
-    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
-        if (missing) {
-            const bool inserted = m_claims.insertPrepared(key, {ownerToken, ClaimOrigin::GenericWrite,
-                                                                QThread::currentThreadId()});
-            Q_ASSERT(inserted);
-        }
-    }, error);
+        return false;
+    }
+    claim->token = ownerToken;
+    claim->origin = ClaimOrigin::GenericWrite;
+    claim->thread = QThread::currentThreadId();
+    ++m_genericCount;
+    return true;
 }
 
 void KisPageWriteAdmission::releaseDirectLocked(const KisPageKey &key, quint64 ownerToken) noexcept
 {
-    const auto *found = m_claims.find(key);
-    Q_ASSERT(found && found->origin == ClaimOrigin::GenericWrite && found->token == ownerToken);
-    if (!found || found->origin != ClaimOrigin::GenericWrite || found->token != ownerToken) return;
-    m_claims.erase(key);
+    auto *claim = m_metadata->findWriteClaim(key);
+    Q_ASSERT(owned(claim, ownerToken, true));
+    if (!owned(claim, ownerToken, true)) return;
+    *claim = {};
+    --m_genericCount;
     m_ownerCondition->wakeAll();
 }
 
-KisPageWriteAdmission::ClaimSet KisPageWriteAdmission::beginClaimSet(const KisMutationWriteSet &writeSet)
+KisPageWriteAdmission::ClaimSet KisPageWriteAdmission::beginClaimSet(KisMutationWriteSet &writeSet)
 {
     ClaimSet result;
-    if (!m_nextClaimToken) return result;
+    if (!m_nextClaimToken || (writeSet.claimMetadata && writeSet.claimMetadata != m_metadata)) return result;
+    writeSet.claimMetadata = m_metadata;
     result.owner = this;
     result.writeSet = &writeSet;
     result.token = m_nextClaimToken;
@@ -2996,127 +3016,144 @@ KisPageWriteAdmission::ClaimSet KisPageWriteAdmission::beginClaimSet(const KisMu
     return result;
 }
 
-bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::EntryHandle entry,
-                                     QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin)
+bool KisPageWriteAdmission::valid(const ClaimSet &claims) const
 {
-    const KisMutationPageEntry *page = nullptr;
-    const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || !claims.writeSet || claims.owner != this || (m_operational && !*m_operational)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
-            return {};
+    return claims.isValid() && claims.owner == this && claims.writeSet
+        && claims.writeSet->claimMetadata == m_metadata && (!m_operational || *m_operational);
+}
+
+void KisPageWriteAdmission::attach(ClaimSet &claims, KisPageWriteClaim &claim, ClaimOrigin origin)
+{
+    Q_ASSERT(!claim.token && origin != ClaimOrigin::GenericWrite);
+    claim.token = claims.token;
+    claim.thread = QThread::currentThreadId();
+    claim.origin = origin;
+    claim.next = claims.head;
+    if (claim.next) claim.next->previous = &claim;
+    claims.head = &claim;
+    ++m_nativeCount;
+}
+
+void KisPageWriteAdmission::unlink(ClaimSet &claims, KisPageWriteClaim &claim) noexcept
+{
+    Q_ASSERT(owned(&claim, claims.token));
+    if (claim.previous) claim.previous->next = claim.next;
+    else { Q_ASSERT(claims.head == &claim); claims.head = claim.next; }
+    if (claim.next) claim.next->previous = claim.previous;
+    claim = {};
+    --m_nativeCount;
+}
+
+template<class Visit>
+KisPageWriteAdmission::Result KisPageWriteAdmission::claimEntries(
+    ClaimSet &claims, Visit &&visit, QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin)
+{
+    if (!valid(claims) || origin == ClaimOrigin::GenericWrite) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
+        return Result::Failed;
+    }
+    bool prepared = true;
+    bool contended = false;
+    bool unlocked = false;
+    size_t missing = 0;
+    // Resolve only original rows without a PageControl location. Real cold
+    // allocation can release Store; no claim is installed until ALL selected
+    // rows have been checked together again under the original Store gate.
+    visit([&](KisMutationPageEntry &entry) {
+        if (!entry.writeClaim) entry.writeClaim = locate(entry.key(), lock, error, &unlocked);
+        if (!entry.writeClaim) { prepared = false; return false; }
+        missing += !entry.writeClaim->token;
+        if (entry.writeClaim->token && !owned(entry.writeClaim, claims.token)) {
+            contended = true;
+            return false;
         }
-        page = claims.writeSet->at(entry);
-        if (!page) {
-            KisPageStoreDetail::setError(error, QStringLiteral("write admission entry is invalid"));
-            return {};
-        }
-        const auto *found = m_claims.find(page->key());
-        if (!found) return 1;
-        if (found->origin != ClaimOrigin::GenericWrite && found->token == claims.token) return 0;
-        KisPageStoreDetail::setError(error, QStringLiteral("page is claimed by another writer"));
-        return {};
-    };
-    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
-        if (missing) {
-            const bool inserted = m_claims.insertPrepared(page->key(), {claims.token, origin, QThread::currentThreadId()});
-            Q_ASSERT(inserted);
-        }
-    }, error);
+        return true;
+    });
+    if (!valid(claims)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write admission is unavailable"));
+        return Result::Failed;
+    }
+    // There is no invalidation boundary on the ordinary cached path. Only
+    // a real unlocked creation needs the additional full-range revalidation.
+    if (unlocked) {
+        missing = 0;
+        visit([&](KisMutationPageEntry &entry) {
+            missing += entry.writeClaim && !entry.writeClaim->token;
+            if (entry.writeClaim && entry.writeClaim->token && !owned(entry.writeClaim, claims.token)) {
+                contended = true;
+                return false;
+            }
+            return true;
+        });
+    }
+    if (contended) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write set intersects another writer"));
+        return Result::Contended;
+    }
+    if (!prepared) return Result::Failed;
+    if (!missing) return Result::Acquired;
+    visit([&](KisMutationPageEntry &entry) {
+        if (!entry.writeClaim->token) attach(claims, *entry.writeClaim, origin);
+        return true;
+    });
+    return Result::Acquired;
+}
+
+bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::EntryHandle slot,
+    QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin)
+{
+    auto *entry = valid(claims) ? claims.writeSet->at(slot) : nullptr;
+    if (!entry) {
+        KisPageStoreDetail::setError(error, QStringLiteral("write admission entry is invalid"));
+        return false;
+    }
+    return claimEntries(claims, [&](auto &&consume) { consume(*entry); }, lock, error, origin) == Result::Acquired;
 }
 
 bool KisPageWriteAdmission::releaseOneLocked(ClaimSet &claims, KisMutationWriteSet::EntryHandle slot) noexcept
 {
     if (!claims.isValid() || !claims.writeSet || claims.owner != this) return false;
     const auto *entry = claims.writeSet->at(slot);
-    if (!entry) return false;
-    const auto *found = m_claims.find(entry->key());
-    if (!found || found->origin == ClaimOrigin::GenericWrite || found->token != claims.token) return false;
-    m_claims.erase(entry->key());
+    if (!entry || !owned(entry->writeClaim, claims.token)) return false;
+    unlink(claims, *entry->writeClaim);
     m_ownerCondition->wakeAll();
     return true;
 }
 
 KisPageWriteAdmission::Result KisPageWriteAdmission::claimAll(ClaimSet &claims, QMutexLocker<QMutex> &lock,
-                                     QString *error, ClaimOrigin origin)
+    QString *error, ClaimOrigin origin)
 {
-    bool contended = false;
-    const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || !claims.writeSet || claims.owner != this || (m_operational && !*m_operational)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("write admission claim set is invalid"));
-            return {};
-        }
-        size_t missing = 0;
-        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
-            const auto *entry = claims.writeSet->at(slot);
-            const auto *found = m_claims.find(entry->key());
-            if (!found) ++missing;
-            else if (found->origin == ClaimOrigin::GenericWrite || found->token != claims.token) {
-                contended = true;
-                KisPageStoreDetail::setError(error, QStringLiteral("write set intersects another writer"));
-                return {};
-            }
-        }
-        return missing;
-    };
-    const bool acquired = admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
-        if (!missing) return;
-        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
-            const auto &key = claims.writeSet->at(slot)->key();
-            const auto *claim = m_claims.getOrInsertPrepared(key, {claims.token, origin, QThread::currentThreadId()});
-            Q_ASSERT(claim && claim->token == claims.token);
-            Q_UNUSED(claim);
-        }
-    }, error);
-    return acquired ? Result::Acquired : contended ? Result::Contended : Result::Failed;
+    return claimEntries(claims, [&](auto &&consume) {
+        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot))
+            if (!consume(*claims.writeSet->at(slot))) break;
+    }, lock, error, origin);
 }
 
-bool KisPageWriteAdmission::claimRange(ClaimSet &claims, KisSurfaceId surface,
-                                      const KisPageSnapshotArray<KisLogicalPageId> &pages, QMutexLocker<QMutex> &lock, QString *error)
+bool KisPageWriteAdmission::claimRange(ClaimSet &claims, Rows rows,
+    QMutexLocker<QMutex> &lock, QString *error)
 {
-    const auto required = [&]() -> std::optional<size_t> {
-        if (!claims.isValid() || !claims.writeSet || claims.owner != this || !surface.isValid() || pages.isEmpty()
-            || (m_operational && !*m_operational)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("execution claim range is invalid"));
-            return {};
-        }
-        size_t missing = 0;
-        for (const auto &page : pages) {
-            const auto *found = m_claims.find({surface, page});
-            if (found && (found->origin == ClaimOrigin::GenericWrite || found->token != claims.token)) {
-                KisPageStoreDetail::setError(error, QStringLiteral("execution range lost its entry or intersects another writer"));
-                return {};
-            }
-            missing += !found;
-        }
-        return missing;
-    };
-    return admitMutationRecords(m_claims, lock, required, [&](size_t missing) {
-        if (!missing) return;
-        for (const auto &page : pages) {
-            const KisPageKey key{surface, page};
-            const auto *claim = m_claims.getOrInsertPrepared(key,
-                {claims.token, ClaimOrigin::NativeSession, QThread::currentThreadId()});
-            Q_ASSERT(claim && claim->token == claims.token);
-            Q_UNUSED(claim);
-        }
-    }, error);
+    if (!rows.data || !rows.count || !rows.at) {
+        KisPageStoreDetail::setError(error, QStringLiteral("execution claim range is invalid"));
+        return false;
+    }
+    return claimEntries(claims, [&](auto &&consume) {
+        for (size_t i = 0; i < rows.count; ++i)
+            if (!consume(*rows.at(rows.data, i))) break;
+    }, lock, error, ClaimOrigin::NativeSession) == Result::Acquired;
 }
 
 bool KisPageWriteAdmission::ownsClaimSetLocked(const ClaimSet &claims) const
 {
     if (!claims.isValid() || !claims.writeSet || claims.owner != this) return false;
-    for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
-        const auto *found = m_claims.find(claims.writeSet->at(slot)->key());
-        if (!found || found->origin == ClaimOrigin::GenericWrite || found->token != claims.token) return false;
-    }
+    for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot))
+        if (!owned(claims.writeSet->at(slot)->writeClaim, claims.token)) return false;
     return true;
 }
 
 bool KisPageWriteAdmission::ownsClaimLocked(const ClaimSet &claims, const KisPageKey &key) const
 {
     if (!claims.isValid() || claims.owner != this) return false;
-    const auto *found = m_claims.find(key);
-    return found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token;
+    return owned(m_metadata->findWriteClaim(key), claims.token);
 }
 
 void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept
@@ -3124,24 +3161,10 @@ void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept
     std::optional<QMutexLocker<QMutex>> lock;
     if (lockOwner) lock.emplace(m_ownerMutex);
     if (claims.owner != this || !claims.token) return;
-    bool changed = false;
-    if (!claims.writeSet) {
-        // Only abandoned terminal scopes discard their row storage before
-        // release. The original table still owns every key and token; no
-        // copied range or second claim directory is needed for this tail.
-        changed = m_claims.eraseIf([&](const KisPageKey &, const ActiveClaim &claim) {
-            return claim.origin != ClaimOrigin::GenericWrite && claim.token == claims.token;
-        }) != 0;
-    } else {
-        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot)) {
-            const auto &key = claims.writeSet->at(slot)->key();
-            const auto *found = m_claims.find(key);
-            if (found && found->origin != ClaimOrigin::GenericWrite && found->token == claims.token) {
-                m_claims.erase(key);
-                changed = true;
-            }
-        }
-    }
+    const bool changed = claims.head;
+    // Original PageControls form the owner's chain, including abandoned
+    // terminal scopes. No row lookup, key rehash or global-table scan remains.
+    while (claims.head) unlink(claims, *claims.head);
     if (changed) m_ownerCondition->wakeAll();
 }
 

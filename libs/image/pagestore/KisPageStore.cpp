@@ -132,7 +132,7 @@ public:
         : storage(allocator)
         , metadataCleanupStatistics(std::allocate_shared<DeferredMetadataCleanupStatistics>(allocator))
         , owner(allocator)
-        , writeAdmission(mutex, writeAdmissionChanged, &backingBudget, &operational)
+        , writeAdmission(metadata, mutex, writeAdmissionChanged, &operational)
         , writeCoordinator(metadata, epochs, backingBudget, owner)
         , defaultStorage(backingBudget, allocator)
         , retirementQueue(owner, metadata, backingBudget, lifetimeReferences, this, &Private::releaseRetirementLifetime)
@@ -1001,11 +1001,11 @@ public:
         if (!cancelLocked(nullptr, terminalWithoutFacade)) return false;
         // Only the last public reference/orphan retry enters here. A sealed
         // adapter may still exclude writers until its owned abort is accepted,
-        // but the admission table already holds those keys. Keep its original
-        // token and return all duplicate rows before the potentially refused
+        // but the stable PageControls already hold those claims. Keep their
+        // original owner chain and return the rows before the potentially refused
         // abort; an orphan must not pin arrays that could relieve pressure.
         if (ownsTransaction && admission.isValid()) {
-            admission.retainTokenForTerminal();
+            admission.retainClaimsForTerminal();
             discardCapacityUnlocked();
         }
         const bool finished = terminalWithoutFacade || finishOwnedTransaction(false);
@@ -1159,7 +1159,6 @@ public:
     KisPageStore::Private *owner = nullptr;
     const KisPageStore *diagnosticOwner = nullptr; // identity only, never dereferenced
     KisPageTransaction transaction;
-    bool ownsTransaction = false;
     std::shared_ptr<KisPageReplicaProvider> provider;
     KisMutationWriteSet writes;
     ColdPageSet coldPages;
@@ -1329,6 +1328,7 @@ public:
     enum class State : quint8 { Active, Sealing, Failed, Detached };
     Qt::HANDLE thread = QThread::currentThreadId();
     std::atomic<State> state{State::Detached};
+    bool ownsTransaction = false; // Share scalar padding; keep single-page control in its allocation class.
     struct Counters {
         quint64 guardsReleased = 0;
         quint64 pinsAcquired = 0;
@@ -1895,7 +1895,10 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
     ++d->owner->activeProviderCalls;
     const auto preparation = qScopeGuard([&] { --d->owner->activeProviderCalls; });
     if (!d->admission.isValid()) d->admission = d->owner->writeAdmission.beginClaimSet(d->writes);
-    if (!d->owner->writeAdmission.claimRange(d->admission, surface, pages, ownerLock, error))
+    if (!d->owner->writeAdmission.claimRange(d->admission,
+        {range, candidate->count, [](const void *rows, size_t index) {
+            return static_cast<const KisPageMutationExecution::Private::BoundEntry *>(rows)[index].entry;
+        }}, ownerLock, error))
         return result;
     std::fill_n(created, (candidate->count + 63) / 64, quint64(0));
     candidate->link();

@@ -46,6 +46,8 @@ struct KisCpuReadBinding {
 struct DeferredMetadataCleanupStatistics;
 class KisPageHistoryCollector;
 class KisPageOwnerLedger;
+class KisPageWriteAdmission;
+struct KisPageWriteClaim;
 class KisBackingBudgetController;
 class KisPageReplicaProvider;
 class KisPagePublicationCoordinator;
@@ -613,6 +615,11 @@ private:
     KisPageMetadataTransitionResult applyCapturedProtection(const KisPageKey &key,
                                                    const KisPageTransition &transition,
                                                    KisPageMetadataReadCleanup *cleanup = nullptr);
+    // PageControl memory is stable for this metadata core's lifetime. Claim
+    // payload is exclusively protected by the original Store admission gate.
+    KisPageWriteClaim *findWriteClaim(const KisPageKey &) const;
+    KisPageWriteClaim *prepareWriteClaim(const KisPageKey &, QString *);
+    friend class KisPageWriteAdmission;
     class Private;
     // configure() publishes the complete immutable core once. Destruction
     // still requires owner quiescence; acquire does not extend its lifetime.
