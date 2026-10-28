@@ -965,7 +965,7 @@ KisPageCapturedRelease::Layout::Layout(size_t body, size_t versions, size_t remo
         && alignof(KisPageCapturedRelease) >= alignof(KisPageKey)
         && alignof(KisPageCapturedRelease) >= alignof(KisSurfaceEpochState)
         && alignof(KisPageCapturedRelease) >= alignof(KisPageNativeReadRef));
-    v = KisMutationWorkspace::append<KisPageVersion>(bytes, versions);
+    v = KisMutationWorkspace::append<KisPageViewValue *>(bytes, versions);
     r = KisMutationWorkspace::append<KisPageKey>(bytes, removals);
     s = KisMutationWorkspace::append<KisSurfaceEpochState>(bytes, surfaces);
     n = KisMutationWorkspace::append<KisPageNativeReadRef>(bytes, references);
@@ -974,7 +974,7 @@ KisPageCapturedRelease::Layout::Layout(size_t body, size_t versions, size_t remo
 void KisPageCapturedRelease::Layout::bind(KisPageCapturedRelease &record, void *storage) const
 {
     auto *start = static_cast<char *>(storage);
-    record.versions.bind(reinterpret_cast<KisPageVersion *>(start + v), versionCount);
+    record.values.bind(reinterpret_cast<KisPageViewValue **>(start + v), versionCount);
     record.removedPages.bind(reinterpret_cast<KisPageKey *>(start + r), removalCount);
     record.stagedSurfaces.bind(reinterpret_cast<KisSurfaceEpochState *>(start + s), surfaceCount);
     record.nativeRefs.bind(reinterpret_cast<KisPageNativeReadRef *>(start + n), referenceCount);

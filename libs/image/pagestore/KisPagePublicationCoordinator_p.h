@@ -45,7 +45,7 @@ struct KisPageWriteSelection;
 
 // The publication owner's original mutable delta. Epoch preparation borrows
 // these containers only while the owner's CommitPreparation excludes edits;
-// it still creates its own necessary immutable version projection.
+// it retains the same final Values in its necessary immutable nodes.
 struct KisPagePublicationDelta {
     struct PageLess {
         bool operator()(const KisPageKey &a, const KisPageKey &b) const noexcept
@@ -54,16 +54,26 @@ struct KisPagePublicationDelta {
                 < std::tie(b.surface.value, b.page.row, b.page.column);
         }
     };
-    struct PageState {
-        KisPagePublicationIdentity proof;
-    };
-    using ProofMap = boost::container::flat_map<KisPageKey, PageState, PageLess,
+    using PageState = KisPagePublicationSelection;
+    using SelectionMap = boost::container::flat_map<KisPageKey, PageState, PageLess,
         KisMutationStorageAllocator<std::pair<KisPageKey, PageState>>>;
     using RemovalSet = boost::container::flat_set<KisPageKey, PageLess,
         KisMutationStorageAllocator<KisPageKey>>;
-    explicit KisPagePublicationDelta(const KisMutationStorageAllocator<char> &storage)
-        : proofs(PageLess{}, storage), surfaceChanges(storage), removals(PageLess{}, storage) {}
-    ProofMap proofs;
+    explicit KisPagePublicationDelta(const KisMutationStorageAllocator<char> &storage,
+                                     std::shared_ptr<KisPageViewValueStorage> values, KisPageTransactionId transaction)
+        : values(std::move(values)), transaction(transaction), proofs(PageLess{}, storage), surfaceChanges(storage), removals(PageLess{}, storage)
+    { Q_ASSERT(this->values); }
+    ~KisPagePublicationDelta() { clearValues(); }
+    KisPagePublicationDelta(const KisPagePublicationDelta &) = delete;
+    KisPagePublicationDelta &operator=(const KisPagePublicationDelta &) = delete;
+    void clearValues() noexcept
+    {
+        for (const auto &entry : proofs) values->release(entry.second.value);
+        proofs.clear();
+    }
+    std::shared_ptr<KisPageViewValueStorage> values;
+    KisPageTransactionId transaction;
+    SelectionMap proofs;
     std::vector<KisSurfaceEpochChange, KisMutationStorageAllocator<KisSurfaceEpochChange>> surfaceChanges;
     RemovalSet removals;
     // Capacity only. Cancellation may release it without the owner gate.
@@ -144,7 +154,7 @@ class KisPagePublicationCoordinator final
 {
     friend class KisPageWriteCoordinator;
     friend class KisPageStoreCpuMutationTest;
-    using ProofMap = KisPagePublicationDelta::ProofMap;
+    using SelectionMap = KisPagePublicationDelta::SelectionMap;
     // Installation storage only; the original metadata version owns layout.
     // A single target stays inline instead of allocating a replacement node.
     using DescriptorEntry = std::pair<KisPageVersion, std::shared_ptr<const KisPageAllocationDescriptor>>;
@@ -246,7 +256,13 @@ public:
                 : ownedChanges(storage), ownedAuthorities(storage) {}
             Data(Data &&) noexcept = default;
             Data &operator=(Data &&) noexcept = default;
-            ~Data() { releaseCapacity(); }
+            ~Data()
+            {
+                releaseCapacity();
+                // A moved-from preparation has no storage owner or obligation.
+                if (state) for (auto &row : changes)
+                    state->values->release(std::exchange(row.acceptedValue, nullptr));
+            }
             const Change *findChange(const KisPageKey &) const;
             void releaseCapacity() noexcept
             {
@@ -418,7 +434,7 @@ private:
         QMutexLocker<QMutex> &ownerLock);
     void finishAbortedProofLocked(const KisPagePublicationIdentity &proof) noexcept;
     std::shared_ptr<KisPagePublicationDelta> preparedStateLocked(KisPageTransactionId transaction);
-    const ProofMap *findProofsLocked(KisPageTransactionId transaction) const;
+    const SelectionMap *findProofsLocked(KisPageTransactionId transaction) const;
 
     /**
      * One-shot publication aggregate. Metadata and epoch candidates keep

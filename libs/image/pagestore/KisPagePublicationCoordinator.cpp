@@ -29,7 +29,8 @@ bool overlayKeyLess(const KisPageKey &a, const KisPageKey &b)
 // The transaction owns the only mutable selection. Capacity was admitted for
 // all sibling candidates before metadata acceptance. Structural changes merge
 // once in that storage; value-only updates touch only D validated positions.
-// Entries are capabilities/keys, not resource owners requiring deferred free.
+// Memory holds transfer from the original preparation. The old Value remains
+// alive through this removal even if metadata already revoked its content.
 template<bool Proof, typename Table>
 void acceptSelection(Table &table, KisPagePublicationRows changes)
 {
@@ -38,21 +39,23 @@ void acceptSelection(Table &table, KisPagePublicationRows changes)
         else return row.replacement.removal && row.removalWasInBase;
     };
     size_t additions = 0, removals = 0;
-    for (const auto &row : changes) {
+    for (auto &row : changes) {
         const bool before = Proof ? row.superseded.isValid() : row.wasRemoved;
         const bool after = selected(row);
         additions += after && !before;
         removals += before && !after;
-    }
-    if (!additions && !removals) {
-        if constexpr (Proof) {
-            for (const auto &row : changes) {
-                if (selected(row))
-                    (table.begin() + row.acceptedOverlayIndex)->second.proof = row.replacement.proofValue();
-            }
+        if constexpr (Proof) if (before) {
+            auto &entry = (table.begin() + row.acceptedOverlayIndex)->second;
+            std::swap(entry.value, row.acceptedValue);
+            if (after) entry.stamp = row.replacement.proofValue().stamp;
         }
-        return;
     }
+    const auto take = [](auto &row) {
+        const auto proof = row.replacement.proofValue();
+        Q_ASSERT(row.acceptedValue);
+        return KisPagePublicationSelection{std::exchange(row.acceptedValue, nullptr), proof.stamp};
+    };
+    if (!additions && !removals) return;
     auto values = table.extract_sequence();
     using Value = typename decltype(values)::value_type;
     static_assert(std::is_nothrow_move_assignable_v<Value>);
@@ -74,9 +77,11 @@ void acceptSelection(Table &table, KisPagePublicationRows changes)
         if (old && key(values[old - 1]) == changedKey) --old;
         if (selected(*row)) {
             --output;
-            if constexpr (Proof) values[output] = Value{changedKey,
-                KisPagePublicationDelta::PageState{row->replacement.proofValue()}};
-            else values[output] = changedKey;
+            if constexpr (Proof) {
+                if (row->superseded.isValid()) {
+                    if (old != output) values[output] = std::move(values[old]);
+                } else values[output] = Value{changedKey, take(*row)};
+            } else values[output] = changedKey;
         }
     }
     // The prefix before the first changed key is already final. Do not scan
@@ -539,7 +544,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
             && (state.proofs.begin() + change.acceptedOverlayIndex)->first == key)
             found = state.proofs.begin() + change.acceptedOverlayIndex;
         else found = state.proofs.find(key);
-        const KisPagePublicationIdentity current = found == state.proofs.end() ? KisPagePublicationIdentity{} : found->second.proof;
+        const KisPagePublicationIdentity current = found == state.proofs.end() ? KisPagePublicationIdentity{} : found->second.identity(data->transaction.id);
         if (!(current == change.superseded)
             || (state.removals.count(change.replacement.key()) != 0) != change.wasRemoved
             || (current.isValid() && !current.native
@@ -803,7 +808,7 @@ bool KisPagePublicationCoordinator::resolveVersionLocked(const KisPageKey &key,
     if (prepared != m_preparedTransactions.cend()) {
         const auto proof = prepared->second->proofs.find(key);
         if (proof != prepared->second->proofs.cend()) {
-            *version = proof->second.proof.version;
+            *version = proof->second.version();
             return true;
         }
     }
@@ -841,13 +846,13 @@ bool KisPagePublicationCoordinator::prepareNativeReadSelectionLocked(KisSurfaceI
 bool KisPagePublicationCoordinator::NativeReadSelection::resolve(const KisPageKey &key,
     KisPageVersion *version, KisVersionSlotId *slot) const
 {
-    if (!version || !slot || !(key.surface == surface.surface)) return false;
+    if (!version || !slot || !key.isValid() || !root.isValid() || !(key.surface == surface.surface)) return false;
     *slot = {};
     if (delta) {
         const auto found = delta->proofs.find(key);
         if (found != delta->proofs.end()) {
-            *version = found->second.proof.version;
-            *slot = found->second.proof.metadataSlot;
+            *version = found->second.version();
+            *slot = found->second.metadataSlot();
             return true;
         }
         if (delta->removals.count(key)) {
@@ -855,7 +860,10 @@ bool KisPagePublicationCoordinator::NativeReadSelection::resolve(const KisPageKe
             return true;
         }
     }
-    if (!root.resolve(key, version)) return false;
+    if (auto *value = root.selectedValue(key)) {
+        *version = value->version;
+        *slot = value->slot;
+    } else *version = {key, {1}, surface.defaultPixelRevision};
     if (version->isDefaultPixel()) version->defaultPixelRevision = surface.defaultPixelRevision;
     return true;
 }
@@ -1103,7 +1111,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
         for (const auto &proof : preparedPages.proofs) {
             const auto original = owned.proofs.find(proof.authority.version.key);
             if (original == owned.proofs.cend()
-                || !m_owner.matchesPublicationIdentity(original->second.proof, proof)) return {};
+                || !m_owner.matchesPublicationIdentity(original->second.identity(transaction.id), proof)) return {};
         }
         for (const auto &change : preparedPages.surfaceChanges)
             if (std::find(owned.surfaceChanges.cbegin(), owned.surfaceChanges.cend(), change) == owned.surfaceChanges.cend()) return {};
@@ -1138,11 +1146,11 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitOwnedLocked(
 }
 
 static const KisPageVersion &publicationVersion(const KisPagePublicationChange::Replacement &entry) { return entry.version(); }
-static const KisPageVersion &publicationVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
-{ return entry.second.proof.version; }
-static const KisPagePublicationIdentity &publicationIdentity(const KisPagePublicationDelta::ProofMap::value_type &entry)
+static const KisPageVersion &publicationVersion(const KisPagePublicationDelta::SelectionMap::value_type &entry)
+{ return entry.second.version(); }
+static KisPagePublicationIdentity publicationIdentity(const KisPagePublicationDelta::SelectionMap::value_type &entry, KisPageTransactionId transaction)
 {
-    return entry.second.proof;
+    return entry.second.identity(transaction);
 }
 
 template<class Input>
@@ -1151,9 +1159,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
     const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock)
 {
     using Phase = KisPageStoreDiagnosticPhase;
-    const auto publicationProof = [](const auto &entry) {
+    const auto publicationProof = [&](const auto &entry) {
         if constexpr (std::is_same_v<Input, KisPageOperationPublication>) return entry.proofValue();
-        else return publicationIdentity(entry);
+        else return publicationIdentity(entry, transaction.id);
     };
     const quint64 pageWork = quint64(owned.proofs.size() + owned.removals.size());
     KisPageStoreDiagnosticTimer diagnostic(diagnosticOwner, Phase::CommitOwnerWait, pageWork);
@@ -1313,7 +1321,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                 KisPagePublicationChanges inputs{KisMutationStorageAllocator<KisPagePublicationChange>(&m_budget)};
                 inputs.reserve(owned.proofs.size());
                 for (const auto &entry : owned.proofs)
-                    inputs.emplace_back(KisPagePublicationChange::Replacement{&entry.second.proof});
+                    inputs.emplace_back(KisPagePublicationChange::Replacement{&entry.second, transaction.id});
                 publication = m_metadata.prepareAcceptance(transaction, std::move(inputs), nullptr,
                     prospectiveEpoch, detach, publicationChanges.data(), qsizetype(publicationChanges.size()));
             } catch (const std::bad_alloc &) {
@@ -1673,7 +1681,7 @@ bool KisPagePublicationCoordinator::abortLocked(
     while (const auto *remainingProofs = findProofsLocked(transaction.id)) {
         // Consume the final selection: abort must not shift the remaining
         // transaction directory after each independently accepted transition.
-        const auto proof = remainingProofs->crbegin()->second.proof;
+        const auto proof = remainingProofs->crbegin()->second.identity(transaction.id);
         if (!m_owner.ownsPublicationIdentity(proof))
             qFatal("Owned abort source proof changed before metadata transition");
         KisPageTransition transition;
@@ -1711,12 +1719,12 @@ KisPagePublicationCoordinator::preparedStateLocked(KisPageTransactionId transact
     auto found = m_preparedTransactions.find(transaction.value);
     if (found != m_preparedTransactions.end()) return found->second;
     const auto storage = KisMutationStorageAllocator<KisPagePublicationDelta>::retained(&m_budget);
-    auto state = std::allocate_shared<KisPagePublicationDelta>(storage, storage);
+    auto state = std::allocate_shared<KisPagePublicationDelta>(storage, storage, m_epochs.viewValues(), transaction);
     m_preparedTransactions.emplace(transaction.value, state);
     return state;
 }
 
-const KisPagePublicationCoordinator::ProofMap *
+const KisPagePublicationCoordinator::SelectionMap *
 KisPagePublicationCoordinator::findProofsLocked(KisPageTransactionId transaction) const
 {
     const auto found = m_preparedTransactions.find(transaction.value);
@@ -1748,8 +1756,8 @@ bool KisPagePublicationCoordinator::selectWriteBaseLocked(
     if (delta) {
         const auto proof = delta->proofs.find(intent.key);
         if (proof != delta->proofs.end()) {
-            base = proof->second.proof.version;
-            slot = proof->second.proof.metadataSlot;
+            base = proof->second.version();
+            slot = proof->second.metadataSlot();
         }
     }
     if (!base.isValid() && !m_epochs.resolve(intent.key, overlay, &base))
@@ -1800,7 +1808,7 @@ KisPagePublicationCoordinator::transactionDeltaLocked(KisPageTransactionId trans
     const auto found = m_preparedTransactions.find(transaction.value);
     if (found != m_preparedTransactions.cend()) {
         result.proofs.reserve(qsizetype(found->second->proofs.size()));
-        for (const auto &proof : found->second->proofs) result.proofs.append(projectProof(proof.second.proof));
+        for (const auto &proof : found->second->proofs) result.proofs.append(projectProof(proof.second.identity(transaction)));
         result.surfaceChanges.reserve(qsizetype(found->second->surfaceChanges.size()));
         for (const auto &change : found->second->surfaceChanges) result.surfaceChanges.append(change);
         result.removedPages.reserve(qsizetype(found->second->removals.size()));
@@ -1884,11 +1892,15 @@ bool KisPagePublicationCoordinator::captureDeltaLocked(
     *versions = state ? state->proofs.size() : 0;
     *removals = state ? state->removals.size() : 0;
     *surfaces = state ? size_t(state->surfaceChanges.size()) : 0;
-    if (capture.versions.capacity() < *versions || capture.removedPages.capacity() < *removals
+    if (capture.values.capacity() < *versions || capture.removedPages.capacity() < *removals
         || capture.stagedSurfaces.capacity() < *surfaces) return false;
-    capture.versions.clear(); capture.removedPages.clear(); capture.stagedSurfaces.clear();
+    capture.clearValues(); capture.removedPages.clear(); capture.stagedSurfaces.clear();
+    capture.valueStorage = state ? state->values.get() : nullptr;
     if (state) {
-        for (const auto &proof : state->proofs) capture.versions.push_back(proof.second.proof.version);
+        for (const auto &proof : state->proofs) {
+            KisPageViewValueStorage::retain(proof.second.value);
+            capture.values.push_back(proof.second.value);
+        }
         for (const auto &key : state->removals) capture.removedPages.push_back(key);
         for (const auto &change : state->surfaceChanges) capture.stagedSurfaces.push_back(change.after);
     }
@@ -1988,6 +2000,14 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
                 return {};
             }
             previous = change.key();
+            Q_ASSERT(!entry.acceptedValue);
+            if (state && hasProof) {
+                entry.acceptedValue = state->values->pin(change.version(), change.metadataSlot(), native);
+                if (!entry.acceptedValue) {
+                    KisPageStoreDetail::setError(error, QStringLiteral("overlay final Value is unavailable"));
+                    return {};
+                }
+            }
             if (hasProof && !native) native = m_metadata.nativeWrite(change.version());
             // This is the metadata consumer's original result, not permission
             // to skip validation of an independently exported capability.
@@ -1996,7 +2016,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
                 if (!state) return KisPagePublicationIdentity{};
                 const auto found = state->proofs.find(change.key());
                 entry.acceptedOverlayIndex = size_t(found - state->proofs.begin());
-                return found == state->proofs.end() ? KisPagePublicationIdentity{} : found->second.proof;
+                return found == state->proofs.end() ? KisPagePublicationIdentity{} : found->second.identity(transaction.id);
             }();
             if (superseded.isValid()) {
                 if ((!superseded.native && !m_owner.ownsPreparedPageProof(projectProof(superseded)))
@@ -2081,7 +2101,7 @@ void KisPagePublicationCoordinator::finishAbortedProofLocked(
     // transition. Removing the version also consumes its inline CPU proof;
     // a protected Historical version or exported capability still needs
     // explicit revocation. There is no post-acceptance resource refusal.
-    if (stored == state.proofs.end() || !(stored->second.proof == proof))
+    if (stored == state.proofs.end() || !(stored->second.identity(proof.transaction) == proof))
         qFatal("Owned prepared proof changed before revocation");
     if (!m_owner.releasePublicationIdentity(proof)) {
         KisPageMetadataCoordinator::VersionInfo remaining;
@@ -2089,6 +2109,7 @@ void KisPagePublicationCoordinator::finishAbortedProofLocked(
         if (remaining.version.isValid())
             qFatal("Owned aborted proof survived without its capability");
     }
+    state.values->release(stored->second.value);
     state.proofs.erase(stored);
     // Keep the original state/index until commit or abort has fully changed
     // visibility. Their final exit disposes its aggregate outside the gate.

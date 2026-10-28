@@ -1,4 +1,5 @@
 #include "pagestore/KisPageOwnerLedgerTestAccess.h"
+#include "pagestore/KisPageViewTestAccess.h"
 #include <cstdio>
 /*
  * SPDX-FileCopyrightText: 2026 Krita contributors
@@ -410,9 +411,8 @@ struct ReadTerminalFixture
         initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
         initial.surfaces = {surface};
         if (!historical) initial.manifest = {replica.version};
-        if (!epochs.initialize(initial, &error)) return false;
+        if (!KisPageViewTestAccess::initialize(epochs, metadata, initial, &error)) return false;
         if (capture) {
-            capture->versions.push_back(replica.version);
             capture->token = epochs.retainSnapshot(initial.epoch).token;
             if (!capture->token.isValid()) return false;
             capture->capturedScope = true;
@@ -441,6 +441,10 @@ struct ReadTerminalFixture
         }
         if (!metadata.registerPage(page, &error)) return false;
         if (capture) {
+            capture->valueStorage = KisPageViewTestAccess::values(metadata).get();
+            auto *selected = capture->valueStorage->pin(replica.version);
+            if (!selected) return false;
+            capture->values.push_back(selected);
             capture->nativeRefs.resize(1);
             capture->nativeRefs[0].shard = quint32(metadata.shardFor(replica.version.key));
         }
@@ -2158,6 +2162,10 @@ void KisPageStoreCpuMutationTest::capturedCutStorageRefusalAndLifetime()
     auto laterGuard = later.readResidentPage(key(1)); QVERIFY(laterGuard.isValid());
     QCOMPARE(QByteArray(static_cast<const char *>(laterGuard.data()), 4), QByteArray(4, char(0x75)));
     laterGuard = {}; later = {};
+    const auto exported = f.store->snapshotForClone(captured, &f.error);
+    KisPageVersion original; QVERIFY(captured.resolvePageVersion(key(), &original));
+    QCOMPARE(exported.manifest.size(), qsizetype(1));
+    QCOMPARE(exported.manifest.first(), original);
     QVERIFY(f.store->abort(tx)); f.store.reset();
     auto physicalGuard = captured.readResidentPage(key()); QVERIFY(physicalGuard.isValid());
     captured = {};
@@ -6951,6 +6959,7 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
     QVERIFY(parentLive() > parentBaseline);
     QVERIFY(parentLive() > parentBaseline); // Inert descriptor node still owns actual capacity.
     tail.reset();
+    kisDrainPageStoreReclamation(); // Final tree-memory jobs also release the original Value core.
     QCOMPARE(parentLive(), parentBaseline);
 }
 
@@ -7161,6 +7170,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     };
     QVERIFY(parentLive() > parentBaseline); // Controller is gone; the candidate still owns actual storage.
     tail = {};
+    kisDrainPageStoreReclamation(); // Include the real deferred root/Value memory tail.
     QCOMPARE(parentLive(), parentBaseline);
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
 }

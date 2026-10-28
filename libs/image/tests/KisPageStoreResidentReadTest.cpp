@@ -1161,6 +1161,23 @@ void KisPageStoreResidentReadTest::overlayCapturedSlotsSurviveAllOwners()
     }
     auto guard = view.readResidentPage(key(0)); QVERIFY(guard.isValid()); QCOMPARE(guard.version(), exact);
     QCOMPARE(kisPageStoreMetadataMetrics(*f.store).fullSnapshotExports, before);
+    // Replace existing selections, insert a new key, then remove a replaced
+    // key. Flat-map moves and old Value disposal must preserve the frozen cut.
+    if (!removed) {
+        QVERIFY2(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, tx, QRect(0, 0, 18 * 64, 64),
+            QByteArray(f.bpp, char(0x71)), &f.error), qPrintable(f.error));
+        QVERIFY2(KisPageStoreCpuSurfaceOps::removePage(f.store.get(), tx, key(8), &f.error), qPrintable(f.error));
+        auto later = f.store->captureReadView(KisPageReadView::transactionOverlay(tx.id), &f.error);
+        QVERIFY2(later.isValid(), qPrintable(f.error));
+        for (int i = 0; i < 18; ++i) {
+            auto next = later.readResidentPage(key(i)); QVERIFY(next.isValid());
+            QCOMPARE(static_cast<const quint8 *>(next.data())[0], quint8(i == 8 ? 0 : 0x71));
+            if (i < 17) {
+                auto old = view.readResidentPage(key(i)); QVERIFY(old.isValid());
+                QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x51));
+            }
+        }
+    }
     QVERIFY(f.store->abort(tx)); // The frozen overlay remains independently protected.
     auto afterAbort = view.readResidentPage(key(0)); QVERIFY(afterAbort.isValid());
     QCOMPARE(afterAbort.version(), exact); afterAbort = {};

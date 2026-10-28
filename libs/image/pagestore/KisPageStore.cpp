@@ -3332,15 +3332,14 @@ public:
                 : KisPageVersion{key, KisPageGeneration{1}, stagedSurfaces.front().defaultPixelRevision};
             return version->isValid();
         }
-        const auto &versions = this->versions;
-        const auto found = std::lower_bound(versions.begin(), versions.end(), key,
-            [&](const KisPageVersion &candidate, const KisPageKey &value) { return lessKey(candidate.key, value); });
-        if (found != versions.end() && found->key == key) {
-            *version = *found;
+        const auto found = std::lower_bound(values.begin(), values.end(), key,
+            [&](const KisPageViewValue *candidate, const KisPageKey &key) { return lessKey(candidate->version.key, key); });
+        if (found != values.end() && (*found)->version.key == key) {
+            *version = (*found)->version;
             if (binding && !version->isDefaultPixel()) {
                 // The original capture retained this exact slot in the same
                 // ordinal; radix grouping changes links, never array order.
-                const auto selected = owner->metadata.nativeReadVersion(nativeRefs[size_t(found - versions.begin())], binding);
+                const auto selected = owner->metadata.nativeReadVersion(nativeRefs[size_t(found - values.begin())], binding);
                 if (!(selected == *version)) return false;
             }
             return true;
@@ -3431,7 +3430,7 @@ try
     }
     phase.next(KisPageStoreDiagnosticPhase::ManifestExport, quint64(view.d->root.pageCount()));
     const auto &delta = *view.d;
-    auto result = view.d->root.snapshotWithChanges(delta.versions.data(), delta.versions.size(),
+    auto result = view.d->root.snapshotWithChanges(delta.values.data(), delta.values.size(),
         delta.removedPages.data(), delta.removedPages.size(), delta.stagedSurfaces.data(), delta.stagedSurfaces.size());
     KisPageStoreDetail::setError(error, {});
     return result;
@@ -3812,8 +3811,8 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         auto &candidate = result.d ? static_cast<KisPageCapturedRelease &>(*result.d) : empty;
         const bool captured = d->publicationCoordinator.captureDeltaLocked(selector.transaction, candidate,
                                                                            &versions, &removals, &surfaces);
-        if (result.d && captured && candidate.nativeRefs.capacity() >= candidate.versions.size()) break;
-        versions = qMax(versions, candidate.versions.size());
+        if (result.d && captured && candidate.nativeRefs.capacity() >= candidate.values.size()) break;
+        versions = qMax(versions, candidate.values.size());
         if (versions > KisPageNativeReadRef::End) {
             KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
             return {};
@@ -3834,22 +3833,19 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
         locker.relock(); --d->activeProviderCalls;
     }
     auto &release = *result.d;
-    if (release.versions.size() > KisPageNativeReadRef::End) {
+    if (release.values.size() > KisPageNativeReadRef::End) {
         KisPageStoreDetail::setError(error, QStringLiteral("read scope has too many exact versions"));
         return {};
     }
     if (selector.kind == KisPageReadViewKind::TransactionOverlay) {
-        std::sort(release.versions.begin(), release.versions.end(), [](const auto &a, const auto &b) {
-            return KisCapturedReadView::Private::lessKey(a.key, b.key);
-        });
-        std::sort(release.removedPages.begin(), release.removedPages.end(), KisCapturedReadView::Private::lessKey);
+        // Original flat-map/set order already supplies the immutable key order.
         std::sort(release.stagedSurfaces.begin(), release.stagedSurfaces.end(),
             [](const auto &a, const auto &b) { return a.surface.value < b.surface.value; });
         result.d->overlayTransaction = selector.transaction;
     }
-    release.nativeRefs.resize(release.versions.size());
-    for (size_t i = 0; i < release.versions.size(); ++i) {
-        release.nativeRefs[i].shard = quint32(d->metadata.shardFor(release.versions[i].key));
+    release.nativeRefs.resize(release.values.size());
+    for (size_t i = 0; i < release.values.size(); ++i) {
+        release.nativeRefs[i].shard = quint32(d->metadata.shardFor(release.values[i]->version.key));
     }
     release.groupNativeRefs(d->metadata.shardCount());
     const auto retained = d->epochs.retainSnapshot(root.epoch());
@@ -3862,16 +3858,18 @@ KisCapturedReadView KisPageStore::captureReadViewImpl(Private *d, const KisPageR
     // Full and range captures retain the same exact slots under the same
     // publication cut. The full view additionally retains its immutable root
     // and sparse key map for clone/export; neither needs token-per-page state.
-    auto select = [&](quint32 ordinal, KisPageVersion *version) {
-        *version = release.versions[ordinal];
+    auto select = [&](quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
+        const auto *value = release.values[ordinal];
+        *version = value->version;
+        *slot = value->slot;
         return true;
     };
     size_t next = release.next;
     while (release.retained < release.nativeRefs.size()) {
         const auto count = d->metadata.retainNativeReads(release.nativeRefs.data(), next,
             release.nativeRefs.size() - release.retained, &select,
-            [](void *context, quint32 ordinal, KisPageVersion *version, KisVersionSlotId *) {
-                return (*static_cast<decltype(select) *>(context))(ordinal, version);
+            [](void *context, quint32 ordinal, KisPageVersion *version, KisVersionSlotId *slot) {
+                return (*static_cast<decltype(select) *>(context))(ordinal, version, slot);
             });
         release.retained += count;
         if (!count) {

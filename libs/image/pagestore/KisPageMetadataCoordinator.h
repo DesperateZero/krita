@@ -603,6 +603,7 @@ private:
     friend class KisPageOwnerLedger;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
+    friend class KisPageViewTestAccess;
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
     KisPageMetadataTransitionResult applyWriteSequence(const KisPageKey &key,

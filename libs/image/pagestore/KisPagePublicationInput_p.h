@@ -42,6 +42,22 @@ struct KisPagePublicationIdentity {
         && (native ? metadataSlot == other.metadataSlot : stamp == other.stamp); }
 };
 
+// The mutable overlay keeps the final identity, not another version/slot
+// projection. Its transaction owns the storage reference; a real external
+// capability alone contributes a nonzero issuer stamp.
+struct KisPagePublicationSelection {
+    KisPageViewValue *value = nullptr;
+    quint64 stamp = 0;
+    const KisPageVersion &version() const { Q_ASSERT(value); return value->version; }
+    KisVersionSlotId metadataSlot() const { return value ? value->slot : KisVersionSlotId{}; }
+    bool isNative() const { return stamp == 0; }
+    bool isValid() const
+    { return value && version().isValid() && (stamp || metadataSlot().isValid()); }
+    KisPagePublicationIdentity identity(KisPageTransactionId transaction) const
+    { return value ? KisPagePublicationIdentity{version(), transaction, stamp, isNative(), metadataSlot()}
+                   : KisPagePublicationIdentity{}; }
+};
+
 struct KisPagePublicationChange {
     struct Input {
         KisPageKey key;
@@ -62,7 +78,7 @@ struct KisPagePublicationChange {
         bool removal = false;
         KisPagePrivateWrite *native = nullptr;
         bool borrowed = false;
-        const KisPagePublicationIdentity *originalProof = nullptr;
+        const KisPagePublicationSelection *originalSelection = nullptr;
         Replacement() { new (&payload.owned) Owned{}; }
         Replacement(const KisPageKey &key, const KisPagePublicationIdentity &proof,
                     bool removed = false, KisPagePrivateWrite *result = nullptr)
@@ -70,22 +86,23 @@ struct KisPagePublicationChange {
         { new (&payload.owned) Owned{key, proof}; }
         explicit Replacement(KisPagePrivateWrite *result) : native(result), borrowed(true)
         { Q_ASSERT(result); }
-        explicit Replacement(const KisPagePublicationIdentity *proof) : originalProof(proof)
-        { Q_ASSERT(proof); new (&payload.owned) Owned{}; }
+        Replacement(const KisPagePublicationSelection *selection, KisPageTransactionId transaction)
+            : originalSelection(selection)
+        { Q_ASSERT(selection); new (&payload.owned) Owned{}; payload.owned.proof.transaction = transaction; }
         const KisPageKey &key() const
-        { return borrowed ? native->version().key : originalProof ? originalProof->version.key : payload.owned.key; }
-        const KisPageVersion &version() const { return borrowed ? native->version() : originalProof ? originalProof->version : payload.owned.proof.version; }
+        { return borrowed ? native->version().key : originalSelection ? originalSelection->version().key : payload.owned.key; }
+        const KisPageVersion &version() const { return borrowed ? native->version() : originalSelection ? originalSelection->version() : payload.owned.proof.version; }
         KisPageTransactionId transaction() const
-        { return borrowed ? native->sealedBy() : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
+        { return borrowed ? native->sealedBy() : payload.owned.proof.transaction; }
         bool hasProof() const
-        { return borrowed ? native->isSealed() && native->version().isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
-        bool isNativeValue() const { return borrowed || (originalProof ? originalProof->native : payload.owned.proof.native); }
+        { return borrowed ? native->isSealed() && native->version().isValid() : originalSelection ? originalSelection->isValid() : payload.owned.proof.isValid(); }
+        bool isNativeValue() const { return borrowed || (originalSelection ? originalSelection->isNative() : payload.owned.proof.native); }
         KisVersionSlotId metadataSlot() const
-        { return borrowed ? native->valueSlot() : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
+        { return borrowed ? native->valueSlot() : originalSelection ? originalSelection->metadataSlot() : payload.owned.proof.metadataSlot; }
         KisPagePublicationIdentity proofValue() const
         {
             return borrowed ? KisPagePublicationIdentity{native->version(), native->sealedBy(),
-                0, true, native->valueSlot()} : originalProof ? *originalProof : payload.owned.proof;
+                0, true, native->valueSlot()} : originalSelection ? originalSelection->identity(transaction()) : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;
@@ -94,6 +111,9 @@ struct KisPagePublicationChange {
         const KisReplicaHandle *supersededAuthority = nullptr)
         : replacement(std::move(replacement)), superseded(superseded), removalWasInBase(removalWasInBase),
           wasRemoved(wasRemoved), detachesSuperseded(detachesSuperseded), supersededAuthority(supersededAuthority) {}
+    // One pre-cut memory hold, transferred to the original overlay on accept.
+    // Cancellation consumes it through the preparation's original owner.
+    KisPageViewValue *acceptedValue = nullptr;
     KisPagePublicationIdentity superseded;
     bool removalWasInBase = false;
     bool wasRemoved = false;

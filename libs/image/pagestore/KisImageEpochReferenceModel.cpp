@@ -743,7 +743,7 @@ KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshot() const
 }
 
 KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshotWithChanges(
-    const KisPageVersion *versions, size_t versionCount,
+    KisPageViewValue *const *values, size_t versionCount,
     const KisPageKey *removals, size_t removalCount,
     const KisSurfaceEpochState *changedSurfaces, size_t changedSurfaceCount) const
 {
@@ -762,12 +762,12 @@ KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshotWithChanges(
         const auto merge = [&](const auto &append) {
             size_t added = 0, removed = 0;
             appendPageRoot(m_pageRoot, [&](const KisPageVersion &base) {
-                while (added < versionCount && pageKeyLess(versions[added].key, base.key)) append(versions[added++]);
+                while (added < versionCount && pageKeyLess(values[added]->version.key, base.key)) append(values[added++]->version);
                 while (removed < removalCount && pageKeyLess(removals[removed], base.key)) ++removed;
-                if (added < versionCount && versions[added].key == base.key) append(versions[added++]);
+                if (added < versionCount && values[added]->version.key == base.key) append(values[added++]->version);
                 else if (removed == removalCount || !(removals[removed] == base.key)) append(base);
             });
-            while (added < versionCount) append(versions[added++]);
+            while (added < versionCount) append(values[added++]->version);
         };
         qsizetype count = 0;
         merge([&](const KisPageVersion &) {
@@ -912,18 +912,18 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
 static const KisPageVersion &epochPreparedVersion(KisPageViewValue *value) { return value->version; }
 static const KisPageVersion &epochPreparedVersion(const KisPreparedPageProof &proof) { return proof.authority.version; }
 static const KisPageVersion &epochPreparedVersion(const KisPagePublicationChange::Replacement &entry) { return entry.version(); }
-static const KisPageVersion &epochPreparedVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
+static const KisPageVersion &epochPreparedVersion(const KisPagePublicationDelta::SelectionMap::value_type &entry)
 {
-    return entry.second.proof.version;
+    return entry.second.version();
 }
 
 static EpochPageInput epochPageInput(KisPageViewValue *value) { return {&value->version, value}; }
 static EpochPageInput epochPageInput(const KisPreparedPageProof &proof) { return {&proof.authority.version}; }
 static EpochPageInput epochPageInput(const KisPagePublicationChange::Replacement &entry)
-{ return {&entry.version(), nullptr, entry.isNativeValue() ? entry.metadataSlot() : KisVersionSlotId{},
-          entry.borrowed ? entry.native : nullptr}; }
-static EpochPageInput epochPageInput(const KisPagePublicationDelta::ProofMap::value_type &entry)
-{ return {&entry.second.proof.version, nullptr, entry.second.proof.native ? entry.second.proof.metadataSlot : KisVersionSlotId{}}; }
+{ return {&entry.version(), entry.originalSelection ? entry.originalSelection->value : nullptr,
+          entry.isNativeValue() ? entry.metadataSlot() : KisVersionSlotId{}, entry.borrowed ? entry.native : nullptr}; }
+static EpochPageInput epochPageInput(const KisPagePublicationDelta::SelectionMap::value_type &entry)
+{ return {&entry.second.version(), entry.second.value}; }
 
 struct EpochInputProjection {
     template<class Entry> EpochPageInput operator()(const Entry &entry) const { return epochPageInput(entry); }
@@ -1440,6 +1440,14 @@ catch (const std::bad_alloc &) {
     return {};
 }
 
+std::shared_ptr<KisPageViewValueStorage> KisImageEpochReferenceModel::viewValues() const
+{
+    const auto d = std::atomic_load(&m_core);
+    if (!d) return {};
+    QMutexLocker lock(&d->mutex);
+    return d->treeStorage->values;
+}
+
 bool KisImageEpochReferenceModel::prepare(const KisPreparedPageSet &preparedPages, QString *error)
 {
     if (!preparedPages.isValid()) {
@@ -1616,6 +1624,11 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
         result.error = QStringLiteral("transaction is not open for commit"); return {};
     }
     const auto expectedState = transactionIt->second.state;
+    if constexpr (std::is_same_v<Publication, KisPagePublicationDelta>) {
+        if (!publication || !(publication->transaction == transaction.id) || publication->values != d->treeStorage->values) {
+            result.error = QStringLiteral("publication Values belong to another storage owner"); return {};
+        }
+    }
     if constexpr (borrowed) {
         if (!publication || transactionIt->second.delta
             || !(publication->proofs.size() || publication->surfaceChanges.size() || publication->removals.size())) {

@@ -56,7 +56,16 @@ struct KisPageCapturedRelease
     void (*dispose)(KisPageCapturedRelease *, KisBackingBudgetController *) noexcept = nullptr;
     KRITAIMAGE_EXPORT void groupNativeRefs(qsizetype shardCount);
     KisImageEpochSnapshotToken token;
-    KisMutationWorkspace::Array<KisPageVersion> versions;
+    ~KisPageCapturedRelease() { clearValues(); }
+    void clearValues() noexcept
+    {
+        for (auto *value : values) valueStorage->release(value);
+        values.clear();
+    }
+    // The original captured record retains its Store/metadata lifetime until
+    // disposal. Borrow that source; do not add a second owner per read scope.
+    KisPageViewValueStorage *valueStorage = nullptr;
+    KisMutationWorkspace::Array<KisPageViewValue *> values;
     KisMutationWorkspace::Array<KisPageKey> removedPages;
     KisMutationWorkspace::Array<KisSurfaceEpochState> stagedSurfaces;
     KisMutationWorkspace::Array<KisPageNativeReadRef> nativeRefs;

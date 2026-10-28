@@ -118,9 +118,13 @@ bool invokeEpochCallback(void *context, KisImageEpochId epoch)
 
 void setPublicationDelta(KisPagePublicationDelta &delta, const KisPreparedPageSet &input)
 {
-    delta.proofs.clear(); delta.surfaceChanges.clear(); delta.removals.clear();
-    for (const auto &proof : input.proofs)
-        delta.proofs.emplace(proof.authority.version.key, KisPagePublicationDelta::PageState{proof});
+    delta.clearValues(); delta.surfaceChanges.clear(); delta.removals.clear();
+    for (const auto &proof : input.proofs) {
+        auto *value = delta.values->pin(proof.authority.version);
+        Q_ASSERT(value);
+        delta.proofs.emplace(proof.authority.version.key,
+            KisPagePublicationDelta::PageState{value, proof.providerValidationStamp});
+    }
     delta.surfaceChanges.assign(input.surfaceChanges.begin(), input.surfaceChanges.end());
     delta.removals.insert(input.removedPages.begin(), input.removedPages.end());
 }
@@ -2651,7 +2655,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
     original.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 1)};
     original.surfaceChanges = {{initial.surfaces.first(), surfaceEpochState({1}, 2, 0x19)}};
     original.removedPages = {pageKey(1)};
-    KisPagePublicationDelta ownedOriginal{KisMutationStorageAllocator<char>(&budget)};
+    KisPagePublicationDelta ownedOriginal{KisMutationStorageAllocator<char>(&budget), model.viewValues(), tx.id};
     setPublicationDelta(ownedOriginal, original);
     const auto live = [&] { return parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto before = live();
@@ -2670,7 +2674,7 @@ void KisPageStoreReferenceTest::epochTransactionStorageAtCapacity()
             changed.surfaceChanges.append({initial.surfaces[i], surfaceEpochState({quint64(i + 1)}, 2, 0x19)});
     if (refusal == 3)
         for (int i = 3; i < 512; ++i) changed.removedPages.append(pageKey(i));
-    KisPagePublicationDelta ownedChanged{KisMutationStorageAllocator<char>(&budget)};
+    KisPagePublicationDelta ownedChanged{KisMutationStorageAllocator<char>(&budget), model.viewValues(), tx.id};
     setPublicationDelta(ownedChanged, changed);
     const auto acceptedBytes = live();
     // All prepared extents belong to one immutable value, including a large
@@ -2894,7 +2898,7 @@ void KisPageStoreReferenceTest::epochTransactionRejectsOpposingIncrementalChange
     KisPreparedPageSet removed; removed.transaction = tx.id; removed.removedPages = {pageKey(0)};
     if (!complete) QVERIFY(model.prepare(firstRemoval ? removed : written));
     const auto &next = firstRemoval ? written : removed;
-    KisPagePublicationDelta owned{KisMutationStorageAllocator<char>{}};
+    KisPagePublicationDelta owned{KisMutationStorageAllocator<char>{}, model.viewValues(), tx.id};
     setPublicationDelta(owned, next);
     const bool endsRemoved = complete ? !firstRemoval : firstRemoval;
     if (complete) {
@@ -12056,7 +12060,7 @@ void KisPageStoreReferenceTest::denseEpochMergePreservesCardinality()
         for (int i = 8; i < 12; ++i) add(i);
         for (int i = 16; i < 24; ++i) add(i);
     }
-    KisPagePublicationDelta originalDelta{KisMutationStorageAllocator<char>(&budget)};
+    KisPagePublicationDelta originalDelta{KisMutationStorageAllocator<char>(&budget), model.viewValues(), tx.id};
     std::vector<KisPagePublicationChange> originalRows;
     size_t originalProofs = 0, originalRemovals = 0;
     const auto prepareRoot = [&] {
@@ -12131,6 +12135,12 @@ void KisPageStoreReferenceTest::denseEpochMergePreservesCardinality()
     for (const auto &item : expected) manifest.append(item.second);
     QCOMPARE(committed.root.pageCount(), manifest.size());
     QCOMPARE(committed.root.manifest(), manifest);
+    if (producer == 1) {
+        for (const auto &entry : originalDelta.proofs)
+            QCOMPARE(committed.root.selectedValue(entry.first), entry.second.value);
+        originalDelta.clearValues(); // Tree owns the same memory after the overlay ends.
+        QCOMPARE(committed.root.manifest(), manifest);
+    }
     QCOMPARE(original.manifest(), initial.manifest);
     int height = 0;
     for (size_t nodes = size_t(manifest.size()); nodes; nodes /= 2) ++height;

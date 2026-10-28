@@ -26,6 +26,7 @@ class KisImageEpochSurfaces;
 class KisBackingBudgetController;
 class KisPageMetadataCoordinator;
 struct KisPageViewValue;
+class KisPageViewValueStorage;
 struct KisPagePublicationDelta;
 
 enum class KisPageTransactionState : quint8 {
@@ -81,7 +82,7 @@ private:
     ResolutionKind resolveVersion(const KisPageKey &, KisPageVersion *) const;
     // Only a retained capture supplies these sorted immutable inputs. Export
     // directly into one exact-sized manifest; no intermediate root/delta copy.
-    KisImageEpochSnapshot snapshotWithChanges(const KisPageVersion *versions, size_t versionCount,
+    KisImageEpochSnapshot snapshotWithChanges(KisPageViewValue *const *values, size_t versionCount,
         const KisPageKey *removals, size_t removalCount,
         const KisSurfaceEpochState *surfaces, size_t surfaceCount) const;
     size_t surfaceCount() const;
@@ -333,9 +334,11 @@ private:
     // fallible root check, before visibility switches, under the epoch mutex.
     // Must not reenter this model, call providers, wait, or partially mutate on
     // failure. Not a public extension callback.
+    std::shared_ptr<KisPageViewValueStorage> viewValues() const;
     friend class KisPageStore;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStoreReferenceTest;
+    friend class KisPageViewTestAccess;
     // A cancelled candidate can safely outlive this facade.
     std::shared_ptr<Private> m_core;
     mutable QMutex m_initializationMutex;
