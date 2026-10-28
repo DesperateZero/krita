@@ -1794,7 +1794,7 @@ KisPageIdleCapacity KisPagePublicationCoordinator::takeIdleCapacityLocked(const 
         m_retirementQueue.acceptDetachedRecord(*record, record->replica);
         return {};
     }
-    return {record->replica, record->backingNode.second.nativeBinding};
+    return {record->replica, record->backingNode.second.nativeBinding, record};
     // Ledger retains the original record until retag or retirement.
 }
 

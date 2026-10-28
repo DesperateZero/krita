@@ -402,6 +402,12 @@ public:
                                const KisCompletionTicket &lastUse) = 0;
     virtual bool validate(const KisReplicaHandle &replica,
                           const KisPageAllocationDescriptor &descriptor) const = 0;
+    // Validate an already selected allocation without resolving it by key
+    // again. Implementations must check provenance, exact generation, layout
+    // and revocation. The default preserves custom provider validation policy.
+    virtual bool validateCpuBinding(const KisReplicaHandle &replica,
+                                   const KisPageAllocationDescriptor &descriptor,
+                                   const std::shared_ptr<KisCpuResidentBinding> &binding) const;
     virtual KisReplicaOperation retire(KisPageOperationId operation,
                                        const KisReplicaHandle &replica,
                                        const KisCompletionTicket &lastUse) = 0;

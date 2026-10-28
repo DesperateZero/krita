@@ -51,6 +51,14 @@ namespace {
 const KisPageAccessRequirement cpu{KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer};
 KisPageKey key(int x = 0) { return {{1}, {x, 0}}; }
 
+// Standalone fixture rows use the same original-input batch as production.
+bool validateOriginalWrite(KisPageOwnerLedger &owner, KisPagePrivateWrite &result,
+                          KisPageTransactionId transaction, QString *error)
+{
+    KisPagePublicationChange row{KisPagePublicationChange::Replacement{&result}};
+    return owner.validatePrivateWrites({&row, 1}, transaction, error);
+}
+
 // Faults are injected at the provider contract, never by editing owner state.
 class TestProvider final : public KisPageReplicaProvider
 {
@@ -997,6 +1005,7 @@ private Q_SLOTS:
         QTest::newRow("retirement-block-refused") << false;
         QTest::newRow("one-retirement-block-suffices") << true;
     }
+    void nativeValidationConsumesOriginalBinding();
     void providerCompletionPreparationRejectsBeforePayload();
     void providerRetirementUsesPreparedCompletion();
     void providerAdoptionPreparationRejectsBeforePayload_data()
@@ -1809,6 +1818,56 @@ void KisPageStoreCpuMutationTest::sealPreservesReaderChanges()
     if (lease) { f.store->release(std::move(*lease)); lease.reset(); }
     late = {}; old = {}; QVERIFY(f.store->closeSession());
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+}
+
+void KisPageStoreCpuMutationTest::nativeValidationConsumesOriginalBinding()
+{
+    Fixture f; QVERIFY(f.init(4, 1));
+    KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
+    const auto descriptor = surface.allocationDescriptor();
+    const auto original = f.initialReplicas.first();
+    auto binding = f.provider->p->cpuResidentBinding(original); QVERIFY(binding);
+    QVERIFY(f.provider->p->validateCpuBinding(original, descriptor, binding));
+    QVERIFY(f.provider->p->validateCpuBinding(original, descriptor, {}));
+    auto stale = original; ++stale.allocation.generation;
+    QVERIFY(!f.provider->p->validateCpuBinding(stale, descriptor, binding));
+    auto wrongLayout = descriptor; ++wrongLayout.pageExtent.rwidth();
+    QVERIFY(!f.provider->p->validateCpuBinding(original, wrongLayout, binding));
+
+    // Numeric provider/allocation identities are insufficient provenance.
+    auto foreign = std::make_shared<KisTiles3PageReplicaProvider>();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = original.provider; config.providerEpoch = original.providerEpoch;
+    config.budgetBytes = 64 * 1024 * 1024;
+    QVERIFY(foreign->configure(config, f.completions));
+    const auto allocated = foreign->prepareWrite({1}, original.version, descriptor,
+        cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(allocated.isValid());
+    auto foreignBinding = foreign->cpuResidentBinding(allocated.replica); QVERIFY(foreignBinding);
+    QVERIFY(foreign->validateCpuBinding(allocated.replica, descriptor, foreignBinding));
+    QVERIFY(!foreign->validateCpuBinding(original, descriptor, binding));
+    QVERIFY(!f.provider->p->validateCpuBinding(allocated.replica, descriptor, foreignBinding));
+
+    auto next = allocated.replica.version; ++next.generation.value;
+    auto handoff = KisCpuBackingHandoff::prepare(foreign, allocated.replica, next, descriptor, foreignBinding);
+    QVERIFY(handoff.isValid()); QVERIFY(handoff.tryClaim());
+    const auto target = handoff.target();
+    auto writer = handoff.commit(); QVERIFY(writer.isValid());
+    QVERIFY(!foreign->validateCpuBinding(allocated.replica, descriptor, foreignBinding));
+    QVERIFY(foreign->validateCpuBinding(target, descriptor, foreignBinding));
+    writer.reset(); handoff.reset();
+    QVERIFY(foreign->retire({2}, target, {}).isValid());
+    QVERIFY(!foreign->validateCpuBinding(target, descriptor, foreignBinding));
+
+    // Destruction revokes a still-retained binding before unlinking storage.
+    const auto last = foreign->prepareWrite({3}, next, descriptor,
+        cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    QVERIFY(last.isValid());
+    auto revoked = foreign->cpuResidentBinding(last.replica); QVERIFY(revoked);
+    foreign.reset();
+    QVERIFY(!revoked->matchesHandle(last.replica));
+    QVERIFY(f.store->closeSession());
+    QVERIFY(!binding->matchesHandle(original));
 }
 
 void KisPageStoreCpuMutationTest::blockedSealValidationAllowsParallelWork()
@@ -9579,7 +9638,7 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         input.source = i ? targets[0] : f.replica;
         input.transaction = tx.id; input.operation = f.owner.nextOperationId();
         const bool accepted = f.metadata.acceptPrivateTarget(KisPageWriteInput(input), input.source, result.replica, &value, 64, &f.error)
-            && f.metadata.completePrivateWrite(&value) && f.owner.validatePrivateWrite(value, tx.id, &f.error);
+            && f.metadata.completePrivateWrite(&value) && validateOriginalWrite(f.owner, value, tx.id, &f.error);
         return accepted && f.metadata.versionDescriptorMatches(version, descriptor)
             && f.metadata.borrowVersionDescriptor(version) == value.descriptor.get()
             && f.metadata.versionDescriptor(version) == value.descriptor;
@@ -9690,7 +9749,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         native.binding = f.physical.provider->cpuResidentBinding(result.replica);
         QVERIFY(f.metadata.acceptPrivateTarget(KisPageWriteInput(acquire), acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
-        QVERIFY(f.owner.validatePrivateWrite(native, tx.id, &f.error));
+        QVERIFY(validateOriginalWrite(f.owner, native, tx.id, &f.error));
         // Accept through the original native result so its inline proof and
         // physical authority, rather than an exported generic proof, qualify.
         KisPagePublicationChange birth;

@@ -19,6 +19,12 @@ class KisCpuResidentBinding;
 struct KisPageIdleCapacity {
     KisReplicaHandle replica;
     std::shared_ptr<KisCpuResidentBinding> binding;
+    // Publication transfers its original detached record to the current
+    // operation. Its page/session claim excludes another checkout and close;
+    // removing it from the idle list excludes expiry. The caller must consume
+    // it by handoff or its existing retirement guard before ending that claim.
+    // This location alone grants no ledger/physical write permission.
+    KisPageRetirementRecord *original = nullptr;
 };
 
 struct KisPageBackingRecord

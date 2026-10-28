@@ -1438,8 +1438,7 @@ KisPageMutationSession::Private::prepareTarget(
         if (!idle.replica.isValid()) return;
         if (lock.isLocked()) lock.unlock();
         const auto relock = qScopeGuard([&] { idle.binding.reset(); lock.relock(); });
-        owner->retirementQueue.retireOrDefer(idle.replica,
-            owner->owner.provider(idle.replica.provider, idle.replica.providerEpoch), {}, {});
+        owner->retirementQueue.retireOrDefer(idle.replica, {}, {}, {}, idle.original);
         idle.replica = {};
     };
     const auto releaseUnusedIdle = qScopeGuard(retireIdle);
@@ -3013,24 +3012,23 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     KisPagePublicationRows changes;
     try {
         phase.next(Phase::MutationSealProofPrepare, quint64(overlayChangeCount - sealedRemovals));
+        if (success && overlayChangeCount) {
+            changes = d->writes.publicationRows();
+            success = owner->owner.validatePrivateWrites(changes, d->transaction.id, &failure, !sealedSources);
+        }
         for (auto slot = d->writes.firstEntry(); success && overlayChangeCount && slot.isValid(); slot = d->writes.nextEntry(slot)) {
             auto *entry = d->writes.at(slot.index);
             if (entry->isRemoval()) continue;
             auto *page = d->pageFor(entry);
             if (!page) continue;
             const bool completeAtSeal = !sealedSources;
-            // Sealing retains this exact original result. A capacity retry
-            // keeps its validation fact; a real revocation clears that fact
-            // in place. Exporting and rediscovering it grants no extra safety.
-            if (!page->proof.isValid())
-                success = owner->owner.validatePrivateWrite(*page, d->transaction.id, &failure, completeAtSeal);
-            if (!success) break;
+            // The batch validator consumed these original results. Capacity
+            // retry retains their proof; revocation clears it in place.
             if (completeAtSeal && !entry->hasPrivateResult())
                 owner->writeCoordinator.recordPrivateCompletion(*entry);
             // Proof is still private; no writer may survive its publication.
             page->writable.reset();
         }
-        if (success) changes = d->writes.publicationRows();
     } catch (const std::bad_alloc &) {
         success = false;
         storageRefused = true;

@@ -3137,8 +3137,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
             capacity.binding.reset(); // The last capability must leave before relocking.
             locker.relock();
         });
-        auto originalProvider = ownerLedger->provider(spare.provider, spare.providerEpoch);
-        publication.m_retirementQueue.retireOrDefer(spare, originalProvider, {}, {});
+        publication.m_retirementQueue.retireOrDefer(spare, {}, {}, {}, capacity.original);
     });
     if (intent.inputKind == KisPageWriteInputKind::Semantic || !provider
         || (intent.flags & quint8(KisPageWriteIntentFlag::SourceInitialization))
@@ -3221,7 +3220,8 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     // All stable selection facts stay in the original input. Only the source
     // may differ for recovery; the target is owned by physical until accepted.
     const auto &acceptedSource = reuseCapacity ? write.source : before;
-    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source, physical.target());
+    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source,
+        physical.target(), nullptr, reuseCapacity ? capacity.original : nullptr);
     if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
         auto lease = write.leaseTransition(physical.target(), reuseCapacity

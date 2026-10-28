@@ -112,6 +112,7 @@ private:
 public:
     // Only used while an owner-issued immutable read guard holds this binding.
     KisTileData *guardedTile() const { return m_tile; }
+    bool belongsTo(const Tiles3HandoffAdmission *admission) const { return m_admission == admission; }
 private:
     bool supportsBackingHandoff() const override { return true; }
     void *tryClaimStorageForHandoff() override
@@ -1258,6 +1259,22 @@ bool KisTiles3PageReplicaProvider::validate(
            replica.layout.matches(descriptor) &&
            allocationIt != d->allocations.end() &&
            allocationIt->guardedTile();
+}
+
+bool KisTiles3PageReplicaProvider::validateCpuBinding(const KisReplicaHandle &replica,
+    const KisPageAllocationDescriptor &descriptor,
+    const std::shared_ptr<KisCpuResidentBinding> &binding) const
+{
+    if (!binding) return validate(replica, descriptor); // A real unbound/generic input.
+    // The original provider-created binding owns the allocation. Retirement
+    // revokes it before unlinking the provider index; handoff changes its
+    // exact generation under the same local gate. No provider-wide lookup or
+    // gate adds a fact here. The admission address establishes provenance,
+    // including two providers configured with identical numeric identities.
+    const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding.get());
+    return original && original->belongsTo(&d->handoffAdmission)
+        && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor)
+        && original->matchesHandle(replica);
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::retire(

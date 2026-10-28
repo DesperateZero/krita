@@ -300,7 +300,8 @@ private:
     bool acceptPrivateValidation(KisPagePrivateWrite &, KisPageTransactionId,
                                  quint64 stamp, quint64 issuer, bool complete = false);
     bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
-        KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor) const;
+        KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
+        std::shared_ptr<KisCpuResidentBinding> *binding) const;
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
     // physical slot; no synthetic lease/writer or target arena is created.

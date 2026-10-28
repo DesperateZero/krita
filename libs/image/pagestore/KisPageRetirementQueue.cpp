@@ -522,11 +522,14 @@ void KisPageRetirementQueue::retireOrDefer(
     const KisReplicaHandle &replica,
     const std::shared_ptr<KisPageReplicaProvider> &provider,
     const KisCompletionTicket &lastUse,
-    KisPageBackingPreparation &&backing)
+    KisPageBackingPreparation &&backing,
+    KisPageRetirementRecord *original)
 {
     if (!replica.isValid()) return;
-    bool owned = false;
-    auto record = m_owner.takeRetirementRecordImpl(replica, nullptr, &owned);
+    bool owned = bool(original);
+    auto record = original ? m_owner.takeRetirementRecord(*original, replica)
+                          : m_owner.takeRetirementRecordImpl(replica, nullptr, &owned);
+    if (original && !record) qFatal("Idle checkout lost its original retirement record");
     if (!owned) record = std::move(backing.retirement);
     if (!record) {
         // Foreign/stale handles are not asynchronously owned. Never fabricate
@@ -542,7 +545,11 @@ void KisPageRetirementQueue::retireOrDefer(
         }
         return;
     }
-    record->replica = replica; record->provider = provider; record->lastUse = lastUse;
+    // Original checkout already transfers the registered provider and exact
+    // identity under the ledger gate. Generic/unregistered results retain
+    // their external input, including the caller's funded orphan preparation.
+    if (!original) { record->replica = replica; record->provider = provider; }
+    record->lastUse = lastUse;
     // Registered records already carry the registration-time permission.
     // An unregistered result fixes it once on entry to this original owner.
     if (!owned) record->backgroundRetirement = provider && provider->capabilities().backgroundRetirement;

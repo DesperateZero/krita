@@ -96,6 +96,9 @@ public:
                        const KisCompletionTicket &lastUse) override;
     bool validate(const KisReplicaHandle &replica,
                   const KisPageAllocationDescriptor &descriptor) const override;
+    bool validateCpuBinding(const KisReplicaHandle &replica,
+                            const KisPageAllocationDescriptor &descriptor,
+                            const std::shared_ptr<KisCpuResidentBinding> &binding) const override;
     KisReplicaOperation retire(KisPageOperationId operation,
                                const KisReplicaHandle &replica,
                                const KisCompletionTicket &lastUse) override;

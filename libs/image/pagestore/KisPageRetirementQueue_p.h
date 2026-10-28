@@ -78,7 +78,8 @@ public:
     KRITAIMAGE_EXPORT void retireOrDefer(const KisReplicaHandle &replica,
                        const std::shared_ptr<KisPageReplicaProvider> &provider,
                        const KisCompletionTicket &lastUse,
-                       KisPageBackingPreparation &&backing);
+                       KisPageBackingPreparation &&backing,
+                       KisPageRetirementRecord *original = nullptr);
     void processAcceptedEffects(bool backgroundReclamation);
     // Detach committed Debt and retain the original record. Transfer is
     // infallible under the metadata owner's gate and invokes no provider.

@@ -35,6 +35,12 @@ std::shared_ptr<KisCpuResidentBinding> KisPageReplicaProvider::cpuResidentBindin
 }
 
 KisPageReplicaProvider::~KisPageReplicaProvider() = default;
+bool KisPageReplicaProvider::validateCpuBinding(const KisReplicaHandle &replica,
+    const KisPageAllocationDescriptor &descriptor,
+    const std::shared_ptr<KisCpuResidentBinding> &) const
+{
+    return validate(replica, descriptor);
+}
 KisPageReplicaSource::~KisPageReplicaSource() = default;
 KisReplicaBackingFootprint KisPageReplicaProvider::backingFootprint(
     const KisReplicaHandle &replica) const

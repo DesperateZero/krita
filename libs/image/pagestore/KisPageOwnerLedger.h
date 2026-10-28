@@ -144,7 +144,7 @@ public:
     // preparation before provider retag. Logical detachment is the caller's duty.
     KisBackingHandoffReservation prepareBackingHandoff(
         const KisReplicaHandle &source, const KisReplicaHandle &target,
-        QString *error = nullptr);
+        QString *error = nullptr, KisPageRetirementRecord *originalIdle = nullptr);
     // Caller has installed logical detachment and consumed physical retag under
     // its admission gate. Reuses the existing index node; no provider call or
     // allocation. Keeps any admitted debt headroom until ordinary publication
@@ -205,8 +205,11 @@ public:
     // producer consumes its prepaid version slot; exported proofs keep their
     // independent capability lifetime and may coexist for the same version.
     bool bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion);
-    bool validatePrivateWrite(KisPagePrivateWrite &result, KisPageTransactionId transaction,
-                              QString *error = nullptr, bool complete = false);
+    // The caller freezes original rows through completion and acceptance.
+    // One issuance range and retained provider serve the actual batch; each
+    // original writer still validates its dynamic allocation and reservation.
+    bool validatePrivateWrites(KisPagePublicationRows rows, KisPageTransactionId transaction,
+                               QString *error = nullptr, bool complete = false);
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger

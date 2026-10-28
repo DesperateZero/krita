@@ -4889,7 +4889,7 @@ bool visitCpuProof(Core *d, const KisPagePublicationIdentity &proof, quint64 iss
             || !(native->target.version == proof.version)
             || native->proof.providerValidationStamp != proof.stamp
             || !(native->proof.transaction == proof.transaction)) return false;
-        return visit(native->target, native->descriptor, true,
+        return visit(native->target, native->descriptor, native->binding, true,
             native->proof.providerValidationStamp, native->proof.transaction, shard->arenas.cpuProofs);
     }
     const auto *record = shard->records.version(slot);
@@ -4898,7 +4898,9 @@ bool visitCpuProof(Core *d, const KisPagePublicationIdentity &proof, quint64 iss
     auto *facts = shard->arenas.facts.get(record->facts);
     if (!facts || facts->stamp != proof.stamp || !(facts->transaction == proof.transaction)
         || !authority) return false;
-    return visit(replicaHandle(*authority, record->version), facts->descriptor,
+    const std::shared_ptr<KisCpuResidentBinding> unbound;
+    const auto &binding = facts->nativeReplica == record->authorityReplica ? facts->nativeBinding : unbound;
+    return visit(replicaHandle(*authority, record->version), facts->descriptor, binding,
         record->publication == KisPagePublicationState::Prepared && record->preparedBy == proof.transaction,
         facts->stamp, facts->transaction, shard->arenas.cpuProofs);
 }
@@ -4906,14 +4908,16 @@ bool visitCpuProof(Core *d, const KisPagePublicationIdentity &proof, quint64 iss
 
 bool KisPageMetadataCoordinator::cpuPreparedAuthority(const KisPagePublicationIdentity &identity,
     quint64 issuer, KisReplicaHandle *authority,
-    std::shared_ptr<const KisPageAllocationDescriptor> *descriptor) const
+    std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
+    std::shared_ptr<KisCpuResidentBinding> *binding) const
 {
-    if (!authority || !descriptor) return false;
-    *authority = {}; descriptor->reset();
+    if (!authority || !descriptor || !binding) return false;
+    *authority = {}; descriptor->reset(); binding->reset();
     return visitCpuProof(m_core.load(std::memory_order_acquire), identity, issuer,
-        [&](const auto &original, const auto &layout, bool prepared, auto &, auto &, auto &) {
+        [&](const auto &original, const auto &layout, const auto &originalBinding,
+            bool prepared, auto &, auto &, auto &) {
             if (!prepared || !layout) return false;
-            *authority = original; *descriptor = layout;
+            *authority = original; *descriptor = layout; *binding = originalBinding;
             return true;
         });
 }
@@ -4923,7 +4927,7 @@ KisPreparedPageProof KisPageMetadataCoordinator::cpuProof(const KisPagePublicati
 {
     auto *d = m_core.load(std::memory_order_acquire);
     KisPreparedPageProof result;
-    visitCpuProof(d, proof, issuer, [&](const auto &authority, const auto &,
+    visitCpuProof(d, proof, issuer, [&](const auto &authority, const auto &, const auto &,
                                       bool, auto &, auto &, auto &) {
         result.authority = authority;
         result.transaction = proof.transaction;
@@ -4939,7 +4943,7 @@ bool KisPageMetadataCoordinator::ownsCpuProof(const KisPreparedPageProof &proof,
     auto *d = m_core.load(std::memory_order_acquire);
     if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
     return visitCpuProof(d, KisPagePublicationIdentity(proof), issuer,
-        [&](const auto &authority, const auto &, bool, auto &, auto &, auto &) {
+        [&](const auto &authority, const auto &, const auto &, bool, auto &, auto &, auto &) {
             return authority == proof.authority;
         });
 }
@@ -4949,7 +4953,7 @@ bool KisPageMetadataCoordinator::revokeCpuProof(const KisPreparedPageProof &proo
     auto *d = m_core.load(std::memory_order_acquire);
     if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
     return visitCpuProof(d, KisPagePublicationIdentity(proof), issuer,
-        [&](const auto &authority, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
+        [&](const auto &authority, const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
             if (!(authority == proof.authority)) return false;
             stamp = 0; transaction = {}; --count;
             return true;
@@ -4959,7 +4963,7 @@ bool KisPageMetadataCoordinator::revokeCpuProof(const KisPreparedPageProof &proo
 bool KisPageMetadataCoordinator::revokeCpuProof(const KisPagePublicationIdentity &proof, quint64 issuer)
 {
     return visitCpuProof(m_core.load(std::memory_order_acquire), proof, issuer,
-        [](const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
+        [](const auto &, const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
             stamp = 0; transaction = {}; --count;
             return true;
         });

@@ -1995,7 +1995,8 @@ try {
 }
 
 KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
-    const KisReplicaHandle &source, const KisReplicaHandle &target, QString *error)
+    const KisReplicaHandle &source, const KisReplicaHandle &target, QString *error,
+    KisPageRetirementRecord *originalIdle)
 {
     if (!source.isValid() || !target.isValid()
         || source.domain != KisPageAccessDomain::CpuRam || target.domain != source.domain
@@ -2013,16 +2014,32 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     QMutexLocker locker(&d->mutex);
     const auto oldKey = source.allocationIdentity();
     const auto newKey = target.allocationIdentity();
-    const auto backing = d->backings.find(oldKey);
+    // The original checkout retains this record across the unlocked physical
+    // observation. Consume its location under our gate; the same physical
+    // class claim below then protects preparation through commit/cancel.
+    if (originalIdle && (!originalIdle->backingNode.is_linked()
+        || originalIdle->storage.budget != d->backingBudget
+        || originalIdle->backingNode.second.retirement != originalIdle
+        || originalIdle->backingNode.second.budgetClass != KisBackingBudgetClass::IdleCapacity
+        || !(originalIdle->backingNode.first == oldKey))) return {};
+    const auto backing = originalIdle ? d->backings.iterator_to(originalIdle->backingNode)
+                                     : d->backings.find(oldKey);
     if (!d->backingBudget || backing == d->backings.end()
         || !backing->second.retirement
         || !(backing->second.replica == source)
         || (backing->second.budgetClass != KisBackingBudgetClass::Current
             && backing->second.budgetClass != KisBackingBudgetClass::ActivePending
             && backing->second.budgetClass != KisBackingBudgetClass::OptionalCache
-            && backing->second.budgetClass != KisBackingBudgetClass::IdleCapacity)
-        || d->backings.find(newKey) != d->backings.end()) {
+            && backing->second.budgetClass != KisBackingBudgetClass::IdleCapacity)) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing handoff source is not available"));
+        return {};
+    }
+    // Target differs only by +1 in the last ordered component. If registered,
+    // it is this node's immediate successor; a second root-to-key search adds
+    // no fact. Registration still excludes this target while the claim lives.
+    const auto successor = std::next(backing);
+    if (successor != d->backings.end() && successor->first == newKey) {
+        KisPageStoreDetail::setError(error, QStringLiteral("backing handoff target is already registered"));
         return {};
     }
     auto *physical = backing->second.physicalRecord;
@@ -2614,13 +2631,14 @@ try
         issuer = d->cpuProofIssuer;
     }
     std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+    std::shared_ptr<KisCpuResidentBinding> binding;
     KisReplicaHandle authority;
-    if (!metadata.cpuPreparedAuthority(identity, issuer, &authority, &descriptor)
+    if (!metadata.cpuPreparedAuthority(identity, issuer, &authority, &descriptor, &binding)
         || !descriptor || !descriptor->isValid() || !authority.layout.matches(*descriptor)) return false;
     // This is the real dynamic boundary. Internal validation consumes the
     // original authority; the immutable completion belongs to public export.
     const auto authorityProvider = provider(authority.provider, authority.providerEpoch);
-    return authorityProvider && authorityProvider->validate(authority, *descriptor);
+    return authorityProvider && authorityProvider->validateCpuBinding(authority, *descriptor, binding);
 }
 catch (const std::bad_alloc &) { return false; }
 
@@ -2649,30 +2667,58 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
     return metadata && metadata->ownsCpuProof(proof, issuer);
 }
 
-bool KisPageOwnerLedger::validatePrivateWrite(KisPagePrivateWrite &result,
+bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
     KisPageTransactionId transaction, QString *error, bool complete)
 {
-    std::shared_ptr<KisPageReplicaProvider> authorityProvider;
+    if (!transaction.isValid() || (rows.size() && !rows)) return false;
+    size_t pending = 0;
+    const KisPagePrivateWrite *firstPending = nullptr;
+    for (const auto &row : rows) {
+        if (row.replacement.removal) continue;
+        const auto *result = row.replacement.native;
+        if (!result || !result->reserved || (!result->completed && !complete)
+            || !result->location.page || !result->location.shard) return false;
+        if (result->proof.isValid()) {
+            if (!(result->proof.transaction == transaction)) return false;
+        } else { ++pending; if (!firstPending) firstPending = result; }
+    }
+    if (!pending) { KisPageStoreDetail::setError(error, {}); return true; }
+
     KisPageMetadataCoordinator *metadata;
     quint64 issuer, stamp;
+    std::shared_ptr<KisPageReplicaProvider> authorityProvider;
+    ProviderKey selected = providerKey(firstPending->target.provider, firstPending->target.providerEpoch);
     {
         QMutexLocker locker(&d->mutex);
-        const auto registered = d->registeredProvider(providerKey(result.target.provider, result.target.providerEpoch));
-        if (registered) authorityProvider = registered->provider;
         metadata = d->cpuMetadata;
         issuer = d->cpuProofIssuer;
+        const auto registered = d->registeredProvider(selected);
+        if (registered) authorityProvider = registered->provider;
         if (!metadata || !d->nextValidationStamp
-            || d->nextValidationStamp == std::numeric_limits<quint64>::max()) return false;
-        stamp = d->nextValidationStamp++;
+            || pending > std::numeric_limits<quint64>::max() - d->nextValidationStamp) return false;
+        stamp = d->nextValidationStamp;
+        d->nextValidationStamp += pending;
     }
-    if (!result.reserved || (!result.completed && !complete) || !result.descriptor || !authorityProvider
-        || !authorityProvider->validate(result.target, *result.descriptor)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
-        return false;
-    }
-    if (!metadata->acceptPrivateValidation(result, transaction, stamp, issuer, complete)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU original result changed during validation"));
-        return false;
+    // This is an original frozen input, not an allocated proof/authority
+    // projection. Issuance is batch-local; unused stamps on refusal remain
+    // consumed, just as they did for a refused individual validation.
+    for (auto &row : rows) {
+        auto *result = row.replacement.native;
+        if (row.replacement.removal || result->proof.isValid()) continue;
+        const auto key = providerKey(result->target.provider, result->target.providerEpoch);
+        if (!authorityProvider || key != selected) {
+            authorityProvider = provider(result->target.provider, result->target.providerEpoch);
+            selected = key;
+        }
+        if (!result->descriptor || !authorityProvider
+            || !authorityProvider->validateCpuBinding(result->target, *result->descriptor, result->binding)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
+            return false;
+        }
+        if (!metadata->acceptPrivateValidation(*result, transaction, stamp++, issuer, complete)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("CPU original result changed during validation"));
+            return false;
+        }
     }
     KisPageStoreDetail::setError(error, {});
     return true;
