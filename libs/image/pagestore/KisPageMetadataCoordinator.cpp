@@ -464,7 +464,7 @@ struct MetadataArenaGrowth {
 template<class Snapshot>
 quint64 overflowCount(const Snapshot &snapshot)
 {
-    quint64 result = quint64(snapshot.capturedReadViews.size());
+    quint64 result = 0;
     for (const auto &replica : snapshot.replicas) {
         result += quint64(replica.readLeases.size());
         result += quint64(replica.pendingLastUses.size());
@@ -1000,7 +1000,6 @@ struct ShardRecordStore {
     void eraseChildren(KisPageValueCell *record)
     {
         Q_ASSERT(record);
-        eraseOverflowChain(record->capturedReadViews);
         for (KisReplicaSlotId slot = record->firstReplica; slot.isValid();) {
             KisPageReplicaState *stored = replica(slot);
             Q_ASSERT(stored);
@@ -1015,7 +1014,6 @@ struct ShardRecordStore {
         }
         record->firstReplica = {};
         record->authorityReplica = {};
-        record->capturedReadViews = {};
         record->replicaCount = 0;
     }
 
@@ -1074,7 +1072,7 @@ struct ShardRecordStore {
         // Cold import may seed the independent oracle count. Existing Values
         // own their live read edges; a prepared snapshot cannot restore an
         // edge already returned while its publication claim was outstanding.
-        if (!record->version.isValid()) record->readEdges = snapshot.nativeReaders;
+        if (!record->version.isValid()) record->readEdges = snapshot.readEdges;
         const KisVersionSlotId previousVersion = record->previousVersion;
         const KisVersionSlotId nextVersion = record->nextVersion;
         const KisVersionSlotId previousHistory = record->previousHistory;
@@ -1100,15 +1098,6 @@ struct ShardRecordStore {
         record->publication = snapshot.publication;
         record->preparedBy = snapshot.preparedBy;
         record->replicaCount = quint32(snapshot.replicas.size());
-
-        KisMetadataOverflowSlotId capturedTail;
-        for (KisImageEpochSnapshotToken token : snapshot.capturedReadViews) {
-            appendOverflow(&record->capturedReadViews,
-                           &capturedTail,
-                           &reservation->overflow,
-                           KisMetadataOverflowKind::CapturedReadView,
-                           token.value);
-        }
 
         KisReplicaSlotId replicaTail;
         for (const auto &source : snapshot.replicas) {
@@ -1171,15 +1160,7 @@ struct ShardRecordStore {
         result.version = record.version;
         result.publication = record.publication;
         result.preparedBy = record.preparedBy;
-        result.nativeReaders = record.version.isDefaultPixel() ? 0 : record.readEdges;
-        for (KisMetadataOverflowSlotId slot = Protection ? record.capturedReadViews : KisMetadataOverflowSlotId{}; slot.isValid();) {
-            const KisMetadataOverflowNode *node = overflow(slot);
-            Q_ASSERT(node && node->kind == KisMetadataOverflowKind::CapturedReadView);
-            if (!node)
-                break;
-            result.capturedReadViews.push_back(KisImageEpochSnapshotToken{node->value});
-            slot = node->next;
-        }
+        result.readEdges = record.version.isDefaultPixel() ? 0 : record.readEdges;
         result.replicas.reserve(qsizetype(record.replicaCount));
         for (KisReplicaSlotId slot = record.firstReplica; slot.isValid();) {
             const KisPageReplicaState *stored = replica(slot);
@@ -1371,7 +1352,7 @@ struct ShardRecordStore {
         const auto *authority = replica(stored->authorityReplica);
         if (authority) result.authority = replicaHandle(*authority, stored->version);
         result.replicaCount = stored->replicaCount;
-        result.captured = stored->capturedReadViews.isValid() || (!stored->version.isDefaultPixel() && stored->readEdges);
+        result.captured = !stored->version.isDefaultPixel() && stored->readEdges;
         return result;
     }
 
@@ -1590,7 +1571,7 @@ struct ShardRecordStore {
         const auto *cpu = replica(record->authorityReplica);
         const bool accepted = record->publication == KisPagePublicationState::Published
             || (record->publication == KisPagePublicationState::Prepared && facts->sealedBy.isValid());
-        return accepted && !record->capturedReadViews.isValid() && !record->readEdges
+        return accepted && !record->readEdges
             && record->replicaCount == 1 && cpu && cpu->domain == KisPageAccessDomain::CpuRam
             && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
             && !cpu->overflow.isValid() && !cpu->activeOperation.isValid() ? record : nullptr;
@@ -2126,7 +2107,7 @@ bool readableVersionLocked(const KisPageValueCell &version)
     return version.publication == KisPagePublicationState::Published
         || version.publication == KisPagePublicationState::Historical
         || (version.publication == KisPagePublicationState::Prepared
-            && (version.capturedReadViews.isValid() || (!version.version.isDefaultPixel() && version.readEdges)));
+            && !version.version.isDefaultPixel() && version.readEdges);
 }
 
 template<class Shard>
@@ -5406,7 +5387,7 @@ bool KisPageMetadataCoordinator::discardHistory(
             const auto *record = shard->records.version(slot);
             if (record->publication != KisPagePublicationState::Historical
                 || record->rootEdges.load(std::memory_order_acquire)
-                || record->capturedReadViews.isValid() || (!record->version.isDefaultPixel() && record->readEdges)
+                || (!record->version.isDefaultPixel() && record->readEdges)
                 || (!record->authorityReplica.isValid()
                     && !(record->version.isDefaultPixel() && !record->replicaCount))) continue;
             bool eligible = true;
@@ -5538,8 +5519,6 @@ bool localTransition(KisPageTransitionKind kind)
     case K::PublishWrite:
     case K::FailWrite:
     case K::CancelWrite:
-    case K::RetainCapturedVersion:
-    case K::ReleaseCapturedVersion:
     case K::DetachPreparedVersion:
     case K::AbortPreparedVersion:
     case K::AbortTransaction:
@@ -5592,9 +5571,6 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwner(const Kis
 {
     if (transition.kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, transition, cleanup);
-    if (transition.kind == KisPageTransitionKind::RetainCapturedVersion
-        || transition.kind == KisPageTransitionKind::ReleaseCapturedVersion)
-        return applyCapturedProtection(key, transition, cleanup);
     if (directWriteSequence(&transition, 1))
         return applyWriteSequence(key, &transition, 1);
     return applyProjectedSequence(key, &transition, 1);
@@ -5606,9 +5582,6 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(c
 {
     if (transitions && count == 1 && transitions->kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, *transitions);
-    if (transitions && count == 1 && (transitions->kind == KisPageTransitionKind::RetainCapturedVersion
-                                    || transitions->kind == KisPageTransitionKind::ReleaseCapturedVersion))
-        return applyCapturedProtection(key, *transitions);
     if (directWriteSequence(transitions, count))
         return applyWriteSequence(key, transitions, count);
     return applyProjectedSequence(key, transitions, count);
@@ -5849,117 +5822,6 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     result.historyNeedsRevisit = page->second.historyCount != 0
         && (!releaseRead || !transition.completion.isValid());
     return result;
-}
-
-KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyCapturedProtection(
-    const KisPageKey &key, const KisPageTransition &transition, KisPageMetadataReadCleanup *cleanup)
-{
-    KisPageMetadataTransitionResult result;
-    const bool retain = transition.kind == KisPageTransitionKind::RetainCapturedVersion;
-    if ((!retain && transition.kind != KisPageTransitionKind::ReleaseCapturedVersion)
-        || !(transition.version.key == key) || !transition.readView.isValid()) {
-        result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
-        return result;
-    }
-    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
-    if (!shard) {
-        result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
-        return result;
-    }
-    if (cleanup && cleanup->m_authority && cleanup->m_authority != shard->budgetAuthority) {
-        result.rejectionReason = QStringLiteral("captured protection identity or cleanup is invalid");
-        return result;
-    }
-    for (;;) {
-        const auto storageOwner = shard->budgetAuthority->storage<char>();
-        MetadataArenaGrowth growth(storageOwner.borrowed());
-        MetadataArenas::ReleasedBlocks released;
-        QMutexLocker lock(&shard->mutex);
-        auto page = shard->pages.find(key);
-        KisVersionSlotId versionSlot;
-        if (page == shard->pages.end() || !shard->canMutate(key, page->second)) {
-            result.rejectionReason = QStringLiteral("captured version is missing or reserved for publication");
-            return result;
-        }
-        ++shard->localTransitionSequences;
-        const bool background = kisOnPageStoreReclamationThread();
-        if (background) ++shard->backgroundLocalTransitionSequences;
-        if (!shard->records.findVersion(transition.version, &versionSlot)) {
-            ++shard->rejectedTransitions;
-            result.rejectionReason = QStringLiteral("captured version identity is not readable");
-            return result;
-        }
-        auto *version = shard->records.version(versionSlot);
-        if (version->publication == KisPagePublicationState::Unpublished
-            || version->publication == KisPagePublicationState::Retiring) {
-            ++shard->rejectedTransitions;
-            result.rejectionReason = QStringLiteral("captured version identity is not readable");
-            return result;
-        }
-        if (retain && (version->publication != KisPagePublicationState::Prepared
-                       || !(version->preparedBy == transition.transaction))) {
-            ++shard->rejectedTransitions;
-            result.rejectionReason = QStringLiteral("captured private version is foreign or already retained");
-            return result;
-        }
-        auto *link = &version->capturedReadViews;
-        while (link->isValid()) {
-            const auto *node = shard->records.overflow(*link);
-            Q_ASSERT(node && node->kind == KisMetadataOverflowKind::CapturedReadView);
-            if (node->value == transition.readView.value) break;
-            link = &shard->records.overflow(*link)->next;
-        }
-        if (retain == link->isValid()) {
-            ++shard->rejectedTransitions;
-            result.rejectionReason = retain ? QStringLiteral("captured private version is foreign or already retained")
-                                            : QStringLiteral("captured version token is stale or foreign");
-            return result;
-        }
-        if (retain) {
-            const quint64 revision = page->second.revision;
-            MetadataArenaDemand demand; demand.overflow = 1;
-            const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
-                page = shard->pages.find(key);
-                return page != shard->pages.end() && shard->canMutate(key, page->second)
-                    && page->second.revision == revision;
-            }, &result.rejectionReason);
-            if (storage == MetadataGrowthResult::Stale) {
-                --shard->localTransitionSequences;
-                if (background) --shard->backgroundLocalTransitionSequences;
-                continue;
-            }
-            if (storage != MetadataGrowthResult::Ready) {
-                ++shard->rejectedTransitions;
-                result.rejectionReason = QStringLiteral("captured protection storage is exhausted");
-                return result;
-            }
-            // Arena values stay stable across growth. The unchanged page
-            // revision also keeps this exact append link valid after relock.
-            auto reservation = shard->arenas.overflow.reserveSlots(1);
-            KisMetadataOverflowNode node;
-            node.value = transition.readView.value;
-            *link = shard->arenas.overflow.emplaceReserved(&reservation, node);
-            Q_ASSERT(link->isValid());
-        } else {
-            const auto slot = *link;
-            *link = shard->records.overflow(slot)->next;
-            const bool erased = shard->arenas.overflow.erase(slot, &released.overflow, 1);
-            Q_ASSERT(erased); Q_UNUSED(erased);
-            if (!released.overflow.isEmpty()) {
-                released.budgetRelease = shard->budgetCharge.take(released.overflow.byteSize());
-                if (cleanup) {
-                    if (!cleanup->m_authority) cleanup->m_authority = std::move(released.budgetRelease.authority);
-                    cleanup->m_bytes += std::exchange(released.budgetRelease.bytes, 0);
-                    cleanup->m_blocks.append(std::move(released.overflow));
-                }
-            }
-        }
-        ++page->second.revision;
-        ++shard->acceptedTransitions;
-        result.accepted = true;
-        result.historyNeedsRevisit = !retain && page->second.historyCount != 0;
-        return result;
-    }
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
@@ -6409,14 +6271,6 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
                 if (!version)
                     break;
                 result.trackedPayloadBytes += sizeof(KisPageValueCell);
-                for (KisMetadataOverflowSlotId overflowSlot = version->capturedReadViews; overflowSlot.isValid();) {
-                    const KisMetadataOverflowNode *node = shard->records.overflow(overflowSlot);
-                    Q_ASSERT(node);
-                    if (!node)
-                        break;
-                    result.trackedPayloadBytes += sizeof(KisMetadataOverflowNode);
-                    overflowSlot = node->next;
-                }
                 for (KisReplicaSlotId replicaSlot = version->firstReplica; replicaSlot.isValid();) {
                     const KisPageReplicaState *replica = shard->records.replica(replicaSlot);
                     Q_ASSERT(replica);

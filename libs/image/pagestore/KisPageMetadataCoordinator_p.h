@@ -168,7 +168,6 @@ struct KisPageValueState {
     KisVersionSlotId nextMutable;
     KisReplicaSlotId firstReplica;
     KisReplicaSlotId authorityReplica;
-    KisMetadataOverflowSlotId capturedReadViews;
     KisPageTransactionId preparedBy;
     quint32 replicaCount = 0;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
@@ -242,7 +241,6 @@ struct KisPagePrivateWrite {
 };
 
 enum class KisMetadataOverflowKind : quint8 {
-    CapturedReadView,
     ReadLease,
     PendingLastUse
 };
@@ -251,11 +249,11 @@ struct KisMetadataOverflowNode {
     KisMetadataOverflowSlotId next;
     KisCompletionTicket completion;
     quint64 value = 0;
-    KisMetadataOverflowKind kind = KisMetadataOverflowKind::CapturedReadView;
+    KisMetadataOverflowKind kind = KisMetadataOverflowKind::ReadLease;
 };
 
-// The independent live-root fact adds 8 B; do not hide it in memory refs.
-static_assert(sizeof(KisPageValueCell) <= 328);
+// Identity lifetime facts live on the original Value; no per-capture token chain.
+static_assert(sizeof(KisPageValueCell) <= 320);
 static_assert(sizeof(KisPageReplicaState) <= 128);
 static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 

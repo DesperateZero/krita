@@ -47,10 +47,10 @@ struct KRITAIMAGE_EXPORT KisPageVersionStateSnapshot
     // Per-version owner. Different transactions may retain independent sealed
     // versions of this page; only the active writer is page-exclusive.
     KisPageTransactionId preparedBy;
-    // Logical captured-view protection, independent of replica pins and
-    // execution last-use. A sealed private version may outlive its transaction.
-    KisPageSnapshotArray<KisImageEpochSnapshotToken> capturedReadViews;
-    quint32 nativeReaders = 0;
+    // Cold projection of original Value read edges, independent of replica
+    // pins/last-use. Default identity edges do not retain its optional pixels
+    // and project zero here. A sealed value may outlive its transaction.
+    quint32 readEdges = 0;
 
     /** Exact bytes are defined by the retained surface default revision. */
     bool isVirtualDefault() const
@@ -197,8 +197,6 @@ enum class KisPageTransitionKind : quint8 {
     // Owner rollback of a not-yet-exposed mutation seal. Unlike aborting the
     // whole transaction, earlier Prepared generations remain intact.
     AbortPreparedVersion,
-    RetainCapturedVersion,
-    ReleaseCapturedVersion,
     // Drop sealed-overlay membership, not outstanding pixel/read capabilities.
     // Reclamation follows ordinary historical reachability/pin/last-use rules.
     DetachPreparedVersion,
@@ -224,7 +222,6 @@ struct KRITAIMAGE_EXPORT KisPageTransition
     KisCompletionTicket completion;
     KisImageEpochId imageEpoch;
     KisPageSnapshotArray<KisPageVersion> versions;
-    KisImageEpochSnapshotToken readView;
 };
 
 struct KRITAIMAGE_EXPORT KisPageTransitionEffect

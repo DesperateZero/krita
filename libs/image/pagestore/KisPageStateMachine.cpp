@@ -230,26 +230,6 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
     }
 
     switch (transition.kind) {
-    case KisPageTransitionKind::RetainCapturedVersion:
-    case KisPageTransitionKind::ReleaseCapturedVersion: {
-        auto *version = requireVersion(transition.version);
-        if (!version || !transition.readView.isValid() ||
-            version->publication == KisPagePublicationState::Unpublished ||
-            version->publication == KisPagePublicationState::Retiring) {
-            return reject(QStringLiteral("captured version identity is not readable"));
-        }
-        if (transition.kind == KisPageTransitionKind::RetainCapturedVersion) {
-            if (version->publication != KisPagePublicationState::Prepared ||
-                !(version->preparedBy == transition.transaction) ||
-                contains(version->capturedReadViews, transition.readView)) {
-                return reject(QStringLiteral("captured private version is foreign or already retained"));
-            }
-            version->capturedReadViews.push_back(transition.readView);
-        } else if (!eraseOne(version->capturedReadViews, transition.readView)) {
-            return reject(QStringLiteral("captured version token is stale or foreign"));
-        }
-        break;
-    }
     case KisPageTransitionKind::AcquireRead: {
         if (!transition.lease.isValid()) {
             return reject(QStringLiteral("read lease identity is invalid"));
@@ -812,7 +792,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
                 result.next.findVersion(version);
             if (!candidate ||
                 candidate->publication != KisPagePublicationState::Historical ||
-                !candidate->capturedReadViews.empty() || candidate->nativeReaders ||
+                candidate->readEdges ||
                 (!candidate->authority.isValid() && !candidate->isVirtualDefault())) {
                 return reject(QStringLiteral(
                     "historical discard target is unavailable"));
@@ -871,7 +851,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
                 // Abort removes transaction visibility, not an issued read
                 // capability. Retained sealed bytes become detached history;
                 // the owner collects them after view/pin/last-use release.
-                if (!version.capturedReadViews.empty() || version.nativeReaders) {
+                if (version.readEdges) {
                     version.publication = KisPagePublicationState::Historical;
                     version.preparedBy = {};
                     found = true;
@@ -997,7 +977,7 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
             }
         }
         if (version.publication == KisPagePublicationState::Unpublished) {
-            if (!version.capturedReadViews.isEmpty() || version.nativeReaders)
+            if (version.readEdges)
                 return fail(QStringLiteral("unpublished bytes cannot belong to a captured view"));
             unpublishedCount++;
             unpublishedVersion = version.version;
@@ -1013,12 +993,8 @@ bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,
         } else if (version.preparedBy.isValid()) {
             return fail(QStringLiteral("non-prepared version retains a transaction"));
         }
-        for (const auto token : version.capturedReadViews) {
-            if (!token.isValid() || std::count(version.capturedReadViews.cbegin(),
-                    version.capturedReadViews.cend(), token) != 1 ||
-                version.publication == KisPagePublicationState::Retiring)
-                return fail(QStringLiteral("captured version protection is invalid or duplicated"));
-        }
+        if (version.readEdges && version.publication == KisPagePublicationState::Retiring)
+            return fail(QStringLiteral("retiring version cannot have read edges"));
 
         for (const KisReplicaStateSnapshot &replica : version.replicas) {
             if (!replica.replica.isValid() ||

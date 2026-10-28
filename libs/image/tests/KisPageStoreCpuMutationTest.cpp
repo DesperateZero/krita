@@ -2995,7 +2995,7 @@ void KisPageStoreCpuMutationTest::capturedReleaseKeepsOriginalFacts()
     QCOMPARE(f.snapshot().pendingCapturedReleases, qsizetype(1));
     QCOMPARE(f.live(), f.limits.metadataArenaBytes);
     KisPageStateSnapshot page; QVERIFY(f.metadata.pageSnapshot(key(), &page));
-    QCOMPARE(page.findVersion(f.replica.version)->nativeReaders, quint32(0));
+    QCOMPARE(page.findVersion(f.replica.version)->readEdges, quint32(0));
     // Exact protection already left. Only root release/handoff may continue.
     QCOMPARE(f.epochs.retainedSnapshotCount(), qsizetype(1));
     if (exit == 1) {
@@ -9719,10 +9719,11 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         QVERIFY(f.owner.revokePreparedPage(independent));
     }
     if (historyClass) QVERIFY(f.owner.reclassifyBacking(targets[0], KisBackingBudgetClass::RetainedHistory, &f.error));
-    KisPageTransition capture;
-    capture.kind = KisPageTransitionKind::RetainCapturedVersion;
-    capture.version = targets[0].version; capture.transaction = tx.id; capture.readView = {198};
-    if (protectedVersion) QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
+    KisPageViewTestAccess::ReadEdge capture;
+    if (protectedVersion) {
+        capture = KisPageViewTestAccess::readEdge(f.metadata, targets[0].version);
+        QVERIFY(capture);
+    }
     const auto before = f.metadata.metrics();
     QVERIFY2(prepare(1), qPrintable(f.error));
     KisBackingBudgetDelta pressure;
@@ -9749,15 +9750,12 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         QCOMPARE(f.physical.provider->retireCalls.load(), retires + 1);
     }
     debtPressure.release();
-    if (protectedVersion) {
-        capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-        QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
-    }
+    if (protectedVersion) QVERIFY(capture.reset());
     KisPageReadCleanup cleanup(f.read); QMutexLocker gate(&f.mutex);
     // This fixture invokes metadata protection directly. Its real read owner
     // also requests history when the last capture leaves; collection consumes
     // those events rather than rescanning every registered page.
-    if (protectedVersion) f.history.requestKeyLocked(capture.version.key);
+    if (protectedVersion) f.history.requestKeyLocked(targets[0].version.key);
     QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
     QVERIFY2(publication.abortLocked(tx, gate, cleanup), qPrintable(f.error));
     QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
@@ -9830,10 +9828,11 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         input.superseded = {version, tx.id, 1, false, {}};
         input.detachesSuperseded = true;
     }
-    KisPageTransition capture;
-    capture.kind = KisPageTransitionKind::RetainCapturedVersion;
-    capture.version = targets[1].version; capture.transaction = tx.id; capture.readView = {191};
-    if (mode == 2) QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
+    KisPageViewTestAccess::ReadEdge capture;
+    if (mode == 2) {
+        capture = KisPageViewTestAccess::readEdge(f.metadata, targets[1].version);
+        QVERIFY(capture);
+    }
     auto candidate = f.metadata.prepareAcceptance(tx, {inputs.data(), inputs.size()}, &f.error);
     QVERIFY2(candidate.isValid(), qPrintable(f.error));
     std::array<bool, 5> planned{};
@@ -9847,11 +9846,11 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
     QCOMPARE(fee.isValid(), mode != 3);
     const auto optional = [&] { return f.budget.usage().buckets[size_t(KisBackingBudgetClass::OptionalCache)]; };
     QCOMPARE(optional().reserved.cpuRam, mode == 3 ? quint64(0) : (mode == 2 ? pageBytes : 2 * pageBytes));
-    if (mode == 1) QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
-    if (mode == 2) {
-        capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-        QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
+    if (mode == 1) {
+        capture = KisPageViewTestAccess::readEdge(f.metadata, targets[1].version);
+        QVERIFY(capture);
     }
+    if (mode == 2) QVERIFY(capture.reset());
     if (mode == 4) { candidate = {}; fee.release(); }
     else {
         const bool installed = f.metadata.installAcceptance(std::move(candidate), tx, &f.error);
@@ -9910,8 +9909,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         QVERIFY(f.metadata.versionSnapshot(targets[1].version, &info));
         QCOMPARE(info.publication, KisPagePublicationState::Historical);
         QCOMPARE(optional().live.cpuRam, pageBytes);
-        capture.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-        QVERIFY(f.metadata.applyOwner(capture.version.key, capture).accepted);
+        QVERIFY(capture.reset());
     }
     if (mode != 1 && mode != 4) f.metadata.finishAcceptance({inputs.data(), inputs.size()});
     candidate = {}; fee.release();

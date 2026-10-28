@@ -1160,32 +1160,21 @@ void KisPageStoreFoundationTest::stateMachineCapturedVersionRetention()
     for (auto kind : {KisPageTransitionKind::AcquireWrite, KisPageTransitionKind::PrepareWrite,
                       KisPageTransitionKind::BeginPublish, KisPageTransitionKind::PublishWrite})
         state = applyAccepted(sm, state, writeTransition(kind, 2));
-    KisPageTransition retain;
-    retain.kind = KisPageTransitionKind::RetainCapturedVersion;
-    retain.version = testPageVersion(2); retain.transaction = {1}; retain.readView = {71};
-    auto foreign = retain; foreign.transaction = {2};
-    QVERIFY(!sm.apply(state, foreign).accepted);
-    foreign = retain; foreign.version = testPageVersion(1);
-    QVERIFY(!sm.apply(state, foreign).accepted);
-    auto result = sm.apply(state, retain); QVERIFY(result.accepted); state = result.next;
-    QVERIFY(!sm.apply(state, retain).accepted);
-    retain.readView = {72}; result = sm.apply(state, retain); QVERIFY(result.accepted); state = result.next;
+    // Independent oracle consumes external read-lifetime facts. Admission and
+    // move-only return are exercised through real Values in Reference/Store.
+    state.findVersion(testPageVersion(2))->readEdges = 2;
     KisPageTransition discard;
     discard.kind = KisPageTransitionKind::DiscardHistoricalVersions;
     discard.versions = {testPageVersion(2)};
     QVERIFY(!sm.apply(state, discard).accepted);
     KisPageTransition abort; abort.kind = KisPageTransitionKind::AbortTransaction; abort.transaction = {1};
-    result = sm.apply(state, abort); QVERIFY(result.accepted); QVERIFY(result.effects.isEmpty()); state = result.next;
+    auto result = sm.apply(state, abort); QVERIFY(result.accepted); QVERIFY(result.effects.isEmpty()); state = result.next;
     QCOMPARE(state.versions.last().publication, KisPagePublicationState::Historical);
     QVERIFY(!state.versions.last().preparedBy.isValid());
     QVERIFY(!sm.apply(state, discard).accepted);
-    KisPageTransition release = retain; release.kind = KisPageTransitionKind::ReleaseCapturedVersion;
-    release.readView = {70}; QVERIFY(!sm.apply(state, release).accepted);
-    for (quint64 token : {71, 72}) {
-        release.readView = {token}; result = sm.apply(state, release); QVERIFY(result.accepted); state = result.next;
-        QVERIFY(!sm.apply(state, release).accepted);
-        if (token == 71) QVERIFY(!sm.apply(state, discard).accepted);
-    }
+    --state.findVersion(testPageVersion(2))->readEdges;
+    QVERIFY(!sm.apply(state, discard).accepted);
+    --state.findVersion(testPageVersion(2))->readEdges;
     result = sm.apply(state, discard); QVERIFY(result.accepted); QCOMPARE(result.effects.size(), 1);
     QVERIFY(sm.validateInvariants(result.next));
 }

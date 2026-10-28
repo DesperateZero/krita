@@ -60,7 +60,7 @@ struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
 {
     bool accepted = false;
     bool storageRefused = false;
-    // Accepted removal of read/last-use/captured protection found history on
+    // Accepted removal of replica read/last-use protection found history on
     // this page. The owner consumes this notification before releasing its gate.
     bool historyNeedsRevisit = false;
     QString rejectionReason;
@@ -624,9 +624,6 @@ private:
     KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);
-    KisPageMetadataTransitionResult applyCapturedProtection(const KisPageKey &key,
-                                                   const KisPageTransition &transition,
-                                                   KisPageMetadataReadCleanup *cleanup = nullptr);
     // PageControl memory is stable for this metadata core's lifetime. Claim
     // payload is exclusively protected by the original Store admission gate.
     KisPageWriteClaim *findWriteClaim(const KisPageKey &) const;

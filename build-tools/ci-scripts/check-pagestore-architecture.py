@@ -1319,7 +1319,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct KisPageValueCell : KisPageViewValue, KisPageValueState",
             "struct KisPageReplicaState",
             "struct KisMetadataOverflowNode",
-            "sizeof(KisPageValueCell) <= 328",
+            "sizeof(KisPageValueCell) <= 320",
             "sizeof(KisPageReplicaState) <= 128",
             "sizeof(KisMetadataOverflowNode) <= 64",
         ):
@@ -1613,9 +1613,12 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         retired = ("sealCpuPreparedPage", "sealCpuProof", "reservePrivateWrite",
                    "KisPagePublicationProof", "borrowedMutation", "needsOwnedMutation",
                    "KisPageNativeReadRef", "nativeRefs", "groupNativeRefs", "retainNativeReads",
-                   "releaseNativeReads", "nativeReadVersion", "nativeReadBindings")
+                   "releaseNativeReads", "nativeReadVersion", "nativeReadBindings",
+                   "RetainCapturedVersion", "ReleaseCapturedVersion", "applyCapturedProtection",
+                   "capturedReadViews", "nativeReaders", "CapturedReadView")
         for symbol in retired:
-            if any(symbol in code_only(p.read_text()) for p in page_store_source.parent.glob("KisPage*.*")
+            if any(re.search(r"\b" + re.escape(symbol) + r"\b", code_only(p.read_text()))
+                   for p in page_store_source.parent.glob("KisPage*.*")
                    if p.suffix in (".h", ".cpp")):
                 errors.append("retired native preparation contract returned: " + symbol)
         selector_begin = write_source.find("KisPageWritePlanKind KisPageWriteCoordinator::select")

@@ -35,14 +35,13 @@ struct KisPageWorkingReplica
 struct KisPageWorkingVersion
 {
     explicit KisPageWorkingVersion(KisPageWorkingStorage storage)
-        : replicas(decltype(replicas)::allocator_type(storage)), capturedReadViews(storage) {}
+        : replicas(decltype(replicas)::allocator_type(storage)) {}
     KisPageVersion version;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
     KisPageWorkingArray<KisPageWorkingReplica, 1> replicas;
     KisReplicaHandle authority;
     KisPageTransactionId preparedBy;
-    KisPageWorkingArray<KisImageEpochSnapshotToken> capturedReadViews;
-    quint32 nativeReaders = 0;
+    quint32 readEdges = 0;
 
     bool isVirtualDefault() const
     {
