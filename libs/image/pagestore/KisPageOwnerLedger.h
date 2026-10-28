@@ -286,7 +286,7 @@ private:
     KisPageRetirementRecordPointer takeRetirementRecordLocked(KisPageBackingRecord &backing,
         const KisReplicaHandle &replica, KisBackingBudgetClass *originalClass);
     bool reclassifyBackingLocked(KisPageBackingIndex::iterator found,
-        const KisReplicaHandle &replica, KisBackingBudgetClass budgetClass,
+        KisBackingBudgetClass budgetClass,
         KisBackingBudgetReservation *reservation, QString *error);
     bool reclassifyBackingImpl(const KisReplicaHandle &replica,
                                KisBackingBudgetClass budgetClass,

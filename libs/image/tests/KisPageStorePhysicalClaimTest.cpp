@@ -144,6 +144,7 @@ private Q_SLOTS:
         QTest::newRow("head-account-owner") << true;
     }
     void ledgerAliasMembershipAtCapacity();
+    void wideAliasClassCapacity();
     void sharedCacheClassificationAndDebt_data()
     {
         QTest::addColumn<int>("bpp");
@@ -879,6 +880,120 @@ void KisPageStorePhysicalClaimTest::ledgerAliasMembershipAtCapacity()
     for (size_t i = 0; i < fillers.size(); ++i)
         freeTestStoragePressure(&budget, std::exchange(fillers[i], nullptr), fillerBytes[i], 1);
     QCOMPARE(live(), baseline);
+}
+
+void KisPageStorePhysicalClaimTest::wideAliasClassCapacity()
+{
+    using Class = KisBackingBudgetClass;
+    Fixture f; QVERIFY(f.init());
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 2 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger ledger; QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
+    QVERIFY(ledger.registerProvider(f.provider));
+    { auto warm = kisPreparePageRetirementRecord(&budget); }
+    std::array<KisBackingBudgetReservation, 4> warm;
+    for (auto &fee : warm) { fee = budget.reserve({}, &f.error); QVERIFY(fee.isValid()); }
+    for (auto &fee : warm) fee.release();
+    const auto live = [&] { return budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
+    const auto bytes = f.replica.layout.byteSize;
+    KisBackingBudgetDelta delta; delta.bucket(size_t(Class::Current)).cpuRam = qint64(bytes);
+    std::array<KisReplicaHandle, 256> replicas;
+    std::array<Class, 256> classes;
+    classes.fill(Class::Current);
+    auto source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source);
+    KisPageRetirementRecord *anchor = nullptr;
+    KisPageRetirementRecordPointer last;
+    KisBackingBudgetReservation lastFee;
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        auto record = kisPreparePageRetirementRecord(&budget);
+        if (!i) { anchor = record.get(); replicas[i] = f.replica; }
+        else {
+            auto result = f.provider->prepareSynchronousSource({1000 + i}, source, {key(int(i)), {1}},
+                f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
+            QVERIFY(result.isValid()); replicas[i] = result.replica;
+        }
+        auto fee = budget.reserve(delta, &f.error); QVERIFY(fee.isValid());
+        if (i + 1 == replicas.size()) { last = std::move(record); lastFee = std::move(fee); }
+        else QVERIFY2(ledger.registerBacking(replicas[i], fee, Class::Current, &f.error, &record), qPrintable(f.error));
+    }
+    QVERIFY(!anchor->physical.classStorage); // 255 real members need no wide storage.
+    QVERIFY(!ledger.reclassifyBacking(replicas[0], Class::Count));
+    QCOMPARE(ledger.backingClass(replicas[0]), Class::Current);
+    const auto beforeWide = live();
+    size_t fillerBytes = size_t(limits.metadataArenaBytes - live());
+    void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    const auto cleanup = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
+    auto *original = last.get();
+    QVERIFY(!ledger.registerBacking(replicas.back(), lastFee, Class::Current, &f.error, &last));
+    QCOMPARE(last.get(), original); QVERIFY(lastFee.isValid());
+    QCOMPARE(ledger.backingClass(replicas.back()), Class::Count);
+    QCOMPARE(budget.usage().buckets[size_t(Class::Current)].live.cpuRam, bytes);
+    QVERIFY(!anchor->physical.classStorage);
+    freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    QVERIFY2(ledger.registerBacking(replicas.back(), lastFee, Class::Current, &f.error, &last), qPrintable(f.error));
+    QVERIFY(anchor->physical.classStorage);
+    const auto storage = live(); QVERIFY(storage > beforeWide);
+    qInfo() << "BR1_WIDE_CLASS_CAPACITY_BYTES" << storage - beforeWide;
+    const std::array<Class, 8> priority{Class::Current, Class::ActivePending, Class::InFlight,
+        Class::RetainedHistory, Class::OptionalCache, Class::IdleCapacity, Class::MetadataArena, Class::RetirementDebt};
+    const auto checkCharge = [&] {
+        Class expected = Class::Count;
+        for (const auto cls : priority) if (std::find(classes.begin(), classes.end(), cls) != classes.end()) {
+            expected = cls; break;
+        }
+        const auto usage = budget.usage();
+        for (const auto cls : priority) {
+            const quint64 expectedBytes = (cls == Class::MetadataArena ? storage : 0) + (cls == expected ? bytes : 0);
+            if (!QTest::qCompare(usage.buckets[size_t(cls)].live.cpuRam, expectedBytes,
+                "actual charge", "member oracle", __FILE__, __LINE__)) return false;
+            if (!QTest::qCompare(usage.buckets[size_t(cls)].reserved.cpuRam, quint64(0),
+                "reserved charge", "zero after acceptance", __FILE__, __LINE__)) return false;
+        }
+        return true;
+    };
+    // Uniform 256-member groups exceed one byte in each of the eight classes.
+    // Check every intermediate destination, including the final priority edge.
+    for (const auto cls : priority) for (size_t i = 0; i < replicas.size(); ++i) {
+        QVERIFY2(ledger.reclassifyBacking(replicas[i], cls, &f.error), qPrintable(f.error));
+        classes[i] = cls; QVERIFY(checkCharge());
+    }
+    // Independent member oracle: mixed distributions and priority crossings.
+    for (size_t shift = 0; shift < priority.size(); ++shift) {
+        for (size_t i = 0; i < replicas.size(); ++i) {
+            const auto cls = priority[(i + shift) % priority.size()];
+            QVERIFY2(ledger.reclassifyBacking(replicas[i], cls, &f.error), qPrintable(f.error));
+            classes[i] = cls; QVERIFY(checkCharge());
+        }
+    }
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        QVERIFY(ledger.reclassifyBacking(replicas[i], Class::Current)); classes[i] = Class::Current;
+    }
+    QVERIFY(checkCharge());
+    QVERIFY(ledger.reclassifyBacking(replicas.back(), Class::RetirementDebt));
+    QVERIFY(f.provider->retire({2000}, replicas.back(), {}).isValid());
+    QVERIFY(KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, replicas.back()));
+    QVERIFY(anchor->physical.classCounts != KisPageClassCounts::Wide);
+    last = kisPreparePageRetirementRecord(&budget);
+    const auto replacement = f.provider->prepareSynchronousSource({2001}, source, {key(255), {2}},
+        f.desc, KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Normal);
+    QVERIFY(replacement.isValid()); replicas.back() = replacement.replica;
+    lastFee = budget.reserve(delta, &f.error); QVERIFY(lastFee.isValid());
+    fillerBytes = size_t(limits.metadataArenaBytes - live());
+    filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
+    QVERIFY2(ledger.registerBacking(replicas.back(), lastFee, Class::Current, &f.error, &last), qPrintable(f.error));
+    QCOMPARE(live(), limits.metadataArenaBytes); // Reuse paid cold capacity; no refill at 255 -> 256.
+    freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    QCOMPARE(live(), storage);
+    for (const auto &replica : replicas) QVERIFY(ledger.reclassifyBacking(replica, Class::RetirementDebt));
+    source.reset();
+    for (size_t i = 0; i < replicas.size(); ++i) {
+        QVERIFY(f.provider->retire({3000 + i}, replicas[i], {}).isValid());
+        QVERIFY(KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, replicas[i]));
+    }
+    QCOMPARE(live(), baseline); // The original alias account tail and wide capacity both finish once.
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(budget.usage().buckets[size_t(Class::RetirementDebt)].live.cpuRam, quint64(0));
 }
 
 void KisPageStorePhysicalClaimTest::optionalCapacityCheckout_data()

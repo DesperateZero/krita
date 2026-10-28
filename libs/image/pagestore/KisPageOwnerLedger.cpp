@@ -166,44 +166,6 @@ using BackingIndex = KisPageBackingIndex;
 using PhysicalBackingRecord = KisPagePhysicalBackingRecord;
 using PhysicalBackingIndex = KisPagePhysicalBackingIndex;
 
-using ClassReferences = decltype(PhysicalBackingRecord::references);
-
-KisBackingBudgetClass chargedBackingClass(const ClassReferences &references)
-{
-    // Physical bytes are charged once, to a surviving use before terminal
-    // aliases. Expose that use at fallible admission, not after the provider
-    // has destroyed the last Debt alias and can no longer reject a new fee.
-    constexpr std::array<KisBackingBudgetClass, 8> priority{
-        KisBackingBudgetClass::Current,
-        KisBackingBudgetClass::ActivePending,
-        KisBackingBudgetClass::InFlight,
-        KisBackingBudgetClass::RetainedHistory,
-        KisBackingBudgetClass::OptionalCache,
-        KisBackingBudgetClass::IdleCapacity,
-        KisBackingBudgetClass::MetadataArena,
-        KisBackingBudgetClass::RetirementDebt};
-    for (const KisBackingBudgetClass budgetClass : priority) {
-        if (references[static_cast<size_t>(budgetClass)] != 0)
-            return budgetClass;
-    }
-    return KisBackingBudgetClass::Count;
-}
-
-bool changePhysicalReferenceClass(ClassReferences *references,
-                                  KisBackingBudgetClass before,
-                                  KisBackingBudgetClass after)
-{
-    if (!references || before == after)
-        return false;
-    auto &beforeCount = (*references)[static_cast<size_t>(before)];
-    auto &afterCount = (*references)[static_cast<size_t>(after)];
-    if (!beforeCount || afterCount == std::numeric_limits<quint32>::max())
-        return false;
-    --beforeCount;
-    ++afterCount;
-    return true;
-}
-
 bool addPhysicalChargeChange(KisBackingBudgetDelta *delta,
                              const PhysicalBackingRecord &record,
                              KisBackingBudgetClass before,
@@ -422,11 +384,8 @@ public:
         auto *physical = record.physicalRecord;
         Q_ASSERT(physical);
         physical->unlink(record);
-        auto &references = physical->references[static_cast<size_t>(record.budgetClass)];
-        Q_ASSERT(references != 0);
-        if (references)
-            --references;
-        const KisBackingBudgetClass afterCharge = chargedBackingClass(physical->references);
+        physical->removeClass(record.budgetClass);
+        const KisBackingBudgetClass afterCharge = physical->currentClass();
         if (afterCharge == KisBackingBudgetClass::Count) {
             Q_ASSERT(!physical->members);
             if (backingBudget) {
@@ -551,7 +510,7 @@ public:
             if (!alias) {
                 physical->classClaim = &row;
                 Q_ASSERT(physical->chargedClass == found->second.budgetClass);
-                Q_ASSERT(physical->references[static_cast<size_t>(found->second.budgetClass)] == 1);
+                Q_ASSERT(physical->classes().count(found->second.budgetClass) == 1);
                 if (!projectPhysicalCharge(signedDelta, row, change.after,
                         found->second.retirementHeadroom.isValid() ? &found->second : nullptr, error)) return false;
             }
@@ -588,13 +547,13 @@ public:
             }
             Q_ASSERT(!source->classClaim && !source->domainClaim);
             source->classClaim = &projected[first];
-            auto next = source->references;
+            auto next = source->classes();
             BackingRecord *credit = nullptr;
             do {
                 auto &entry = projected[first];
                 if (!credit && entry.backing->second.retirementHeadroom.isValid())
                     credit = &entry.backing->second;
-                if (!changePhysicalReferenceClass(&next, entry.backing->second.budgetClass, entry.after)) {
+                if (!next.change(entry.backing->second.budgetClass, entry.after)) {
                     KisPageStoreDetail::setError(error, QStringLiteral("physical backing class references are invalid"));
                     return false;
                 }
@@ -602,7 +561,7 @@ public:
                 if (first < projected.size() && projected[first].physical == source)
                     entry.next = &projected[first];
             } while (first < projected.size() && projected[first].physical == source);
-            if (!projectPhysicalCharge(signedDelta, projected[first - 1], chargedBackingClass(next), credit, error)) return false;
+            if (!projectPhysicalCharge(signedDelta, projected[first - 1], next.chargedClass(), credit, error)) return false;
         }
         return true;
     }
@@ -742,8 +701,7 @@ public:
         const auto before = found->second.budgetClass;
         if (before == change.after) return;
         Q_ASSERT(physical);
-        const bool changed = changePhysicalReferenceClass(
-            &physical->references, before, change.after);
+        const bool changed = physical->changeClass(before, change.after);
         Q_ASSERT(changed);
         Q_UNUSED(changed);
         // The claim froze the complete physical group at preparation. Only
@@ -1291,112 +1249,129 @@ try {
         return false;
     }
 
+    KisPageWideClassCountsPointer preparedClasses; // Destroy outside the ledger gate.
     QMutexLocker locker(&d->mutex);
     const BackingKey key = replica.allocationIdentity();
     const PhysicalBackingKey physicalKey = physicalBackingKey(replica, footprint);
-    if (!d->backingBudget || reservation.owner != d->backingBudget
-        || d->backings.find(key) != d->backings.end() || d->isHandoffTarget(key)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("replica backing identity is already owned"));
-        return false;
-    }
-    auto physical = d->physicalBackings.find(physicalKey);
-    const bool newPhysicalBacking = physical == d->physicalBackings.end();
-    KisBackingBudgetDelta sharedChargeChange;
-    KisBackingBudgetClass sharedAfterCharge = KisBackingBudgetClass::Count;
-    if (newPhysicalBacking) {
-        if ((*preparedRetirement)->physical.is_linked()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("original resource account still belongs to another physical backing"));
+    for (;;) {
+        if (!d->backingBudget || reservation.owner != d->backingBudget
+            || d->backings.find(key) != d->backings.end() || d->isHandoffTarget(key)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("replica backing identity is already owned"));
             return false;
         }
-        if (!d->backingBudget->reservationCovers(reservation.cookie,
-                                                 budgetClass, footprint.domain,
-                                                 footprint.bytes)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain is not reserved"));
-            return false;
-        }
-        auto node = (*preparedRetirement)->retainPhysicalEndpoint();
-        node->identity = physicalKey;
-        node->bytes = footprint.bytes;
-        node->domain = footprint.domain;
-        node->domainRevision = footprint.revision;
-        node->references[static_cast<size_t>(budgetClass)] = 1;
-        node->chargedClass = budgetClass;
-        auto installed = d->physicalBackings.insert(*node);
-        Q_ASSERT(installed.second);
-        physical = installed.first;
-        node.release(); // The original physical index owns this endpoint.
-    } else {
-        if (physical->domainClaim || physical->classClaim) {
-            KisPageStoreDetail::setError(
-                error, QStringLiteral("shared physical backing transition is active"));
-            return false;
-        }
-        if (physical->domain != footprint.domain
-            || physical->domainRevision != footprint.revision
-            || physical->byteSize() != footprint.bytes) {
-            KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing footprint changed"));
-            return false;
-        }
-        auto next = physical->references;
-        auto &references = next[static_cast<size_t>(budgetClass)];
-        if (references == std::numeric_limits<quint32>::max()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing reference count overflow"));
-            return false;
-        }
-        ++references;
-        sharedAfterCharge = chargedBackingClass(next);
-        if (!addPhysicalChargeChange(&sharedChargeChange, *physical,
-                                     physical->chargedClass, sharedAfterCharge)
-            || (sharedAfterCharge != physical->chargedClass
-                && !d->backingBudget->reservationCovers(
-                    reservation.cookie, sharedAfterCharge, footprint.domain,
-                    footprint.bytes))) {
-            KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing class change is not reserved"));
-            return false;
-        }
-        physical->references = next;
-    }
-    auto &node = (*preparedRetirement)->backingNode;
-    node.first = key;
-    node.second.replica = replica;
-    node.second.budgetClass = budgetClass;
-    const auto installedBacking = d->backings.insert(node);
-    Q_ASSERT(installedBacking.second);
-    auto &backing = installedBacking.first->second;
-    physical->link(backing);
-    const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
-    Q_ASSERT(registered);
-    (*preparedRetirement)->provider = registered->provider;
-    (*preparedRetirement)->backgroundRetirement = registered->backgroundRetirement;
-    backing.retirement = preparedRetirement->release();
-
-    if (!newPhysicalBacking) {
-        // The same bytes have one charge, but a new foreground alias can
-        // outrank the former owner class and must move that charge atomically.
-        if (sharedAfterCharge != physical->chargedClass) {
-            reservation.commit(sharedChargeChange);
-            physical->chargedClass = sharedAfterCharge;
+        auto physical = d->physicalBackings.find(physicalKey);
+        const bool newPhysicalBacking = physical == d->physicalBackings.end();
+        KisBackingBudgetDelta sharedChargeChange;
+        KisBackingBudgetClass sharedAfterCharge = KisBackingBudgetClass::Count;
+        if (newPhysicalBacking) {
+            if ((*preparedRetirement)->physical.is_linked()) {
+                KisPageStoreDetail::setError(error, QStringLiteral("original resource account still belongs to another physical backing"));
+                return false;
+            }
+            if (!d->backingBudget->reservationCovers(reservation.cookie,
+                                                     budgetClass, footprint.domain,
+                                                     footprint.bytes)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("physical backing domain is not reserved"));
+                return false;
+            }
+            auto node = (*preparedRetirement)->retainPhysicalEndpoint();
+            node->identity = physicalKey;
+            node->bytes = footprint.bytes;
+            node->domain = footprint.domain;
+            node->domainRevision = footprint.revision;
+            node->installClasses(KisPageClassCounts::single(budgetClass));
+            node->chargedClass = budgetClass;
+            auto installed = d->physicalBackings.insert(*node);
+            Q_ASSERT(installed.second);
+            physical = installed.first;
+            node.release(); // The original physical index owns this endpoint.
         } else {
-            reservation.release();
+            if (physical->domainClaim || physical->classClaim) {
+                KisPageStoreDetail::setError(
+                    error, QStringLiteral("shared physical backing transition is active"));
+                return false;
+            }
+            if (physical->domain != footprint.domain
+                || physical->domainRevision != footprint.revision
+                || physical->byteSize() != footprint.bytes) {
+                KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing footprint changed"));
+                return false;
+            }
+            auto next = physical->classes();
+            if (!next.add(budgetClass)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing reference count overflow"));
+                return false;
+            }
+            if (next.isWide() && !physical->classStorage && !preparedClasses) {
+                // This real alias group outgrew the compact distribution. Prepare
+                // its one retained extension before accepting membership. No
+                // physical location survives the unlocked allocation window.
+                locker.unlock();
+                preparedClasses = kisPreparePageWideClassCounts(d->backingBudget);
+                footprint = observeBackingFootprint(replica);
+                if (!footprint.isValid() || footprint.bytes != replica.layout.byteSize
+                    || !(physicalBackingKey(replica, footprint) == registrationPhysical)) {
+                    KisPageStoreDetail::setError(error, QStringLiteral("physical backing changed during class capacity preparation"));
+                    return false;
+                }
+                locker.relock();
+                continue;
+            }
+            sharedAfterCharge = next.chargedClass();
+            if (!addPhysicalChargeChange(&sharedChargeChange, *physical,
+                                         physical->chargedClass, sharedAfterCharge)
+                || (sharedAfterCharge != physical->chargedClass
+                    && !d->backingBudget->reservationCovers(
+                        reservation.cookie, sharedAfterCharge, footprint.domain,
+                        footprint.bytes))) {
+                KisPageStoreDetail::setError(error, QStringLiteral("shared physical backing class change is not reserved"));
+                return false;
+            }
+            if (next.isWide() && !physical->classStorage) physical->classStorage = std::move(preparedClasses);
+            physical->installClasses(next);
+        }
+        auto &node = (*preparedRetirement)->backingNode;
+        node.first = key;
+        node.second.replica = replica;
+        node.second.budgetClass = budgetClass;
+        const auto installedBacking = d->backings.insert(node);
+        Q_ASSERT(installedBacking.second);
+        auto &backing = installedBacking.first->second;
+        physical->link(backing);
+        const auto registered = d->registeredProvider(providerKey(replica.provider, replica.providerEpoch));
+        Q_ASSERT(registered);
+        (*preparedRetirement)->provider = registered->provider;
+        (*preparedRetirement)->backgroundRetirement = registered->backgroundRetirement;
+        backing.retirement = preparedRetirement->release();
+
+        if (!newPhysicalBacking) {
+            // The same bytes have one charge, but a new foreground alias can
+            // outrank the former owner class and must move that charge atomically.
+            if (sharedAfterCharge != physical->chargedClass) {
+                reservation.commit(sharedChargeChange);
+                physical->chargedClass = sharedAfterCharge;
+            } else {
+                reservation.release();
+            }
+            KisPageStoreDetail::setError(error, {});
+            return true;
+        }
+        KisBackingBudgetDelta installed;
+        addBackingDelta(&installed, budgetClass, footprint.domain, qint64(footprint.bytes));
+        if (budgetClass != KisBackingBudgetClass::RetirementDebt
+            && d->backingBudget->reservationCovers(
+                reservation.cookie, KisBackingBudgetClass::RetirementDebt,
+                footprint.domain, footprint.bytes)) {
+            KisBackingBudgetDelta retirementFallback;
+            addBackingDelta(&retirementFallback, KisBackingBudgetClass::RetirementDebt,
+                            footprint.domain, qint64(footprint.bytes));
+            reservation.commitRetaining(installed, retirementFallback);
+        } else {
+            reservation.commit(installed);
         }
         KisPageStoreDetail::setError(error, {});
         return true;
     }
-    KisBackingBudgetDelta installed;
-    addBackingDelta(&installed, budgetClass, footprint.domain, qint64(footprint.bytes));
-    if (budgetClass != KisBackingBudgetClass::RetirementDebt
-        && d->backingBudget->reservationCovers(
-            reservation.cookie, KisBackingBudgetClass::RetirementDebt,
-            footprint.domain, footprint.bytes)) {
-        KisBackingBudgetDelta retirementFallback;
-        addBackingDelta(&retirementFallback, KisBackingBudgetClass::RetirementDebt,
-                        footprint.domain, qint64(footprint.bytes));
-        reservation.commitRetaining(installed, retirementFallback);
-    } else {
-        reservation.commit(installed);
-    }
-    KisPageStoreDetail::setError(error, {});
-    return true;
 } catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("backing observation or installation storage was refused"));
     return false;
@@ -1493,6 +1468,10 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
     KisBackingBudgetReservation *reservation,
     QString *error)
 {
+    if (size_t(budgetClass) >= size_t(KisBackingBudgetClass::Count)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("backing target class is invalid"));
+        return false;
+    }
     QMutexLocker locker(&d->mutex);
     const BackingKey key = replica.allocationIdentity();
     auto found = d->backings.find(key);
@@ -1505,11 +1484,11 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
             : QStringLiteral("replica backing is not owned by this store"));
         return false;
     }
-    return reclassifyBackingLocked(found, replica, budgetClass, reservation, error);
+    return reclassifyBackingLocked(found, budgetClass, reservation, error);
 }
 
 bool KisPageOwnerLedger::reclassifyBackingLocked(KisPageBackingIndex::iterator found,
-    const KisReplicaHandle &replica, KisBackingBudgetClass budgetClass,
+    KisBackingBudgetClass budgetClass,
     KisBackingBudgetReservation *reservation, QString *error)
 {
     if (reservation && reservation->owner != d->backingBudget) {
@@ -1528,13 +1507,13 @@ bool KisPageOwnerLedger::reclassifyBackingLocked(KisPageBackingIndex::iterator f
             error, QStringLiteral("replica physical backing transition is active"));
         return false;
     }
-    auto next = physical->references;
+    KisPageClassCounts next;
     const KisBackingBudgetClass beforeCharge = physical->chargedClass;
-    if (!changePhysicalReferenceClass(&next, found->second.budgetClass, budgetClass)) {
+    if (!physical->projectClassChange(found->second.budgetClass, budgetClass, next)) {
         KisPageStoreDetail::setError(error, QStringLiteral("replica physical class references are invalid"));
         return false;
     }
-    const KisBackingBudgetClass afterCharge = chargedBackingClass(next);
+    const KisBackingBudgetClass afterCharge = next.chargedClass();
     KisBackingBudgetDelta installed;
     if (!addPhysicalChargeChange(&installed, *physical, beforeCharge, afterCharge)) {
         KisPageStoreDetail::setError(error, QStringLiteral("replica physical class delta is invalid"));
@@ -1558,7 +1537,7 @@ bool KisPageOwnerLedger::reclassifyBackingLocked(KisPageBackingIndex::iterator f
         return false;
     }
     if (reservation) reservation->commit(installed);
-    physical->references = next;
+    physical->installClasses(next);
     physical->chargedClass = afterCharge;
     found->second.budgetClass = budgetClass;
     if (budgetClass != KisBackingBudgetClass::ActivePending)
@@ -1593,7 +1572,7 @@ KisPageOwnerLedger::admitRetirementRecordLocked(KisPageRetirementRecord &record)
     // an actual class transition needs to consult outstanding class claims.
     if (d->isPreparedBacking(node.second)) return RecordAdmission::Refused;
     if (record.admissionReservation.isValid()) {
-        const bool accepted = reclassifyBackingLocked(found, record.replica(),
+        const bool accepted = reclassifyBackingLocked(found,
             KisBackingBudgetClass::RetirementDebt, &record.admissionReservation, nullptr);
         record.admissionReservation.release();
         if (accepted) {
@@ -1601,10 +1580,10 @@ KisPageOwnerLedger::admitRetirementRecordLocked(KisPageRetirementRecord &record)
             return RecordAdmission::Accepted;
         }
     }
-    if (record.orphanReservation.isValid() && reclassifyBackingLocked(found, record.replica(),
+    if (record.orphanReservation.isValid() && reclassifyBackingLocked(found,
             KisBackingBudgetClass::RetirementDebt, &record.orphanReservation, nullptr))
         return RecordAdmission::Accepted;
-    if (!reclassifyBackingLocked(found, record.replica(), KisBackingBudgetClass::RetirementDebt,
+    if (!reclassifyBackingLocked(found, KisBackingBudgetClass::RetirementDebt,
                                 nullptr, nullptr)) return RecordAdmission::Refused;
     record.orphanReservation.release();
     return RecordAdmission::Accepted;
@@ -1624,12 +1603,11 @@ KisPageReadinessStatus KisPageOwnerLedger::watchRetirementBudget(
     Q_ASSERT(physical);
     if (physical->domainClaim || physical->classClaim)
         return KisPageReadinessStatus::Unavailable;
-    auto next = physical->references;
-    if (!changePhysicalReferenceClass(&next, node.second.budgetClass,
-                                       KisBackingBudgetClass::RetirementDebt))
+    KisPageClassCounts next;
+    if (!physical->projectClassChange(node.second.budgetClass, KisBackingBudgetClass::RetirementDebt, next))
         return KisPageReadinessStatus::Unavailable;
     KisBackingBudgetDelta change;
-    if (!addPhysicalChargeChange(&change, *physical, physical->chargedClass, chargedBackingClass(next)))
+    if (!addPhysicalChargeChange(&change, *physical, physical->chargedClass, next.chargedClass()))
         return KisPageReadinessStatus::Unavailable;
     auto *budget = d->backingBudget;
     lock.unlock(); // Cold waiter/capture admission never holds the backing gate.
@@ -2029,12 +2007,9 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
         KisPageStoreDetail::setError(error, QStringLiteral("backing handoff physical owner is shared or busy"));
         return {};
     }
-    for (size_t i = 0; i < physical->references.size(); ++i) {
-        if (physical->references[i] != (i == size_t(backing->second.budgetClass) ? 1u : 0u)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("backing handoff requires one physical owner"));
-            return {};
-        }
-    }
+    // Membership already proved a sole owner. Its compact class is the
+    // complete distribution, rather than eight independently checked buckets.
+    Q_ASSERT(physical->classCounts == KisPageClassCounts::single(backing->second.budgetClass).packed());
     const bool noFee = backing->second.budgetClass == KisBackingBudgetClass::ActivePending
         && backing->second.retirementHeadroom.isValid();
     const bool cpuOptionalFee = backing->second.budgetClass == KisBackingBudgetClass::OptionalCache
@@ -2088,9 +2063,9 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     const auto before = source->budgetClass;
     const auto &target = reservation.m_target;
     if (before != KisBackingBudgetClass::ActivePending) {
-        const bool changed = changePhysicalReferenceClass(
-            &physical->references, before, KisBackingBudgetClass::ActivePending);
-        Q_ASSERT(changed); Q_UNUSED(changed);
+        // The original handoff claim already froze sole ownership. Consume
+        // that fact directly; no count search or fallible class operation.
+        physical->installClasses(KisPageClassCounts::single(KisBackingBudgetClass::ActivePending));
         source->budgetClass = KisBackingBudgetClass::ActivePending;
         physical->chargedClass = KisBackingBudgetClass::ActivePending;
     }

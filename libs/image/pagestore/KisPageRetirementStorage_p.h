@@ -8,6 +8,14 @@
 class KisBackingBudgetController;
 struct KisPageRetirementRecord;
 struct KisPagePhysicalBackingRecord;
+struct KisPageWideClassCounts;
+struct KisPageWideClassCountsDeleter {
+    KRITAIMAGE_EXPORT void operator()(KisPageWideClassCounts *) const noexcept;
+};
+using KisPageWideClassCountsPointer =
+    std::unique_ptr<KisPageWideClassCounts, KisPageWideClassCountsDeleter>;
+KRITAIMAGE_EXPORT KisPageWideClassCountsPointer kisPreparePageWideClassCounts(KisBackingBudgetController *);
+
 struct KisPagePhysicalBackingRecordDeleter {
     KRITAIMAGE_EXPORT void operator()(KisPagePhysicalBackingRecord *) const noexcept;
 };

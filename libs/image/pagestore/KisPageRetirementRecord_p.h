@@ -10,6 +10,8 @@
 #include <boost/intrusive/set.hpp>
 #include <tuple>
 #include <atomic>
+#include <limits>
+#include <QtCore/qalgorithms.h>
 struct KisPageRetirementWait;
 struct KisPagePreparedBackingChange;
 struct KisPagePhysicalBackingRecord;
@@ -43,6 +45,101 @@ struct KisPageBackingRecord
     std::shared_ptr<KisCpuResidentBinding> nativeBinding;
 };
 
+// Counts are ordered by the actual fee priority, not by the public enum.
+// Up to 255 total members fit in eight bytes, so every possible reclassification
+// remains allocation-free. Larger groups retain a paid wide extension once.
+class KisPageClassCounts
+{
+public:
+    using Class = KisBackingBudgetClass;
+    static_assert(size_t(Class::Count) == 8);
+    static constexpr quint64 Wide = std::numeric_limits<quint64>::max();
+    explicit KisPageClassCounts(quint64 packed = 0) noexcept : m_packed(packed) {}
+    KisPageClassCounts(const KisPageClassCounts &other) noexcept : m_packed(other.m_packed)
+    { if (isWide()) copyWide(other); }
+    KisPageClassCounts &operator=(const KisPageClassCounts &other) noexcept
+    { m_packed = other.m_packed; if (isWide()) copyWide(other); return *this; }
+    static KisPageClassCounts single(Class cls) noexcept { return KisPageClassCounts(unit(rank(cls))); }
+    quint64 packed() const noexcept { return m_packed; }
+    bool isWide() const noexcept { return m_packed == Wide; }
+    quint32 count(Class cls) const noexcept
+    { const auto i = rank(cls); return isWide() ? m_counts[i] : quint32((m_packed >> (8 * i)) & 255); }
+    Class chargedClass() const noexcept
+    {
+        if (isWide()) return m_active ? priority[qCountTrailingZeroBits(quint32(m_active))] : Class::Count;
+        return m_packed ? priority[qCountTrailingZeroBits(m_packed) / 8] : Class::Count;
+    }
+    bool add(Class cls) noexcept
+    {
+        const auto i = rank(cls);
+        if (!isWide()) {
+            if (compactTotal() < 255) { m_packed += unit(i); return true; }
+            m_active = 0;
+            for (size_t j = 0; j < priority.size(); ++j) {
+                m_counts[j] = quint32((m_packed >> (8 * j)) & 255);
+                if (m_counts[j]) m_active |= quint8(1u << j);
+            }
+            m_total = 255;
+            m_packed = Wide;
+        }
+        if (m_counts[i] == std::numeric_limits<quint32>::max()) return false;
+        ++m_counts[i]; ++m_total; m_active |= quint8(1u << i);
+        return true;
+    }
+    void remove(Class cls) noexcept
+    {
+        const auto i = rank(cls);
+        Q_ASSERT(count(cls));
+        if (!isWide()) { m_packed -= unit(i); return; }
+        if (!--m_counts[i]) m_active &= quint8(~(1u << i));
+        if (--m_total <= 255) {
+            m_packed = 0;
+            for (size_t j = 0; j < priority.size(); ++j) m_packed |= quint64(m_counts[j]) << (8 * j);
+        }
+    }
+    bool change(Class before, Class after) noexcept
+    {
+        if (before == after || !count(before)) return false;
+        const auto i = rank(before), j = rank(after);
+        if (!isWide()) { m_packed = m_packed - unit(i) + unit(j); return true; }
+        if (m_counts[j] == std::numeric_limits<quint32>::max()) return false;
+        if (!--m_counts[i]) m_active &= quint8(~(1u << i));
+        ++m_counts[j]; m_active |= quint8(1u << j);
+        return true;
+    }
+private:
+    static constexpr std::array<Class, 8> priority{Class::Current, Class::ActivePending,
+        Class::InFlight, Class::RetainedHistory, Class::OptionalCache, Class::IdleCapacity,
+        Class::MetadataArena, Class::RetirementDebt};
+    static constexpr size_t rank(Class cls) noexcept
+    {
+        constexpr std::array<quint8, 8> order{0, 3, 1, 2, 7, 4, 5, 6};
+        return order[size_t(cls)];
+    }
+    static constexpr quint64 unit(size_t i) noexcept { return quint64(1) << (8 * i); }
+    quint32 compactTotal() const noexcept
+    {
+        auto sum = (m_packed & 0x00ff00ff00ff00ffULL) + ((m_packed >> 8) & 0x00ff00ff00ff00ffULL);
+        sum = (sum & 0x0000ffff0000ffffULL) + ((sum >> 16) & 0x0000ffff0000ffffULL);
+        return quint32(sum) + quint32(sum >> 32);
+    }
+    void copyWide(const KisPageClassCounts &other) noexcept
+    { m_counts = other.m_counts; m_total = other.m_total; m_active = other.m_active; }
+    quint64 m_packed;
+    // Inactive for compact groups: construction/copy/change never touch these.
+    std::array<quint32, 8> m_counts;
+    quint64 m_total;
+    quint8 m_active;
+};
+
+struct KisPageWideClassCounts
+{
+    explicit KisPageWideClassCounts(KisMutationStorageAllocator<KisPageWideClassCounts> allocator)
+        : storage(std::move(allocator)) {}
+    KisMutationStorageAllocator<KisPageWideClassCounts> storage;
+    KisPageClassCounts counts;
+};
+
 struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>
 {
     // One physical/account endpoint in the original resource allocation. Its
@@ -60,7 +157,49 @@ struct KisPagePhysicalBackingRecord : boost::intrusive::set_base_hook<boost::int
     quint64 domainRevision = 0;
     quint64 domainClaim = 0;
     const KisPagePreparedBackingChange *classClaim = nullptr;
-    std::array<quint32, static_cast<size_t>(KisBackingBudgetClass::Count)> references{};
+    quint64 classCounts = 0;
+    KisPageWideClassCountsPointer classStorage;
+    KisPageClassCounts classes() const noexcept
+    { return classCounts == KisPageClassCounts::Wide ? classStorage->counts : KisPageClassCounts(classCounts); }
+    KisBackingBudgetClass currentClass() const noexcept
+    { return classCounts == KisPageClassCounts::Wide ? classStorage->counts.chargedClass()
+                                                    : KisPageClassCounts(classCounts).chargedClass(); }
+    void installClasses(const KisPageClassCounts &next) noexcept
+    {
+        if (next.isWide()) { Q_ASSERT(classStorage); classStorage->counts = next; }
+        classCounts = next.packed();
+    }
+    bool projectClassChange(KisBackingBudgetClass before, KisBackingBudgetClass after,
+                            KisPageClassCounts &next) const noexcept
+    {
+        if (!shared()) {
+            Q_ASSERT(classCounts == KisPageClassCounts::single(before).packed());
+            next = KisPageClassCounts::single(after); return before != after;
+        }
+        next = classes(); return next.change(before, after);
+    }
+    void removeClass(KisBackingBudgetClass before) noexcept
+    {
+        // Membership has already been unlinked under this same ledger gate.
+        if (!members) { classCounts = 0; return; }
+        if (!shared()) { classCounts = KisPageClassCounts::single(members->budgetClass).packed(); return; }
+        if (classCounts == KisPageClassCounts::Wide) {
+            classStorage->counts.remove(before); classCounts = classStorage->counts.packed();
+        } else {
+            KisPageClassCounts next(classCounts); next.remove(before); classCounts = next.packed();
+        }
+    }
+    bool changeClass(KisBackingBudgetClass before, KisBackingBudgetClass after) noexcept
+    {
+        if (!shared()) {
+            Q_ASSERT(classCounts == KisPageClassCounts::single(before).packed());
+            classCounts = KisPageClassCounts::single(after).packed(); return before != after;
+        }
+        if (classCounts == KisPageClassCounts::Wide) return classStorage->counts.change(before, after);
+        KisPageClassCounts next(classCounts);
+        if (!next.change(before, after)) return false;
+        classCounts = next.packed(); return true;
+    }
     KisBackingBudgetClass chargedClass = KisBackingBudgetClass::Count;
     KisPageBackingRecord *members = nullptr;
 

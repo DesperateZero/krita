@@ -67,6 +67,21 @@ KisPageRetirementRecordPointer kisPreparePageRetirementRecord(KisBackingBudgetCo
     catch (...) { storage.deallocate(raw, 1); throw; }
 }
 
+void KisPageWideClassCountsDeleter::operator()(KisPageWideClassCounts *record) const noexcept
+{
+    if (!record) return;
+    auto storage = std::move(record->storage);
+    std::destroy_at(record);
+    storage.deallocate(record, 1);
+}
+KisPageWideClassCountsPointer kisPreparePageWideClassCounts(KisBackingBudgetController *budget)
+{
+    auto storage = KisMutationStorageAllocator<KisPageWideClassCounts>::retained(budget);
+    auto *raw = storage.allocate(1);
+    try { return KisPageWideClassCountsPointer(::new (raw) KisPageWideClassCounts(storage)); }
+    catch (...) { storage.deallocate(raw, 1); throw; }
+}
+
 // These are notification identities only. The queue gate protects membership;
 // an unqueued record owns preparation. The wake-context gate protects in-flight
 // dispatch, and the early notification atomic bridges registration. The iterator is
