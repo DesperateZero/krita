@@ -12,25 +12,25 @@
 
 KisCpuResidentBinding::~KisCpuResidentBinding()
 {
-    Q_ASSERT(m_readers == 0 && m_writeState == WriteState::Idle);
+    Q_ASSERT(m_readers == 0 && m_writeState == WriteState::Idle && !m_storageBusy);
 }
 
 bool KisCpuResidentBinding::matchesHandle(const KisReplicaHandle &expected) const
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     return !m_retired && m_handle == expected;
 }
 
 bool KisCpuResidentBinding::matchesAllocation(KisReplicaAllocationToken expected) const
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     return !m_retired && m_handle.allocation == expected;
 }
 
 bool KisCpuResidentBinding::matchesReadIdentity(
     const KisReplicaAllocationIdentity &expected, const KisPageVersion &version) const
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     return !m_retired && m_handle.allocationIdentity() == expected && m_handle.version == version;
 }
 
@@ -38,10 +38,10 @@ bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
     KisReplicaHandle *result) const
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     // Advisory rejection only: readers may arrive after this mutex is released,
     // so tryClaimHandoff must still perform the final physical exclusion.
-    if (!supportsBackingHandoff() || m_retired || !(m_handle == source) ||
+    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !(m_handle == source) ||
         m_readers || m_writeState != WriteState::Idle ||
         source.domain != KisPageAccessDomain::CpuRam || !source.layout.matches(descriptor) ||
         !target.isValid() || !(target.key == source.version.key) ||
@@ -55,31 +55,45 @@ bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
 
 bool KisCpuResidentBinding::tryClaimHandoff(const KisReplicaHandle &source)
 {
-    if (!m_mutex.tryLock()) return false;
-    const auto unlock = qScopeGuard([&] { m_mutex.unlock(); });
-    if (m_retired || !(m_handle == source) || m_readers || m_writeState != WriteState::Idle)
-        return false;
-    m_data = tryClaimStorageForHandoff();
-    if (!m_data) return false;
-    m_writeState = WriteState::Handoff;
-    return true;
+    std::unique_lock<QMutex> lock(m_mutex, std::try_to_lock);
+    if (!lock.owns_lock() || m_storageBusy || m_retired || !(m_handle == source)
+        || m_readers || m_writeState != WriteState::Idle) return false;
+    startStorageTransition();
+    lock.unlock();
+    void *data = tryClaimStorageForHandoff();
+    lock.lock();
+    if (data && m_retired) {
+        lock.unlock();
+        finishStorageHandoff(false);
+        lock.lock();
+        data = nullptr;
+    }
+    if (data) {
+        m_data = data;
+        m_writeState = WriteState::Handoff;
+    }
+    finishStorageTransition(lock);
+    return data != nullptr;
 }
 
 void KisCpuResidentBinding::finishHandoff(const KisReplicaHandle *target) noexcept
 {
-    QMutexLocker lock(&m_mutex);
-    Q_ASSERT(m_writeState == WriteState::Handoff && m_data && !m_retired);
+    std::unique_lock<QMutex> lock(m_mutex);
+    Q_ASSERT(m_writeState == WriteState::Handoff && m_data && !m_storageBusy);
     if (target) {
-        // Slot/provider/layout never change. In particular, slot is also the
-        // immutable key read under the provider's index gate; rewriting the
-        // whole handle here would race with that otherwise independent read.
+        // Complete the already issued exclusive capability. Revoke closes
+        // future access but cannot steal this in-flight physical obligation.
         Q_ASSERT(target->allocation.slot == m_handle.allocation.slot);
         m_handle.version = target->version;
         m_handle.allocation.generation = target->allocation.generation;
     }
+    startStorageTransition();
+    lock.unlock();
     finishStorageHandoff(target != nullptr);
+    lock.lock();
     m_writeState = target ? WriteState::Reserved : WriteState::Idle;
     if (!target) m_data = nullptr;
+    finishStorageTransition(lock);
 }
 
 KisCpuBackingHandoff::~KisCpuBackingHandoff() { reset(); }
@@ -165,19 +179,84 @@ bool KisCpuResidentProviderState::configure(
     return true;
 }
 
+bool KisCpuResidentBinding::awaitStorage(std::unique_lock<QMutex> &lock, bool wait)
+{
+    while (m_storageBusy) {
+        if (!wait) return false;
+        lock.unlock();
+        m_storageGate.lock();
+        m_storageGate.unlock();
+        lock.lock();
+    }
+    return true;
+}
+
+void KisCpuResidentBinding::startStorageTransition()
+{
+    Q_ASSERT(!m_storageBusy);
+    // Called under the state gate. An earlier physical owner releases the
+    // storage gate before clearing the state gate. At this point only a cold
+    // waiter can briefly own it; that waiter releases it before taking state.
+    m_storageGate.lock();
+    m_storageBusy = true;
+}
+
+void KisCpuResidentBinding::finishStorageTransition(std::unique_lock<QMutex> &lock) noexcept
+{
+    Q_ASSERT(lock.owns_lock() && m_storageBusy);
+    if (m_retired && !m_readers && m_writeState == WriteState::Idle && !m_storageReleased) {
+        m_storageReleased = true;
+        lock.unlock();
+        releaseStorage();
+        lock.lock();
+    }
+    m_storageBusy = false;
+    m_storageGate.unlock();
+    auto readiness = m_retired || (!m_readers && m_writeState == WriteState::Idle)
+        ? std::move(m_retirementReadiness) : std::shared_ptr<KisPageReadinessSignal>{};
+    lock.unlock();
+    if (readiness) readiness->notify();
+}
+
+void *KisCpuResidentBinding::pinStorageUnlocked(std::unique_lock<QMutex> &lock,
+    bool residentOnly, bool waitedPin, KisCpuResidentReadStatus *status)
+{
+    Q_ASSERT(lock.owns_lock() && !m_storageBusy && !m_data && !m_retired);
+    startStorageTransition();
+    lock.unlock();
+    void *data;
+    try {
+        data = residentOnly && waitedPin
+            ? pinResidentStorageAfterGateWait(status) : pinStorage(residentOnly, status);
+    } catch (...) {
+        lock.lock();
+        finishStorageTransition(lock);
+        throw;
+    }
+    lock.lock();
+    // No capability was delivered while physical preparation was in progress.
+    // Revoke wins this race and the same transition returns the physical pin.
+    if (m_retired) {
+        if (data) {
+            lock.unlock();
+            unpinStorage();
+            lock.lock();
+        }
+        data = nullptr;
+        if (status) *status = KisCpuResidentReadStatus::Retired;
+    }
+    return data;
+}
+
 const void *KisCpuResidentBinding::acquireRead(const KisReplicaAllocationIdentity &expected,
-                                             bool residentOnly, KisCpuResidentReadStatus *status,
-                                             bool waitForLocalGate)
+    bool residentOnly, KisCpuResidentReadStatus *status, bool waitForLocalGate)
 {
     if (status) *status = KisCpuResidentReadStatus::Busy;
-    // A native try must never wait behind a swap-in in the generic path.
-    // Storage preparation can throw before pinning; always release this gate.
     std::unique_lock<QMutex> lock(m_mutex, std::defer_lock);
     if (residentOnly && !waitForLocalGate) {
         if (!lock.try_lock()) return nullptr;
-    } else {
-        lock.lock();
-    }
+    } else lock.lock();
+    if (!awaitStorage(lock, !residentOnly || waitForLocalGate)) return nullptr;
     if (!expected.isValid() || !(m_handle.allocationIdentity() == expected)) {
         if (status) *status = KisCpuResidentReadStatus::InvalidIdentity;
         return nullptr;
@@ -187,53 +266,69 @@ const void *KisCpuResidentBinding::acquireRead(const KisReplicaAllocationIdentit
         if (status && m_retired) *status = KisCpuResidentReadStatus::Retired;
         return nullptr;
     }
-    if (!m_readers) m_data = residentOnly && waitForLocalGate
-        ? pinResidentStorageAfterGateWait(status) : pinStorage(residentOnly, status);
-    const void *result = m_data;
-    if (result) {
+    if (m_readers) {
         ++m_readers;
         if (status) *status = KisCpuResidentReadStatus::Ready;
+        return m_data;
     }
+    void *result = pinStorageUnlocked(lock, residentOnly, waitForLocalGate, status);
+    if (result) {
+        m_data = result;
+        m_readers = 1;
+        if (status) *status = KisCpuResidentReadStatus::Ready;
+    }
+    finishStorageTransition(lock);
     return result;
 }
 
 void KisCpuResidentBinding::releaseRead()
 {
-    QMutexLocker lock(&m_mutex);
-    Q_ASSERT(m_readers);
-    if (!m_readers) return;
-    if (--m_readers == 0) {
-        unpinStorage();
-        m_data = nullptr;
-        if (m_retired) releaseStorage();
-        const auto readiness = std::move(m_retirementReadiness);
-        lock.unlock();
-        if (readiness) readiness->notify();
-    }
+    std::unique_lock<QMutex> lock(m_mutex);
+    Q_ASSERT(m_readers && !m_storageBusy);
+    if (!m_readers || --m_readers) return;
+    m_data = nullptr;
+    startStorageTransition();
+    lock.unlock();
+    unpinStorage();
+    lock.lock();
+    finishStorageTransition(lock);
 }
 
 void *KisCpuResidentBinding::acquireWrite(const KisReplicaAllocationIdentity &expected)
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
+    awaitStorage(lock, true);
     if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) ||
         m_retired || m_writeState != WriteState::Idle || m_readers) return nullptr;
-    m_data = pinStorage(false, nullptr);
-    if (m_data) m_writeState = WriteState::Active;
-    return m_data;
+    void *data = pinStorageUnlocked(lock, false, false, nullptr);
+    if (data) {
+        m_data = data;
+        m_writeState = WriteState::Active;
+    }
+    finishStorageTransition(lock);
+    return data;
 }
 
 void KisCpuResidentBinding::releaseWriter(WriteState state)
 {
-    QMutexLocker lock(&m_mutex);
-    Q_ASSERT(m_writeState == state);
+    std::unique_lock<QMutex> lock(m_mutex);
+    Q_ASSERT(m_writeState == state && !m_storageBusy);
     if (m_writeState != state) return;
-    if (m_data) unpinStorage();
-    m_data = nullptr;
+    const bool pinned = std::exchange(m_data, nullptr) != nullptr;
     m_writeState = WriteState::Idle;
-    if (m_retired) releaseStorage();
-    const auto readiness = std::move(m_retirementReadiness);
+    if (!pinned && !m_retired) {
+        // Ending an unpinned reservation changes only permission. It owns no
+        // physical transition and must not enter the storage wait protocol.
+        auto readiness = std::move(m_retirementReadiness);
+        lock.unlock();
+        if (readiness) readiness->notify();
+        return;
+    }
+    startStorageTransition();
     lock.unlock();
-    if (readiness) readiness->notify();
+    if (pinned) unpinStorage();
+    lock.lock();
+    finishStorageTransition(lock);
 }
 
 void KisCpuResidentBinding::releaseWrite() { releaseWriter(WriteState::Active); }
@@ -246,10 +341,10 @@ KisPageReadinessStatus KisCpuResidentBinding::watchRetirementReadiness(
     subscription->reset();
     std::shared_ptr<KisPageReadinessSignal> preparedSignal;
     KisPageReadinessSubscription prepared;
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     if (m_retired || !(expected == m_handle.allocationIdentity()) || m_writeState == WriteState::Handoff)
         return KisPageReadinessStatus::Unavailable;
-    if (!m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
+    if (!m_storageBusy && !m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
     preparedSignal = m_retirementReadiness;
     lock.unlock();
     try {
@@ -258,10 +353,10 @@ KisPageReadinessStatus KisCpuResidentBinding::watchRetirementReadiness(
         if (!preparedSignal) preparedSignal = std::allocate_shared<KisPageReadinessSignal>(
             KisMutationStorageAllocator<KisPageReadinessSignal>(storage), storage);
     } catch (const std::bad_alloc &) { return KisPageReadinessStatus::Unavailable; }
-    lock.relock();
+    lock.lock();
     if (m_retired || !(expected == m_handle.allocationIdentity()) || m_writeState == WriteState::Handoff)
         return KisPageReadinessStatus::Unavailable;
-    if (!m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
+    if (!m_storageBusy && !m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
     if (!m_retirementReadiness) {
         if (!preparedSignal) return KisPageReadinessStatus::Unavailable;
         m_retirementReadiness = std::move(preparedSignal);
@@ -294,34 +389,48 @@ KisReplicaAccess KisCpuResidentBinding::acquireAccess(
 
 bool KisCpuResidentBinding::reserveWrite(const KisReplicaAllocationIdentity &expected)
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) ||
-        m_retired || m_writeState != WriteState::Idle || m_readers) return false;
+        m_retired || m_storageBusy || m_writeState != WriteState::Idle || m_readers) return false;
     m_writeState = WriteState::Reserved;
     return true;
 }
 
 void *KisCpuResidentBinding::pinReservedWrite(bool residentOnly, KisCpuResidentReadStatus *status)
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     if (status) *status = KisCpuResidentReadStatus::InvalidIdentity;
-    if (m_writeState != WriteState::Reserved || m_retired) {
-        if (status && m_retired) *status = KisCpuResidentReadStatus::Retired;
+    Q_ASSERT(!m_storageBusy);
+    if (m_writeState != WriteState::Reserved) return nullptr;
+    // An already pinned writer survives revoke until its original release.
+    if (m_data) {
+        if (status) *status = KisCpuResidentReadStatus::Ready;
+        return m_data;
+    }
+    if (m_retired) {
+        if (status) *status = KisCpuResidentReadStatus::Retired;
         return nullptr;
     }
-    if (!m_data) m_data = residentOnly
-        ? pinResidentStorageAfterGateWait(status) : pinStorage(false, status);
-    if (m_data && status) *status = KisCpuResidentReadStatus::Ready;
-    return m_data;
+    void *data = pinStorageUnlocked(lock, residentOnly, residentOnly, status);
+    if (data) {
+        m_data = data;
+        if (status) *status = KisCpuResidentReadStatus::Ready;
+    }
+    finishStorageTransition(lock);
+    return data;
 }
 
 void KisCpuResidentBinding::unpinReservedWrite()
 {
-    QMutexLocker lock(&m_mutex);
-    Q_ASSERT(m_writeState == WriteState::Reserved);
+    std::unique_lock<QMutex> lock(m_mutex);
+    Q_ASSERT(m_writeState == WriteState::Reserved && !m_storageBusy);
     if (m_writeState != WriteState::Reserved || !m_data) return;
-    unpinStorage();
     m_data = nullptr;
+    startStorageTransition();
+    lock.unlock();
+    unpinStorage();
+    lock.lock();
+    finishStorageTransition(lock);
 }
 
 void KisCpuResidentBinding::releaseReservedWrite() { releaseWriter(WriteState::Reserved); }
@@ -357,27 +466,34 @@ void KisCpuWriteBindingReservation::reset()
 
 bool KisCpuResidentBinding::retire(const KisReplicaAllocationIdentity &expected)
 {
-    QMutexLocker lock(&m_mutex);
-    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) ||
+    std::unique_lock<QMutex> lock(m_mutex);
+    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) || m_storageBusy ||
         m_readers || m_writeState != WriteState::Idle || m_retired) return false;
     m_retired = true;
-    releaseStorage();
+    startStorageTransition();
+    finishStorageTransition(lock);
     return true;
 }
 
 KisReplicaAllocationIdentity KisCpuResidentBinding::readIdentity(const KisPageVersion &version) const
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     return m_readers && !m_retired && m_handle.version == version
         ? m_handle.allocationIdentity() : KisReplicaAllocationIdentity{};
 }
 
 void KisCpuResidentBinding::revoke()
 {
-    QMutexLocker lock(&m_mutex);
+    std::unique_lock<QMutex> lock(m_mutex);
     m_retired = true;
-    if (!m_readers && m_writeState == WriteState::Idle) releaseStorage();
-    const auto readiness = std::move(m_retirementReadiness);
+    if (!m_storageBusy && !m_readers && m_writeState == WriteState::Idle && !m_storageReleased) {
+        startStorageTransition();
+        finishStorageTransition(lock);
+        return;
+    }
+    // The active pin/transition keeps the one release obligation. No second
+    // free, wait for physical I/O, or callback is performed under this gate.
+    auto readiness = std::move(m_retirementReadiness);
     lock.unlock();
     if (readiness) readiness->notify();
 }

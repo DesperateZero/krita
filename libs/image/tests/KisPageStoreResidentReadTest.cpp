@@ -152,8 +152,33 @@ protected:
         ++pins;
         return bytes.data();
     }
-    void unpinStorage() override { ++unpins; }
-    void releaseStorage() override {}
+    void unpinStorage() noexcept override { ++unpins; }
+    void releaseStorage() noexcept override {}
+private:
+    std::array<quint8, 64 * 64 * 4> bytes{};
+};
+
+class StorageTransitionBinding final : public KisCpuResidentBinding
+{
+public:
+    explicit StorageTransitionBinding(const KisReplicaHandle &handle)
+        : KisCpuResidentBinding(handle) {}
+    bool pausePin = false, pauseUnpin = false;
+    QSemaphore entered, resume;
+    std::atomic<int> pins{0}, unpins{0}, frees{0};
+protected:
+    void *pinStorage(bool, KisCpuResidentReadStatus *) override
+    {
+        ++pins;
+        if (pausePin) { entered.release(); resume.acquire(); }
+        return bytes.data();
+    }
+    void unpinStorage() noexcept override
+    {
+        ++unpins;
+        if (pauseUnpin) { entered.release(); resume.acquire(); }
+    }
+    void releaseStorage() noexcept override { ++frees; }
 private:
     std::array<quint8, 64 * 64 * 4> bytes{};
 };
@@ -363,11 +388,101 @@ private Q_SLOTS:
     void overlayCapturedSlotsSurviveAllOwners();
     void bindingStorageFailureUnlocks_data();
     void bindingStorageFailureUnlocks();
+    void bindingRevokeDuringStorage_data();
+    void bindingRevokeDuringStorage();
+    void bindingReadersSharePendingPin();
     void resolveStorageBeforePin_data();
     void resolveStorageBeforePin();
     void resolveSurvivesConcurrentIndexGrowth_data();
     void resolveSurvivesConcurrentIndexGrowth();
 };
+
+void KisPageStoreResidentReadTest::bindingRevokeDuringStorage_data()
+{
+    QTest::addColumn<bool>("unpin");
+    QTest::newRow("revoke-before-pin-delivery") << false;
+    QTest::newRow("revoke-during-last-unpin") << true;
+}
+
+void KisPageStoreResidentReadTest::bindingRevokeDuringStorage()
+{
+    QFETCH(bool, unpin);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    QString error; auto provider = makeProvider(false, completions, &error); QVERIFY(provider);
+    auto op = provider->requestReplica({900}, {key(0), {1}}, descriptor(), cpu.domain,
+        KisPageAccessMode::Read, KisPagePriority::Normal); QVERIFY(op.isValid());
+    auto binding = std::make_shared<StorageTransitionBinding>(op.replica);
+    const auto identity = op.replica.allocationIdentity();
+    if (unpin) QVERIFY(binding->acquireRead(identity, true));
+    binding->pausePin = !unpin;
+    binding->pauseUnpin = unpin;
+    const void *result = nullptr;
+    KisCpuResidentReadStatus status = KisCpuResidentReadStatus::Busy;
+    std::thread physical([&] {
+        if (unpin) binding->releaseRead();
+        else result = binding->acquireRead(identity, false, &status);
+    });
+    std::thread revoker;
+    QSemaphore revoked;
+    auto join = qScopeGuard([&] {
+        binding->resume.release();
+        physical.join();
+        if (revoker.joinable()) revoker.join();
+        if (result) binding->releaseRead();
+    });
+    QVERIFY(binding->entered.tryAcquire(1, 5000));
+    KisCpuResidentReadStatus busy;
+    QVERIFY(!binding->acquireRead(identity, true, &busy));
+    QCOMPARE(busy, KisCpuResidentReadStatus::Busy);
+    // Revoke must close the state while physical work is still paused.
+    // Waiting for that work while holding R would deadlock this handshake.
+    revoker = std::thread([&] { binding->revoke(); revoked.release(); });
+    QVERIFY(revoked.tryAcquire(1, 5000));
+    QVERIFY(!binding->matchesAllocation(op.replica.allocation));
+    QCOMPARE(binding->frees.load(), 0);
+    binding->resume.release();
+    physical.join(); revoker.join(); join.dismiss();
+    if (!unpin) { QVERIFY(!result); QCOMPARE(status, KisCpuResidentReadStatus::Retired); }
+    QCOMPARE(binding->pins.load(), 1);
+    QCOMPARE(binding->unpins.load(), 1);
+    QCOMPARE(binding->frees.load(), 1);
+    binding->revoke();
+    QVERIFY(!binding->retire(identity));
+    QVERIFY(!binding->acquireRead(identity, true));
+    QCOMPARE(binding->frees.load(), 1);
+    QVERIFY(provider->retire({903}, op.replica, {}).isValid());
+}
+
+void KisPageStoreResidentReadTest::bindingReadersSharePendingPin()
+{
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    QString error; auto provider = makeProvider(false, completions, &error); QVERIFY(provider);
+    auto op = provider->requestReplica({900}, {key(0), {1}}, descriptor(), cpu.domain,
+        KisPageAccessMode::Read, KisPagePriority::Normal); QVERIFY(op.isValid());
+    auto binding = std::make_shared<StorageTransitionBinding>(op.replica);
+    const auto identity = op.replica.allocationIdentity();
+    binding->pausePin = true;
+    const void *first = nullptr, *second = nullptr;
+    std::thread owner([&] { first = binding->acquireRead(identity, false); });
+    std::thread waiter;
+    auto join = qScopeGuard([&] {
+        binding->resume.release();
+        owner.join();
+        if (waiter.joinable()) waiter.join();
+        if (first) binding->releaseRead();
+        if (second) binding->releaseRead();
+    });
+    QVERIFY(binding->entered.tryAcquire(1, 5000));
+    waiter = std::thread([&] { second = binding->acquireRead(identity, true, nullptr, true); });
+    binding->resume.release();
+    owner.join(); waiter.join(); join.dismiss();
+    QVERIFY(first); QCOMPARE(first, second);
+    QCOMPARE(binding->pins.load(), 1);
+    binding->releaseRead(); QCOMPARE(binding->unpins.load(), 0);
+    binding->releaseRead(); QCOMPARE(binding->unpins.load(), 1);
+    QVERIFY(binding->retire(identity)); QCOMPARE(binding->frees.load(), 1);
+    QVERIFY(provider->retire({903}, op.replica, {}).isValid());
+}
 
 void KisPageStoreResidentReadTest::bindingStorageFailureUnlocks_data()
 {

@@ -115,7 +115,7 @@ public:
     bool belongsTo(const Tiles3HandoffAdmission *admission) const { return m_admission == admission; }
 private:
     bool supportsBackingHandoff() const override { return true; }
-    void *tryClaimStorageForHandoff() override
+    void *tryClaimStorageForHandoff() noexcept override
     {
         // Provider registration and retag must linearize. The same handle
         // may otherwise have been imported by another canonical Store without
@@ -156,7 +156,7 @@ private:
         if (status) *status = KisCpuResidentReadStatus::Ready;
         return m_tile->data();
     }
-    void unpinStorage() override { m_tile->unblockSwapping(); }
+    void unpinStorage() noexcept override { m_tile->unblockSwapping(); }
     void *pinResidentStorageAfterGateWait(KisCpuResidentReadStatus *status) override
     {
         if (!m_tile) {
@@ -167,7 +167,7 @@ private:
         if (status) *status = ready ? KisCpuResidentReadStatus::Ready : KisCpuResidentReadStatus::NonResident;
         return ready ? m_tile->data() : nullptr;
     }
-    void releaseStorage() override
+    void releaseStorage() noexcept override
     {
         if (m_tile) { m_tile->deref(); m_tile = nullptr; }
     }

@@ -55,8 +55,8 @@ private:
         if (status) *status = m_bytes ? KisCpuResidentReadStatus::Ready : KisCpuResidentReadStatus::Retired;
         return m_bytes ? m_bytes->data : nullptr;
     }
-    void unpinStorage() override {}
-    void releaseStorage() override { m_bytes.reset(); }
+    void unpinStorage() noexcept override {}
+    void releaseStorage() noexcept override { m_bytes.reset(); }
     std::shared_ptr<CpuAlignedBytes> m_bytes;
 };
 

@@ -59,12 +59,12 @@ protected:
     virtual void *pinStorage(bool residentOnly, KisCpuResidentReadStatus *status) = 0;
     virtual void *pinResidentStorageAfterGateWait(KisCpuResidentReadStatus *status)
     { return pinStorage(true, status); }
-    virtual void unpinStorage() = 0;
-    virtual void releaseStorage() = 0;
+    virtual void unpinStorage() noexcept = 0;
+    virtual void releaseStorage() noexcept = 0;
     virtual bool supportsBackingHandoff() const { return false; }
     // Nonblocking physical exclusion, not a normal resident read pin. The
     // matching finish either cancels or converts to the ordinary writer pin.
-    virtual void *tryClaimStorageForHandoff() { return nullptr; }
+    virtual void *tryClaimStorageForHandoff() noexcept { return nullptr; }
     virtual void finishStorageHandoff(bool writable) noexcept { Q_UNUSED(writable); }
 
 private:
@@ -84,7 +84,19 @@ private:
     void *pinReservedWrite(bool residentOnly, KisCpuResidentReadStatus *status);
     void unpinReservedWrite();
     void releaseReservedWrite();
+    bool awaitStorage(std::unique_lock<QMutex> &lock, bool wait);
+    void startStorageTransition();
+    void *pinStorageUnlocked(std::unique_lock<QMutex> &lock, bool residentOnly,
+                            bool waitedPin, KisCpuResidentReadStatus *status);
+    // Ends the original transition, including deferred revoke/free, and
+    // returns with the state gate unlocked. Physical work never runs under R.
+    void finishStorageTransition(std::unique_lock<QMutex> &lock) noexcept;
     mutable QMutex m_mutex;
+    // Physical transition owner holds this gate outside m_mutex. A cold
+    // waiter drops m_mutex, waits here, releases it, then rechecks state.
+    QMutex m_storageGate;
+    bool m_storageBusy = false;
+    bool m_storageReleased = false;
     quint64 m_readers = 0;
     WriteState m_writeState = WriteState::Idle;
     bool m_retired = false;
