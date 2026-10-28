@@ -675,6 +675,13 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("bpp%1-history%2-keep%3").arg(b).arg(h).arg(k))) << b << h << k;
     }
     void historyReachabilityIgnoresRetiredRootBacklog();
+    void lastRootReleaseVisitsOnlyAffectedHistory_data()
+    {
+        QTest::addColumn<int>("pages"); QTest::addColumn<int>("exit");
+        for (int pages : {2, 33}) for (int exit = 0; exit < 4; ++exit)
+            QTest::newRow(qPrintable(QStringLiteral("pages%1-exit%2").arg(pages).arg(exit))) << pages << exit;
+    }
+    void lastRootReleaseVisitsOnlyAffectedHistory();
     void longHistoryUsesVersionBudget_data()
     {
         QTest::addColumn<int>("bpp"); QTest::addColumn<int>("history");
@@ -2455,6 +2462,62 @@ void KisPageStoreCpuMutationTest::historyReachabilityIgnoresRetiredRootBacklog()
     QCOMPARE(f.store->sessionStats().immutableRoots, qsizetype(1));
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
     QVERIFY(f.store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::lastRootReleaseVisitsOnlyAffectedHistory()
+{
+    QFETCH(int, pages); QFETCH(int, exit);
+    Fixture f; QVERIFY(f.init());
+    const auto fill = [&](int first, int count, quint8 value, KisPageTransaction tx = {}) {
+        if (!tx.isValid()) tx = f.store->beginCurrentTransaction();
+        return KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, tx,
+            QRect(first * 64, 0, count * 64, 64), QByteArray(f.bpp, char(value)), &f.error) &&
+            f.store->commit(tx, f.store->preparedPages(tx)).isValid();
+    };
+    QVERIFY(fill(0, pages, 0x31));
+    const auto unrelated = f.store->captureRetainedEpoch(); QVERIFY(unrelated.isValid());
+    QVERIFY(fill(0, pages, 0x52)); QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(pages));
+    const auto snapshot = exit == 0 ? f.store->captureRetainedEpoch() : KisRetainedImageEpochSnapshot{};
+    const auto base = (exit == 1 || exit == 2) ? f.store->beginCurrentTransaction() : KisPageTransaction{};
+    auto captured = exit == 3 ? f.store->captureReadView() : KisCapturedReadView{};
+    const auto sibling = f.store->captureRetainedEpoch(); QVERIFY(sibling.isValid());
+    QVERIFY(fill(0, 1, 0x73)); QVERIFY(f.store->waitForRetirementIdle());
+    const auto before = f.store->readScopeStatistics();
+    const auto metadataBefore = kisPageStoreMetadataMetrics(*f.store);
+    // Another real protection on the same root means this exit changes no
+    // Value root edge. It must not rescan even the affected page yet.
+    QVERIFY(f.store->releaseSnapshot(sibling.token)); QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited, before.historicalGcPagesVisited);
+    if (exit == 0) QVERIFY(f.store->releaseSnapshot(snapshot.token));
+    if (exit == 1) QVERIFY(f.store->abort(base));
+    if (exit == 2) {
+        const auto versions = f.store->sessionStats().pageVersions;
+        QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, base,
+            QRect(pages * 64, 0, 64, 64), QByteArray(f.bpp, char(0x94)), &f.error));
+        // First-touch selection currently creates one explicit virtual default
+        // plus the prepared result. Its default-history cleanup is separate
+        // from the old base releasing page 0, and must remain in this account.
+        QCOMPARE(f.store->sessionStats().pageVersions - versions, qsizetype(2));
+        QVERIFY(f.store->commit(base, f.store->preparedPages(base)).isValid());
+    }
+    if (exit == 3) captured = {};
+    QVERIFY(f.store->waitForRetirementIdle());
+    const auto after = f.store->readScopeStatistics();
+    const auto metadataAfter = kisPageStoreMetadataMetrics(*f.store);
+    const quint64 defaultCleanup = exit == 2 ? 1 : 0;
+    QCOMPARE(after.historicalGcPagesVisited - before.historicalGcPagesVisited, quint64(1) + defaultCleanup);
+    QCOMPARE(metadataAfter.historySliceQueries - metadataBefore.historySliceQueries, quint64(1) + defaultCleanup);
+    QCOMPARE(metadataAfter.historySliceVersionInputs - metadataBefore.historySliceVersionInputs, quint64(2) + defaultCleanup);
+    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(pages));
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2 * pages + (exit == 2)));
+    KisPageReadView old; old.kind = KisPageReadViewKind::CommittedEpoch; old.epoch = unrelated.snapshot.epoch; old.retention = unrelated.token;
+    QCOMPARE(f.pixel(old, pages - 1), QByteArray(f.bpp, char(0x31)));
+    QCOMPARE(f.pixel({}, 0), QByteArray(f.bpp, char(0x73)));
+    QVERIFY(f.store->releaseSnapshot(unrelated.token)); QVERIFY(f.store->waitForRetirementIdle());
+    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(pages + (exit == 2)));
+    QVERIFY(f.store->closeSession()); QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget()

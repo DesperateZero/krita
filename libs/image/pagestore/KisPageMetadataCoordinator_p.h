@@ -253,7 +253,7 @@ struct KisMetadataOverflowNode {
 };
 
 // Identity lifetime facts live on the original Value; no per-capture token chain.
-static_assert(sizeof(KisPageValueCell) <= 320);
+static_assert(sizeof(KisPageValueCell) <= 328);
 static_assert(sizeof(KisPageReplicaState) <= 128);
 static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 

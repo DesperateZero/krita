@@ -64,6 +64,7 @@ public:
         return value;
     }
     KisPageViewValue *prepareInitial(const KisPageVersion &version) override { return pin(version); }
+    void releaseRoots(KisPageViewValue *const *, size_t) noexcept override {}
 private:
     void releaseMemory(const KisPageKey &, KisVersionSlotId, KisPageViewValue *value) noexcept override
     {
@@ -159,14 +160,29 @@ public:
     }
     void deactivate() const noexcept
     {
+        KisPageViewValue *unrooted[16];
+        size_t count = 0;
+        deactivate(unrooted, count);
+        if (count) storage->values->releaseRoots(unrooted, count);
+    }
+private:
+    void deactivate(KisPageViewValue **unrooted, size_t &count) const noexcept
+    {
         Q_ASSERT(liveParents);
         if (--liveParents) return;
-        if (left) left->deactivate();
-        if (right) right->deactivate();
+        if (left) left->deactivate(unrooted, count);
+        if (right) right->deactivate(unrooted, count);
         const auto before = value->rootEdges.fetch_sub(1, std::memory_order_release);
-        Q_ASSERT(before); Q_UNUSED(before);
+        Q_ASSERT(before);
+        if (before == 1) {
+            unrooted[count++] = value;
+            if (count == 16) {
+                storage->values->releaseRoots(unrooted, count);
+                count = 0;
+            }
+        }
     }
-
+public:
     std::shared_ptr<KisImageEpochTreeStorage> storage;
     // Nodes have strong owners only. The original allocation carries the
     // count; its zero transition hands this same node to the existing queue.

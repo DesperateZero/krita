@@ -434,6 +434,10 @@ private:
         size_t first, size_t count, KisCpuReadBinding *bindings) const;
     friend class KisCapturedReadView;
     friend class KisPageHistoryCollector;
+    // Original Value notifications cross the epoch gate without invoking the
+    // collector there. Consumer holds Store; neither call holds the V gate.
+    bool hasUnrootedValues() const;
+    size_t takeUnrootedKeys(KisPageKey *keys, size_t capacity);
     friend class KisPagePublicationCoordinator;
     friend class KisPageReadCoordinator;
     friend class KisPageRetirementQueue;

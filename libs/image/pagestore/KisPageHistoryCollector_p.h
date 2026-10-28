@@ -81,11 +81,10 @@ public:
     KisPageHistoryCollector(KisPageHistoryCollector &&) = delete;
     KisPageHistoryCollector &operator=(KisPageHistoryCollector &&) = delete;
 
-    KRITAIMAGE_EXPORT void collectUnreachableLocked(bool scanAll = false);
-    // Call after registering this publication's changed keys. Ending an old
-    // base can release history outside that delta; use the same known-work
-    // scan and foreground/background policy as a retained snapshot release.
-    void collectAfterEpochChangeLocked(bool rescanHistory = false);
+    KRITAIMAGE_EXPORT void collectUnreachableLocked();
+    // Changed keys and actual last-root-edge notifications share the same
+    // bounded collector. Neither publication nor base exit scans known keys.
+    void collectAfterEpochChangeLocked();
     KRITAIMAGE_EXPORT void requestKeyLocked(const KisPageKey &key) noexcept;
     KRITAIMAGE_EXPORT void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();

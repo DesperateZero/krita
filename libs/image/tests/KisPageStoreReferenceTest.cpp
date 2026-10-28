@@ -1340,6 +1340,13 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("h%1-remove%2").arg(history).arg(removal))) << history << removal;
     }
     void rootEdgesTrackAdmission();
+    void rootExitNotificationOwnsOnlyMemory_data()
+    {
+        QTest::addColumn<int>("pages"); QTest::addColumn<bool>("detach");
+        for (int n : {1, 33}) for (bool detach : {false, true})
+            QTest::newRow(qPrintable(QStringLiteral("pages%1-detach%2").arg(n).arg(detach))) << n << detach;
+    }
+    void rootExitNotificationOwnsOnlyMemory();
     void rootCandidatesHaveNoSemanticEdges();
     void historyAdmissionDuringDebtPreparation();
     void rootDefaultsRetainSurfaceIdentity();
@@ -3635,6 +3642,54 @@ void KisPageStoreReferenceTest::rootEdgesTrackAdmission()
         QCOMPARE(root.selectedValue(pageKey(column))->rootEdges.load(), quint64(0));
 }
 
+void KisPageStoreReferenceTest::rootExitNotificationOwnsOnlyMemory()
+{
+    QFETCH(int, pages); QFETCH(bool, detach);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    auto metadata = std::make_unique<KisPageMetadataCoordinator>(); metadata->attachBackingBudget(budget);
+    QVERIFY(metadata->configure(4));
+    KisImageEpochSnapshot initial; initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    for (int i = 0; i < pages; ++i) initial.manifest.append(pageVersion(i, 1));
+    auto model = std::make_unique<KisImageEpochReferenceModel>(); model->attachBackingBudget(budget);
+    QVERIFY(KisPageViewTestAccess::initialize(*model, *metadata, initial, nullptr));
+    auto raw = model->captureCommittedRoot();
+    auto source = metadata->viewValues(); std::weak_ptr<KisPageViewValueStorage> weak = source;
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const size_t bytes = size_t(limits.metadataArenaBytes - live());
+    void *pressure = allocateTestStoragePressure(&budget, bytes, 1);
+    const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, pressure, bytes, 1); });
+    QCOMPARE(live(), limits.metadataArenaBytes);
+    // The real last-root exit cannot refuse or allocate even at full budget.
+    model.reset(); QVERIFY(metadata->hasUnrootedValues());
+    for (int i = 0; i < pages; ++i) {
+        auto *value = raw.selectedValue(pageKey(i)); QVERIFY(value);
+        QCOMPARE(value->rootEdges.load(), quint64(0)); QCOMPARE(value->readEdges, quint32(0));
+        QVERIFY(value->nextUnrooted);
+    }
+    if (detach) {
+        metadata.reset(); // Clears pending notifications even with escaped raw trees.
+        for (int i = 0; i < pages; ++i) QVERIFY(!raw.selectedValue(pageKey(i))->nextUnrooted);
+        QVERIFY(!source->pin(pageVersion(0, 1)));
+    } else {
+        // Drop every raw tree first: only notification memory remains. Pop is
+        // bounded and may erase the original cell, never a pixel permission.
+        raw = {}; kisDrainPageStoreReclamation();
+        KisPageKey keys[16]; QSet<KisPageKey> seen;
+        QCOMPARE(metadata->takeUnrootedKeys(keys, 0), size_t(0));
+        QVERIFY(metadata->hasUnrootedValues());
+        while (const auto count = metadata->takeUnrootedKeys(keys, 16)) {
+            QVERIFY(count <= 16);
+            for (size_t i = 0; i < count; ++i) { QVERIFY(!seen.contains(keys[i])); seen.insert(keys[i]); }
+        }
+        QCOMPARE(seen.size(), qsizetype(pages)); QVERIFY(!metadata->hasUnrootedValues());
+        for (int i = 0; i < pages; ++i) QVERIFY(seen.contains(pageKey(i)));
+        metadata.reset();
+    }
+    source.reset(); raw = {}; kisDrainPageStoreReclamation(); QVERIFY(weak.expired());
+}
+
 void KisPageStoreReferenceTest::rootCandidatesHaveNoSemanticEdges()
 {
     KisImageEpochSnapshot initial;
@@ -3720,8 +3775,13 @@ void KisPageStoreReferenceTest::historyAdmissionDuringDebtPreparation()
     QCOMPARE(raw.selectedValue(old.key)->rootEdges.load(), quint64(0));
     QVERIFY(metadata.discardHistory(page.key, &old, 1, &removed));
     QCOMPARE(removed, quint32(1)); QCOMPARE(debt.effects.committed, quint64(1));
-    QCOMPARE(raw.selectedValue(old.key)->version, old);
+    auto *retired = raw.selectedValue(old.key);
+    QCOMPARE(retired->version, old);
     raw = {}; kisDrainPageStoreReclamation();
+    QCOMPARE(retired->viewMemoryState.load(), quint64(1)); // Only queued identity memory.
+    QVERIFY(metadata.hasUnrootedValues()); KisPageKey notified[16];
+    QCOMPARE(metadata.takeUnrootedKeys(notified, 16), size_t(1)); QCOMPARE(notified[0], old.key);
+    QVERIFY(!metadata.hasUnrootedValues());
 }
 
 void KisPageStoreReferenceTest::rootDefaultsRetainSurfaceIdentity()

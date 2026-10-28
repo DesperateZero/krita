@@ -1434,13 +1434,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             m_history.requestKeyLocked(change.version.key);
         }
         diagnostic.next(Phase::CommitHistoryCollect, quint64(owned.proofs.size() + descriptorChanges.size()));
-        // Ending a non-current base affects other keys only when its last
-        // logical protection is gone. A live sibling or retained snapshot
-        // keeps the same reachability; do not rescan H keys for that exit.
-        // The Store gate excludes new protection changes across this query.
-        const bool releasedOldBase = !(transaction.baseEpoch == currentRoot.epoch())
-            && !m_epochs.root(transaction.baseEpoch).isValid();
-        m_history.collectAfterEpochChangeLocked(releasedOldBase);
+        m_history.collectAfterEpochChangeLocked();
         diagnostic.next(Phase::CommitProviderRetire, 0);
         processRetirementsUnlocked(ownerLock);
         ++m_committedTransactions;
@@ -1704,7 +1698,7 @@ bool KisPagePublicationCoordinator::abortLocked(
         releasedOverlay = {};
         ownerLock.relock();
     });
-    m_history.collectAfterEpochChangeLocked(!m_epochs.root(transaction.baseEpoch).isValid());
+    m_history.collectAfterEpochChangeLocked();
     return true;
 }
 

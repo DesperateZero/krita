@@ -1319,7 +1319,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct KisPageValueCell : KisPageViewValue, KisPageValueState",
             "struct KisPageReplicaState",
             "struct KisMetadataOverflowNode",
-            "sizeof(KisPageValueCell) <= 320",
+            "sizeof(KisPageValueCell) <= 328",
             "sizeof(KisPageReplicaState) <= 128",
             "sizeof(KisMetadataOverflowNode) <= 64",
         ):

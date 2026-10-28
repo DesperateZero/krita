@@ -156,6 +156,9 @@ KisPageHistoryCollector::SliceResult KisPageHistoryCollector::collectSliceLocked
 
 bool KisPageHistoryCollector::collectPassLocked()
 {
+    KisPageKey unrooted[PageAdmissionBudget];
+    const size_t unrootedCount = m_metadata.takeUnrootedKeys(unrooted, PageAdmissionBudget);
+    for (size_t i = 0; i < unrootedCount; ++i) requestKeyLocked(unrooted[i]);
     if (m_rescanRequested) {
         m_rescanRequested = false;
         m_metadata.visitPageKeys(this, +[](void *p, const KisPageKey &key) {
@@ -188,15 +191,10 @@ bool KisPageHistoryCollector::collectPassLocked()
     return blocked;
 }
 
-void KisPageHistoryCollector::collectUnreachableLocked(bool scanAll)
+void KisPageHistoryCollector::collectUnreachableLocked()
 {
-    if (scanAll) {
-        // Every accepted key stays indexed while history remains. Do not
-        // visit unchanged pages merely because a retained root was released.
-        for (auto &work : m_work) queueWorkLocked(work);
-    }
     if (!m_backgroundReclamation || m_closing || m_automaticWakeupsStopped) {
-        while (!m_ready.empty() || m_rescanRequested) {
+        while (!m_ready.empty() || m_rescanRequested || m_metadata.hasUnrootedValues()) {
             if (collectPassLocked()) {
                 m_blocked = true;
                 break;
@@ -208,7 +206,7 @@ void KisPageHistoryCollector::collectUnreachableLocked(bool scanAll)
 
 bool KisPageHistoryCollector::hasSemanticWorkLocked() const
 {
-    return m_epochs.hasCollectionWork() || !m_ready.empty() || m_rescanRequested
+    return m_epochs.hasCollectionWork() || !m_ready.empty() || m_rescanRequested || m_metadata.hasUnrootedValues()
         || (m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext));
 }
 
@@ -358,16 +356,14 @@ void KisPageHistoryCollector::scheduleLocked()
     }
 }
 
-void KisPageHistoryCollector::collectAfterEpochChangeLocked(bool rescanHistory)
+void KisPageHistoryCollector::collectAfterEpochChangeLocked()
 {
     if (!m_backgroundReclamation) {
         m_epochs.collectFinishedTransactions();
         m_epochs.collectUnretainedRoots();
     }
-    // Root protection changed, not the set of registered history keys.
-    // Missing-key recovery alone needs m_rescanRequested's metadata walk.
     // This also pumps foreground abort, which has no later publish callback.
-    collectUnreachableLocked(rescanHistory);
+    collectUnreachableLocked();
 }
 
 void KisPageHistoryCollector::waitForIdleLocked()
@@ -411,6 +407,8 @@ void KisPageHistoryCollector::clearLocked()
         m_wakeContext->timerDeadline = 0;
     }
     m_pressureDeadline = 0;
+    KisPageKey unrooted[PageAdmissionBudget];
+    while (m_metadata.takeUnrootedKeys(unrooted, PageAdmissionBudget)) {}
     m_ready.clear();
     m_work.clear_and_dispose([this](Work *work) { disposeWork(work); });
     m_rescanRequested = false;

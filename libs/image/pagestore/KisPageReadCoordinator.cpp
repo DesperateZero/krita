@@ -1105,7 +1105,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
     if (becameUnretained && !m_backgroundReclamation) m_epochs.collectUnretainedRoots();
     // The record is semantically complete before the first owner unlock.
     // A blocked record instead entered the original retry list above.
-    m_history.collectUnreachableLocked(becameUnretained);
+    m_history.collectUnreachableLocked();
     processRetirementsUnlocked(lock);
     // This record has handed off all semantic work. Its original lifetime pin
     // covers physical disposal; it must not make a concurrent restore Busy.
@@ -1126,11 +1126,9 @@ bool KisPageReadCoordinator::releaseSnapshot(KisImageEpochSnapshotToken token)
     }
     if (becameUnretained) {
         if (!m_backgroundReclamation) m_epochs.collectUnretainedRoots();
-        // A root may be the last owner of versions outside the transaction
-        // that originally created its memento. Revisit the existing history
-        // work index, as the background path does; never infer a complete
-        // release set from that transaction's write delta.
-        m_history.collectUnreachableLocked(true);
+        // The original Values report precisely which last root edges ended,
+        // including versions outside the creating transaction's write delta.
+        m_history.collectUnreachableLocked();
         if (!m_backgroundReclamation) processRetirementsUnlocked(lock);
     }
     retryCapturedReleasesLocked(lock);

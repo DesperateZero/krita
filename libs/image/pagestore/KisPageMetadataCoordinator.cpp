@@ -2149,6 +2149,9 @@ public:
     KisPageViewValue *pin(const KisPageVersion &, KisVersionSlotId = {},
                          const KisPagePrivateWrite * = nullptr) override;
     KisPageViewValue *prepareInitial(const KisPageVersion &) override;
+    void releaseRoots(KisPageViewValue *const *, size_t count) noexcept override;
+    size_t takeUnrootedKeys(KisPageKey *, size_t capacity) noexcept;
+    void clearUnrooted() noexcept;
     void releaseMemory(const KisPageKey &, KisVersionSlotId, KisPageViewValue *) noexcept override;
     void detachLiveValues() noexcept;
 
@@ -2191,7 +2194,69 @@ public:
     std::atomic<quint64> cpuProofIssuer{0};
     KisCompletionTicket cpuCompletion;
     std::atomic<bool> attached{true};
+    QMutex unrootedMutex;
+    std::atomic<KisPageViewValue *> firstUnrooted{nullptr};
+    KisPageViewValue *lastUnrooted = nullptr;
 };
+
+void KisPageMetadataCoordinator::Private::releaseRoots(
+    KisPageViewValue *const *values, size_t count) noexcept
+{
+    QMutexLocker lock(&unrootedMutex);
+    if (!attached.load(std::memory_order_acquire)) return;
+    for (size_t i = 0; i < count; ++i) {
+        auto *value = values[i];
+        if (value->nextUnrooted) continue;
+        retain(value);
+        value->nextUnrooted = value;
+        if (lastUnrooted) lastUnrooted->nextUnrooted = value;
+        else firstUnrooted.store(value, std::memory_order_release);
+        lastUnrooted = value;
+    }
+}
+
+size_t KisPageMetadataCoordinator::Private::takeUnrootedKeys(
+    KisPageKey *keys, size_t capacity) noexcept
+{
+    if (!firstUnrooted.load(std::memory_order_acquire)) return 0;
+    KisPageViewValue *released[16];
+    size_t count = 0;
+    {
+        QMutexLocker lock(&unrootedMutex);
+        auto *value = firstUnrooted.load(std::memory_order_relaxed);
+        while (value && count < std::min<size_t>(16, capacity)) {
+            auto *next = value->nextUnrooted;
+            keys[count] = value->version.key;
+            released[count++] = value;
+            value->nextUnrooted = nullptr;
+            value = next == value ? nullptr : next;
+        }
+        firstUnrooted.store(value, std::memory_order_release);
+        if (!value) lastUnrooted = nullptr;
+    }
+    // A notification can outlive indexed content. Its last memory release may
+    // enter V, so it must happen after the notification gate has been left.
+    for (size_t i = 0; i < count; ++i) release(released[i]);
+    return count;
+}
+
+void KisPageMetadataCoordinator::Private::clearUnrooted() noexcept
+{
+    KisPageKey keys[16];
+    while (takeUnrootedKeys(keys, 16)) {}
+}
+
+bool KisPageMetadataCoordinator::hasUnrootedValues() const
+{
+    const auto *core = m_core.load(std::memory_order_acquire);
+    return core && core->firstUnrooted.load(std::memory_order_acquire);
+}
+
+size_t KisPageMetadataCoordinator::takeUnrootedKeys(KisPageKey *keys, size_t capacity)
+{
+    auto *core = m_core.load(std::memory_order_acquire);
+    return core ? core->takeUnrootedKeys(keys, capacity) : 0;
+}
 
 KisPageViewValue *KisPageMetadataCoordinator::Private::pin(
     const KisPageVersion &identity, KisVersionSlotId slot, const KisPagePrivateWrite *original)
@@ -3989,7 +4054,11 @@ KisPageMetadataCoordinator::~KisPageMetadataCoordinator()
     if (auto *core = m_core.exchange(nullptr, std::memory_order_acq_rel)) {
         // Raw facade calls already require quiescence. Escaped immutable roots
         // retain memory only, so detach the live budget while it still exists.
-        core->attached.store(false, std::memory_order_release);
+        {
+            QMutexLocker notificationLock(&core->unrootedMutex);
+            core->attached.store(false, std::memory_order_release);
+        }
+        core->clearUnrooted();
         if (m_coreMemory.use_count() > 1) core->detachLiveValues();
         core->budgetAuthority->detach();
     }
