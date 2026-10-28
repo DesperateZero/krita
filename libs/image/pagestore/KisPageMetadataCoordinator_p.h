@@ -98,28 +98,36 @@ struct KisPagePrivateWrite {
     // acceptance. Consumers still take its shard gate and validate the active
     // result; they do not rediscover the node by key inside that same lifetime.
     struct Location {
+        using ExactIndex = KisShardSlotIndex<KisPageVersion, KisVersionSlotId>;
+        using PhysicalIndex = KisShardSlotIndex<KisReplicaPhysicalSlotIdentity, KisReplicaSlotId>;
         void *shard = nullptr;
         void *page = nullptr;
         size_t shardIndex = 0;
+        KisVersionSlotId value;
+        ExactIndex::Reservation exact;
+        PhysicalIndex::Reservation physical;
         Location() = default;
         Location(void *s, void *p, size_t i) : shard(s), page(p), shardIndex(i) {}
         // A copied private value is not the activity's registered result.
         // In particular it cannot retain a location after the original exits.
         Location(const Location &) noexcept {}
-        Location &operator=(const Location &) noexcept { shard = page = nullptr; shardIndex = 0; return *this; }
+        Location &operator=(const Location &) noexcept
+        { Q_ASSERT(!value.isValid()); shard = page = nullptr; shardIndex = 0; return *this; }
         Location(Location &&other) noexcept
             : shard(std::exchange(other.shard, nullptr)), page(std::exchange(other.page, nullptr)),
-              shardIndex(std::exchange(other.shardIndex, 0)) {}
+              shardIndex(std::exchange(other.shardIndex, 0)), value(std::exchange(other.value, {})),
+              exact(std::move(other.exact)), physical(std::move(other.physical)) {}
         Location &operator=(Location &&other) noexcept
-        { shard = std::exchange(other.shard, nullptr); page = std::exchange(other.page, nullptr);
-          shardIndex = std::exchange(other.shardIndex, 0); return *this; }
+        { Q_ASSERT(!value.isValid());
+          shard = std::exchange(other.shard, nullptr); page = std::exchange(other.page, nullptr);
+          shardIndex = std::exchange(other.shardIndex, 0); value = std::exchange(other.value, {});
+          exact = std::move(other.exact); physical = std::move(other.physical); return *this; }
     } location;
     // Set by metadata acceptance. This is a generational locator, not another
     // version authority; readers validate the record identity under its gate.
     KisVersionSlotId acceptedSlot;
     bool reserved = false;
     bool completed = false;
-    bool freshMetadataRequired = false;
 };
 
 struct KisPageNativeReadRef {
@@ -136,7 +144,7 @@ static_assert(sizeof(KisPageNativeReadRef) == 16);
  * shard-owned generational arenas; M3 links and indexes their typed slots
  * while the compact page/activity directory projects public values on demand.
  */
-struct KisVersionRecord {
+struct KisPageValueCell {
     KisPageVersion version;
     KisVersionSlotId slot;
     KisVersionSlotId previousVersion;
@@ -147,24 +155,20 @@ struct KisVersionRecord {
     KisReplicaSlotId firstReplica;
     KisReplicaSlotId authorityReplica;
     KisMetadataOverflowSlotId capturedReadViews;
-    KisVersionFactsSlotId facts;
     KisPageTransactionId preparedBy;
     quint32 replicaCount = 0;
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
+    // Layout, readiness and native read retention belong to this value. They
+    // have no independent slot identity, allocation, or reservation lifetime.
+    struct Native {
+        std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
+        quint64 stamp = 0;
+        KisPageTransactionId transaction;
+        std::shared_ptr<KisCpuResidentBinding> nativeBinding;
+        KisReplicaSlotId nativeReplica;
+        quint32 nativeReaders = 0;
+    } native;
 };
-
-// Immutable layout and the owner's single internal CPU completion capability.
-// Generic exported capabilities can coexist and retain their original owner
-// records. This slot never copies version/transaction/authority from metadata.
-struct KisVersionFactsRecord {
-    std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-    quint64 stamp = 0;
-    KisPageTransactionId transaction;
-    std::shared_ptr<KisCpuResidentBinding> nativeBinding;
-    KisReplicaSlotId nativeReplica;
-    quint32 nativeReaders = 0;
-};
-static_assert(sizeof(KisVersionFactsRecord) <= 64);
 
 struct KisReplicaRecord {
     KisReplicaAllocationIdentity identity;
@@ -196,18 +200,13 @@ struct KisMetadataOverflowNode {
     KisMetadataOverflowKind kind = KisMetadataOverflowKind::CapturedReadView;
 };
 
-static_assert(sizeof(KisVersionRecord) <= 128);
+static_assert(sizeof(KisPageValueCell) <= 192);
 static_assert(sizeof(KisReplicaRecord) <= 128);
 static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 
 template<>
-struct KisSlotIdFor<KisVersionRecord> {
+struct KisSlotIdFor<KisPageValueCell> {
     using Type = KisVersionSlotId;
-};
-
-template<>
-struct KisSlotIdFor<KisVersionFactsRecord> {
-    using Type = KisVersionFactsSlotId;
 };
 
 template<>

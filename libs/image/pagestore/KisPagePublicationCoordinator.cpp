@@ -388,18 +388,18 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::tryAcceptLocked(
     QMutexLocker<QMutex> &ownerLock, QString *error, bool *storageRefused)
 {
     if (installOverlayLocked(error)) return true;
-    if (!data->metadata.needsAcceptanceCapacity()) return false;
+    if (!data->metadata.needsAcceptanceRevalidation()) return false;
     // One common retry for native seal, generic publication and removal.
-    // Keep pixels, proofs and unaffected release permissions. Full-D claims
-    // are repeated, but only invalidated rows need additional capacity.
+    // Keep the already constructed values and pixels. A late reader changes
+    // the original source disposition/fees; it creates no new value storage.
     bool prepared = false;
     ownerLock.unlock();
     {
         const auto relock = qScopeGuard([&] { ownerLock.relock(); });
-        // Preserve original ordering, positions and existing reservations.
-        // Only genuinely new native slots need preparation after this unlock.
+        // Preserve original ordering and positions while surface and source
+        // retention are revalidated against the same result.
         data->surfacePrepared = false;
-        prepared = data->owner->m_metadata.prepareAcceptanceCapacity(data->metadata, error);
+        prepared = data->owner->m_metadata.revalidateAcceptance(data->metadata, error);
         if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
     }
     return prepared && prepareSurfaceLocked(error, storageRefused) && installOverlayLocked(error);
@@ -1301,7 +1301,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         auto &publication = preparedCommit.metadata;
         if (repair && repairBase == currentRoot.epoch() && !changesSurfaceDefault) {
             publication = std::move(*repair); repair.reset();
-            m_metadata.prepareAcceptanceCapacity(publication);
+            m_metadata.revalidateAcceptance(publication);
         } else {
             repair.reset();
             const bool detach = !disableDirectDetachment && rootCandidate.mayDetachPreviousRoot();
@@ -1395,7 +1395,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         const KisImageEpochCommitResult committed = preparedCommit.result;
         auto metadataCleanup = std::move(preparedCommit.metadataCleanup);
         const auto acceptedRows = preparedCommit.metadata.originalRows();
-        if (!committed.isCommitted() && metadataRejected && preparedCommit.metadata.needsAcceptanceCapacity()) {
+        if (!committed.isCommitted() && metadataRejected && preparedCommit.metadata.needsAcceptanceRevalidation()) {
             repair.emplace(std::move(preparedCommit.metadata));
             repairBase = currentRoot.epoch();
         }

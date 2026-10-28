@@ -79,8 +79,10 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
     quint64 readProtectionSlotReuses = 0;
     quint64 readProtectionSlotReleases = 0;
     quint64 nativeWriteReservations = 0;
-    quint64 nativeSlotReplacements = 0;
-    quint64 nativeCapacityRetries = 0;
+    quint64 nativeValuesPrepared = 0;
+    quint64 nativeValuesAccepted = 0;
+    quint64 nativeValuesCancelled = 0;
+    quint64 nativeRetentionRevalidations = 0;
     quint64 mutationBaseVersionInputs = 0;
     // Reclamation-thread subsets of the local totals; never add them twice.
     quint64 backgroundLocalTransitionSequences = 0;
@@ -203,7 +205,6 @@ struct KRITAIMAGE_EXPORT KisPageMetadataFootprint {
     // directory/shared-control allocation requests appear in backing usage.
     quint64 owningCapacityBytes = 0;
     KisPageMetadataArenaStatistics versionArena;
-    KisPageMetadataArenaStatistics versionFactsArena;
     KisPageMetadataArenaStatistics replicaArena;
     KisPageMetadataArenaStatistics overflowArena;
     KisPageMetadataIndexStatistics exactVersionIndex;
@@ -304,9 +305,14 @@ private:
     bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
         KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
         std::shared_ptr<KisCpuResidentBinding> *binding) const;
+    // Allocate the final value before any provider may produce pixels. The
+    // original edit retains its exact slot and both index admissions until
+    // acceptance or cancellation; publication never replaces an old value.
+    bool preparePrivateValue(const KisPageWriteInput &, KisPagePrivateWrite *, QString *error);
+    void discardPrivateValue(KisPagePrivateWrite *);
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
-    // physical slot; no synthetic lease/writer or target arena is created.
+    // physical slot; the final value already exists and no lease is invented.
     bool acceptPrivateTarget(const KisPageWriteInput &, const KisReplicaHandle &source,
                              const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
         QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
@@ -446,7 +452,7 @@ private:
         // retry a revision race or retain its input until capacity returns.
         bool needsReprepare() const { return m_failure == Failure::Conflict; }
         bool wasStorageRefused() const { return m_failure == Failure::Storage; }
-        bool needsAcceptanceCapacity() const { return m_owner && m_failure == Failure::Capacity; }
+        bool needsAcceptanceRevalidation() const { return m_owner && m_failure == Failure::RetentionChanged; }
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
                                            KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
@@ -461,17 +467,17 @@ private:
         };
         using DataPointer = std::unique_ptr<Data, DataDeleter>;
         DataPointer data;
-        class MutationCapacity;
-        struct MutationCapacityDeleter { void operator()(MutationCapacity *) const noexcept; };
-        using MutationCapacityPointer = std::unique_ptr<MutationCapacity, MutationCapacityDeleter>;
-        MutationCapacityPointer m_mutationCapacity;
+        class AcceptanceReferences;
+        struct AcceptanceReferencesDeleter { void operator()(AcceptanceReferences *) const noexcept; };
+        using AcceptanceReferencesPointer = std::unique_ptr<AcceptanceReferences, AcceptanceReferencesDeleter>;
+        AcceptanceReferencesPointer m_acceptanceReferences;
         std::optional<std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>>> m_ownedRows;
         KisPagePublicationRows m_rows;
         KisImageEpochId m_minimumEpoch;
         size_t m_count = 0;
         KisPageTransaction m_transaction;
         std::shared_ptr<const quint8> m_owner;
-        enum class Failure : quint8 { None, Conflict, Storage, Capacity };
+        enum class Failure : quint8 { None, Conflict, Storage, RetentionChanged };
         Failure m_failure = Failure::None;
         friend class KisPageMetadataCoordinator;
         friend class DeferredPublicationCleanup;
@@ -533,7 +539,7 @@ private:
                                                bool detachUnprotectedCurrent = false) const;
     // Original D accepts native results and external detachments atomically.
     // Exact identity, writers and real readers are revalidated before edits;
-    // a capacity-only conflict retains the frozen preparation for repair.
+    // changed retention preserves the frozen preparation for fee revalidation.
     // Original publication rows retain each semantic input and its acceptance
     // position through prepare/install/finish. External capabilities have
     // already been checked by publication; this is not a second proof issuer.
@@ -546,9 +552,9 @@ private:
         std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>> &&,
         QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
         const PublicationChange *generic = nullptr, qsizetype genericCount = 0) const;
-    // Unlocked continuation of the same frozen D. Retains existing capacity
-    // and positions; only newly invalidated native rows reserve more slots.
-    bool prepareAcceptanceCapacity(PreparedPublication &, QString *error = nullptr) const;
+    // Continue the same frozen D after its source disposition changed. The
+    // final cells and positions remain intact; no additional slots are made.
+    bool revalidateAcceptance(PreparedPublication &, QString *error = nullptr) const;
     bool installAcceptance(PreparedPublication &&prepared,
                          const KisPageTransaction &transaction,
                          QString *error = nullptr, KisImageEpochId epoch = {},

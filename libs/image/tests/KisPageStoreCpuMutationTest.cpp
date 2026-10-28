@@ -1123,8 +1123,8 @@ private Q_SLOTS:
     void finalPayload_data();
     void finalPayload();
     void finalPayloadSealRetry();
-    void nativeFinalSlotReplacement_data();
-    void nativeFinalSlotReplacement();
+    void nativeFinalValueSurvivesLateReaders_data();
+    void nativeFinalValueSurvivesLateReaders();
     void capacityDispositionLateProtection_data();
     void capacityDispositionLateProtection();
     void capacityDispositionBudgetPlan_data()
@@ -9410,7 +9410,7 @@ void KisPageStoreCpuMutationTest::sharedIdleWarmQuantities()
     QCOMPARE(fresh, overlay ? 128 : 64);
 }
 
-void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement_data()
+void KisPageStoreCpuMutationTest::nativeFinalValueSurvivesLateReaders_data()
 {
     QTest::addColumn<int>("reader"); QTest::addColumn<int>("pages");
     QTest::addColumn<int>("shards");
@@ -9421,7 +9421,7 @@ void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement_data()
     }
 }
 
-void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
+void KisPageStoreCpuMutationTest::nativeFinalValueSurvivesLateReaders()
 {
     QFETCH(int, reader); QFETCH(int, pages); QFETCH(int, shards);
     Fixture f;
@@ -9455,8 +9455,8 @@ void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
         if (filler) freeTestStoragePressure(pressure.get(), std::exchange(filler, nullptr), fillerBytes, 1);
     };
     const auto releaseFiller = qScopeGuard(freeFiller);
-    // The new page has an original fresh reservation before acceptance;
-    // another, previously prepared page will lose reuse to a late reader.
+    // Both new and replacement pages already own their final cells. A late
+    // reader may retain the source, even after metadata headroom is exhausted.
     KisCapturedReadView late;
     if (reader == 3 || reader == 4) late = f.store->captureReadRange({1}, QRect(0,0,1,1), overlay, &f.error);
     bool visited = false;
@@ -9475,30 +9475,18 @@ void KisPageStoreCpuMutationTest::nativeFinalSlotReplacement()
         if (reader == 4) late = {}; // Prepared non-release must not expand at install.
     });
     const bool sealed = second.seal(&f.error);
-    if (reader == 6) {
-        QVERIFY(!sealed);
-        const auto refused = kisPageStoreMetadataMetrics(*f.store);
-        QCOMPARE(refused.nativeCapacityRetries - before.nativeCapacityRetries, quint64(1));
-        QCOMPARE(refused.publicationAdditionRecordsPrepared - before.publicationAdditionRecordsPrepared, quint64(1));
-        freeFiller();
-        QCOMPARE(f.pixel(overlay), QByteArray(f.bpp, char(0x31)));
-        QCOMPARE(f.pixel(overlay, 1), QByteArray(f.bpp, char(0x51))); // No partial install.
-        QVERIFY2(second.seal(&f.error), qPrintable(f.error));
-    } else QVERIFY2(sealed, qPrintable(f.error));
+    QVERIFY2(sealed, qPrintable(f.error));
+    freeFiller();
     QVERIFY(visited);
     const auto after = kisPageStoreMetadataMetrics(*f.store);
-    // A late reader rejects the joint claim before any edit, but only its
-    // actual protected rows need new capacity. Other rows keep their slots.
-    const bool retry = reader == 1 || reader == 2 || reader == 3 || reader >= 5;
-    const int protectedPages = reader == 2 ? pages : retry ? 1 : 0;
-    const int freshPages = reader >= 5 ? 1 : 0;
-    QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, quint64(pages - protectedPages - freshPages));
-    QCOMPARE(after.nativeCapacityRetries - before.nativeCapacityRetries, quint64(retry));
-    // A local late reader must prepare only its own added record. The other
-    // rows continue borrowing their original results through the joint claim.
+    // Every final value was allocated before pixels. Captures and saturated
+    // metadata capacity cannot cause a second value allocation at this cut.
+    const bool retained = reader == 1 || reader == 2 || reader == 3 || reader >= 5;
+    const int protectedPages = reader == 2 ? pages : retained ? 1 : 0;
+    QCOMPARE(after.nativeValuesPrepared, before.nativeValuesPrepared);
+    QCOMPARE(after.nativeValuesAccepted - before.nativeValuesAccepted, quint64(pages));
     QCOMPARE(after.preparedMutationPages - before.preparedMutationPages, quint64(0));
-    QCOMPARE(after.publicationAdditionRecordsPrepared - before.publicationAdditionRecordsPrepared,
-             quint64(protectedPages + freshPages + (reader == 6 ? 1 : 0)));
+    QCOMPARE(after.publicationAdditionRecordsPrepared, before.publicationAdditionRecordsPrepared);
     QCOMPARE(after.publicationHistoryNodesTransferred - before.publicationHistoryNodesTransferred,
              quint64(protectedPages));
     QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages, payload.payloadInitializedPages);
@@ -9628,6 +9616,7 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         input.version = version; input.baseVersion = i ? targets[0].version : f.replica.version;
         input.source = i ? targets[0] : f.replica;
         input.transaction = tx.id; input.operation = f.owner.nextOperationId();
+        if (!f.metadata.preparePrivateValue(KisPageWriteInput(input), &value, &f.error)) return false;
         const bool accepted = f.metadata.acceptPrivateTarget(KisPageWriteInput(input), input.source, result.replica, &value, 64, &f.error)
             && f.metadata.completePrivateWrite(&value) && validateOriginalWrite(f.owner, value, tx.id, &f.error);
         return accepted && f.metadata.versionDescriptorMatches(version, descriptor)
@@ -9662,7 +9651,8 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
     auto debtPressure = f.budget.reserve(pressure, &f.error); QVERIFY(debtPressure.isValid());
     QVERIFY2(accept(1), qPrintable(f.error));
     const auto after = f.metadata.metrics();
-    QCOMPARE(after.nativeSlotReplacements - before.nativeSlotReplacements, protectedVersion ? quint64(0) : quint64(1));
+    QCOMPARE(after.nativeValuesPrepared - before.nativeValuesPrepared, quint64(1));
+    QCOMPARE(after.nativeValuesAccepted - before.nativeValuesAccepted, quint64(1));
     KisPageMetadataCoordinator::VersionInfo old;
     const bool exists = f.metadata.versionSnapshot(targets[0].version, &old) && old.version.isValid();
     QCOMPARE(exists, protectedVersion); // Fee class cannot create or remove metadata consumers.
@@ -9738,6 +9728,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         native.descriptor = std::allocate_shared<const KisPageAllocationDescriptor>(
             KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor());
         native.binding = f.physical.provider->cpuResidentBinding(result.replica);
+        QVERIFY(f.metadata.preparePrivateValue(KisPageWriteInput(acquire), &native, &f.error));
         QVERIFY(f.metadata.acceptPrivateTarget(KisPageWriteInput(acquire), acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
         QVERIFY(validateOriginalWrite(f.owner, native, tx.id, &f.error));
@@ -9796,7 +9787,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
             ? KisBackingBudgetClass::OptionalCache : KisBackingBudgetClass::ActivePending);
     }
     if (mode == 1) {
-        QVERIFY(candidate.needsAcceptanceCapacity());
+        QVERIFY(candidate.needsAcceptanceRevalidation());
         QVERIFY(!candidate.isValid());
         // Reprepare the same original D while the late reader is still live.
         // Only its row loses detachment; no invalidation list remaps ordinals.
@@ -9815,7 +9806,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         auto repeated = f.metadata.prepareAcceptance(tx, {repeatedInputs.data(), repeatedInputs.size()}, &f.error);
         QVERIFY(!repeated.isValid());
         QVERIFY(repeated.wasStorageRefused());
-        QVERIFY2(f.metadata.prepareAcceptanceCapacity(candidate, &f.error), qPrintable(f.error));
+        QVERIFY2(f.metadata.revalidateAcceptance(candidate, &f.error), qPrintable(f.error));
         QVERIFY(candidate.isValid());
         QCOMPARE(f.live(), f.limits.metadataArenaBytes); // External-only repair allocates nothing.
         QCOMPARE(f.metadata.metrics().preparedMutationPages, beforeRepair.preparedMutationPages);
@@ -9826,7 +9817,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         fee = f.owner.prepareBackingChanges(std::move(retryChanges), {}, &f.error);
         QVERIFY2(fee.isValid(), qPrintable(f.error));
         QVERIFY(f.metadata.installAcceptance(std::move(candidate), tx, &f.error));
-        QVERIFY(!candidate.needsAcceptanceCapacity());
+        QVERIFY(!candidate.needsAcceptanceRevalidation());
         f.owner.commitBackingChanges(std::move(fee));
         f.metadata.finishAcceptance({inputs.data(), inputs.size()});
         KisPageMetadataCoordinator::VersionInfo info;
@@ -14608,7 +14599,6 @@ void KisPageStoreCpuMutationTest::canonicalSlotsRespectLateReaders()
         KisCapturedReadView old;
         if(reader==1 || reader==4) old=store->captureReadView();
         const auto before=kisPageStoreMetadataMetrics(*store);
-        const auto publicationBefore=store->publicationStatistics();
         bool visited=false;
         KisPageStoreDiagnosticRecorder recorder(true,store);
         recorder.setPhaseObserver([&](auto phase) {
@@ -14624,15 +14614,8 @@ void KisPageStoreCpuMutationTest::canonicalSlotsRespectLateReaders()
             128*bpp,false,nullptr,&error),KisPageStoreWriteOperationResult::Succeeded);
         recorder.setPhaseObserver({}); QVERIFY(visited);
         const auto after=kisPageStoreMetadataMetrics(*store);
-        const auto replaced=after.nativeSlotReplacements-before.nativeSlotReplacements;
-        // A live reader always forbids replacement. A reader released after
-        // preflight can permit replacement only after actual repreparation
-        // consumed the new facts; the original frozen candidate cannot do so.
-        if (reader == 4 && replaced) {
-            QCOMPARE(replaced, quint64(2));
-            QVERIFY(store->publicationStatistics().metadataRepreparations >
-                    publicationBefore.metadataRepreparations);
-        } else QCOMPARE(replaced, quint64(reader == 0 ? 2 : 0));
+        QCOMPARE(after.nativeValuesPrepared - before.nativeValuesPrepared, quint64(2));
+        QCOMPARE(after.nativeValuesAccepted - before.nativeValuesAccepted, quint64(2));
         if(reader>=1 && reader<=3) {
             QVERIFY(old.isValid());
             for(int x=0;x<2;++x) {
@@ -15000,7 +14983,11 @@ void KisPageStoreCpuMutationTest::productionHandoffConcurrentConsumers()
         || (!generic && consumer == 2);
     QCOMPARE(installed, handoff ? 1 : 0);
     void *bytes = generic ? writeLease->cpuData() : guard.data();
-    QCOMPARE(bytes == originalAddress, handoff);
+    // The pre-prepare swap releases the old pixel buffer. A fresh allocation
+    // may reuse its address; only the still-live buffer cases prove transfer
+    // by address. The identity and committed-byte checks below remain exact.
+    if (consumer != 8 || afterInstall)
+        QCOMPARE(bytes == originalAddress, handoff);
     QCOMPARE(f.provider->validate(source, f.importedDescriptor), !handoff);
     QCOMPARE(f.provider->memoryUsage().committedBytes, initialBytes + (handoff ? 0 : 4096 * bpp));
     QCOMPARE(static_cast<const quint8 *>(bytes)[0], quint8(0x31));

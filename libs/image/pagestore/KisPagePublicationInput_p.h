@@ -124,7 +124,6 @@ struct KisPagePublicationChange {
         KisVersionSlotId replacementSlot;
         quint16 shardIndex = 0; // configure() permits at most 4096 shards.
         // Only the first adjunct in a shard group requests native growth.
-        bool needsStorage = false;
     } metadataAcceptance;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.

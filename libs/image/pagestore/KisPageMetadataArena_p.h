@@ -46,12 +46,10 @@ inline size_t qHash(KisGenerationalSlotId<Tag> slot, size_t seed = 0) noexcept
 }
 
 struct KisVersionSlotTag;
-struct KisVersionFactsSlotTag;
 struct KisReplicaSlotTag;
 struct KisMetadataOverflowSlotTag;
 
 using KisVersionSlotId = KisGenerationalSlotId<KisVersionSlotTag>;
-using KisVersionFactsSlotId = KisGenerationalSlotId<KisVersionFactsSlotTag>;
 using KisReplicaSlotId = KisGenerationalSlotId<KisReplicaSlotTag>;
 using KisMetadataOverflowSlotId = KisGenerationalSlotId<KisMetadataOverflowSlotTag>;
 

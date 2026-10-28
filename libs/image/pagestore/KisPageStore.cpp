@@ -678,9 +678,9 @@ public:
         KisCpuWriteBindingReservation writable;
         KisPageByteArray resetPixel;
         PageSlot *storage = nullptr;
-        ~Page() { Q_ASSERT(!reserved); }
+        ~Page() { Q_ASSERT(!reserved && !location.value.isValid()); }
     };
-    static_assert(sizeof(Page) <= 784);
+    static_assert(sizeof(Page) <= 832);
     struct PageSlot {
         PageSlot() noexcept : next(nullptr) {}
         std::optional<Page> page;
@@ -1174,6 +1174,7 @@ public:
     {
         auto *page = static_cast<Page *>(entry.coldPage());
         Q_ASSERT(page && !page->reserved);
+        owner->metadata.discardPrivateValue(page);
         auto layout = std::move(page->descriptor);
         erasePage(entry);
         if (layout) {
@@ -1427,6 +1428,15 @@ KisPageMutationSession::Private::prepareTarget(
     auto discardUnprepared = qScopeGuard([&] {
         if (!page->reserved) discardUnpreparedPageLocked(*entry, lock);
     });
+    if (!previous) {
+        lock.unlock();
+        const bool prepared = owner->metadata.preparePrivateValue(acquire, page, error);
+        lock.relock();
+        if (!prepared) {
+            if (storageRefused) *storageRefused = true;
+            return {};
+        }
+    }
     try {
         if (!previous)
             owner->publicationCoordinator.preparePrivateLayoutLocked(*page, descriptor, selected->layout);
