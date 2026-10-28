@@ -48,6 +48,7 @@ class KisPageHistoryCollector;
 class KisPageOwnerLedger;
 class KisPageWriteAdmission;
 struct KisPageWriteClaim;
+class KisPageViewValueStorage;
 class KisBackingBudgetController;
 class KisPageReplicaProvider;
 class KisPagePublicationCoordinator;
@@ -620,10 +621,14 @@ private:
     KisPageWriteClaim *findWriteClaim(const KisPageKey &) const;
     KisPageWriteClaim *prepareWriteClaim(const KisPageKey &, QString *);
     friend class KisPageWriteAdmission;
+    // Original tree/selection memory owner; this is not a retained view.
+    std::shared_ptr<KisPageViewValueStorage> viewValues() const;
+    friend class KisImageEpochReferenceModel;
     class Private;
     // configure() publishes the complete immutable core once. Destruction
     // still requires owner quiescence; acquire does not extend its lifetime.
     std::atomic<Private *> m_core{nullptr};
+    std::shared_ptr<Private> m_coreMemory;
     mutable QMutex m_configurationMutex;
     KisBackingBudgetController *m_budget = nullptr;
     void *m_retirementDebtContext = nullptr;

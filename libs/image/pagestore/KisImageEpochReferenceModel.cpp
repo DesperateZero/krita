@@ -8,10 +8,12 @@
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisPagePublicationCoordinator_p.h"
+#include "KisPageViewValue_p.h"
 
 #include <QMutex>
 #include <QMutexLocker>
 #include <QSet>
+#include <QScopeGuard>
 
 #include <algorithm>
 #include <atomic>
@@ -44,14 +46,62 @@ public:
     using EpochArray<KisSurfaceEpochState>::vector;
 };
 
+namespace {
+struct EpochValueUnavailable {};
+
+class EpochOracleValues final : public KisPageViewValueStorage
+{
+public:
+    explicit EpochOracleValues(KisMutationStorageAllocator<KisPageViewValue> storage)
+        : storage(std::move(storage)) {}
+    KisPageViewValue *pin(const KisPageVersion &version, KisVersionSlotId = {},
+                         const KisPagePrivateWrite * = nullptr) override
+    {
+        auto *value = storage.allocate(1);
+        new (value) KisPageViewValue;
+        value->version = version;
+        retain(value);
+        return value;
+    }
+    KisPageViewValue *prepareInitial(const KisPageVersion &version) override { return pin(version); }
+private:
+    void releaseMemory(const KisPageKey &, KisVersionSlotId, KisPageViewValue *value) noexcept override
+    {
+        std::destroy_at(value);
+        storage.deallocate(value, 1);
+    }
+    KisMutationStorageAllocator<KisPageViewValue> storage;
+};
+
+// Borrowed construction input only; no row, tree node or transaction owns
+// this projection. Existing tree/delta values carry their final identity.
+// A genuine external identity is resolved once when its new node is built.
+struct EpochPageInput {
+    const KisPageVersion *identity;
+    KisPageViewValue *value = nullptr;
+    KisVersionSlotId slot;
+    const KisPagePrivateWrite *original = nullptr;
+    const KisPageVersion &version() const { return *identity; }
+    KisPageViewValue *pin(KisPageViewValueStorage &storage) const
+    {
+        if (value) { KisPageViewValueStorage::retain(value); return value; }
+        auto *result = storage.pin(*identity, slot, original);
+        if (!result) throw EpochValueUnavailable{};
+        return result;
+    }
+};
+}
+
 class KisImageEpochTreeStorage : public std::enable_shared_from_this<KisImageEpochTreeStorage>
 {
 public:
-    explicit KisImageEpochTreeStorage(KisMutationStorageAllocator<KisImageEpochPageRoot> allocator)
-        : nodes(std::move(allocator)) {}
+    KisImageEpochTreeStorage(KisMutationStorageAllocator<KisImageEpochPageRoot> allocator,
+                            std::shared_ptr<KisPageViewValueStorage> values)
+        : nodes(std::move(allocator)), values(std::move(values)) {}
     void prepare(KisBackingBudgetController *budget);
     void enqueue(KisImageEpochPageRoot *node) noexcept;
     KisMutationStorageAllocator<KisImageEpochPageRoot> nodes;
+    std::shared_ptr<KisPageViewValueStorage> values;
 private:
     void drain() noexcept;
     void finished() noexcept;
@@ -66,18 +116,19 @@ class KisImageEpochPageRoot
 {
 public:
     KisImageEpochPageRoot(std::shared_ptr<KisImageEpochTreeStorage> owner,
-                          const KisPageVersion &pageVersion,
+                          KisPageViewValue *pageValue,
                           const boost::intrusive_ptr<const KisImageEpochPageRoot> &leftChild,
                           const boost::intrusive_ptr<const KisImageEpochPageRoot> &rightChild,
                           qint32 nodeHeight,
                           qsizetype nodeCount)
         : storage(std::move(owner))
-        , version(pageVersion)
+        , value(pageValue)
         , left(leftChild)
         , right(rightChild)
         , height(nodeHeight)
         , count(nodeCount)
     {
+        const auto &version = value->version;
         firstSurface = left ? left->firstSurface : version.key.surface.value;
         lastSurface = right ? right->lastSurface : version.key.surface.value;
         minColumn = maxColumn = version.key.page.column;
@@ -92,13 +143,15 @@ public:
         }
     }
 
+    ~KisImageEpochPageRoot() { storage->values->release(value); }
+
     std::shared_ptr<KisImageEpochTreeStorage> storage;
     // Nodes have strong owners only. The original allocation carries the
     // count; its zero transition hands this same node to the existing queue.
     // The constructor's first reference is adopted by makePageRoot.
     mutable std::atomic<size_t> references{1};
     KisImageEpochPageRoot *nextReleased = nullptr;
-    KisPageVersion version;
+    KisPageViewValue *value;
     boost::intrusive_ptr<const KisImageEpochPageRoot> left;
     boost::intrusive_ptr<const KisImageEpochPageRoot> right;
     qint32 height = 1;
@@ -174,8 +227,8 @@ void collectPageBounds(const PageRoot &root, quint64 surface, PageBounds *bounds
         bounds->include(root->minColumn, root->maxColumn, root->minRow, root->maxRow);
         return;
     }
-    if (root->version.key.surface.value == surface) {
-        const auto page = root->version.key.page;
+    if (root->value->version.key.surface.value == surface) {
+        const auto page = root->value->version.key.page;
         bounds->include(page.column, page.column, page.row, page.row);
     }
     collectPageBounds(root->left, surface, bounds);
@@ -192,79 +245,93 @@ void collectPageBoundsExcluding(
         collectPageBounds(root, surface, bounds);
         return;
     }
-    auto split = std::lower_bound(first, last, root->version.key, pageKeyLess);
+    auto split = std::lower_bound(first, last, root->value->version.key, pageKeyLess);
     collectPageBoundsExcluding(root->left, surface, first, split, bounds);
-    if (split != last && *split == root->version.key) {
+    if (split != last && *split == root->value->version.key) {
         ++split;
-    } else if (root->version.key.surface.value == surface) {
-        const auto page = root->version.key.page;
+    } else if (root->value->version.key.surface.value == surface) {
+        const auto page = root->value->version.key.page;
         bounds->include(page.column, page.column, page.row, page.row);
     }
     collectPageBoundsExcluding(root->right, surface, split, last, bounds);
 }
 
-PageRoot makePageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
-                      const KisPageVersion &version, const PageRoot &left = {}, const PageRoot &right = {})
+PageRoot makeOwnedPageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
+                           KisPageViewValue *value, const PageRoot &left = {}, const PageRoot &right = {})
 {
+    if (!value) throw EpochValueUnavailable{};
     auto allocator = storage->nodes;
-    auto *node = allocator.allocate(1);
+    KisImageEpochPageRoot *node = nullptr;
     try {
-        std::allocator_traits<decltype(allocator)>::construct(allocator, node, storage, version, left, right,
+        node = allocator.allocate(1);
+        std::allocator_traits<decltype(allocator)>::construct(allocator, node, storage, value, left, right,
             qMax(pageRootHeight(left), pageRootHeight(right)) + 1,
             pageRootCount(left) + pageRootCount(right) + 1);
     } catch (...) {
-        allocator.deallocate(node, 1);
+        if (node) allocator.deallocate(node, 1);
+        storage->values->release(value);
         throw;
     }
-    // Construction already owns the first reference. There is no separate
-    // control allocation or second resource refusal after the node exists.
     return PageRoot(node, false);
+}
+
+PageRoot makePageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
+                      KisPageViewValue *value, const PageRoot &left = {}, const PageRoot &right = {})
+{
+    KisPageViewValueStorage::retain(value);
+    return makeOwnedPageRoot(storage, value, left, right);
+}
+
+PageRoot makeSelectedPageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
+                              const EpochPageInput &input, const PageRoot &left, const PageRoot &right)
+{
+    return makeOwnedPageRoot(storage, input.pin(*storage->values), left, right);
 }
 
 // Build only the final balanced shape. A not-yet-published parent is input,
 // not an independently owned node that must be allocated and then retired
 // merely to discover that the join needs a single or double rotation.
 PageRoot balancePageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
-                         const KisPageVersion &version, const PageRoot &left, const PageRoot &right)
+                         KisPageViewValue *value, const PageRoot &left, const PageRoot &right)
 {
     const qint32 balance = pageRootHeight(left) - pageRootHeight(right);
     if (balance > 1) {
         if (pageRootHeight(left->left) < pageRootHeight(left->right)) {
             const auto &pivot = left->right;
-            return makePageRoot(storage, pivot->version,
-                makePageRoot(storage, left->version, left->left, pivot->left),
-                makePageRoot(storage, version, pivot->right, right));
+            return makePageRoot(storage, pivot->value,
+                makePageRoot(storage, left->value, left->left, pivot->left),
+                makePageRoot(storage, value, pivot->right, right));
         }
-        return makePageRoot(storage, left->version, left->left,
-            makePageRoot(storage, version, left->right, right));
+        return makePageRoot(storage, left->value, left->left,
+            makePageRoot(storage, value, left->right, right));
     }
     if (balance < -1) {
         if (pageRootHeight(right->right) < pageRootHeight(right->left)) {
             const auto &pivot = right->left;
-            return makePageRoot(storage, pivot->version,
-                makePageRoot(storage, version, left, pivot->left),
-                makePageRoot(storage, right->version, pivot->right, right->right));
+            return makePageRoot(storage, pivot->value,
+                makePageRoot(storage, value, left, pivot->left),
+                makePageRoot(storage, right->value, pivot->right, right->right));
         }
-        return makePageRoot(storage, right->version,
-            makePageRoot(storage, version, left, right->left), right->right);
+        return makePageRoot(storage, right->value,
+            makePageRoot(storage, value, left, right->left), right->right);
     }
-    return makePageRoot(storage, version, left, right);
+    return makePageRoot(storage, value, left, right);
 }
 
 // A batch may change subtree height by more than one. Join down the taller
 // spine before balancing; a single rotation at the old root is insufficient.
 PageRoot joinPageRoot(const std::shared_ptr<KisImageEpochTreeStorage> &storage,
-                      const KisPageVersion &version, const PageRoot &left, const PageRoot &right)
+                      KisPageViewValue *value, const PageRoot &left, const PageRoot &right)
 {
     if (pageRootHeight(left) > pageRootHeight(right) + 1) {
-        return balancePageRoot(storage, left->version, left->left,
-            joinPageRoot(storage, version, left->right, right));
+        return balancePageRoot(storage, left->value, left->left,
+            joinPageRoot(storage, value, left->right, right));
     }
     if (pageRootHeight(right) > pageRootHeight(left) + 1) {
-        return balancePageRoot(storage, right->version,
-            joinPageRoot(storage, version, left, right->left), right->right);
+        return balancePageRoot(storage, right->value,
+            joinPageRoot(storage, value, left, right->left), right->right);
     }
-    return makePageRoot(storage, version, left, right);
+    return makePageRoot(storage, value, left, right);
 }
 
 PageRoot joinPageRoots(const PageRoot &left, const PageRoot &right)
@@ -273,24 +340,25 @@ PageRoot joinPageRoots(const PageRoot &left, const PageRoot &right)
     if (!right) return left;
     // Remove the pivot in the same traversal that joins the ordered trees.
     // The left child's height can shrink by several levels after a batch.
-    return joinPageRoot(right->storage, right->version,
+    return joinPageRoot(right->storage, right->value,
         joinPageRoots(left, right->left), right->right);
+}
+
+KisPageViewValue *resolvePageValue(const PageRoot &root, const KisPageKey &key)
+{
+    const KisImageEpochPageRoot *node = root.get();
+    while (node) {
+        if (key == node->value->version.key) return node->value;
+        node = pageKeyLess(key, node->value->version.key) ? node->left.get() : node->right.get();
+    }
+    return nullptr;
 }
 
 bool resolvePageRoot(const PageRoot &root, const KisPageKey &key, KisPageVersion *version)
 {
-    const KisImageEpochPageRoot *node = root.get();
-    while (node) {
-        if (key == node->version.key) {
-            if (version)
-                *version = node->version;
-            return true;
-        }
-        node = pageKeyLess(key, node->version.key) ? node->left.get() : node->right.get();
-    }
-    if (version)
-        *version = {};
-    return false;
+    auto *value = resolvePageValue(root, key);
+    if (version) *version = value ? value->version : KisPageVersion{};
+    return value;
 }
 
 template<class Append>
@@ -299,7 +367,7 @@ void appendPageRoot(const PageRoot &root, const Append &append)
     if (!root)
         return;
     appendPageRoot(root->left, append);
-    append(root->version);
+    append(root->value->version);
     appendPageRoot(root->right, append);
 }
 
@@ -310,9 +378,9 @@ PageRoot buildPageRoot(const Versions &manifest, qsizetype begin, qsizetype end,
     if (begin >= end)
         return {};
     const qsizetype middle = begin + (end - begin) / 2;
-    return makePageRoot(storage, manifest.at(middle),
-                        buildPageRoot(manifest, begin, middle, storage),
-                        buildPageRoot(manifest, middle + 1, end, storage));
+    const auto left = buildPageRoot(manifest, begin, middle, storage);
+    const auto right = buildPageRoot(manifest, middle + 1, end, storage);
+    return makeOwnedPageRoot(storage, storage->values->prepareInitial(manifest.at(middle)), left, right);
 }
 
 // Borrow the immutable inputs for this candidate's construction. The AVL
@@ -327,22 +395,22 @@ public:
         : change(first), changeEnd(last), removed(removedFirst), removedEnd(removedLast)
     { pushLeft(root.get()); }
 
-    const KisPageVersion *next()
+    EpochPageInput next()
     {
         for (;;) {
             const auto *base = depth ? frontier[depth - 1] : nullptr;
-            if (change != changeEnd && (!base || pageKeyLess(change->key, base->version.key)))
-                return &*change++;
-            if (!base) return nullptr;
+            if (change != changeEnd && (!base || pageKeyLess(change->version().key, base->value->version.key)))
+                return *change++;
+            if (!base) return {nullptr};
             --depth;
             pushLeft(base->right.get());
-            while (removed != removedEnd && pageKeyLess(*removed, base->version.key)) ++removed;
-            if (removed != removedEnd && *removed == base->version.key) {
+            while (removed != removedEnd && pageKeyLess(*removed, base->value->version.key)) ++removed;
+            if (removed != removedEnd && *removed == base->value->version.key) {
                 ++removed;
                 continue;
             }
-            return change != changeEnd && change->key == base->version.key
-                ? &*change++ : &base->version;
+            return change != changeEnd && change->version().key == base->value->version.key
+                ? *change++ : EpochPageInput{&base->value->version, base->value};
         }
     }
 private:
@@ -367,12 +435,12 @@ PageRoot buildMergedPageRoot(Cursor &input, size_t count,
     if (!count) return {};
     const size_t leftCount = count / 2;
     const auto left = buildMergedPageRoot(input, leftCount, storage);
-    const auto *version = input.next();
-    Q_ASSERT(version);
+    const auto value = input.next();
+    Q_ASSERT(value.identity);
     // Both original input owners remain captured while the right subtree is
     // built. Advancing the cursor never changes an emitted version's address.
     const auto right = buildMergedPageRoot(input, count - leftCount - 1, storage);
-    return makePageRoot(storage, *version, left, right);
+    return makeSelectedPageRoot(storage, value, left, right);
 }
 
 template<class Changes, class Removals>
@@ -385,21 +453,24 @@ PageRoot applyPageRootDelta(const PageRoot &root,
     if (!root) {
         if (first == last) return {};
         const auto middle = std::next(first, std::distance(first, last) / 2);
-        return makePageRoot(storage, *middle,
+        return makeSelectedPageRoot(storage, *middle,
             applyPageRootDelta({}, first, middle, removedFirst, removedFirst, storage),
             applyPageRootDelta({}, std::next(middle), last, removedFirst, removedFirst, storage));
     }
-    const auto change = std::lower_bound(first, last, root->version.key,
-        [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
-    const auto removed = std::lower_bound(removedFirst, removedLast, root->version.key, pageKeyLess);
-    const bool replaces = change != last && change->key == root->version.key;
-    const bool removes = removed != removedLast && *removed == root->version.key;
+    const auto change = std::lower_bound(first, last, root->value->version.key,
+        [](const auto &value, const auto &key) { return pageKeyLess(value.version().key, key); });
+    const auto removed = std::lower_bound(removedFirst, removedLast, root->value->version.key, pageKeyLess);
+    const bool replaces = change != last && change->version().key == root->value->version.key;
+    const bool removes = removed != removedLast && *removed == root->value->version.key;
     const PageRoot left = applyPageRootDelta(root->left, first, change, removedFirst, removed, storage);
     const PageRoot right = applyPageRootDelta(root->right, replaces ? std::next(change) : change, last,
         removes ? std::next(removed) : removed, removedLast, storage);
     if (removes)
         return joinPageRoots(left, right);
-    return joinPageRoot(storage, replaces ? *change : root->version, left, right);
+    if (!replaces) return joinPageRoot(storage, root->value, left, right);
+    auto *value = change->pin(*storage->values);
+    const auto release = qScopeGuard([&] { storage->values->release(value); });
+    return joinPageRoot(storage, value, left, right);
 }
 
 const KisSurfaceEpochState *findSurface(const KisImageEpochSurfaces &surfaces, KisSurfaceId surface)
@@ -588,8 +659,8 @@ bool KisImageEpochRootSnapshot::appendRestoreTargets(
             else to.expand();
             continue;
         }
-        const auto *before = from.empty() ? nullptr : &from.front().node->version;
-        const auto *after = to.empty() ? nullptr : &to.front().node->version;
+        const auto *before = from.empty() ? nullptr : &from.front().node->value->version;
+        const auto *after = to.empty() ? nullptr : &to.front().node->value->version;
         if (before && (!after || pageKeyLess(before->key, after->key))) {
             KisPageVersion target;
             if (!resolve(before->key, &target)) return false;
@@ -649,6 +720,11 @@ qsizetype KisImageEpochRootSnapshot::pageCount() const
 qint32 KisImageEpochRootSnapshot::pageTreeHeight() const
 {
     return pageRootHeight(m_pageRoot);
+}
+
+KisPageViewValue *KisImageEpochRootSnapshot::selectedValue(const KisPageKey &key) const
+{
+    return m_epoch.isValid() && m_commitSequence && key.isValid() ? resolvePageValue(m_pageRoot, key) : nullptr;
 }
 
 bool KisImageEpochRootSnapshot::containsPage(const KisPageKey &key, KisPageVersion *version) const
@@ -833,12 +909,30 @@ bool KisImageEpochRootSnapshot::contentExtentAfterPages(
     return true;
 }
 
+static const KisPageVersion &epochPreparedVersion(KisPageViewValue *value) { return value->version; }
 static const KisPageVersion &epochPreparedVersion(const KisPreparedPageProof &proof) { return proof.authority.version; }
 static const KisPageVersion &epochPreparedVersion(const KisPagePublicationChange::Replacement &entry) { return entry.version(); }
 static const KisPageVersion &epochPreparedVersion(const KisPagePublicationDelta::ProofMap::value_type &entry)
 {
     return entry.second.proof.version;
 }
+
+static EpochPageInput epochPageInput(KisPageViewValue *value) { return {&value->version, value}; }
+static EpochPageInput epochPageInput(const KisPreparedPageProof &proof) { return {&proof.authority.version}; }
+static EpochPageInput epochPageInput(const KisPagePublicationChange::Replacement &entry)
+{ return {&entry.version(), nullptr, entry.isNativeValue() ? entry.metadataSlot() : KisVersionSlotId{},
+          entry.borrowed ? entry.native : nullptr}; }
+static EpochPageInput epochPageInput(const KisPagePublicationDelta::ProofMap::value_type &entry)
+{ return {&entry.second.proof.version, nullptr, entry.second.proof.native ? entry.second.proof.metadataSlot : KisVersionSlotId{}}; }
+
+struct EpochInputProjection {
+    template<class Entry> EpochPageInput operator()(const Entry &entry) const { return epochPageInput(entry); }
+};
+template<class Inputs> struct EpochInputRange {
+    const Inputs &inputs;
+    auto cbegin() const { return boost::make_transform_iterator(inputs.begin(), EpochInputProjection{}); }
+    auto cend() const { return boost::make_transform_iterator(inputs.end(), EpochInputProjection{}); }
+};
 
 // Ordered original input and owned immutable deltas share validation and
 // root construction. The projection borrows each original version by reference.
@@ -855,6 +949,9 @@ template<class Proofs> struct EpochVersionRange {
     size_t size() const { return proofs.size(); }
     bool empty() const { return !size(); }
 };
+template<class T> EpochVersionRange(const T &) -> EpochVersionRange<T>;
+template<class T> EpochInputRange(const T &) -> EpochInputRange<T>;
+
 template<class Versions, class Surfaces, class Removals>
 bool KisImageEpochReferenceModel::validateEpochDelta(const KisImageEpochRootSnapshot &base, const Versions &versions,
     const Surfaces &surfaces, const Removals &removals, size_t *insertions, QString *error)
@@ -903,23 +1000,25 @@ struct EpochTransactionChanges {
     // array over a native size-class/VM boundary just to save a service call.
     // Every extent still has this one value's lifetime and original payer.
     static constexpr size_t MaximumPackedBytes = 32 * 1024;
-    explicit EpochTransactionChanges(boost::intrusive_ptr<KisMutationStorageOwner> owner) noexcept
-        : storage(std::move(owner)) {}
+    EpochTransactionChanges(boost::intrusive_ptr<KisMutationStorageOwner> owner,
+                            std::shared_ptr<KisPageViewValueStorage> values) noexcept
+        : storage(std::move(owner)), values(std::move(values)) {}
     ~EpochTransactionChanges()
     {
+        for (auto *value : changes) values->release(value);
         if (!separateArrays) return;
         changes.clear(); surfaceChanges.clear(); removedPages.clear();
         if ((separateArrays & 1) && changes.data())
-            storage->deallocate(changes.data(), 0, alignof(KisPageVersion));
+            storage->deallocate(changes.data(), 0, alignof(KisPageViewValue *));
         if ((separateArrays & 2) && surfaceChanges.data())
             storage->deallocate(surfaceChanges.data(), 0, alignof(KisSurfaceEpochChange));
         if ((separateArrays & 4) && removedPages.data())
             storage->deallocate(removedPages.data(), 0, alignof(KisPageKey));
     }
     static boost::intrusive_ptr<EpochTransactionChanges> create(KisBackingBudgetController *budget,
-        size_t versions, size_t surfaces, size_t removals)
+        size_t versions, size_t surfaces, size_t removals, std::shared_ptr<KisPageViewValueStorage> values)
     {
-        static_assert(alignof(EpochTransactionChanges) >= alignof(KisPageVersion)
+        static_assert(alignof(EpochTransactionChanges) >= alignof(KisPageViewValue *)
             && alignof(EpochTransactionChanges) >= alignof(KisSurfaceEpochChange)
             && alignof(EpochTransactionChanges) >= alignof(KisPageKey));
         size_t bytes = sizeof(EpochTransactionChanges);
@@ -932,16 +1031,16 @@ struct EpochTransactionChanges {
             else bytes = next;
             return offset;
         };
-        const auto v = append(static_cast<KisPageVersion *>(nullptr), versions, 1);
+        const auto v = append(static_cast<KisPageViewValue * *>(nullptr), versions, 1);
         const auto s = append(static_cast<KisSurfaceEpochChange *>(nullptr), surfaces, 2);
         const auto r = append(static_cast<KisPageKey *>(nullptr), removals, 4);
         boost::intrusive_ptr<KisMutationStorageOwner> owner(kisMutationStorageOwner(budget));
         auto *raw = static_cast<char *>(owner->allocate(bytes, alignof(EpochTransactionChanges)));
         boost::intrusive_ptr<EpochTransactionChanges> value(
-            new (raw) EpochTransactionChanges(std::move(owner)), false);
+            new (raw) EpochTransactionChanges(std::move(owner), std::move(values)), false);
         value->separateArrays = separate;
-        value->changes.bind(separate & 1 ? static_cast<KisPageVersion *>(value->storage->allocate(
-            versions * sizeof(KisPageVersion), alignof(KisPageVersion))) : reinterpret_cast<KisPageVersion *>(raw + v), versions);
+        value->changes.bind(separate & 1 ? static_cast<KisPageViewValue * *>(value->storage->allocate(
+            versions * sizeof(KisPageViewValue *), alignof(KisPageViewValue *))) : reinterpret_cast<KisPageViewValue * *>(raw + v), versions);
         value->surfaceChanges.bind(separate & 2 ? static_cast<KisSurfaceEpochChange *>(value->storage->allocate(
             surfaces * sizeof(KisSurfaceEpochChange), alignof(KisSurfaceEpochChange))) : reinterpret_cast<KisSurfaceEpochChange *>(raw + s), surfaces);
         value->removedPages.bind(separate & 4 ? static_cast<KisPageKey *>(value->storage->allocate(
@@ -950,7 +1049,8 @@ struct EpochTransactionChanges {
     }
     mutable std::atomic<size_t> references{1};
     boost::intrusive_ptr<KisMutationStorageOwner> storage;
-    KisMutationWorkspace::Array<KisPageVersion> changes;
+    std::shared_ptr<KisPageViewValueStorage> values;
+    KisMutationWorkspace::Array<KisPageViewValue *> changes;
     KisMutationWorkspace::Array<KisSurfaceEpochChange> surfaceChanges;
     KisMutationWorkspace::Array<KisPageKey> removedPages;
     // Unique explicit additions relative to this immutable transaction base.
@@ -1217,7 +1317,7 @@ bool KisImageEpochReferenceModel::initialize(const KisImageEpochSnapshot &initia
 }
 
 std::shared_ptr<KisImageEpochReferenceModel::Private>
-KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &initial, QString *error) try
+KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &initial, QString *error, KisPageMetadataCoordinator *metadata) try
 {
     if (!initial.isValid() || initial.epoch.value == std::numeric_limits<quint64>::max()) {
         KisPageStoreDetail::setError(error, QStringLiteral("initial image epoch is invalid or exhausted"));
@@ -1243,7 +1343,12 @@ KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &
     }
     const auto storage = KisMutationStorageAllocator<Private>::retained(budget);
     auto d = std::allocate_shared<Private>(storage, budget, std::move(standalone), storage);
-    d->treeStorage = std::allocate_shared<KisImageEpochTreeStorage>(storage, storage);
+    std::shared_ptr<KisPageViewValueStorage> values;
+    if (metadata) {
+        values = metadata->viewValues();
+        if (!values) throw EpochValueUnavailable{};
+    } else values = std::allocate_shared<EpochOracleValues>(storage, storage);
+    d->treeStorage = std::allocate_shared<KisImageEpochTreeStorage>(storage, storage, std::move(values));
     d->treeStorage->prepare(budget);
 
     KisImageEpochRootSnapshot root;
@@ -1278,6 +1383,10 @@ KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &
 }
 catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("epoch initialization storage admission failed"));
+    return {};
+}
+catch (const EpochValueUnavailable &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("initial final Value identity could not be prepared"));
     return {};
 }
 
@@ -1378,10 +1487,13 @@ bool KisImageEpochReferenceModel::prepareImpl(
     };
     next = EpochTransactionChanges::create(d->budget, capacity(previousChanges, size_t(proofs.size())),
         capacity(previous ? previous->surfaceChanges.size() : 0, size_t(surfaces.size())),
-        capacity(previous ? previous->removedPages.size() : 0, size_t(removals.size())));
+        capacity(previous ? previous->removedPages.size() : 0, size_t(removals.size())), d->treeStorage->values);
     if (previous) {
         next->pageInsertions = previous->pageInsertions;
-        next->changes.append(previous->changes.data(), previous->changes.size());
+        for (auto *value : previous->changes) {
+            KisPageViewValueStorage::retain(value);
+            next->changes.push_back(value);
+        }
         next->surfaceChanges.append(previous->surfaceChanges.data(), previous->surfaceChanges.size());
         next->removedPages.append(previous->removedPages.data(), previous->removedPages.size());
     }
@@ -1391,20 +1503,22 @@ bool KisImageEpochReferenceModel::prepareImpl(
         // appended. Paid capacity was admitted before any element changes.
         const auto end = next->changes.begin() + previousChanges;
         const auto existing = std::lower_bound(next->changes.begin(), end, after.key,
-            [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
-        if (existing != end && existing->key == after.key) {
-            if (after.generation.value <= existing->generation.value) {
+            [](auto *value, const auto &key) { return pageKeyLess(value->version.key, key); });
+        if (existing != end && (*existing)->version.key == after.key) {
+            if (after.generation.value <= (*existing)->version.generation.value) {
                 KisPageStoreDetail::setError(error, QStringLiteral("prepared generation does not advance the transaction chain"));
                 return false;
             }
-            *existing = after;
+            auto *value = epochPageInput(entry).pin(*next->values);
+            next->values->release(*existing);
+            *existing = value;
         } else {
-            next->changes.push_back(after);
+            next->changes.push_back(epochPageInput(entry).pin(*next->values));
         }
     }
 
-    std::sort(next->changes.begin(), next->changes.end(), [](const KisPageVersion &lhs, const KisPageVersion &rhs) {
-        return pageKeyLess(lhs.key, rhs.key);
+    std::sort(next->changes.begin(), next->changes.end(), [](auto *lhs, auto *rhs) {
+        return pageKeyLess(lhs->version.key, rhs->version.key);
     });
     for (const KisSurfaceEpochChange &change : surfaces) {
         const auto existing = std::find_if(next->surfaceChanges.begin(), next->surfaceChanges.end(),
@@ -1424,7 +1538,7 @@ bool KisImageEpochReferenceModel::prepareImpl(
     std::sort(next->removedPages.begin(), next->removedPages.end(), pageKeyLess);
     const auto uniqueEnd = std::unique(next->removedPages.begin(), next->removedPages.end());
     next->removedPages.resize(size_t(uniqueEnd - next->removedPages.begin()));
-    if (!validateEpochDelta(base, next->changes, next->surfaceChanges, next->removedPages,
+    if (!validateEpochDelta(base, EpochVersionRange{next->changes}, next->surfaceChanges, next->removedPages,
                             &next->pageInsertions, error)) return false;
     locker.relock();
     transactionIt = d->transactions.find(transaction.value);
@@ -1442,6 +1556,10 @@ bool KisImageEpochReferenceModel::prepareImpl(
 }
 catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("epoch transaction storage admission failed"));
+    return false;
+}
+catch (const EpochValueUnavailable &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("prepared final Value is unavailable"));
     return false;
 }
 
@@ -1520,10 +1638,12 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
     const bool rebased = !(transaction.baseEpoch == current.epoch());
     if (borrowed || rebased) base = d->protectedRoot(transaction.baseEpoch.value);
     locker.unlock();
-    const auto &changes = [&]() -> decltype(auto) {
-        if constexpr (borrowed) return EpochVersionRange<decltype(publication->proofs)>{publication->proofs};
+    const auto &inputs = [&]() -> decltype(auto) {
+        if constexpr (borrowed) return (publication->proofs);
         else return (prepared->changes);
     }();
+    const auto changes = EpochVersionRange{inputs};
+    const auto treeChanges = EpochInputRange{inputs};
     const auto &surfaceChanges = [&]() -> decltype(auto) {
         if constexpr (borrowed) return (publication->surfaceChanges);
         else return (prepared->surfaceChanges);
@@ -1607,9 +1727,9 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
         }
         const size_t finalCount = currentCount + pageInsertions - removedPages.size();
         if (finalCount) {
-            PageDeltaCursor input(current.m_pageRoot, changes.cbegin(), changes.cend(), removedPages.begin(), removedPages.end());
+            PageDeltaCursor input(current.m_pageRoot, treeChanges.cbegin(), treeChanges.cend(), removedPages.begin(), removedPages.end());
             root.m_pageRoot = buildMergedPageRoot(input, finalCount, d->treeStorage);
-            Q_ASSERT(!input.next());
+            Q_ASSERT(!input.next().identity);
         } else {
             root.m_pageRoot.reset();
         }
@@ -1618,7 +1738,7 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
         // shared path once, including mixed insertion/removal/replacement;
         // untouched subtrees retain their original immutable storage.
         root.m_pageRoot = applyPageRootDelta(root.m_pageRoot,
-            changes.cbegin(), changes.cend(),
+            treeChanges.cbegin(), treeChanges.cend(),
             removedPages.begin(), removedPages.end(), d->treeStorage);
     }
     std::shared_ptr<KisImageEpochSurfaces> surfaces;
@@ -1707,6 +1827,10 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
 }
 catch (const std::bad_alloc &) {
     if (failure) failure->error = QStringLiteral("epoch root preparation storage admission failed");
+    return {};
+}
+catch (const EpochValueUnavailable &) {
+    if (failure) failure->error = QStringLiteral("candidate final Value is unavailable");
     return {};
 }
 
@@ -2253,7 +2377,8 @@ KisPageTransactionSnapshot KisImageEpochReferenceModel::transaction(KisPageTrans
     delta = found->second.delta;
     locker.unlock();
     if (delta) {
-        result.changes = KisPageSnapshotArray<KisPageVersion>(delta->changes.begin(), delta->changes.end());
+        const auto versions = EpochVersionRange{delta->changes};
+        result.changes = KisPageSnapshotArray<KisPageVersion>(versions.begin(), versions.end());
         result.surfaceChanges = KisPageSnapshotArray<KisSurfaceEpochChange>(delta->surfaceChanges.begin(), delta->surfaceChanges.end());
         result.removedPages = KisPageSnapshotArray<KisPageKey>(delta->removedPages.begin(), delta->removedPages.end());
     }
@@ -2306,9 +2431,9 @@ bool KisImageEpochReferenceModel::resolve(const KisPageKey &key,
         if (transaction->delta) {
             const auto &changes = transaction->delta->changes;
             const auto change = std::lower_bound(changes.begin(), changes.end(), key,
-                [](const auto &value, const auto &key) { return pageKeyLess(value.key, key); });
-            if (change != changes.end() && change->key == key) {
-                if (version) *version = *change;
+                [](auto *value, const auto &key) { return pageKeyLess(value->version.key, key); });
+            if (change != changes.end() && (*change)->version.key == key) {
+                if (version) *version = (*change)->version;
                 return true;
             }
         }

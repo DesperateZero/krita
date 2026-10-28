@@ -24,6 +24,8 @@ KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(const KisImageEpochPageRoot *) noex
 KRITAIMAGE_EXPORT void intrusive_ptr_release(const KisImageEpochPageRoot *) noexcept;
 class KisImageEpochSurfaces;
 class KisBackingBudgetController;
+class KisPageMetadataCoordinator;
+struct KisPageViewValue;
 struct KisPagePublicationDelta;
 
 enum class KisPageTransactionState : quint8 {
@@ -71,6 +73,8 @@ public:
                                  QRect *extent) const;
 
 private:
+    // A raw selection keeps memory through this root, never read authority.
+    KisPageViewValue *selectedValue(const KisPageKey &) const;
     // Semantic default selection and explicit tree membership are distinct
     // facts obtained by the same lookup. Public resolve keeps its bool API.
     enum class ResolutionKind { Missing, Default, Explicit };
@@ -109,6 +113,7 @@ private:
     friend class KisImageEpochReferenceModel;
     friend class KisPagePublicationCoordinator;
     friend class KisPageStore;
+    friend class KisPageStoreReferenceTest;
 };
 
 struct KRITAIMAGE_EXPORT KisPageTransactionSnapshot {
@@ -232,7 +237,8 @@ private:
     friend class KisPageHistoryCollector;
 
     class Private;
-    std::shared_ptr<Private> prepareInitialization(const KisImageEpochSnapshot &, QString *);
+    std::shared_ptr<Private> prepareInitialization(const KisImageEpochSnapshot &, QString *,
+        KisPageMetadataCoordinator *values = nullptr);
     bool installInitialization(std::shared_ptr<Private> &&);
     static bool matchesRetainedRootMetadata(const KisImageEpochRootSnapshot &,
                                             const KisRetainedImageEpochSnapshot &);

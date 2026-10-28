@@ -10,6 +10,7 @@
 #include "KisPageMetadataArena_p.h"
 #include "KisPageMetadataIndex_p.h"
 #include "KisPageStateMachine.h"
+#include "KisPageViewValue_p.h"
 #include <boost/container/small_vector.hpp>
 #include <functional>
 
@@ -166,10 +167,8 @@ inline KisVersionSlotId kisInlineReplicaOwner(KisReplicaSlotId replica)
  * primary placement directly; only actual additional replicas own cold slots.
  * The original edit and accepted views share this same generational Value.
  */
-struct KisPageValueCell {
+struct KisPageValueState {
     KisPageReplicaState primaryReplica;
-    KisPageVersion version;
-    KisVersionSlotId slot;
     KisVersionSlotId previousVersion;
     KisVersionSlotId nextVersion;
     KisVersionSlotId previousHistory;
@@ -185,6 +184,7 @@ struct KisPageValueCell {
     // Removing a view may detach the value before its Frame finishes delivery.
     bool frameHeld = false;
     bool indexed = false;
+    bool initialIdentity = false;
     // Layout, readiness and native read retention belong to this value. They
     // have no independent slot identity, allocation, or reservation lifetime.
     struct Native {
@@ -200,6 +200,8 @@ struct KisPageValueCell {
         quint32 nativeReaders = 0;
     } native;
 };
+
+struct KisPageValueCell : KisPageViewValue, KisPageValueState {};
 
 
 // The stable original edit row borrows its one final Value. It never owns a

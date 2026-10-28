@@ -4116,7 +4116,10 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
         d->retirementQueue.prepareTask();
         d->historyCollector.prepareTask(d->backingBudget);
         d->readCoordinator.prepareTask();
-        epoch = d->epochs.prepareInitialization(initialEpoch, &failure);
+        const bool metadataReady = d->metadata.isOperational()
+            ? d->metadata.shardCount() == metadataShardCount
+            : d->metadata.configure(metadataShardCount, &failure);
+        if (metadataReady) epoch = d->epochs.prepareInitialization(initialEpoch, &failure, &d->metadata);
     } catch (const std::bad_alloc &) {
         locker.relock();
         --d->activeProviderCalls;
@@ -4125,9 +4128,7 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     }
     locker.relock();
     --d->activeProviderCalls;
-    if (!epoch || !d->publicationCoordinator.prepareDefaultRevisionsLocked(initialEpoch.surfaces, &failure)
-        || (d->metadata.isOperational() ? d->metadata.shardCount() != metadataShardCount
-                                      : !d->metadata.configure(metadataShardCount, &failure))) {
+    if (!epoch || !d->publicationCoordinator.prepareDefaultRevisionsLocked(initialEpoch.surfaces, &failure)) {
         locker.unlock();
         KisPageStoreDetail::setError(error, failure);
         return false;
