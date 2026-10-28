@@ -95,6 +95,7 @@ private:
     KisPagePhysicalBackingRecord *m_physical = nullptr;
     KisReplicaHandle m_target;
     KisBackingBudgetReservation m_budget;
+    bool m_cpuOptionalFee = false;
     friend class KisPageOwnerLedger;
 };
 

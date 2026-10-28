@@ -296,6 +296,11 @@ public:
     void stopMutationStorageReuse() noexcept;
 
 private:
+    // The ledger's original physical handoff claim owns this exact one-shot
+    // CPU transfer. No independently addressable budget slot is needed. The
+    // caller must settle once, with its still-claimed source class and bytes.
+    bool reserveCpuOptionalHandoff(quint64 bytes, QString *error);
+    void settleCpuOptionalHandoff(KisBackingBudgetClass source, quint64 bytes, bool commit) noexcept;
     struct ReservationSlot {
         static_assert(static_cast<size_t>(KisBackingBudgetClass::Count) == 8);
         // Accepted signed change; only its positive components are reserved.
@@ -468,6 +473,7 @@ private:
     mutable bool m_nonMetadataLiveSsdValid = false;
 
     friend class KisBackingBudgetReservation;
+    friend class KisBackingHandoffReservation;
     friend class KisBackingBudgetWaiter;
     friend class KisPageOwnerLedger;
     friend class KisMutationStorageOwner;

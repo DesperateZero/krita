@@ -1077,6 +1077,7 @@ KisBackingHandoffReservation::KisBackingHandoffReservation(
     : m_owner(std::exchange(other.m_owner, nullptr))
     , m_source(other.m_source), m_physical(other.m_physical)
     , m_target(other.m_target), m_budget(std::move(other.m_budget))
+    , m_cpuOptionalFee(std::exchange(other.m_cpuOptionalFee, false))
 {}
 
 KisBackingHandoffReservation &KisBackingHandoffReservation::operator=(
@@ -1089,6 +1090,7 @@ KisBackingHandoffReservation &KisBackingHandoffReservation::operator=(
     m_physical = other.m_physical;
     m_target = other.m_target;
     m_budget = std::move(other.m_budget);
+    m_cpuOptionalFee = std::exchange(other.m_cpuOptionalFee, false);
     return *this;
 }
 
@@ -1098,6 +1100,9 @@ void KisBackingHandoffReservation::release() noexcept
     auto *owner = std::exchange(m_owner, nullptr);
     QMutexLocker lock(&owner->d->mutex);
     Q_ASSERT(m_physical->classClaim == HandoffClaim && owner->d->activeHandoffs);
+    if (std::exchange(m_cpuOptionalFee, false))
+        owner->d->backingBudget->settleCpuOptionalHandoff(
+            m_source->second.budgetClass, m_physical->byteSize(), false);
     m_physical->classClaim = 0;
     --owner->d->activeHandoffs;
     m_budget.release();
@@ -2065,9 +2070,15 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     }
     const bool noFee = backing->second.budgetClass == KisBackingBudgetClass::ActivePending
         && backing->second.retirementHeadroom.isValid();
+    const bool cpuOptionalFee = backing->second.budgetClass == KisBackingBudgetClass::OptionalCache
+        || backing->second.budgetClass == KisBackingBudgetClass::IdleCapacity;
     KisBackingBudgetReservation reservation;
     if (noFee) {
         if (!d->backingBudget->admitUnchangedBacking(error)) return {};
+    } else if (cpuOptionalFee) {
+        // Physical/domain/sole-owner checks above establish the entire signed
+        // change. Keep its lifetime on this original claim, not another slot.
+        if (!d->backingBudget->reserveCpuOptionalHandoff(physical->byteSize(), error)) return {};
     } else {
         KisBackingBudgetDelta change;
         if (!addPhysicalChargeChange(&change, *physical, physical->chargedClass,
@@ -2088,6 +2099,7 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     result.m_physical = physical;
     result.m_target = target;
     result.m_budget = std::move(reservation);
+    result.m_cpuOptionalFee = cpuOptionalFee;
     physical->classClaim = HandoffClaim;
     ++d->activeHandoffs;
     result.m_owner = this;
@@ -2136,7 +2148,9 @@ bool KisPageOwnerLedger::commitBackingHandoff(
 
     // Detached optional capacity has no visible value to recover. A failed
     // private write returns to the original funded retirement endpoint.
-    if (source->retirementHeadroom.isValid()
+    if (std::exchange(reservation.m_cpuOptionalFee, false)) {
+        d->backingBudget->settleCpuOptionalHandoff(before, physical->byteSize(), true);
+    } else if (source->retirementHeadroom.isValid()
         || before == KisBackingBudgetClass::OptionalCache
         || before == KisBackingBudgetClass::IdleCapacity) {
         if (reservation.m_budget.isValid()) reservation.m_budget.commitPrepared();

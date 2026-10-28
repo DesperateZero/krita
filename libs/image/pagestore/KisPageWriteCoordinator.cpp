@@ -1207,6 +1207,75 @@ KisBackingBudgetReservation KisBackingBudgetController::reserveChange(
     return reserveImpl(prepared, aggregateBytes, durableBytes, error, &change);
 }
 
+bool KisBackingBudgetController::reserveCpuOptionalHandoff(quint64 bytes, QString *error)
+{
+    if (!bytes || bytes > quint64(std::numeric_limits<qint64>::max())) return false;
+    constexpr auto active = size_t(KisBackingBudgetClass::ActivePending);
+    KisBackingBudgetDelta demand;
+    demand.setBucket(active, {qint64(bytes), 0, 0, 0});
+    std::array<quint64, budgetClassCount> aggregate{};
+    aggregate[active] = bytes;
+    QMutexLocker lock(&m_mutex);
+    for (;;) {
+        if (priorWaiterConflictsLocked(demand, aggregate, 0)) {
+            ++m_usage.backpressureCount;
+            KisPageStoreDetail::setError(error, QStringLiteral("backing reservation waits for an earlier admission request"));
+            return false;
+        }
+        if (fitsLocked(demand, aggregate, 0)) break;
+        lock.unlock();
+        const bool reclaimed = reclaimMutationStorage(bool(m_sharedNonPayloadBudget));
+        lock.relock();
+        if (reclaimed) continue;
+        ++m_usage.backpressureCount;
+        KisPageStoreDetail::setError(error, QStringLiteral("backing reservation exceeds its hard budget"));
+        return false;
+    }
+    // The source stays live until commit. Reserve the full positive
+    // destination, including its peak, exactly as the generic signed change.
+    auto &pending = m_usage.buckets[active];
+    pending.reserved.cpuRam += bytes;
+    m_reservedAggregateBytes[active] += bytes;
+    pending.peak.cpuRam = std::max(pending.peak.cpuRam,
+        saturatedAdd(pending.live.cpuRam, pending.reserved.cpuRam));
+    if (m_processStorage) {
+        auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
+            saturatedAdd(saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                      storageBytesLocked()), processStorageSnapshot().total));
+    }
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
+void KisBackingBudgetController::settleCpuOptionalHandoff(
+    KisBackingBudgetClass source, quint64 bytes, bool commit) noexcept
+{
+    Q_ASSERT(source == KisBackingBudgetClass::OptionalCache || source == KisBackingBudgetClass::IdleCapacity);
+    constexpr auto active = size_t(KisBackingBudgetClass::ActivePending);
+    {
+        QMutexLocker lock(&m_mutex);
+        auto &pending = m_usage.buckets[active];
+        Q_ASSERT(pending.reserved.cpuRam >= bytes && m_reservedAggregateBytes[active] >= bytes);
+        pending.reserved.cpuRam -= bytes;
+        m_reservedAggregateBytes[active] -= bytes;
+        if (commit) {
+            auto &original = m_usage.buckets[size_t(source)].live.cpuRam;
+            Q_ASSERT(original >= bytes);
+            original -= bytes;
+            pending.live.cpuRam += bytes;
+        }
+        // Reserved -> live does not increase the admitted peak; releasing the
+        // source preserves cached fit facts. Cancellation changes no live fee.
+        notifyWaitersLocked();
+    }
+    // Optional CPU capacity was already charged to the parent's one child.
+    // Its destination is payload: only successful acceptance refunds it.
+    if (commit && m_sharedNonPayloadBudget)
+        m_sharedNonPayloadBudget->releaseSharedNonPayloadLive(
+            m_sharedNonPayloadUsage, KisPageAccessDomain::CpuRam, bytes);
+}
+
 quint64 KisBackingBudgetController::idleCapacityAllowance() const
 {
     QMutexLocker lock(&m_mutex);

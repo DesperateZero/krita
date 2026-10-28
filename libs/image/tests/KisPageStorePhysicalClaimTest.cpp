@@ -1018,23 +1018,28 @@ void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
 
 void KisPageStorePhysicalClaimTest::backingHandoffAccounting_data()
 {
-    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("pending");
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("sourceClass");
+    QTest::addColumn<bool>("shared");
     QTest::addColumn<bool>("cancelWrite");
-    for (int bpp : {1, 4, 8, 16}) for (bool pending : {false, true})
-        for (bool cancel : {false, true})
-            QTest::newRow(qPrintable(QString("bpp%1-pending%2-cancel%3").arg(bpp).arg(pending).arg(cancel)))
-                << bpp << pending << cancel;
+    for (int bpp : {1, 4, 8, 16}) for (auto source : {KisBackingBudgetClass::Current,
+        KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::OptionalCache, KisBackingBudgetClass::IdleCapacity})
+        for (bool shared : {false, true}) for (bool cancel : {false, true})
+            QTest::newRow(qPrintable(QString("bpp%1-source%2-shared%3-cancel%4").arg(bpp).arg(int(source)).arg(shared).arg(cancel)))
+                << bpp << int(source) << shared << cancel;
 }
 
 void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
 {
-    QFETCH(int, bpp); QFETCH(bool, pending); QFETCH(bool, cancelWrite);
+    QFETCH(int, bpp); QFETCH(int, sourceClass); QFETCH(bool, shared); QFETCH(bool, cancelWrite);
     Fixture f; QVERIFY(f.init(bpp));
+    auto parent = std::make_shared<KisBackingBudgetController>();
     KisBackingBudgetController budget;
+    if (shared) QVERIFY(budget.configureSharedNonPayloadBudget(parent, &f.error));
     KisPageOwnerLedger ledger;
     QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider));
-    const auto initialClass = pending ? KisBackingBudgetClass::ActivePending : KisBackingBudgetClass::Current;
+    const auto initialClass = KisBackingBudgetClass(sourceClass);
+    const bool optional = initialClass == KisBackingBudgetClass::OptionalCache || initialClass == KisBackingBudgetClass::IdleCapacity;
     const quint64 bytes = f.replica.layout.byteSize;
     KisBackingBudgetDelta initial; initial.bucket(size_t(initialClass)).cpuRam = bytes;
     auto backing = budget.reserve(initial, &f.error);
@@ -1057,16 +1062,23 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
         QVERIFY(!moved.isValid()); QVERIFY(assigned.isValid());
     }
     for (const auto &bucket : budget.usage().buckets) QCOMPARE(bucket.reserved.cpuRam, 0u);
+    const auto parentBefore = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     auto prepared = ledger.prepareBackingHandoff(f.replica, target, &f.error);
     QVERIFY2(prepared.isValid(), qPrintable(f.error));
     QCOMPARE(budget.usage().buckets[size_t(initialClass)].live.cpuRam, bytes);
-    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, bytes);
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, optional ? quint64(0) : bytes);
+    if (optional) {
+        QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::ActivePending)].reserved.cpuRam, bytes);
+        QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam, parentBefore);
+    }
     QVERIFY(physical.tryClaim());
     auto writer = physical.commit(); QVERIFY(writer.isValid());
     QVERIFY(!original->backingNode.second.nativeBinding); // Cancelled preparations did not install it.
     QVERIFY(ledger.commitBackingHandoff(std::move(prepared), writer.binding()));
     QCOMPARE(original->backingNode.second.nativeBinding, f.binding);
     QVERIFY(!prepared.isValid());
+    QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
+        parentBefore - (shared && optional ? bytes : 0));
     QVERIFY(!ledger.commitBackingHandoff(std::move(prepared)));
     QCOMPARE(ledger.backingClass(f.replica), KisBackingBudgetClass::Count);
     QCOMPARE(ledger.backingClass(target), KisBackingBudgetClass::ActivePending);
