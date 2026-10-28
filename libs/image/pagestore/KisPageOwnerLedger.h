@@ -206,6 +206,9 @@ public:
     qsizetype publicationBlockingOperationCount() const;
     qsizetype sealedProofCount() const;
     KisPreparedPageProof exportPublication(const KisPagePublicationIdentity &) const;
+    bool matchesPublicationIdentity(const KisPagePublicationIdentity &, const KisPreparedPageProof &) const;
+    bool ownsPublicationIdentity(const KisPagePublicationIdentity &) const;
+    KisReplicaHandle publicationAuthority(const KisPagePublicationIdentity &) const;
     bool ownsPreparedPageProof(const KisPreparedPageProof &proof) const;
     // Store configuration binds exactly one original metadata owner. The CPU
     // producer consumes its prepaid version slot; exported proofs keep their

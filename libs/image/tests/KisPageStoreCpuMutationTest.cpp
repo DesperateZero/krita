@@ -9631,6 +9631,30 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         return true;
     };
     QVERIFY2(prepare(0) && accept(0), qPrintable(f.error));
+    QCOMPARE(native[0].value->native.exportedStamp, quint64(0));
+    const auto identity = KisPagePublicationChange::Replacement(&native[0]).proofValue();
+    QVERIFY(f.owner.ownsPublicationIdentity(identity));
+    QCOMPARE(f.owner.publicationAuthority(identity), targets[0]);
+    QCOMPARE(native[0].value->native.exportedStamp, quint64(0));
+    if (!historyClass && !protectedVersion) {
+        KisPreparedPageProof independent;
+        QVERIFY(f.owner.sealPreparedPage(f.metadata, targets[0].version, tx.id,
+            descriptor, f.ready, &independent, &f.error));
+        QVERIFY(f.owner.ownsPreparedPageProof(independent));
+        // Even a valid independently signed proof cannot substitute for the
+        // original native export. This check must not create that export.
+        QVERIFY(!f.owner.matchesPublicationIdentity(identity, independent));
+        QCOMPARE(native[0].value->native.exportedStamp, quint64(0));
+        const auto exported = f.owner.exportPublication(identity);
+        QVERIFY(exported.isValid());
+        QVERIFY(!(exported == independent));
+        QVERIFY(f.owner.matchesPublicationIdentity(identity, exported));
+        QVERIFY(!f.owner.matchesPublicationIdentity(identity, independent));
+        auto forged = exported; ++forged.authority.layout.rowStride;
+        QVERIFY(!f.owner.matchesPublicationIdentity(identity, forged));
+        QCOMPARE(f.owner.exportPublication(identity), exported);
+        QVERIFY(f.owner.revokePreparedPage(independent));
+    }
     if (historyClass) QVERIFY(f.owner.reclassifyBacking(targets[0], KisBackingBudgetClass::RetainedHistory, &f.error));
     KisPageTransition capture;
     capture.kind = KisPageTransitionKind::RetainCapturedVersion;
@@ -9671,7 +9695,9 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
     // also requests history when the last capture leaves; collection consumes
     // those events rather than rescanning every registered page.
     if (protectedVersion) f.history.requestKeyLocked(capture.version.key);
+    QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
     QVERIFY2(publication.abortLocked(tx, gate, cleanup), qPrintable(f.error));
+    QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
     f.history.collectUnreachableLocked();
     gate.unlock(); f.retirement.process(std::numeric_limits<qsizetype>::max());
     for (const auto &target : targets) QCOMPARE(f.owner.backingClass(target), KisBackingBudgetClass::Count);
@@ -9726,8 +9752,8 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         QVERIFY(f.metadata.acceptPrivateTarget(KisPageWriteInput(acquire), acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
         QVERIFY(validateOriginalWrite(f.owner, native, tx.id, &f.error));
-        // Accept through the original native result so its inline proof and
-        // physical authority, rather than an exported generic proof, qualify.
+        // Accept through the original sealed Value and physical authority.
+        // No public proof is needed for the internal selection.
         KisPagePublicationChange birth;
         birth.replacement = KisPagePublicationChange::Replacement(&native);
         auto first = f.metadata.prepareAcceptance(tx, {&birth, 1}, &f.error);

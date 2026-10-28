@@ -18,9 +18,9 @@ struct KisPagePrivateWrite;
 struct KisPageRetirementRecord;
 
 // Original publication locator, admitted only after validating a real input.
-// The issuer's monotonically unique stamp names its validation fact; the
-// generational slot is a checked location. Authority/layout/completion stay
-// with their original owners, never duplicated in each transaction selection.
+// Native selections name their original final Value by generational slot.
+// Only a genuine external input carries its issuer's validation stamp.
+// Authority/layout/completion remain with their original owners.
 // This is NOT an external capability; full input authenticity is checked
 // before conversion and again at every public proof-taking boundary.
 struct KisPagePublicationIdentity {
@@ -35,11 +35,11 @@ struct KisPagePublicationIdentity {
     KisPagePublicationIdentity(const KisPageVersion &v, KisPageTransactionId t, quint64 s, bool n,
                             KisVersionSlotId slot = {})
         : version(v), transaction(t), stamp(s), metadataSlot(slot), native(n) {}
-    bool isValid() const { return version.isValid() && transaction.isValid() && stamp; }
-    bool matches(const KisPreparedPageProof &proof) const
-    { return version == proof.authority.version && transaction == proof.transaction && stamp == proof.providerValidationStamp; }
+    bool isValid() const
+    { return version.isValid() && transaction.isValid() && (native ? metadataSlot.isValid() && stamp == 0 : stamp != 0); }
     bool operator==(const KisPagePublicationIdentity &other) const
-    { return version == other.version && transaction == other.transaction && stamp == other.stamp && native == other.native; }
+    { return version == other.version && transaction == other.transaction && native == other.native
+        && (native ? metadataSlot == other.metadataSlot : stamp == other.stamp); }
 };
 
 struct KisPagePublicationChange {
@@ -76,18 +76,16 @@ struct KisPagePublicationChange {
         { return borrowed ? native->version().key : originalProof ? originalProof->version.key : payload.owned.key; }
         const KisPageVersion &version() const { return borrowed ? native->version() : originalProof ? originalProof->version : payload.owned.proof.version; }
         KisPageTransactionId transaction() const
-        { return borrowed ? native->proof().transaction : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
+        { return borrowed ? native->sealedBy() : originalProof ? originalProof->transaction : payload.owned.proof.transaction; }
         bool hasProof() const
-        { return borrowed ? native->hasValue() && native->proof().isValid() && native->version().isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
-        bool nativeProof() const { return borrowed || (originalProof ? originalProof->native : payload.owned.proof.native); }
+        { return borrowed ? native->isSealed() && native->version().isValid() : originalProof ? originalProof->isValid() : payload.owned.proof.isValid(); }
+        bool isNativeValue() const { return borrowed || (originalProof ? originalProof->native : payload.owned.proof.native); }
         KisVersionSlotId metadataSlot() const
-        { return borrowed ? native->acceptedSlot() : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
-        quint64 validationStamp() const
-        { return borrowed ? native->proof().stamp : originalProof ? originalProof->stamp : payload.owned.proof.stamp; }
+        { return borrowed ? native->valueSlot() : originalProof ? originalProof->metadataSlot : payload.owned.proof.metadataSlot; }
         KisPagePublicationIdentity proofValue() const
         {
-            return borrowed ? KisPagePublicationIdentity{native->version(), native->proof().transaction,
-                native->proof().stamp, true, native->acceptedSlot()} : originalProof ? *originalProof : payload.owned.proof;
+            return borrowed ? KisPagePublicationIdentity{native->version(), native->sealedBy(),
+                0, true, native->valueSlot()} : originalProof ? *originalProof : payload.owned.proof;
         }
     } replacement;
     KisPagePublicationChange() = default;
@@ -123,14 +121,12 @@ struct KisPagePublicationChange {
         void *prepared = nullptr;
         KisVersionSlotId replacementSlot;
         quint16 shardIndex = 0; // configure() permits at most 4096 shards.
-        // Only the first adjunct in a shard group requests native growth.
     } metadataAcceptance;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }
     const KisPageVersion &mutationVersion() const
     { return superseded.isValid() ? superseded.version : replacement.version(); }
-    quint64 expectedStamp() const { return superseded.native ? superseded.stamp : 0; }
     const KisReplicaHandle *expectedAuthority() const
     { return superseded.native ? supersededAuthority : nullptr; }
 };

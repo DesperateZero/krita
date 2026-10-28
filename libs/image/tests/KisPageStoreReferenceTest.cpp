@@ -7070,15 +7070,19 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             const auto *originalValue = row->value;
             shard = row->location.shard;
             QVERIFY(metadata->acceptPrivateTarget(KisPageWriteInput(input), input.source, input.target, row.get(), 64));
+            const KisPagePublicationIdentity locator{row->version(), tx.id, 0, true, row->valueSlot()};
+            QVERIFY(!metadata->ownsCpuValue(locator, 1)); // Memory/writer ownership is not a seal.
             QVERIFY(metadata->completePrivateWrite(row.get()));
             if (cancel) {
                 QVERIFY(metadata->cancelPrivateResult(row.get()));
                 QVERIFY(!row->acceptedSlot().isValid());
             } else {
-                QVERIFY(metadata->acceptPrivateValidation(*row, tx.id, quint64(1 + i), 1));
+                QVERIFY(metadata->sealPrivateValue(*row, tx.id, 1));
+                QVERIFY(metadata->ownsCpuValue(locator, 1));
+                QCOMPARE(row->value->native.exportedStamp, quint64(0));
                 KisPagePublicationChange birth{KisPagePublicationChange::Replacement(row.get())};
                 if (i) {
-                    birth.superseded = {input.baseVersion, tx.id, 1, true, rows[0]->acceptedSlot()};
+                    birth.superseded = {input.baseVersion, tx.id, 0, true, rows[0]->acceptedSlot()};
                     birth.supersededAuthority = &input.source;
                     birth.detachesSuperseded = true;
                 }
@@ -7087,6 +7091,7 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
                 QVERIFY(metadata->installAcceptance(std::move(candidate), tx));
                 metadata->finishAcceptance({&birth, 1});
                 QVERIFY(row->acceptedSlot().isValid());
+                QCOMPARE(row->value->native.exportedStamp, quint64(0));
             }
             QCOMPARE(row->value, originalValue);
             QCOMPARE(row->target(), input.target);
@@ -7097,6 +7102,10 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             QVERIFY(metadata->versionSnapshot(rows[0]->version(), &old));
             QVERIFY(!old.version.isValid());
             QVERIFY(!rows[0]->acceptedSlot().isValid());
+            const KisPagePublicationIdentity detached{rows[0]->version(), tx.id, 0, true, rows[0]->valueSlot()};
+            QVERIFY(!metadata->ownsCpuValue(detached, 1));
+            QVERIFY(!metadata->cpuValueAuthority(detached, 1).isValid());
+            QVERIFY(!metadata->cpuProof(detached, 1, 1).isValid());
         }
         // An old locator must not regain read/write authority merely because
         // its Frame still keeps the detached arena cell in memory.
@@ -7152,7 +7161,29 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         KisPreparedPageProof proof;
         proof.authority = result.target(); proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-        QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
+        QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1));
+        // Internal publication is valid before any public capability exists.
+        // Guessing the future stamp cannot turn an unexported Value into one.
+        const KisPagePublicationIdentity internal{result.version(), result.sealedBy(), 0, true, result.valueSlot()};
+        QVERIFY(internal.isValid());
+        QCOMPARE(result.value->native.exportedStamp, quint64(0));
+        QVERIFY(!metadata.ownsCpuProof(proof, 1));
+        QVERIFY(!metadata.revokeCpuProof(proof, 1));
+        QVERIFY(!metadata.cpuProof(KisPagePublicationIdentity(proof), 1, 1).isValid());
+        QVERIFY(!metadata.cpuProof(internal, 1).isValid());
+        for (int field = 0; field < 4; ++field) {
+            auto wrong = internal;
+            if (field == 0) ++wrong.metadataSlot.generation;
+            if (field == 1) ++wrong.metadataSlot.index;
+            if (field == 2) ++wrong.transaction.value;
+            if (field == 3) ++wrong.version.generation.value;
+            QVERIFY(!metadata.cpuProof(wrong, 1, 1).isValid());
+            QVERIFY(!metadata.revokeCpuProof(wrong, 1));
+        }
+        QVERIFY(!metadata.cpuProof(internal, 2, 1).isValid());
+        QCOMPARE(result.value->native.exportedStamp, quint64(0));
+        QCOMPARE(metadata.cpuProof(internal, 1, 1), proof);
+        QCOMPARE(metadata.cpuProof(internal, 1, 2), proof); // Stable actual export.
         const KisPagePublicationIdentity identity(proof);
         QCOMPARE(metadata.cpuProof(identity, 1), proof);
         QVERIFY(metadata.ownsCpuProof(proof, 1));
@@ -7173,7 +7204,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
                 // the original record; it does not authenticate forged input.
                 QCOMPARE(metadata.cpuProof(KisPagePublicationIdentity(forged), 1), proof);
             }
-            QCOMPARE(metadata.cpuProofCount(1), qsizetype(1));
+            QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(1));
         }
         const auto pending = registry.allocatePending(source);
         auto forged = proof; forged.producerCompletion = pending;
@@ -7202,12 +7233,12 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         // Completion capability must name the original registered result;
         // neither a copied result nor the ordinary seal may complete it.
-        QVERIFY(!metadata.acceptPrivateValidation(foreign, proof.transaction, proof.providerValidationStamp, 1, true));
+        QVERIFY(!metadata.sealPrivateValue(foreign, proof.transaction, 1, true));
         QVERIFY(!result.completed);
-        QVERIFY(!metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
-        QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1, true));
+        QVERIFY(!metadata.sealPrivateValue(result, proof.transaction, 1));
+        QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1, true));
         QVERIFY(result.completed);
-        QVERIFY(!metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1, true));
+        QVERIFY(!metadata.sealPrivateValue(result, proof.transaction, 1, true));
     }
     if (result.reserved) QVERIFY(metadata.cancelPrivateResult(&result));
 }
@@ -8425,7 +8456,7 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
     KisPreparedPageProof proof;
     proof.transaction = transaction; proof.authority = write.target;
     proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-    QVERIFY(metadata.acceptPrivateValidation(result, proof.transaction, proof.providerValidationStamp, 1));
+    QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1));
     auto commit = write; commit.kind = KisPageTransitionKind::CommitTransaction; commit.imageEpoch = {2};
     const KisPageTransaction tx{transaction, {1}};
     auto candidate = metadata.preparePublication(tx, {2}, QVector<KisPageTransition>{commit});
@@ -10976,7 +11007,7 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     const auto completion = registry.allocatePending(registry.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
     QVERIFY(coordinator->bindCpuProofIssuer(1, completion));
-    QVERIFY(coordinator->acceptPrivateValidation(native, tx.id, 1, 1));
+    QVERIFY(coordinator->sealPrivateValue(native, tx.id, 1));
     KisPagePublicationChange birth;
     birth.replacement = KisPagePublicationChange::Replacement(&native);
     auto first = coordinator->prepareAcceptance(tx, {&birth, 1});

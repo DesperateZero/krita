@@ -163,7 +163,7 @@ struct MetadataArenas {
         , overflow(OverflowBudget, storage) {}
 
     VersionArena versions;
-    qsizetype cpuProofs = 0;
+    qsizetype sealedCpuValues = 0;
     quint64 cpuReadBindings = 0;
     ReplicaArena replicas;
     OverflowArena overflow;
@@ -728,7 +728,7 @@ struct ShardRecordStore {
         return exactVersions.findExact(identity, slot);
     }
 
-    bool isPreparedBy(const KisPageVersion &identity, KisPageTransactionId transaction, quint64 stamp = 0,
+    bool isPreparedBy(const KisPageVersion &identity, KisPageTransactionId transaction, bool nativeValue = false,
                       const KisReplicaHandle *authority = nullptr, KisVersionSlotId slot = {}) const
     {
         if (!slot.isValid() && !findVersion(identity, &slot))
@@ -736,8 +736,7 @@ struct ShardRecordStore {
         const KisPageValueCell *record = version(slot);
         return record && record->version == identity
             && record->publication == KisPagePublicationState::Prepared && record->preparedBy == transaction
-            && (!stamp || (record->native.proof.stamp == stamp
-                && record->native.proof.transaction == transaction))
+            && (!nativeValue || record->native.sealedBy == transaction)
             && (!authority || projectReplica(record->authorityReplica) == *authority);
     }
 
@@ -1558,7 +1557,7 @@ struct ShardRecordStore {
         const auto cpuSlot = record->authorityReplica;
         record->publication = publication;
         record->preparedBy = publication == KisPagePublicationState::Prepared
-            ? native.proof().transaction : KisPageTransactionId{};
+            ? native.sealedBy() : KisPageTransactionId{};
         record->primaryReplica.validity = KisReplicaValidity::Valid;
         const bool exact = exactVersions.insertReserved(&native.location.exact, record->version, slot);
         const bool physical = physicalSlots.insertReserved(&native.location.physical,
@@ -1578,7 +1577,7 @@ struct ShardRecordStore {
         const auto *facts = &record->native;
         const auto *cpu = replica(record->authorityReplica);
         const bool accepted = record->publication == KisPagePublicationState::Published
-            || (record->publication == KisPagePublicationState::Prepared && facts->proof.stamp);
+            || (record->publication == KisPagePublicationState::Prepared && facts->sealedBy.isValid());
         return accepted && !record->capturedReadViews.isValid() && !facts->nativeReaders
             && record->replicaCount == 1 && cpu && cpu->domain == KisPageAccessDomain::CpuRam
             && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
@@ -1657,7 +1656,7 @@ struct ShardRecordStore {
         if (releasedDescriptor) releasedDescriptor->swap(facts->descriptor);
         if (facts->nativeBinding) --arenas->cpuReadBindings;
         if (releasedBinding) releasedBinding->swap(facts->nativeBinding);
-        if (facts->proof.stamp) { --arenas->cpuProofs; facts->proof = {}; }
+        if (facts->sealedBy.isValid()) { --arenas->sealedCpuValues; facts->sealedBy = {}; facts->exportedStamp = 0; }
         record->indexed = false;
         const bool recordErased = record->frameHeld || arenas->versions.erase(slot);
         Q_ASSERT(indexErased && recordErased);
@@ -1824,14 +1823,14 @@ struct MetadataShard : KisPageMetadataShardMetrics {
 
     bool validDetachment(const MetadataPage &page, const KisPageVersion &version,
         const KisPagePrivateWrite *native, KisPageTransactionId transaction,
-        quint64 stamp, const KisReplicaHandle *authority, KisVersionSlotId slot = {}) const
+        bool nativeValue, const KisReplicaHandle *authority, KisVersionSlotId slot = {}) const
     {
         const auto &activity = page.activity;
         if (native ? activity.nativeWrite != native || !native->reserved || !native->completed
-                        || !native->proof().isValid() || !(native->proof().transaction == transaction)
+                        || !native->isSealed() || !(native->sealedBy() == transaction)
                    : activity.hasWriter()) return false;
         return (native && version == native->version())
-            || records.isPreparedBy(version, transaction, stamp, authority, slot);
+            || records.isPreparedBy(version, transaction, nativeValue, authority, slot);
     }
 
     void installDetachment(MetadataPage &page, const KisPageVersion &version, KisPagePrivateWrite *native,
@@ -1879,7 +1878,7 @@ struct MetadataShard : KisPageMetadataShardMetrics {
         const auto *native = input.replacement.native;
         const auto *published = records.version(page.publishedVersion);
         if (!published || (native ? page.activity.nativeWrite != native || !native->reserved
-                || !native->completed || !native->proof().isValid() || !(native->proof().transaction == transaction)
+                || !native->completed || !native->isSealed() || !(native->sealedBy() == transaction)
                 : bool(page.activity.nativeWrite))) return false;
         if (input.supersededAuthority && input.supersededAuthority->isValid()
             && !(records.projectReplica(published->authorityReplica) == *input.supersededAuthority)) return false;
@@ -1900,11 +1899,7 @@ struct MetadataShard : KisPageMetadataShardMetrics {
             const auto *original = static_cast<const MetadataAcceptanceReferences *>(input.canonicalRecord);
             if (!(records.projectReplica(target->authorityReplica) == original->targetAuthority)) return false;
         }
-        if (input.replacement.nativeProof() && input.replacement.validationStamp()) {
-            const auto *authority = &target->native;
-            if (!authority || authority->proof.stamp != input.replacement.validationStamp()
-                || !(authority->proof.transaction == transaction)) return false;
-        }
+        if (input.replacement.isNativeValue() && !(target->native.sealedBy == transaction)) return false;
         return kisPageValidateCommit(page.publishedEpoch, KisPageGeneration{}, facts, target, published, visit).isEmpty();
     }
     void installPublished(MetadataPage &page, KisPagePublicationChange &input,
@@ -2991,8 +2986,8 @@ try {
             || (input.superseded.version.key.isValid() && !input.superseded.isValid())) return {};
         if (published ? input.replacement.removal : !input.hasMutation()) continue;
         auto *native = input.replacement.native;
-        if (native && (!native->reserved || !native->completed || !native->proof().isValid()
-            || !(native->proof().transaction == transaction.id))) return {};
+        if (native && (!native->reserved || !native->completed || !native->isSealed()
+            || !(native->sealedBy() == transaction.id))) return {};
         ++mutations;
         auto &work = input.metadataAcceptance;
         work.input = &input;
@@ -3007,7 +3002,7 @@ try {
             releases += !native;
         } else if (native) {
             input.detachesSuperseded = input.detachesSuperseded
-                && input.expectedStamp() && input.expectedAuthority()
+                && input.superseded.native && input.expectedAuthority()
                 && !(input.mutationVersion() == native->version());
         } else {
             releases += input.detachesSuperseded;
@@ -3121,7 +3116,7 @@ try {
                     if (!page || !shard->canMutate(input.mutationVersion().key, *page)
                         || (published ? !shard->validPublication(*page, input, work, transaction.id, minimumEpoch)
                             : !shard->validDetachment(*page, input.mutationVersion(), nullptr,
-                                transaction.id, input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot))) return {};
+                                transaction.id, input.superseded.native, input.expectedAuthority(), input.superseded.metadataSlot))) return {};
                     if (!published) input.detachesSuperseded = input.detachesSuperseded
                         && shard->records.canDetachPrepared(input.mutationVersion());
                     if (published || input.detachesSuperseded) {
@@ -3259,7 +3254,7 @@ bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepare
             if (!page || !shard->canMutate(version.key, *page)) break;
             if (published ? !shard->validPublication(*page, input, work, transaction.id, epoch)
                 : !shard->validDetachment(*page, version, native, transaction.id,
-                    input.expectedStamp(), input.expectedAuthority(), input.superseded.metadataSlot)) break;
+                    input.superseded.native, input.expectedAuthority(), input.superseded.metadataSlot)) break;
             const auto *current = published ? shard->records.version(page->publishedVersion) : nullptr;
             const auto &sourceVersion = published ? current->version : version;
             const bool available = !input.detachesSuperseded
@@ -4795,7 +4790,7 @@ bool KisPageMetadataCoordinator::replacePrivateWrite(KisPagePrivateWrite *result
     auto *activity = &page->activity;
     KisPageVersion physicalOwner;
     if (!activity || activity->nativeWrite != result || !result->reserved || !result->completed
-        || activity->publicationClaim || result->proof().isValid()
+        || activity->publicationClaim || result->isSealed()
         || target.physicalSlotIdentity() == result->target().physicalSlotIdentity()
         || shard->records.physicalOwner(target.physicalSlotIdentity(), &physicalOwner)) return false;
     result->value->primaryReplica.setHandle(target);
@@ -4812,7 +4807,11 @@ bool KisPageMetadataCoordinator::cancelPrivateResult(KisPagePrivateWrite *native
     QMutexLocker lock(&shard->mutex);
     auto *page = static_cast<MetadataPage *>(native->location.page);
     if (page->activity.nativeWrite != native || page->activity.publicationClaim) return false;
-    if (native->proof().isValid()) { --shard->arenas.cpuProofs; native->proof() = {}; }
+    if (native->isSealed()) {
+        --shard->arenas.sealedCpuValues;
+        native->value->native.sealedBy = {};
+        native->value->native.exportedStamp = 0;
+    }
     page->activity.nativeWrite = nullptr;
     page->activity.writerTransaction = {};
     if (page->activity.isEmpty()) shard->activities.erase(native->version().key);
@@ -4822,57 +4821,67 @@ bool KisPageMetadataCoordinator::cancelPrivateResult(KisPagePrivateWrite *native
     return true;
 }
 
-bool KisPageMetadataCoordinator::acceptPrivateValidation(KisPagePrivateWrite &result,
-    KisPageTransactionId transaction, quint64 stamp, quint64 issuer, bool complete)
+bool KisPageMetadataCoordinator::sealPrivateValue(KisPagePrivateWrite &result,
+    KisPageTransactionId transaction, quint64 issuer, bool complete)
 {
     auto *d = m_core.load(std::memory_order_acquire);
-    if (!d || !issuer || d->cpuProofIssuer.load() != issuer || !stamp || !transaction.isValid()
+    if (!d || !issuer || d->cpuProofIssuer.load() != issuer || !transaction.isValid()
         || !result.reserved || !result.location.shard || !result.location.page) return false;
-    // The result's existing reservation retains this exact page and shard.
-    // Only the noncopyable original row can complete the registered edit.
+    // Provider validation has completed. Only the noncopyable original row
+    // may seal this registered edit; no public stamp is issued on this path.
     auto *shard = Private::registeredShard(d, result);
     if (!shard) return false;
     QMutexLocker lock(&shard->mutex);
     const auto &activity = static_cast<MetadataPage *>(result.location.page)->activity;
     if (activity.nativeWrite != &result || (!result.completed && !complete)
-        || result.proof().isValid() || !(activity.writerTransaction == transaction)) return false;
+        || result.isSealed() || !(activity.writerTransaction == transaction)) return false;
     result.completed = true;
-    result.proof() = {transaction, stamp};
-    ++shard->arenas.cpuProofs;
+    result.value->native.sealedBy = transaction;
+    ++shard->arenas.sealedCpuValues;
     return true;
 }
 
 namespace {
-// All CPU proof consumers use the same original fact and one shard window.
-// This is a synchronous visit, not a retained location or validation cache.
+// Native consumers use the retained Value slot; exported capabilities use
+// the exact index and their actual issued stamp. Both resolve the same cell,
+// and an unindexed Frame hold alone never grants permission to a detached cell.
 template<class Core, class Visit>
-bool visitCpuProof(Core *d, const KisPagePublicationIdentity &proof, quint64 issuer, Visit visit)
+bool visitCpuValue(Core *d, const KisPagePublicationIdentity &identity, quint64 issuer, Visit visit)
 {
-    auto *shard = Core::shardFor(d, proof.version.key);
-    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !proof.isValid()) return false;
+    auto *shard = Core::shardFor(d, identity.version.key);
+    if (!shard || !issuer || d->cpuProofIssuer.load() != issuer || !identity.isValid()) return false;
     QMutexLocker lock(&shard->mutex);
-    KisVersionSlotId slot = proof.metadataSlot;
-    if (!slot.isValid() && !shard->records.findVersion(proof.version, &slot)) {
-        const auto *activity = shard->activity(proof.version.key);
-        auto *native = activity ? activity->nativeWrite : nullptr;
-        if (!native || !native->reserved || !native->completed
-            || !(native->version() == proof.version)
-            || native->proof().stamp != proof.stamp
-            || !(native->proof().transaction == proof.transaction)) return false;
-        return visit(native->target(), native->descriptor(), native->binding(), true,
-            native->proof().stamp, native->proof().transaction, shard->arenas.cpuProofs);
+    KisPageValueCell *record = nullptr;
+    if (identity.native) {
+        record = shard->arenas.versions.get(identity.metadataSlot);
+        if (!record || (!record->indexed && !record->frameHeld)) return false;
+        // The original row alone established sealedBy; cancel, revoke and
+        // detachment clear it. That permission, checked below, is distinct
+        // from a Frame's memory hold and needs no second page/writer lookup.
+    } else {
+        KisVersionSlotId slot = identity.metadataSlot;
+        if (!slot.isValid()) shard->records.findVersion(identity.version, &slot);
+        record = slot.isValid() ? shard->records.version(slot) : nullptr;
+        if (!record) {
+            const auto *activity = shard->activity(identity.version.key);
+            auto *original = activity ? activity->nativeWrite : nullptr;
+            if (!original || !original->reserved || !original->completed
+                || !(original->version() == identity.version)
+                || (slot.isValid() && !(original->valueSlot() == slot))) return false;
+            record = original->value;
+        }
     }
-    auto *record = shard->records.version(slot);
-    if (!record || !(record->version == proof.version)) return false;
-    const auto *authority = shard->records.replica(record->authorityReplica);
-    auto *facts = &record->native;
-    if (!facts || facts->proof.stamp != proof.stamp || !(facts->proof.transaction == proof.transaction)
-        || !authority) return false;
+    auto &native = record->native;
+    if (!(record->version == identity.version) || !(native.sealedBy == identity.transaction)
+        || (!identity.native && (!native.exportedStamp || native.exportedStamp != identity.stamp))) return false;
+    const bool prepared = !record->indexed || (record->publication == KisPagePublicationState::Prepared
+        && record->preparedBy == identity.transaction);
+    const auto *authority = !record->indexed ? &record->primaryReplica
+        : shard->records.replica(record->authorityReplica);
+    if (!authority) return false;
     const std::shared_ptr<KisCpuResidentBinding> unbound;
-    const auto &binding = facts->nativeReplica == record->authorityReplica ? facts->nativeBinding : unbound;
-    return visit(replicaHandle(*authority, record->version), facts->descriptor, binding,
-        record->publication == KisPagePublicationState::Prepared && record->preparedBy == proof.transaction,
-        facts->proof.stamp, facts->proof.transaction, shard->arenas.cpuProofs);
+    const auto &binding = !record->indexed || native.nativeReplica == record->authorityReplica ? native.nativeBinding : unbound;
+    return visit(*record, *authority, binding, prepared, shard->arenas.sealedCpuValues);
 }
 }
 
@@ -4883,25 +4892,46 @@ bool KisPageMetadataCoordinator::cpuPreparedAuthority(const KisPagePublicationId
 {
     if (!authority || !descriptor || !binding) return false;
     *authority = {}; descriptor->reset(); binding->reset();
-    return visitCpuProof(m_core.load(std::memory_order_acquire), identity, issuer,
-        [&](const auto &original, const auto &layout, const auto &originalBinding,
-            bool prepared, auto &, auto &, auto &) {
-            if (!prepared || !layout) return false;
-            *authority = original; *descriptor = layout; *binding = originalBinding;
+    return visitCpuValue(m_core.load(std::memory_order_acquire), identity, issuer,
+        [&](const auto &value, const auto &replica, const auto &originalBinding, bool prepared, auto &) {
+            if (!prepared || !value.native.descriptor) return false;
+            *authority = replicaHandle(replica, value.version);
+            *descriptor = value.native.descriptor; *binding = originalBinding;
             return true;
         });
 }
 
-KisPreparedPageProof KisPageMetadataCoordinator::cpuProof(const KisPagePublicationIdentity &proof,
-    quint64 issuer) const
+bool KisPageMetadataCoordinator::ownsCpuValue(const KisPagePublicationIdentity &identity, quint64 issuer) const
+{
+    return identity.native && visitCpuValue(m_core.load(std::memory_order_acquire), identity, issuer,
+        [](const auto &, const auto &, const auto &, bool, auto &) { return true; });
+}
+
+KisReplicaHandle KisPageMetadataCoordinator::cpuValueAuthority(const KisPagePublicationIdentity &identity, quint64 issuer) const
+{
+    KisReplicaHandle result;
+    if (identity.native) visitCpuValue(m_core.load(std::memory_order_acquire), identity, issuer,
+        [&](const auto &value, const auto &authority, const auto &, bool, auto &) {
+            result = replicaHandle(authority, value.version);
+            return true;
+        });
+    return result;
+}
+
+KisPreparedPageProof KisPageMetadataCoordinator::cpuProof(const KisPagePublicationIdentity &identity,
+    quint64 issuer, quint64 exportStamp) const
 {
     auto *d = m_core.load(std::memory_order_acquire);
     KisPreparedPageProof result;
-    visitCpuProof(d, proof, issuer, [&](const auto &authority, const auto &, const auto &,
-                                      bool, auto &, auto &, auto &) {
-        result.authority = authority;
-        result.transaction = proof.transaction;
-        result.providerValidationStamp = proof.stamp;
+    visitCpuValue(d, identity, issuer, [&](auto &value, const auto &authority, const auto &, bool, auto &) {
+        auto &native = value.native;
+        if (!native.exportedStamp) {
+            if (!identity.native || !exportStamp) return false;
+            native.exportedStamp = exportStamp;
+        }
+        result.authority = replicaHandle(authority, value.version);
+        result.transaction = native.sealedBy;
+        result.providerValidationStamp = native.exportedStamp;
         result.producerCompletion = d->cpuCompletion;
         return true;
     });
@@ -4912,9 +4942,9 @@ bool KisPageMetadataCoordinator::ownsCpuProof(const KisPreparedPageProof &proof,
 {
     auto *d = m_core.load(std::memory_order_acquire);
     if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
-    return visitCpuProof(d, KisPagePublicationIdentity(proof), issuer,
-        [&](const auto &authority, const auto &, const auto &, bool, auto &, auto &, auto &) {
-            return authority == proof.authority;
+    return visitCpuValue(d, KisPagePublicationIdentity(proof), issuer,
+        [&](const auto &value, const auto &authority, const auto &, bool, auto &) {
+            return replicaHandle(authority, value.version) == proof.authority;
         });
 }
 
@@ -4922,31 +4952,33 @@ bool KisPageMetadataCoordinator::revokeCpuProof(const KisPreparedPageProof &proo
 {
     auto *d = m_core.load(std::memory_order_acquire);
     if (!d || !proof.isValid() || !(d->cpuCompletion == proof.producerCompletion)) return false;
-    return visitCpuProof(d, KisPagePublicationIdentity(proof), issuer,
-        [&](const auto &authority, const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
-            if (!(authority == proof.authority)) return false;
-            stamp = 0; transaction = {}; --count;
+    return visitCpuValue(d, KisPagePublicationIdentity(proof), issuer,
+        [&](auto &value, const auto &authority, const auto &, bool, auto &count) {
+            if (!(replicaHandle(authority, value.version) == proof.authority)) return false;
+            auto &native = value.native;
+            native.sealedBy = {}; native.exportedStamp = 0; --count;
             return true;
         });
 }
 
-bool KisPageMetadataCoordinator::revokeCpuProof(const KisPagePublicationIdentity &proof, quint64 issuer)
+bool KisPageMetadataCoordinator::revokeCpuProof(const KisPagePublicationIdentity &identity, quint64 issuer)
 {
-    return visitCpuProof(m_core.load(std::memory_order_acquire), proof, issuer,
-        [](const auto &, const auto &, const auto &, bool, auto &stamp, auto &transaction, auto &count) {
-            stamp = 0; transaction = {}; --count;
+    return visitCpuValue(m_core.load(std::memory_order_acquire), identity, issuer,
+        [](auto &value, const auto &, const auto &, bool, auto &count) {
+            auto &native = value.native;
+            native.sealedBy = {}; native.exportedStamp = 0; --count;
             return true;
         });
 }
 
-qsizetype KisPageMetadataCoordinator::cpuProofCount(quint64 issuer) const
+qsizetype KisPageMetadataCoordinator::sealedCpuValueCount(quint64 issuer) const
 {
     const auto *d = m_core.load(std::memory_order_acquire);
     if (!d || !issuer || d->cpuProofIssuer.load() != issuer) return 0;
     qsizetype result = 0;
     for (const auto &shard : d->shards) {
         QMutexLocker lock(&shard->mutex);
-        result += shard->arenas.cpuProofs;
+        result += shard->arenas.sealedCpuValues;
     }
     return result;
 }

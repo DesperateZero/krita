@@ -2998,7 +2998,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         else if (!entry->hasPrivateResult()) owner->writeCoordinator.recordPrivateCompletion(*entry);
     };
     // Alias preparation consumes completed private sources. With no sources,
-    // completion and proof production share the single output traversal.
+    // completion and Value sealing share the single output traversal.
     if (sealedSources) {
         for (auto slot = d->writes.firstEntry(); success && slot.isValid(); slot = d->writes.nextEntry(slot)) {
             auto *entry = d->writes.at(slot);
@@ -3041,10 +3041,10 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
             if (!page) continue;
             const bool completeAtSeal = !sealedSources;
             // The batch validator consumed these original results. Capacity
-            // retry retains their proof; revocation clears it in place.
+            // retry retains their seal; revocation clears it in place.
             if (completeAtSeal && !entry->hasPrivateResult())
                 owner->writeCoordinator.recordPrivateCompletion(*entry);
-            // Proof is still private; no writer may survive its publication.
+            // The Value is sealed; no writer may survive its publication.
             page->writable.reset();
         }
     } catch (const std::bad_alloc &) {

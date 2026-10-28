@@ -150,11 +150,12 @@ struct KisPageValueCell {
     // have no independent slot identity, allocation, or reservation lifetime.
     struct Native {
         std::shared_ptr<const KisPageAllocationDescriptor> descriptor;
-        struct Proof {
-            KisPageTransactionId transaction;
-            quint64 stamp = 0;
-            bool isValid() const { return transaction.isValid() && stamp; }
-        } proof;
+        // Sealing names the original producer, not an exported capability.
+        // Internal consumers identify this Value by its checked arena slot.
+        KisPageTransactionId sealedBy;
+        // Only an actual public export assigns this stamp. Revocation clears
+        // both the producer permission and its optional external capability.
+        quint64 exportedStamp = 0;
         std::shared_ptr<KisCpuResidentBinding> nativeBinding;
         KisReplicaSlotId nativeReplica;
         quint32 nativeReaders = 0;
@@ -179,13 +180,14 @@ struct KisPagePrivateWrite {
     const auto &descriptor() const { Q_ASSERT(value); return value->native.descriptor; }
     auto &binding() { Q_ASSERT(value); return value->native.nativeBinding; }
     const auto &binding() const { Q_ASSERT(value); return value->native.nativeBinding; }
-    auto &proof() { Q_ASSERT(value); return value->native.proof; }
-    const auto &proof() const { Q_ASSERT(value); return value->native.proof; }
+    bool isSealed() const { return value && value->native.sealedBy.isValid(); }
+    KisPageTransactionId sealedBy() const { return value ? value->native.sealedBy : KisPageTransactionId{}; }
+    KisVersionSlotId valueSlot() const { return value ? value->slot : KisVersionSlotId{}; }
     KisVersionSlotId acceptedSlot() const { return value && value->indexed ? value->slot : KisVersionSlotId{}; }
     bool matchesProof(const KisPreparedPageProof &candidate, const KisCompletionTicket &completion) const
     {
-        return value && proof().isValid() && proof().transaction == candidate.transaction
-            && proof().stamp == candidate.providerValidationStamp
+        return isSealed() && sealedBy() == candidate.transaction
+            && value->native.exportedStamp && value->native.exportedStamp == candidate.providerValidationStamp
             && target() == candidate.authority && completion == candidate.producerCompletion;
     }
     struct Location {

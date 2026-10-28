@@ -2544,7 +2544,7 @@ qsizetype KisPageOwnerLedger::sealedProofCount() const
     auto *metadata = d->cpuMetadata;
     const auto issuer = d->cpuProofIssuer;
     locker.unlock();
-    return exported + (metadata ? metadata->cpuProofCount(issuer) : 0);
+    return exported + (metadata ? metadata->sealedCpuValueCount(issuer) : 0);
 }
 
 bool KisPageOwnerLedger::bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion)
@@ -2573,8 +2573,50 @@ KisPreparedPageProof KisPageOwnerLedger::exportPublication(const KisPagePublicat
     }
     auto *metadata = d->cpuMetadata;
     const auto issuer = d->cpuProofIssuer;
+    const quint64 exportStamp = identity.native && d->nextValidationStamp
+        && d->nextValidationStamp < std::numeric_limits<quint64>::max() ? d->nextValidationStamp++ : 0;
     lock.unlock();
-    return metadata ? metadata->cpuProof(identity, issuer) : KisPreparedPageProof{};
+    return metadata ? metadata->cpuProof(identity, issuer, exportStamp) : KisPreparedPageProof{};
+}
+
+bool KisPageOwnerLedger::ownsPublicationIdentity(const KisPagePublicationIdentity &identity) const
+{
+    if (!identity.native) return exportPublication(identity).isValid();
+    QMutexLocker lock(&d->mutex);
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    lock.unlock();
+    return metadata && metadata->ownsCpuValue(identity, issuer);
+}
+
+bool KisPageOwnerLedger::matchesPublicationIdentity(const KisPagePublicationIdentity &identity,
+    const KisPreparedPageProof &proof) const
+{
+    if (!identity.isValid() || !proof.isValid() || !(identity.version == proof.authority.version)
+        || !(identity.transaction == proof.transaction)
+        || (!identity.native && identity.stamp != proof.providerValidationStamp)) return false;
+    QMutexLocker lock(&d->mutex);
+    if (!identity.native) {
+        const auto found = d->sealedProofs.find(identity.stamp, ProofLess{});
+        if (found != d->sealedProofs.end()) return found->proof == proof;
+    }
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    lock.unlock();
+    // Matching an external snapshot must not mint a capability. A different
+    // valid proof for the same version/transaction is not this selection's
+    // original export, and an unexported Value has nothing public to match.
+    return metadata && metadata->cpuProof(identity, issuer) == proof;
+}
+
+KisReplicaHandle KisPageOwnerLedger::publicationAuthority(const KisPagePublicationIdentity &identity) const
+{
+    if (!identity.native) return exportPublication(identity).authority;
+    QMutexLocker lock(&d->mutex);
+    auto *metadata = d->cpuMetadata;
+    const auto issuer = d->cpuProofIssuer;
+    lock.unlock();
+    return metadata ? metadata->cpuValueAuthority(identity, issuer) : KisReplicaHandle{};
 }
 
 bool KisPageOwnerLedger::validatePublicationIdentity(const KisPageMetadataCoordinator &metadata,
@@ -2633,21 +2675,20 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
     KisPageTransactionId transaction, QString *error, bool complete)
 {
     if (!transaction.isValid() || (rows.size() && !rows)) return false;
-    size_t pending = 0;
     const KisPagePrivateWrite *firstPending = nullptr;
     for (const auto &row : rows) {
         if (row.replacement.removal) continue;
         const auto *result = row.replacement.native;
         if (!result || !result->reserved || (!result->completed && !complete)
             || !result->location.page || !result->location.shard) return false;
-        if (result->proof().isValid()) {
-            if (!(result->proof().transaction == transaction)) return false;
-        } else { ++pending; if (!firstPending) firstPending = result; }
+        if (result->isSealed()) {
+            if (!(result->sealedBy() == transaction)) return false;
+        } else if (!firstPending) firstPending = result;
     }
-    if (!pending) { KisPageStoreDetail::setError(error, {}); return true; }
+    if (!firstPending) { KisPageStoreDetail::setError(error, {}); return true; }
 
     KisPageMetadataCoordinator *metadata;
-    quint64 issuer, stamp;
+    quint64 issuer;
     std::shared_ptr<KisPageReplicaProvider> authorityProvider;
     ProviderKey selected = providerKey(firstPending->target().provider, firstPending->target().providerEpoch);
     {
@@ -2656,17 +2697,13 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
         issuer = d->cpuProofIssuer;
         const auto registered = d->registeredProvider(selected);
         if (registered) authorityProvider = registered->provider;
-        if (!metadata || !d->nextValidationStamp
-            || pending > std::numeric_limits<quint64>::max() - d->nextValidationStamp) return false;
-        stamp = d->nextValidationStamp;
-        d->nextValidationStamp += pending;
+        if (!metadata) return false;
     }
-    // This is an original frozen input, not an allocated proof/authority
-    // projection. Issuance is batch-local; unused stamps on refusal remain
-    // consumed, just as they did for a refused individual validation.
+    // Real provider validation seals the original Value. No synchronous
+    // output needs a validation-stamp range or a fabricated public proof.
     for (auto &row : rows) {
         auto *result = row.replacement.native;
-        if (row.replacement.removal || result->proof().isValid()) continue;
+        if (row.replacement.removal || result->isSealed()) continue;
         const auto key = providerKey(result->target().provider, result->target().providerEpoch);
         if (!authorityProvider || key != selected) {
             authorityProvider = provider(result->target().provider, result->target().providerEpoch);
@@ -2677,7 +2714,7 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
             KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
             return false;
         }
-        if (!metadata->acceptPrivateValidation(*result, transaction, stamp++, issuer, complete)) {
+        if (!metadata->sealPrivateValue(*result, transaction, issuer, complete)) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU original result changed during validation"));
             return false;
         }

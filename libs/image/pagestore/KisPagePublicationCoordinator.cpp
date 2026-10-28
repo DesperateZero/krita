@@ -544,7 +544,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
             || (state.removals.count(change.replacement.key()) != 0) != change.wasRemoved
             || (current.isValid() && !current.native
                 && !owner.m_owner.ownsPreparedPageProof(owner.projectProof(current)))
-            || (change.replacement.hasProof() && !change.replacement.nativeProof()
+            || (change.replacement.hasProof() && !change.replacement.isNativeValue()
                 && !owner.m_owner.ownsPreparedPageProof(owner.projectProof(change.replacement.proofValue())))) {
             KisPageStoreDetail::setError(
                 error, QStringLiteral("overlay update source changed"));
@@ -1102,7 +1102,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisP
             owned.removals.size() != size_t(preparedPages.removedPages.size())) return {};
         for (const auto &proof : preparedPages.proofs) {
             const auto original = owned.proofs.find(proof.authority.version.key);
-            if (original == owned.proofs.cend() || (!original->second.proof.matches(proof) || !m_owner.ownsPreparedPageProof(proof))) return {};
+            if (original == owned.proofs.cend()
+                || !m_owner.matchesPublicationIdentity(original->second.proof, proof)) return {};
         }
         for (const auto &change : preparedPages.surfaceChanges)
             if (std::find(owned.surfaceChanges.cbegin(), owned.surfaceChanges.cend(), change) == owned.surfaceChanges.cend()) return {};
@@ -1673,7 +1674,7 @@ bool KisPagePublicationCoordinator::abortLocked(
         // Consume the final selection: abort must not shift the remaining
         // transaction directory after each independently accepted transition.
         const auto proof = remainingProofs->crbegin()->second.proof;
-        if (!projectProof(proof).isValid())
+        if (!m_owner.ownsPublicationIdentity(proof))
             qFatal("Owned abort source proof changed before metadata transition");
         KisPageTransition transition;
         transition.kind = KisPageTransitionKind::AbortTransaction;
@@ -1926,7 +1927,7 @@ KisPagePublicationCoordinator::preparePagePublicationInputLocked(
             }
             auto *native = value.removal ? nullptr : m_metadata.nativeWriteForProof(value.proof);
             auto identity = KisPagePublicationIdentity(value.proof);
-            identity.native = bool(native);
+            if (native) identity = {native->version(), native->sealedBy(), 0, true, native->valueSlot()};
             changes.push_back({{value.key, identity, value.removal, native}, {}, false, false, false, {}});
         }
         std::sort(changes.begin(), changes.end(), [](const auto &a, const auto &b) {
@@ -2017,7 +2018,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
                     // borrowed addresses remain stable through whole-D retry.
                     if (candidate->ownedAuthorities.empty())
                         candidate->ownedAuthorities.reserve(candidate->changes.size());
-                    candidate->ownedAuthorities.push_back(projectProof(superseded).authority);
+                    candidate->ownedAuthorities.push_back(m_owner.publicationAuthority(superseded));
                     entry.supersededAuthority = &candidate->ownedAuthorities.back();
                 }
             }

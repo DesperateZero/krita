@@ -300,11 +300,13 @@ private:
     // Original-result acceptance of an unlocked provider validation. The
     // retained location, registered writer and issuer are checked together;
     // no exported capability is produced or decoded by this internal handoff.
-    bool acceptPrivateValidation(KisPagePrivateWrite &, KisPageTransactionId,
-                                 quint64 stamp, quint64 issuer, bool complete = false);
+    bool sealPrivateValue(KisPagePrivateWrite &, KisPageTransactionId,
+                          quint64 issuer, bool complete = false);
     bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
         KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
         std::shared_ptr<KisCpuResidentBinding> *binding) const;
+    bool ownsCpuValue(const KisPagePublicationIdentity &, quint64 issuer) const;
+    KisReplicaHandle cpuValueAuthority(const KisPagePublicationIdentity &, quint64 issuer) const;
     // Allocate the final value before any provider may produce pixels. The
     // original edit retains its exact slot and both index admissions until
     // acceptance or cancellation; publication never replaces an old value.
@@ -325,11 +327,12 @@ private:
     bool bindCpuProofIssuer(quint64 issuer, const KisCompletionTicket &completion);
     // Public projection only; internal provider validation uses the retained
     // authority and layout without materializing a completion capability.
-    KisPreparedPageProof cpuProof(const KisPagePublicationIdentity &, quint64 issuer) const;
+    KisPreparedPageProof cpuProof(const KisPagePublicationIdentity &, quint64 issuer,
+                                 quint64 exportStamp = 0) const;
     bool ownsCpuProof(const KisPreparedPageProof &, quint64 issuer) const;
     bool revokeCpuProof(const KisPreparedPageProof &, quint64 issuer);
     bool revokeCpuProof(const KisPagePublicationIdentity &, quint64 issuer);
-    qsizetype cpuProofCount(quint64 issuer) const;
+    qsizetype sealedCpuValueCount(quint64 issuer) const;
     enum class MutationBaseSelection { Selected, Absent, Rejected };
     // The publication owner has already selected the exact sealed/root base.
     // Fill its fresh actual write input once under this shard cut, without exporting
