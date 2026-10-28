@@ -398,11 +398,10 @@
           "KisPageStoreSessionStats.activeHistoryScans"
         ],
         "operation": [
-          "KisPageStoreReadScopeStatistics.historyReachabilityRefreshes"
+          "KisPageStoreReadScopeStatistics.historyVersionSlices"
         ],
         "page": [
-          "KisPageStoreReadScopeStatistics.historicalGcPagesVisited",
-          "KisPageStoreReadScopeStatistics.historyReachabilityRootsVisited"
+          "KisPageStoreReadScopeStatistics.historicalGcPagesVisited"
         ],
         "peak": [
           "KisPageStoreReadScopeStatistics.maximumHistoryPagesPerPass",
@@ -412,7 +411,7 @@
           "KisPageStoreReadScopeStatistics.capturedReadViewReleases"
         ]
       },
-      "evidence": "History scanning publishes operation/page/live/peak/fallback diagnostics without delegating root reachability or candidate selection to the physical retirement service.",
+      "evidence": "Bounded historical-version slices test live root edges on the original Value; original key cursors publish operation/page/live/peak/fallback diagnostics independently of physical retirement.",
       "id": "history-collection",
       "manifest-entries": [
         "BR1-PS-STORE-HISTORY-011"

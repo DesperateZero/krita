@@ -386,7 +386,6 @@ public:
         result.pendingHistoricalPages = historySnapshot.pendingPages;
         result.deferredHistoricalPages = historySnapshot.deferredPages;
         result.activeHistoryScans = historySnapshot.activeScans;
-        result.cachedHistoryReachableVersions = historySnapshot.cachedReachableVersions;
         result.readRequestsCreated = readSnapshot.requestsCreated;
         result.writeRequestsCreated = writeRequestsCreated;
         const KisPageDefaultStorageSnapshot defaultSnapshot = defaultStorage.snapshotLocked();
@@ -3922,10 +3921,7 @@ KisPageStoreReadScopeStatistics KisPageStore::readScopeStatistics() const
             history.foregroundPagesVisited,
             history.maximumPagesPerPass,
             history.maximumVersionsPerPass,
-            history.reachabilityRefreshes,
-            history.reachabilityRootsVisited,
-            history.maximumRootsPerPass,
-            history.reachabilityRestarts};
+            history.versionSlices};
 }
 
 KisPageStoreRetirementProgress KisPageStore::processRetirements(qsizetype replicaBudget)

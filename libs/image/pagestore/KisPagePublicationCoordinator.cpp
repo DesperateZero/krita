@@ -1378,6 +1378,13 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         auto backingReservation = prepareFees(detachesBacking);
         if (!backingReservation.isValid() && detachesBacking)
             backingReservation = prepareFees(false);
+        // A reconstructible default cache may retire after the generic
+        // candidate copied its authority. Classify the original revision
+        // failure before considering a genuine detachment budget fallback.
+        if (!backingReservation.isValid() && publication.genericInputsChanged()) {
+            ++m_statistics.metadataRepreparations;
+            continue;
+        }
         if (!backingReservation.isValid() && detachesBacking) {
             // Keeping the old physical charge until retirement has a real
             // Current peak. If refused, preserve the original history plan;
@@ -1616,8 +1623,13 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         };
         auto reader = publicationBackingReader(publication, currentRoot, std::move(nextTarget));
         auto backingReservation = preparedCommit.prepareFees(m_owner, reader);
-        if (!backingReservation.isValid())
+        if (!backingReservation.isValid()) {
+            if (publication.genericInputsChanged()) {
+                ++m_statistics.restoreMetadataRepreparations;
+                continue;
+            }
             return {};
+        }
 
         preparedCommit.owner = this;
         preparedCommit.backingReservation = std::move(backingReservation);

@@ -348,18 +348,11 @@ struct KRITAIMAGE_EXPORT KisPageStoreReadScopeStatistics {
     quint64 historicalGcPagesVisited = 0;
     quint64 foregroundHistoricalGcPagesVisited = 0;
     quint64 maximumHistoryPagesPerPass = 0;
-    // Worker enumeration, not total root-lookup/provider/GC time. One worker
-    // pass selects <=16 keys and <=32 historical versions per key. Replica
-    // lists and root-tree resolution have separate costs. Protected-root
-    // enumeration across the entire pass is additionally capped at 32.
+    // One pass selects <=16 keys and <=32 historical versions per key.
+    // Replica retirement has separate work; root reachability is a local
+    // Value fact, not a protected-root scan or retained cache.
     quint64 maximumHistoryVersionsPerPass = 0;
-    quint64 historyReachabilityRefreshes = 0;
-    // Sum of protected-root visits across candidate-group refreshes; a root
-    // may be visited again for another group or after invalidation.
-    // Not retired registry size, tokens, tree-node visits, or time/total GC work.
-    quint64 historyReachabilityRootsVisited = 0;
-    quint64 maximumHistoryRootsPerPass = 0;
-    quint64 historyReachabilityRestarts = 0;
+    quint64 historyVersionSlices = 0;
 };
 
 /**

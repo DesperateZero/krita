@@ -10,7 +10,6 @@
 #include <QDeadlineTimer>
 
 #include <algorithm>
-#include <tuple>
 #include <limits>
 #include <utility>
 
@@ -57,8 +56,6 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     , m_nextIdleDeadline(nextIdleDeadline)
     , m_collectIdleCapacity(collectIdleCapacity)
 {
-    static_assert(PageAdmissionBudget <= KisImageEpochReferenceModel::ReachabilityScanLimit);
-    static_assert(RootVisitBudget <= KisImageEpochReferenceModel::ReachabilityRootBudget);
     static_assert(VersionScanBudget <= 32);
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_releaseOwnerLifetime);
@@ -93,7 +90,7 @@ void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key, bool histo
             // existing work retains its original scan/repeat responsibility.
             if (!historyAlreadyObserved && !m_metadata.hasHistory(key)) return;
             auto *work = m_workAllocator.allocate(1);
-            // Work construction only binds its inline values and cannot fail.
+            // The original key/cursor record needs no additional allocation.
             new (work) Work(key);
             entry = m_work.insert_before(entry, *work);
         }
@@ -109,108 +106,46 @@ void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key, bool histo
 
 void KisPageHistoryCollector::queueWorkLocked(Work &work) noexcept
 {
-    // Protection can disappear between slices, when the root cookie is gone
-    // but the cursor has already passed versions that must now be revisited.
-    if (work.scanning) work.repeat = true;
+    // Protection can disappear after this version cursor passed an old value.
+    if (work.after.isValid()) work.repeat = true;
     if (!work.is_linked()) m_ready.push_back(work);
 }
 
 void KisPageHistoryCollector::disposeWork(Work *work) noexcept
 {
-    Q_ASSERT(!work->is_linked() && !work->indexHook.is_linked() && !work->reachability);
+    Q_ASSERT(!work->is_linked() && !work->indexHook.is_linked());
     std::destroy_at(work);
     m_workAllocator.deallocate(work, 1);
 }
 
-void KisPageHistoryCollector::endScanLocked(Work &work, bool finished)
-{
-    if (work.reachability) {
-        m_epochs.cancelReachabilityScan(work.reachability);
-        work.reachability = 0;
-    }
-    work.candidates.clear();
-    if (finished) {
-        work.reachableMask = 0;
-        if (work.scanning) --m_activeScans;
-        work.scanning = false;
-    }
-}
-
-void KisPageHistoryCollector::Work::markReachable(const KisPageVersion &version) noexcept
-{
-    // Metadata's original history chain orders one key by generation/revision.
-    // Resolve a root into that set without scanning every candidate again.
-    const auto found = std::lower_bound(candidates.cbegin(), candidates.cend(), version,
-        [](const KisPageVersion &a, const KisPageVersion &b) {
-            return std::tie(a.generation.value, a.defaultPixelRevision)
-                < std::tie(b.generation.value, b.defaultPixelRevision);
-        });
-    if (found != candidates.cend() && *found == version)
-        reachableMask |= quint32(1) << size_t(found - candidates.cbegin());
-}
-
 KisPageHistoryCollector::SliceResult KisPageHistoryCollector::collectSliceLocked(
-    Work &work, quint64 &visitedVersions, qsizetype &rootBudget)
+    Work &work, quint64 &visitedVersions)
 {
-    if (!work.reachability) {
-        if (!rootBudget || (!work.scanning && m_activeScans == PageAdmissionBudget)) return SliceResult::Ready;
-        if (!work.scanning) {
-            work.scanning = true;
-            ++m_activeScans;
-        }
-        const auto slice = m_metadata.historySlice(work.key, work.after, work.candidates, VersionScanBudget);
-        visitedVersions += quint64(work.candidates.size());
-        if (work.candidates.empty()) {
-            endScanLocked(work, true);
-            m_ready.erase(m_ready.iterator_to(work));
-            if (!slice.total) {
-                m_work.erase_and_dispose(m_work.iterator_to(work), [this](Work *value) { disposeWork(value); });
-                return SliceResult::Removed;
-            }
-            if (work.repeat) {
-                work.repeat = false;
-                work.after = {};
-                m_ready.push_back(work);
-            }
-            return SliceResult::Ready;
-        }
-        work.reachableMask = 0;
-        work.sliceAfter = slice.after;
-        work.historicalCount = slice.total;
-        ++m_reachabilityRefreshes;
+    // A slice now completes in one Store admission window. Only its original
+    // per-key cursor persists; candidates and reachability are never cached.
+    alignas(KisPageVersion) std::array<std::byte, sizeof(KisPageVersion) * VersionScanBudget> storage;
+    KisMutationWorkspace::Array<KisPageVersion> candidates;
+    candidates.bind(reinterpret_cast<KisPageVersion *>(storage.data()), VersionScanBudget);
+    const auto slice = m_metadata.historySlice(work.key, work.after, candidates, VersionScanBudget);
+    visitedVersions += quint64(candidates.size());
+    qsizetype remaining = slice.total;
+    if (!candidates.empty()) {
+        ++m_versionSlices;
+        ++m_pagesVisited;
+        if (!kisOnPageStoreReclamationThread()) ++m_foregroundPagesVisited;
+        quint32 removed = 0;
+        if (!m_metadata.discardHistory(work.key, candidates.data(), qsizetype(candidates.size()), &removed))
+            return SliceResult::Blocked;
+        remaining -= qsizetype(qPopulationCount(removed));
     }
-    ++m_pagesVisited;
-    if (!kisOnPageStoreReclamationThread()) ++m_foregroundPagesVisited;
-    const auto roots = m_epochs.visitReachableVersions(work.key, work.reachability, rootBudget, &work,
-        +[](void *context, const KisPageVersion &version) {
-            static_cast<Work *>(context)->markReachable(version);
-        });
-    rootBudget -= roots.rootsVisited;
-    m_reachabilityRootsVisited += quint64(roots.rootsVisited);
-    if (roots.capacityUnavailable) return SliceResult::Blocked;
-    if (!roots.valid) {
-        endScanLocked(work);
-        work.reachableMask = 0;
-        work.after = {};
-        ++m_reachabilityRestarts;
-        return SliceResult::Ready;
-    }
-    if (!roots.complete) return SliceResult::Ready;
-
-    quint32 removed = 0;
-    if (!m_metadata.discardHistory(work.key, work.candidates.data(), qsizetype(work.candidates.size()),
-                                  work.reachableMask, &removed)) return SliceResult::Blocked;
-    work.historicalCount -= qsizetype(qPopulationCount(removed));
-    work.after = work.sliceAfter;
-    endScanLocked(work, !work.after.isValid());
+    work.after = slice.after;
     if (!work.after.isValid()) {
-        if (work.repeat) {
+        if (remaining && work.repeat) {
             work.repeat = false;
-            work.after = {};
-        }
-        else {
+        } else {
+            work.repeat = false;
             m_ready.erase(m_ready.iterator_to(work));
-            if (!work.historicalCount) {
+            if (!remaining) {
                 m_work.erase_and_dispose(m_work.iterator_to(work), [this](Work *value) { disposeWork(value); });
                 return SliceResult::Removed;
             }
@@ -234,25 +169,20 @@ bool KisPageHistoryCollector::collectPassLocked()
         if (count == PageAdmissionBudget) break;
     }
     quint64 versions = 0;
-    qsizetype rootsRemaining = RootVisitBudget;
     bool blocked = m_rescanRequested;
     for (qsizetype i = 0; i < count; ++i) {
         auto &work = *keys[size_t(i)];
-        const qsizetype allowance = rootsRemaining / (count - i);
-        qsizetype remaining = allowance;
         SliceResult result = SliceResult::Ready;
         try {
-            result = collectSliceLocked(work, versions, remaining);
+            result = collectSliceLocked(work, versions);
             blocked = (result == SliceResult::Blocked) || blocked;
         }
         catch (const std::bad_alloc &) { blocked = true; }
-        rootsRemaining -= allowance - remaining;
         // The Store gate never left this pass. Only this slice can dispose its
         // original Work; otherwise its pointer remains the round-robin link.
         if (result != SliceResult::Removed && work.is_linked())
             m_ready.splice(m_ready.end(), m_ready, m_ready.iterator_to(work));
     }
-    m_maximumRootsPerPass = std::max(m_maximumRootsPerPass, quint64(RootVisitBudget - rootsRemaining));
     m_maximumVersionsPerPass = std::max(m_maximumVersionsPerPass, versions);
     m_maximumPagesPerPass = std::max(m_maximumPagesPerPass, quint64(count));
     return blocked;
@@ -482,7 +412,6 @@ void KisPageHistoryCollector::clearLocked()
     }
     m_pressureDeadline = 0;
     m_ready.clear();
-    for (auto &work : m_work) endScanLocked(work, true);
     m_work.clear_and_dispose([this](Work *work) { disposeWork(work); });
     m_rescanRequested = false;
 }
@@ -492,7 +421,6 @@ KisPageHistoryCollectorSnapshot KisPageHistoryCollector::snapshotLocked() const
     KisPageHistoryCollectorSnapshot result;
     result.pendingPages = qsizetype(m_ready.size());
     result.deferredPages = qsizetype(m_work.size()) - result.pendingPages;
-    result.activeScans = m_activeScans;
     if (m_wakeContext) {
         QMutexLocker notificationLock(&m_wakeContext->mutex);
         result.retryWakeups = m_wakeContext->retryWakeups;
@@ -500,15 +428,12 @@ KisPageHistoryCollectorSnapshot KisPageHistoryCollector::snapshotLocked() const
         result.jobScheduled = m_wakeContext->jobScheduled;
     }
     for (const auto &work : m_work) {
-        result.cachedReachableVersions += quint64(qPopulationCount(work.reachableMask));
+        result.activeScans += work.after.isValid();
     }
     result.pagesVisited = m_pagesVisited;
     result.foregroundPagesVisited = m_foregroundPagesVisited;
     result.maximumPagesPerPass = m_maximumPagesPerPass;
     result.maximumVersionsPerPass = m_maximumVersionsPerPass;
-    result.reachabilityRefreshes = m_reachabilityRefreshes;
-    result.reachabilityRootsVisited = m_reachabilityRootsVisited;
-    result.maximumRootsPerPass = m_maximumRootsPerPass;
-    result.reachabilityRestarts = m_reachabilityRestarts;
+    result.versionSlices = m_versionSlices;
     return result;
 }

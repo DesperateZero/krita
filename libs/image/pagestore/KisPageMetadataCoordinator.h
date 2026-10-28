@@ -380,14 +380,15 @@ private:
     // Scheduling fact only. Reachability/protection and retirement admission
     // remain dynamic and are checked when the collector processes the key.
     bool hasHistory(const KisPageKey &key) const;
-    // Select eligible, unreachable records and prepare their exact effects and
+    // Original Value root edges, explicit reads and last-use decide eligibility.
+    // Implicit default content is reproducible from the admitted surface; its
+    // optional materialization is not a root-owned Value. Prepare exact effects and
     // Debt before removal. Replica effects require a configured Debt owner and
     // their original registered retirement records. Refusal changes no record;
     // success commits Debt and transfers effects to the configured receiver
     // infallibly under the caller's owner gate, without invoking a provider.
     bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
-                        qsizetype count, quint32 reachableMask,
-                        quint32 *removedMask);
+                        qsizetype count, quint32 *removedMask);
     // Callback runs under the shard gate and must not reenter metadata. The
     // history-only census supplies the collector's already observed fact.
     void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &), bool historicalOnly = false) const;
@@ -462,6 +463,11 @@ private:
         KisReplicaHandle backingAuthority(const KisPageVersion &version, bool *detached = nullptr,
                                            KisPageRetirementRecord ***idleResult = nullptr) const;
         bool hasDetachedBacking() const;
+        // Cold refusal classification: generic snapshot inputs can change in
+        // their unlocked preparation window. Check only after fee refusal to
+        // distinguish that race from a real budget/permission refusal. Native
+        // original rows keep their separate acceptance contract.
+        bool genericInputsChanged() const;
         KisPageRetirementRecord *originalBacking(const KisPageVersion &) const;
         void forEachDetachedBacking(void *, void (*)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
         KisPagePublicationRows originalRows() const { return m_rows; }

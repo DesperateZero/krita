@@ -263,7 +263,8 @@ struct KisMetadataOverflowNode {
     KisMetadataOverflowKind kind = KisMetadataOverflowKind::CapturedReadView;
 };
 
-static_assert(sizeof(KisPageValueCell) <= 320);
+// The independent live-root fact adds 8 B; do not hide it in memory refs.
+static_assert(sizeof(KisPageValueCell) <= 328);
 static_assert(sizeof(KisPageReplicaState) <= 128);
 static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 

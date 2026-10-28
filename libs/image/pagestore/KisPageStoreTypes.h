@@ -1204,10 +1204,8 @@ struct KRITAIMAGE_EXPORT KisPageStoreSessionStats
     // still be logically reachable or pinned; it is not all immediately freeable.
     qsizetype pendingHistoricalPages = 0;
     qsizetype deferredHistoricalPages = 0;
+    // Original per-key version cursors between bounded slices.
     qsizetype activeHistoryScans = 0;
-    // Derived conservative reachability entries, not live version ownership
-    // or byte/RSS accounting. Completed sweep caches are destroyed off owner.
-    quint64 cachedHistoryReachableVersions = 0;
     qsizetype scheduledReclamationJobs = 0;
     quint64 lastUseAcknowledgePasses = 0;
     quint64 maximumLastUsesPerPass = 0;

@@ -143,13 +143,36 @@ public:
         }
     }
 
-    ~KisImageEpochPageRoot() { storage->values->release(value); }
+    ~KisImageEpochPageRoot() { Q_ASSERT(!liveParents); storage->values->release(value); }
+
+    // Only admitted root records and live parents contribute semantic edges.
+    // Immutable subtrees are shared: an already-live node does not revisit its
+    // children. Activate the new root before deactivating the old root.
+    void activate() const noexcept
+    {
+        Q_ASSERT(liveParents != std::numeric_limits<quint64>::max());
+        if (liveParents++) return;
+        const auto before = value->rootEdges.fetch_add(1, std::memory_order_release);
+        Q_ASSERT(before != std::numeric_limits<quint64>::max()); Q_UNUSED(before);
+        if (left) left->activate();
+        if (right) right->activate();
+    }
+    void deactivate() const noexcept
+    {
+        Q_ASSERT(liveParents);
+        if (--liveParents) return;
+        if (left) left->deactivate();
+        if (right) right->deactivate();
+        const auto before = value->rootEdges.fetch_sub(1, std::memory_order_release);
+        Q_ASSERT(before); Q_UNUSED(before);
+    }
 
     std::shared_ptr<KisImageEpochTreeStorage> storage;
     // Nodes have strong owners only. The original allocation carries the
     // count; its zero transition hands this same node to the existing queue.
     // The constructor's first reference is adopted by makePageRoot.
     mutable std::atomic<size_t> references{1};
+    mutable quint64 liveParents = 0; // Original epoch gate; never a memory owner.
     KisImageEpochPageRoot *nextReleased = nullptr;
     KisPageViewValue *value;
     boost::intrusive_ptr<const KisImageEpochPageRoot> left;
@@ -1140,19 +1163,27 @@ public:
         return it->second.root;
     }
 
-    struct ReachabilityScan {
-        quint64 cookie = 0;
-        KisPageKey key;
-        quint64 next = 0;
-        quint64 last = 0;
-        bool invalidated = false;
-    };
+    ~Private() { detachRootEdges(); }
+
+    void detachRootEdges() noexcept
+    {
+        // A prepared reservation may outlive the facade. Its memory ownership
+        // must not extend semantic admission after that facade disappears.
+        while (protectedHead) {
+            auto &record = roots.find(protectedHead)->second;
+            if (record.root.m_pageRoot) record.root.m_pageRoot->deactivate();
+            protectedHead = record.nextProtected;
+            record.previousProtected = record.nextProtected = 0;
+        }
+        protectedTail = 0;
+    }
 
     void linkProtected(quint64 epoch)
     {
         auto record = roots.find(epoch);
         Q_ASSERT(record != roots.end());
         if (record->second.previousProtected || record->second.nextProtected || protectedHead == epoch) return;
+        if (record->second.root.m_pageRoot) record->second.root.m_pageRoot->activate();
         record->second.previousProtected = protectedTail;
         if (protectedTail) roots.find(protectedTail)->second.nextProtected = epoch;
         else protectedHead = epoch;
@@ -1173,13 +1204,7 @@ public:
         const quint64 next = root.nextProtected;
         Q_ASSERT(previous || next || protectedHead == epoch);
         Q_ASSERT(!root.nextCandidate && rootCandidatesTail != epoch);
-        // Adjust at most 16 value cursors under the same protection gate. No
-        // QHash iterator, root copy, or second retention table escapes it.
-        for (auto &scan : reachabilityScans) {
-            if (!scan.cookie) continue;
-            if (scan.next == epoch) scan.next = scan.last == epoch ? 0 : next;
-            if (scan.last == epoch) scan.last = previous;
-        }
+        if (root.root.m_pageRoot) root.root.m_pageRoot->deactivate();
         if (previous) roots.find(previous)->second.nextProtected = next;
         else protectedHead = next;
         if (next) roots.find(next)->second.previousProtected = previous;
@@ -1191,18 +1216,6 @@ public:
             rootCandidatesHead = epoch;
         rootCandidatesTail = epoch;
         return true;
-    }
-
-    void invalidateChangedScans(const KisImageEpochRootSnapshot &next)
-    {
-        if (!activeReachabilityScans) return;
-        for (auto &scan : reachabilityScans) {
-            if (!scan.cookie || scan.invalidated) continue;
-            KisPageVersion beforeVersion, afterVersion;
-            current.resolve(scan.key, &beforeVersion);
-            next.resolve(scan.key, &afterVersion);
-            if (!(beforeVersion == afterVersion)) scan.invalidated = true;
-        }
     }
 
     void finishTransaction(const KisPageTransaction &transaction)
@@ -1257,9 +1270,7 @@ public:
 
     quint64 protectedHead = 0;
     quint64 protectedTail = 0;
-    quint64 nextReachabilityCookie = 1;
-    qsizetype activeReachabilityScans = 0;
-    std::array<ReachabilityScan, ReachabilityScanLimit> reachabilityScans{};
+
 };
 
 KisImageEpochReferenceModel::PreparedRootReservation::~PreparedRootReservation()
@@ -1296,7 +1307,14 @@ void KisImageEpochReferenceModel::PreparedRootReservation::cancel()
 
 KisImageEpochReferenceModel::KisImageEpochReferenceModel() = default;
 
-KisImageEpochReferenceModel::~KisImageEpochReferenceModel() = default;
+KisImageEpochReferenceModel::~KisImageEpochReferenceModel()
+{
+    const auto core = std::atomic_load(&m_core);
+    if (core) {
+        QMutexLocker lock(&core->mutex);
+        core->detachRootEdges();
+    }
+}
 
 void KisImageEpochReferenceModel::attachBackingBudget(KisBackingBudgetController &budget)
 {
@@ -1376,7 +1394,6 @@ KisImageEpochReferenceModel::prepareInitialization(const KisImageEpochSnapshot &
 
     d->roots.emplace(root.epoch().value, EpochRootRecord{root});
     d->current = root;
-    d->linkProtected(root.epoch().value);
     d->nextEpoch = root.epoch().value + 1;
     KisPageStoreDetail::setError(error, {});
     return d;
@@ -1394,6 +1411,7 @@ bool KisImageEpochReferenceModel::installInitialization(std::shared_ptr<Private>
 {
     QMutexLocker lock(&m_initializationMutex);
     if (!prepared || std::atomic_load(&m_core)) return false;
+    prepared->linkProtected(prepared->current.epoch().value);
     std::atomic_store(&m_core, std::move(prepared));
     return true;
 }
@@ -1911,7 +1929,6 @@ bool KisImageEpochReferenceModel::installReservedRoot(
         return false;
     }
     rootIt->second.root = candidate.m_root;
-    d->invalidateChangedScans(candidate.m_root);
     const quint64 previous = d->current.epoch().value;
     d->current = candidate.m_root;
     d->linkProtected(d->current.epoch().value);
@@ -2231,94 +2248,6 @@ bool KisImageEpochReferenceModel::hasCollectionWork() const
     if (!d) return false;
     QMutexLocker locker(&d->mutex);
     return d->finishedTransactionsHead != 0 || d->rootCandidatesHead != 0;
-}
-
-KisImageEpochReferenceModel::ReachabilitySlice
-KisImageEpochReferenceModel::visitReachableVersions(const KisPageKey &key, quint64 &cookie, qsizetype rootBudget,
-    void *context, void (*visit)(void *, const KisPageVersion &))
-{
-    const auto d = std::atomic_load(&m_core);
-    if (!d) return {};
-    QMutexLocker lock(&d->mutex);
-    ReachabilitySlice result;
-    if (!d->operational() || !key.isValid()) return result;
-    Private::ReachabilityScan initial;
-    auto *scan = &initial;
-    const auto budget = std::clamp(rootBudget, qsizetype(0), ReachabilityRootBudget);
-    if (cookie) {
-        scan = nullptr;
-        for (auto &candidate : d->reachabilityScans) {
-            if (candidate.cookie == cookie) { scan = &candidate; break; }
-        }
-        if (!scan || !(scan->key == key)) return result;
-        if (scan->invalidated) {
-            *scan = {};
-            --d->activeReachabilityScans;
-            cookie = 0;
-            return result;
-        }
-    } else {
-        result.valid = true;
-        if (!budget) return result;
-        initial.key = key;
-        // Current is the newest protected root. If it is the only one, no
-        // registry lookup or persistent cursor is needed at all.
-        if (d->protectedHead != d->current.epoch().value) {
-            const auto current = d->roots.find(d->current.epoch().value);
-            Q_ASSERT(current != d->roots.cend() && !current->second.nextProtected);
-            initial.last = current->second.previousProtected;
-            initial.next = d->protectedHead;
-        }
-        KisPageVersion version;
-        d->current.resolve(key, &version);
-        if (visit) visit(context, version);
-        ++result.rootsVisited;
-    }
-    result.valid = true;
-    while (scan->next && result.rootsVisited < budget) {
-        const auto root = d->roots.find(scan->next);
-        Q_ASSERT(root != d->roots.cend() && d->admitsRoot(scan->next));
-        KisPageVersion version;
-        root->second.root.resolve(key, &version);
-        if (visit) visit(context, version);
-        ++result.rootsVisited;
-        scan->next = scan->next == scan->last ? 0 : root->second.nextProtected;
-    }
-    result.complete = scan->next == 0;
-    if (result.complete) {
-        if (cookie) {
-            *scan = {};
-            --d->activeReachabilityScans;
-            cookie = 0;
-        }
-    } else if (!cookie) {
-        // Retain only a real continuation. A complete local query still
-        // works when all slots or cookie identities have been consumed.
-        if (d->nextReachabilityCookie != std::numeric_limits<quint64>::max()) {
-            for (auto &candidate : d->reachabilityScans) {
-                if (candidate.cookie) continue;
-                candidate = initial;
-                candidate.cookie = d->nextReachabilityCookie++;
-                cookie = candidate.cookie;
-                ++d->activeReachabilityScans;
-                return result;
-            }
-        }
-        result.valid = false;
-        result.capacityUnavailable = true;
-    }
-    return result;
-}
-
-void KisImageEpochReferenceModel::cancelReachabilityScan(quint64 cookie)
-{
-    if (!cookie) return;
-    const auto d = std::atomic_load(&m_core);
-    if (!d) return;
-    QMutexLocker lock(&d->mutex);
-    for (auto &scan : d->reachabilityScans) {
-        if (scan.cookie == cookie) { scan = {}; --d->activeReachabilityScans; return; }
-    }
 }
 
 KisPageSnapshotArray<KisPageVersion> KisImageEpochReferenceModel::reachablePageVersions(const KisPageSnapshotArray<KisPageKey> &registeredKeys,

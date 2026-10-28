@@ -1091,6 +1091,22 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         if owning_history_service.search(text):
             errors.append(f"KisPageHistoryCollector must not become a heap service: {path_name}")
 
+    # The live graph replaces the former root-by-key reachability protocol.
+    # The independent cold root enumeration is retained only as an oracle.
+    epoch_text = code_only((REPOSITORY_ROOT / "libs/image/pagestore/KisImageEpochReferenceModel.cpp").read_text())
+    value_text = code_only((REPOSITORY_ROOT / "libs/image/pagestore/KisPageViewValue_p.h").read_text())
+    history_text = code_only(history_collector_source.read_text()) + code_only(history_collector_header.read_text())
+    for contract in ("mutable quint64 liveParents = 0", "void activate() const noexcept",
+                     "void deactivate() const noexcept", "detachRootEdges()"):
+        if contract not in epoch_text:
+            errors.append(f"original root semantic-edge contract is missing: {contract}")
+    if "std::atomic<quint64> rootEdges{0}" not in value_text:
+        errors.append("final Value lost its independent root semantic edges")
+    for retired in ("ReachabilityScan", "visitReachableVersions", "cancelReachabilityScan",
+                    "invalidateChangedScans", "reachableMask", "reachabilityRootsVisited"):
+        if retired in epoch_text + history_text:
+            errors.append(f"retired root-scan protocol returned: {retired}")
+
     read_coordinator_header = (
         REPOSITORY_ROOT / "libs/image/pagestore/KisPageReadCoordinator_p.h"
     )
@@ -1153,17 +1169,17 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "std::optional<Entries> entries",
             "entries.emplace(std::move(*other.entries))",
             "struct KisPageOperationPublication",
-            "KisPagePublicationIdentity proof",
+            "using PageState = KisPagePublicationSelection",
             "boost::intrusive::list<KisPageRetirementRecord> m_idleCapacity",
             "static constexpr qint64 IdleCapacityAgeMs = 100",
             "takeIdleCapacityLocked",
-            "expireIdleCapacityLocked",
+            "collectExpiredIdleCapacityLocked",
             "using DefaultRevisionMap = std::map",
             "boost::intrusive::list<CommitPreparation> m_preparingCommits",
             "struct KisPagePublicationDelta",
             "using TransactionMap = std::map<quint64, std::shared_ptr<KisPagePublicationDelta>",
             "TransactionMap m_preparedTransactions",
-            "ProofMap proofs",
+            "SelectionMap proofs",
             "RemovalSet removals",
             "std::atomic<size_t> proofInsertions",
             "std::atomic<size_t> removalInsertions",
@@ -1175,6 +1191,13 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for contract in required_contracts:
             if contract not in header_text:
                 errors.append(f"R1 PublicationCoordinator contract is missing: {contract}")
+        input_text = code_only((REPOSITORY_ROOT /
+            "libs/image/pagestore/KisPagePublicationInput_p.h").read_text(encoding="utf-8"))
+        for contract in ("struct KisPagePublicationSelection", "KisPageViewValue *value",
+                         "KisPagePublicationIdentity identity(KisPageTransactionId transaction)",
+                         "KisPagePublicationIdentity proof"):
+            if contract not in input_text:
+                errors.append(f"R1 original Value / external identity contract is missing: {contract}")
         source_text = code_only(publication_coordinator_source.read_text(encoding="utf-8"))
         for contract in ("class KisPagePublicationCoordinator::KisPreparedMutationCommit final",
                          "KisMutationWorkspace workspace", "preparedCommit.prepareChanges",
@@ -1293,11 +1316,11 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             encoding="utf-8", errors="replace"
         ))
         for contract in (
-            "struct KisVersionRecord",
-            "struct KisReplicaRecord",
+            "struct KisPageValueCell : KisPageViewValue, KisPageValueState",
+            "struct KisPageReplicaState",
             "struct KisMetadataOverflowNode",
-            "sizeof(KisVersionRecord) <= 128",
-            "sizeof(KisReplicaRecord) <= 128",
+            "sizeof(KisPageValueCell) <= 328",
+            "sizeof(KisPageReplicaState) <= 128",
             "sizeof(KisMetadataOverflowNode) <= 64",
         ):
             if contract not in records_text:
@@ -1339,8 +1362,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 "R2/M2 metadata coordinator does not include its compact record schema"
             )
         for contract in (
-            "using VersionArena = KisShardSlotArena<KisVersionRecord, 16 * 1024>",
-            "using ReplicaArena = KisShardSlotArena<KisReplicaRecord, 32 * 1024>",
+            "using VersionArena = KisShardSlotArena<KisPageValueCell, 16 * 1024>",
+            "using ReplicaArena = KisShardSlotArena<KisPageReplicaState, 32 * 1024>",
             "using OverflowArena = KisShardSlotArena<KisMetadataOverflowNode, 16 * 1024>",
             "struct MetadataArenas",
             "struct MetadataArenaReservations",
@@ -1357,7 +1380,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "reservePublicationActivity",
             "releasePublicationActivity",
             "entry.originalPage = page",
-            "page->second.activity.publicationClaim = data.get()",
+            "page->second.activity.publicationClaim = this",
             "page->activity.publicationClaim = &rows[0]",
             "shard->installDetachment(*page, version, native",
             "releaseActivities(first, end)",
@@ -1365,7 +1388,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
-            "static_assert(sizeof(MetadataPage) == 136)",
+            "static_assert(sizeof(MetadataPage) == 176)",
             "static_assert(sizeof(MetadataPageActivity) <= 104)",
             "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
@@ -1388,15 +1411,14 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct MetadataArenaGrowth",
             "growMetadataArenasOutsideLock",
             "metadataArenaBlockCandidatesPrepared",
-            "replaceAllReserved",
             "installPreparedAdditionsReserved",
         ):
             if contract not in metadata_text:
                 errors.append(f"R2/M2 shard arena authority is missing: {contract}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
-        install_begin = metadata_text.find("bool KisPageMetadataCoordinator::installPublicationImpl(")
-        install_end = metadata_text.find("KisPageMetadataCoordinator::KisPageMetadataCoordinator()", install_begin)
+        install_begin = metadata_text.find("size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(")
+        install_end = metadata_text.find("class KisPageMetadataCoordinator::PreparedPublication::AcceptanceReferences", install_begin)
         if install_begin < 0 or install_end < 0:
             errors.append("R2/M2 publication install boundary is missing")
         install_text = metadata_text[install_begin:install_end]
@@ -1416,6 +1438,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if forbidden in install_text:
                 errors.append(f"R2/M2 publication consumes activity storage protection during install: {forbidden}")
         for forbidden in (
+            "replaceAllReserved",
             "struct VersionRecords",
             "shared_ptr<VersionRecords>",
             "std::list<",
@@ -1527,7 +1550,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisMutationWriteSet final",
             "struct TransactionActivity",
             "KisMutationAdmissionTable<quint64, TransactionActivity> transactionActivities",
-            "KisMutationAdmissionTable<KisPageKey, ActiveClaim> m_claims",
+            "KisPageWriteClaim *head = nullptr",
             "std::optional<KisMutationPageEntry> inlineEntry",
             "KisMutationStorage<KisMutationPageEntry, 8> overflow",
             "std::optional<Index> index",
@@ -1635,15 +1658,19 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         if "owner.detachRetirementIndexesForDestruction()" not in store_text:
             errors.append("root teardown lost retirement index detachment")
         cold_page = store_text[page_begin:page_end]
+        if "KisPageWriteClaim writeClaim" not in metadata_text:
+            errors.append("stable PageControl lost the original write claim")
+        if "ActiveClaim> m_claims" in write_header:
+            errors.append("write admission restored a second per-key claim owner")
         for forbidden in ("KisPageTransition", "guardActive", "nativePrepared", "void *data"):
             if forbidden in cold_page:
                 errors.append(f"mutation cold resources regained duplicate state: {forbidden}")
-        if "static_assert(sizeof(Page) <= 784)" not in cold_page:
+        if "static_assert(sizeof(Page) <= 832)" not in cold_page:
             errors.append("mutation cold resource layout lost its bounded capacity ceiling")
         private_records = code_only(metadata_records_header.read_text(encoding="utf-8"))
         if ("struct Page : KisPagePrivateWrite" not in cold_page
                 or "std::shared_ptr<const KisPageAllocationDescriptor> descriptor" not in private_records
-                or "static_assert(sizeof(KisVersionFactsRecord) <= 64)" not in private_records):
+                or "KisPageValueCell *value = nullptr" not in private_records):
             errors.append("mutation cold resources regained a duplicate descriptor value")
         if "KisPageAllocationDescriptor descriptor" in cold_page:
             errors.append("mutation cold resources copied the shared descriptor")

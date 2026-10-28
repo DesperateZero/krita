@@ -321,6 +321,42 @@ def index_arguments(unit: TranslationUnit, index_path: Path, output_path: Path) 
     return result
 
 
+def prepare_included_moc(unit: TranslationUnit, output_root: Path, timeout: int) -> Path | None:
+    """Generate source-local Qt moc from current source without changing build outputs.
+
+    The original CMake target supplies all moc options. Its old generated moc
+    can otherwise retain removed slots and invalidate a current-source audit.
+    """
+    source = REPOSITORY_ROOT / unit.path
+    includes = [name for name in INCLUDE_RE.findall(source_text(source)) if name.endswith(".moc")]
+    if not includes:
+        return None
+    try:
+        object_path = Path(unit.directory) / unit.arguments[unit.arguments.index("-o") + 1]
+        target = next(parent for parent in object_path.parents
+                      if parent.name.endswith(".dir") and parent.parent.name == "CMakeFiles")
+    except (ValueError, IndexError, StopIteration) as error:
+        raise GenerationFailure(f"cannot locate original moc target for {unit.path}") from error
+    info = load_json(target.with_name(target.name[:-4] + "_autogen.dir") / "AutogenInfo.json")
+    directory = output_root / (hashlib.sha256(unit.path.encode("utf-8")).hexdigest() + "-moc")
+    directory.mkdir()
+    for include in includes:
+        relative = Path(include)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise GenerationFailure(f"unsupported source-local moc include: {unit.path}: {include}")
+        destination = directory / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        command = [info["QT_MOC_EXECUTABLE"],
+                   *["-D" + item for item in info["MOC_DEFINITIONS"]],
+                   *["-I" + item for item in info["MOC_INCLUDES"]],
+                   *info["MOC_OPTIONS"], "-o", str(destination), str(source)]
+        completed = subprocess.run(command, cwd=unit.directory, capture_output=True,
+                                   text=True, timeout=timeout)
+        if completed.returncode:
+            raise GenerationFailure(f"current-source moc failed for {unit.path}: {completed.stderr}")
+    return directory
+
+
 def compile_translation_unit(
     unit: TranslationUnit,
     index_path: Path,
@@ -330,6 +366,9 @@ def compile_translation_unit(
     output_name = hashlib.sha256(unit.path.encode("utf-8")).hexdigest() + ".o"
     command = index_arguments(unit, index_path, output_root / output_name)
     try:
+        moc_directory = prepare_included_moc(unit, output_root, timeout)
+        if moc_directory is not None:
+            command.insert(1, "-I" + str(moc_directory))
         completed = subprocess.run(
             command,
             cwd=unit.directory,
@@ -337,7 +376,7 @@ def compile_translation_unit(
             text=True,
             timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except (OSError, subprocess.TimeoutExpired, GenerationFailure) as error:
         return unit.path, str(error)
     if completed.returncode != 0:
         diagnostics = (completed.stderr or completed.stdout).strip()

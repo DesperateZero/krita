@@ -446,8 +446,8 @@
       ],
       "id": "BR1-PS-METADATA-RECORDS-020",
       "path": "libs/image/pagestore/KisPageMetadataCoordinator_p.h",
-      "remove-after": "never: compact record schema remains canonical across M2 arena migration",
-      "replacement-type": "KisVersionRecord, KisReplicaRecord and KisMetadataOverflowNode in typed generational slots",
+      "remove-after": "Final Value identity remains canonical; superseded metadata projections and acceptance consumers remain subject to MW05–MW12 whole-pipeline deletion audit",
+      "replacement-type": "Original KisPageValueCell identity with KisPageReplicaState and KisMetadataOverflowNode in typed generational slots",
       "runtime-counter": "existing:KisPageMetadataMetrics local/full projection counters plus KisPageMetadataFootprint record totals",
       "static-callers": [
         "KisPageMetadataCoordinator::registerPage",
@@ -456,11 +456,11 @@
       ],
       "status": "delegated",
       "symbols": [
-        "KisVersionRecord",
-        "KisReplicaRecord",
+        "KisPageValueCell",
+        "KisPageReplicaState",
         "KisMetadataOverflowNode"
       ],
-      "target-owner": "KisPageMetadataCoordinator shard-owned typed arenas"
+      "target-owner": "Original final Value identity and metadata shard-owned typed arenas"
     },
     {
       "category": "canonical",

@@ -216,27 +216,6 @@ public:
 private:
     void attachBackingBudget(KisBackingBudgetController &budget);
     KisPageTransaction activeTransaction(KisPageTransactionId id) const;
-    // Collector-only enumerators over the existing protection records. They
-    // retain no roots and cannot grant logical/pixel admission. Slots and
-    // outputs are bounded independently of history depth.
-    static constexpr qsizetype ReachabilityScanLimit = 16;
-    static constexpr qsizetype ReachabilityRootBudget = 32;
-    struct ReachabilitySlice {
-        bool valid = false;
-        bool complete = false;
-        bool capacityUnavailable = false;
-        qsizetype rootsVisited = 0;
-    };
-    // Consume each resolved value while its original epoch gate is held.
-    // The consumer must neither throw, reenter the model nor retain the ref.
-    // Zero cookie starts a scan; only an unfinished frontier occupies a slot.
-    // Completion/invalidation releases that slot in this same window. The
-    // budget and returned count include the initial current-root visit.
-    ReachabilitySlice visitReachableVersions(const KisPageKey &, quint64 &cookie, qsizetype rootBudget,
-        void *context = nullptr, void (*visit)(void *, const KisPageVersion &) = nullptr);
-    void cancelReachabilityScan(quint64 cookie);
-    friend class KisPageHistoryCollector;
-
     class Private;
     std::shared_ptr<Private> prepareInitialization(const KisImageEpochSnapshot &, QString *,
         KisPageMetadataCoordinator *values = nullptr);
@@ -268,6 +247,7 @@ private:
         std::shared_ptr<Private> m_owner;
         KisImageEpochRootSnapshot m_root;
         friend class KisImageEpochReferenceModel;
+        friend class KisPageStoreReferenceTest;
     };
 
     class PreparedCommit : public PreparedRootReservation

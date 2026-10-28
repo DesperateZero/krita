@@ -1333,17 +1333,16 @@ private Q_SLOTS:
     void rootAdmissionEndsBeforeCollection();
     void reachabilitySkipsRetiredRoots_data();
     void reachabilitySkipsRetiredRoots();
-    void boundedReachabilitySurvivesRootRemoval_data()
+    void rootEdgesTrackAdmission_data()
     {
         QTest::addColumn<int>("history"); QTest::addColumn<int>("removal");
         for (int history : {0, 1, 33, 97}) for (int removal : {0, 1, 2, 3})
             QTest::newRow(qPrintable(QStringLiteral("h%1-remove%2").arg(history).arg(removal))) << history << removal;
     }
-    void boundedReachabilitySurvivesRootRemoval();
-    void boundedReachabilityInvalidatesOnlyChangedKeys();
-    void boundedReachabilitySlotsAndCancellation();
-    void reachabilityCompletesWithoutPersistentCursor();
-    void boundedReachabilityPreservesDefaultRevision();
+    void rootEdgesTrackAdmission();
+    void rootCandidatesHaveNoSemanticEdges();
+    void historyAdmissionDuringDebtPreparation();
+    void rootDefaultsRetainSurfaceIdentity();
     void rootAdmissionSerializesWithFinalRelease_data();
     void rootAdmissionSerializesWithFinalRelease();
     void lastRootDestructionIsIncrementalAndOffThread();
@@ -3561,230 +3560,196 @@ void KisPageStoreReferenceTest::reachabilitySkipsRetiredRoots()
     QCOMPARE(model.rootCount(), qsizetype(1));
 }
 
-void KisPageStoreReferenceTest::boundedReachabilitySurvivesRootRemoval()
+void KisPageStoreReferenceTest::rootEdgesTrackAdmission()
 {
     QFETCH(int, history); QFETCH(int, removal);
     KisImageEpochSnapshot initial;
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
-    initial.manifest = {pageVersion(0, 1), pageVersion(1, 1)};
-    KisImageEpochReferenceModel model; QVERIFY(model.initialize(initial));
+    for (int column = 0; column < 64; ++column) initial.manifest.append(pageVersion(column, 1));
+    auto model = std::make_unique<KisImageEpochReferenceModel>(); QVERIFY(model->initialize(initial));
     KisCompletionRegistry completions;
     const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
-    auto publish = [&](int column, quint64 generation) {
-        const auto tx = model.beginTransaction(model.captureCommittedRoot().epoch());
-        KisPreparedPageSet delta; delta.transaction = tx.id;
-        delta.proofs = {preparedProof(pageVersion(column, generation), tx.id, ticket, generation)};
-        return model.prepare(delta) && model.commit(tx).isCommitted();
-    };
     QVector<KisRetainedImageEpochSnapshot> held;
+    QVector<KisImageEpochRootSnapshot> memory;
+    const auto publish = [&](int iteration) {
+        const auto tx = model->beginTransaction(model->captureCommittedRoot().epoch());
+        KisPreparedPageSet delta; delta.transaction = tx.id;
+        // Sparse rotations and dense replacement both share final Values.
+        for (int j = 0; j < (iteration % 3 ? 1 : 40); ++j)
+            delta.proofs.append(preparedProof(pageVersion((iteration + j) % 64, quint64(iteration + 2)),
+                                             tx.id, ticket, quint64(iteration + 2)));
+        return model->prepare(delta) && model->commit(tx).isCommitted();
+    };
     for (int i = 0; i < history; ++i) {
-        held.append(model.captureRetainedRoot()); QVERIFY(held.back().isValid());
-        QVERIFY(publish(0, quint64(i + 2)));
+        memory.append(model->captureCommittedRoot());
+        held.append(model->captureRetainedRoot()); QVERIFY(held.back().isValid());
+        QVERIFY(publish(i));
     }
-    quint64 cookie = 0;
-    QSet<KisPageVersion> seen;
-    const auto visit = +[](void *p, const KisPageVersion &v) { static_cast<QSet<KisPageVersion> *>(p)->insert(v); };
-    const auto start = model.visitReachableVersions(pageKey(0), cookie, 1, &seen, visit);
-    QVERIFY(start.valid); QCOMPARE(start.rootsVisited, qsizetype(1));
-    QCOMPARE(start.complete, history == 0); QCOMPARE(bool(cookie), history != 0);
-    const auto originalCookie = cookie;
+    memory.append(model->captureCommittedRoot());
+    const auto check = [&] {
+        QSet<KisPageViewValue *> expected, all;
+        QSet<KisPageVersion> identities;
+        KisPageSnapshotArray<KisPageKey> keys;
+        for (int column = 0; column < 64; ++column) {
+            const auto key = pageKey(column); keys.append(key);
+            expected.insert(memory.back().selectedValue(key));
+            identities.insert(memory.back().selectedValue(key)->version);
+            for (int i = 0; i < memory.size(); ++i) {
+                auto *value = memory[i].selectedValue(key); all.insert(value);
+                if (i < held.size() && held[i].isValid()) {
+                    expected.insert(value); identities.insert(value->version);
+                }
+            }
+        }
+        // Independent root enumeration checks semantic selection. Raw copies
+        // of every old root remain alive, but must not protect dead Values.
+        QCOMPARE(model->reachablePageVersions(keys), identities);
+        for (auto *value : all)
+            QCOMPARE(bool(value->rootEdges.load()), expected.contains(value));
+    };
+    check();
     auto remove = [&](int i) {
         if (held[i].token.isValid()) {
-            const bool ok = model.releaseSnapshot(held[i].token);
-            held[i] = {}; return ok;
+            const bool ok = model->releaseSnapshot(held[i].token); held[i] = {}; return ok;
         }
         return true;
     };
-    if (history && removal == 1) QVERIFY(remove(0)); // cursor's next record
-    if (history && removal == 2) QVERIFY(remove(history - 1)); // original last record
+    if (history && removal == 1) QVERIFY(remove(0));
+    if (history && removal == 2) QVERIFY(remove(history - 1));
     if (removal == 3) for (int i = 0; i < history; ++i) QVERIFY(remove(i));
-    model.collectUnretainedRoots(); // Actual erasure cannot dangle a value cursor.
-    // Rehash/new roots/current-root removal for another key must not invalidate
-    // this scan or extend its original finite frontier.
-    QVERIFY(publish(1, 2));
-    quint64 visited = 1;
-    std::vector<KisPageVersion> resolved;
-    resolved.reserve(3);
-    bool complete = start.complete;
-    while (!complete) {
-        resolved.clear();
-        const auto slice = model.visitReachableVersions(pageKey(0), cookie, 3, &resolved,
-            +[](void *p, const KisPageVersion &v) {
-                static_cast<std::vector<KisPageVersion> *>(p)->push_back(v);
-            });
-        QVERIFY(slice.valid); QVERIFY(slice.rootsVisited <= 3);
-        visited += quint64(slice.rootsVisited);
-        QCOMPARE(resolved.size(), size_t(slice.rootsVisited));
-        for (const auto &version : resolved) seen.insert(version);
-        complete = slice.complete;
-    }
-    quint64 oracleVisits = 0;
-    QCOMPARE(seen, model.reachablePageVersions({pageKey(0)}, &oracleVisits));
-    QCOMPARE(visited, oracleVisits);
-    QCOMPARE(cookie, quint64(0));
-    if (originalCookie) {
-        auto stale = originalCookie;
-        QVERIFY(!model.visitReachableVersions(pageKey(0), stale, 32).valid);
-    }
+    check(); model->collectUnretainedRoots(); check();
+    // More tokens on one admitted root add no per-node/Value semantic work.
+    auto *current = memory.back().selectedValue(pageKey(0));
+    const auto edges = current->rootEdges.load();
+    QVector<KisRetainedImageEpochSnapshot> same;
+    for (int i = 0; i < 32; ++i) same.append(model->captureRetainedRoot());
+    QCOMPARE(current->rootEdges.load(), edges);
+    for (const auto &snapshot : same) QVERIFY(model->releaseSnapshot(snapshot.token));
+    QCOMPARE(current->rootEdges.load(), edges);
     for (int i = 0; i < history; ++i) QVERIFY(remove(i));
-    model.collectUnretainedRoots(); QCOMPARE(model.rootCount(), qsizetype(1));
+    check();
+    model.reset();
+    for (const auto &root : memory) for (int column = 0; column < 64; ++column)
+        QCOMPARE(root.selectedValue(pageKey(column))->rootEdges.load(), quint64(0));
 }
 
-void KisPageStoreReferenceTest::boundedReachabilityInvalidatesOnlyChangedKeys()
-{
-    KisImageEpochSnapshot initial;
-    initial.epoch = {1};
-    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
-    initial.manifest = {pageVersion(0, 1), pageVersion(1, 1)};
-    KisImageEpochReferenceModel model; QVERIFY(model.initialize(initial));
-    const auto retained = model.captureRetainedRoot(); QVERIFY(retained.isValid());
-    KisCompletionRegistry completions;
-    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
-    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
-    // A continuation requires a real older protected root. A complete local
-    // query deliberately has no cursor that could later be invalidated.
-    const auto setup = model.beginTransaction({1});
-    KisPreparedPageSet setupDelta; setupDelta.transaction = setup.id;
-    setupDelta.proofs = {preparedProof(pageVersion(1, 2), setup.id, ticket, 2)};
-    QVERIFY(model.prepare(setupDelta)); QVERIFY(model.commit(setup).isCommitted());
-    quint64 changed = 0, unchanged = 0;
-    QVERIFY(model.visitReachableVersions(pageKey(0), changed, 1).valid);
-    QVERIFY(model.visitReachableVersions(pageKey(1), unchanged, 1).valid);
-    QVERIFY(changed && unchanged);
-    const auto tx = model.beginTransaction(model.captureCommittedRoot().epoch());
-    KisPreparedPageSet delta; delta.transaction = tx.id;
-    delta.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 2)};
-    QVERIFY(model.prepare(delta)); QVERIFY(model.commit(tx).isCommitted());
-    QVERIFY(!model.visitReachableVersions(pageKey(0), changed, 32).valid);
-    QCOMPARE(changed, quint64(0)); // Invalidation released the original slot.
-    const auto unaffected = model.visitReachableVersions(pageKey(1), unchanged, 32);
-    QVERIFY(unaffected.valid && unaffected.complete);
-    QCOMPARE(unchanged, quint64(0));
-    quint64 restoredKey = 0;
-    QVERIFY(model.visitReachableVersions(pageKey(0), restoredKey, 1).valid);
-    QVERIFY(restoredKey);
-    // An untouched key can also span restore without a restart.
-    QVERIFY(model.visitReachableVersions(pageKey(7), unchanged, 1).valid);
-    QVERIFY(unchanged);
-    auto restore = model.prepareRestore(retained, nullptr); QVERIFY(restore.isValid());
-    QVERIFY(model.installRestore(std::move(restore), nullptr, nullptr).isCommitted());
-    QVERIFY(!model.visitReachableVersions(pageKey(0), restoredKey, 32).valid);
-    QVERIFY(model.visitReachableVersions(pageKey(7), unchanged, 32).valid);
-    QCOMPARE(restoredKey, quint64(0)); QCOMPARE(unchanged, quint64(0));
-    QVERIFY(model.releaseSnapshot(retained.token));
-}
-
-void KisPageStoreReferenceTest::boundedReachabilitySlotsAndCancellation()
+void KisPageStoreReferenceTest::rootCandidatesHaveNoSemanticEdges()
 {
     KisImageEpochSnapshot initial;
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
     initial.manifest = {pageVersion(0, 1)};
-    KisImageEpochReferenceModel model; QVERIFY(model.initialize(initial));
-    const auto retained = model.captureRetainedRoot(); QVERIFY(retained.isValid());
+    auto model = std::make_unique<KisImageEpochReferenceModel>(); QVERIFY(model->initialize(initial));
+    const auto original = model->captureCommittedRoot();
+    auto *first = original.selectedValue(pageKey(0)); QCOMPARE(first->rootEdges.load(), quint64(1));
     KisCompletionRegistry completions;
     const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
-    const auto tx = model.beginTransaction({1});
+    const auto tx = model->beginTransaction({1});
     KisPreparedPageSet delta; delta.transaction = tx.id;
     delta.proofs = {preparedProof(pageVersion(0, 2), tx.id, ticket, 2)};
-    QVERIFY(model.prepare(delta)); QVERIFY(model.commit(tx).isCommitted());
-    QVector<quint64> cookies;
-    for (int i = 0; i < 16; ++i) {
-        quint64 cookie = 0;
-        const auto start = model.visitReachableVersions(pageKey(0), cookie, 1);
-        QVERIFY(start.valid && !start.complete && cookie);
-        cookies.append(cookie);
-    }
-    quint64 extra = 0;
-    const auto refused = model.visitReachableVersions(pageKey(0), extra, 1);
-    QVERIFY(!refused.valid && refused.capacityUnavailable && !extra);
-    QCOMPARE(refused.rootsVisited, qsizetype(1)); // Attempted current visit counts.
-    const auto immediate = model.visitReachableVersions(pageKey(0), extra, 32);
-    QVERIFY(immediate.valid && immediate.complete && !extra);
-    QCOMPARE(immediate.rootsVisited, qsizetype(2)); // No free slot is needed.
-    model.cancelReachabilityScan(cookies.front());
-    quint64 replacement = 0;
-    QVERIFY(model.visitReachableVersions(pageKey(0), replacement, 1).valid);
-    QVERIFY(replacement && replacement != cookies.front());
-    auto stale = cookies.front();
-    QVERIFY(!model.visitReachableVersions(pageKey(0), stale, 32).valid);
-    model.cancelReachabilityScan(stale); // A late cancel cannot cancel the reused slot.
-    const auto complete = model.visitReachableVersions(pageKey(0), replacement, 32);
-    QVERIFY(complete.valid && complete.complete); QCOMPARE(complete.rootsVisited, qsizetype(1));
-    QCOMPARE(replacement, quint64(0));
-    for (quint64 cookie : cookies) model.cancelReachabilityScan(cookie);
-    QVERIFY(model.releaseSnapshot(retained.token));
+    QVERIFY(model->prepare(delta));
+    auto candidate = model->prepareCommit(tx, nullptr); QVERIFY(candidate.isValid());
+    const auto candidateMemory = candidate.m_root;
+    auto *next = candidateMemory.selectedValue(pageKey(0));
+    QCOMPARE(next->rootEdges.load(), quint64(0));
+    const auto refuse = +[](void *, KisImageEpochId) { return false; };
+    QVERIFY(!model->installCommit(std::move(candidate), nullptr, refuse).isCommitted());
+    QCOMPARE(next->rootEdges.load(), quint64(0)); QCOMPARE(first->rootEdges.load(), quint64(1));
+    candidate = model->prepareCommit(tx, nullptr); QVERIFY(candidate.isValid());
+    QVERIFY(model->installCommit(std::move(candidate), nullptr, nullptr).isCommitted());
+    const auto published = model->captureCommittedRoot();
+    QCOMPARE(published.selectedValue(pageKey(0))->rootEdges.load(), quint64(1));
+    QCOMPARE(first->rootEdges.load(), quint64(0));
+    auto retained = model->captureRetainedRoot(); QVERIFY(retained.isValid());
+    const auto nextTx = model->beginTransaction(published.epoch());
+    delta.transaction = nextTx.id; delta.proofs = {preparedProof(pageVersion(0, 3), nextTx.id, ticket, 3)};
+    QVERIFY(model->prepare(delta));
+    candidate = model->prepareCommit(nextTx, nullptr); QVERIFY(candidate.isValid());
+    const auto abandoned = candidate.m_root;
+    QCOMPARE(abandoned.selectedValue(pageKey(0))->rootEdges.load(), quint64(0));
+    // The reservation retains the core after facade exit. Neither it nor raw
+    // roots may preserve semantic edges; their immutable identities still live.
+    model.reset();
+    QCOMPARE(published.selectedValue(pageKey(0))->rootEdges.load(), quint64(0));
+    QCOMPARE(abandoned.selectedValue(pageKey(0))->rootEdges.load(), quint64(0));
+    candidate = {};
 }
 
-void KisPageStoreReferenceTest::reachabilityCompletesWithoutPersistentCursor()
+void KisPageStoreReferenceTest::historyAdmissionDuringDebtPreparation()
 {
-    KisImageEpochReferenceModel model;
-    quint64 cookie = 0;
-    QVERIFY(!model.visitReachableVersions(pageKey(0), cookie, 32).valid);
+    KisBackingBudgetController budget;
+    KisPageMetadataCoordinator metadata; metadata.attachBackingBudget(budget);
+    QVERIFY(metadata.configure(1));
+    const auto page = pageWithHistory(1); const auto old = page.versions.last().version;
+    QVERIFY(metadata.registerPage(page));
+    auto model = std::make_unique<KisImageEpochReferenceModel>(); model->attachBackingBudget(budget);
     KisImageEpochSnapshot initial;
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
-    initial.manifest = {pageVersion(0, 1)};
-    QVERIFY(model.initialize(initial));
-    int visits = 0;
-    const auto visitor = +[](void *p, const KisPageVersion &) { ++*static_cast<int *>(p); };
-    const auto zero = model.visitReachableVersions(pageKey(0), cookie, 0, &visits, visitor);
-    QVERIFY(zero.valid && !zero.complete && !cookie); QCOMPARE(visits, 0);
-    QVERIFY(!model.visitReachableVersions({}, cookie, 32, &visits, visitor).valid);
-    for (int i = 0; i < 32; ++i) {
-        const auto result = model.visitReachableVersions(pageKey(0), cookie, 1, &visits, visitor);
-        QVERIFY(result.valid && result.complete && !result.capacityUnavailable && !cookie);
-        QCOMPARE(result.rootsVisited, qsizetype(1));
-    }
-    QCOMPARE(visits, 32);
+    initial.manifest = {old};
+    auto pending = model->prepareInitialization(initial, nullptr, &metadata); QVERIFY(pending);
+    struct Debt {
+        MetadataEffectReceiver effects;
+        std::function<bool()> admit;
+        bool admitted = false;
+    } debt;
+    debt.admit = [&] { return model->installInitialization(std::move(pending)); };
+    metadata.attachRetirementDebtOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+            auto &d = *static_cast<Debt *>(p);
+            if (!MetadataEffectReceiver::prepare(&d.effects, effects, count, cookie, error)) return false;
+            if (!d.admitted) d.admitted = d.admit();
+            return d.admitted;
+        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
+            MetadataEffectReceiver::commit(&static_cast<Debt *>(p)->effects, cookie, effects, count);
+        }, +[](void *p, quint64 cookie) noexcept {
+            MetadataEffectReceiver::cancel(&static_cast<Debt *>(p)->effects, cookie);
+        });
+    quint32 removed = 0;
+    // Admission changes no metadata page revision. The debt window must still
+    // recheck the original semantic fact and cancel its prepared retirement.
+    QVERIFY(metadata.discardHistory(page.key, &old, 1, &removed));
+    QCOMPARE(removed, quint32(0)); QVERIFY(debt.admitted);
+    QCOMPARE(debt.effects.cancelled, quint64(1)); QCOMPARE(debt.effects.committed, quint64(0));
+    auto raw = model->captureCommittedRoot();
+    QCOMPARE(raw.selectedValue(old.key)->rootEdges.load(), quint64(1));
+    model.reset();
+    QCOMPARE(raw.selectedValue(old.key)->rootEdges.load(), quint64(0));
+    QVERIFY(metadata.discardHistory(page.key, &old, 1, &removed));
+    QCOMPARE(removed, quint32(1)); QCOMPARE(debt.effects.committed, quint64(1));
+    QCOMPARE(raw.selectedValue(old.key)->version, old);
+    raw = {}; kisDrainPageStoreReclamation();
 }
 
-void KisPageStoreReferenceTest::boundedReachabilityPreservesDefaultRevision()
+void KisPageStoreReferenceTest::rootDefaultsRetainSurfaceIdentity()
 {
     KisImageEpochSnapshot initial;
     initial.epoch = {1};
     initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
-    const KisPageVersion first{pageKey(0), {1}, 1};
-    const KisPageVersion second{pageKey(0), {1}, 2};
     initial.surfaces = {surfaceEpochState()};
     KisImageEpochReferenceModel model; QVERIFY(model.initialize(initial));
     const auto retained = model.captureRetainedRoot(); QVERIFY(retained.isValid());
-    const auto setup = model.beginTransaction({1});
-    KisCompletionRegistry completions;
-    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
-    QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded));
-    KisPreparedPageSet setupDelta; setupDelta.transaction = setup.id;
-    setupDelta.proofs = {preparedProof(pageVersion(1, 2), setup.id, ticket, 2)};
-    QVERIFY(model.prepare(setupDelta)); QVERIFY(model.commit(setup).isCommitted());
-    quint64 beforeScan = 0;
-    QVERIFY(model.visitReachableVersions(pageKey(0), beforeScan, 1).valid);
-    QVERIFY(beforeScan);
-    const auto tx = model.beginTransaction(model.captureCommittedRoot().epoch());
+    const auto old = model.captureCommittedRoot();
+    QVERIFY(!old.selectedValue(pageKey(0))); // No invented per-page live edge.
+    const auto tx = model.beginTransaction({1});
     KisPreparedPageSet delta; delta.transaction = tx.id;
-    const auto before = initial.surfaces.first();
-    const auto after = surfaceEpochState({1}, 2, 0x19);
-    delta.surfaceChanges = {{before, after}};
+    delta.surfaceChanges = {{initial.surfaces.first(), surfaceEpochState({1}, 2, 0x19)}};
     QVERIFY(model.prepare(delta)); QVERIFY(model.commit(tx).isCommitted());
-    int invalidVisits = 0;
-    QVERIFY(!model.visitReachableVersions(pageKey(0), beforeScan, 32, &invalidVisits,
-        +[](void *p, const KisPageVersion &) { ++*static_cast<int *>(p); }).valid);
-    QCOMPARE(invalidVisits, 0);
-    QCOMPARE(beforeScan, quint64(0));
-    quint64 scan = 0;
-    KisPageVersion current;
-    const auto start = model.visitReachableVersions(pageKey(0), scan, 1, &current,
-        +[](void *p, const KisPageVersion &v) { *static_cast<KisPageVersion *>(p) = v; });
-    QVERIFY(start.valid && scan); QCOMPARE(current, second);
+    const KisPageVersion first{pageKey(0), {1}, 1}, second{pageKey(0), {1}, 2};
+    const auto current = model.captureCommittedRoot();
+    QVERIFY(!current.selectedValue(pageKey(0)));
     KisPageVersion resolved;
-    const auto slice = model.visitReachableVersions(pageKey(0), scan, 32, &resolved,
-        +[](void *p, const KisPageVersion &v) { *static_cast<KisPageVersion *>(p) = v; });
-    QVERIFY(slice.valid && slice.complete); QCOMPARE(slice.rootsVisited, qsizetype(1));
-    QCOMPARE(resolved, first); // Equal generation never aliases default revisions.
-    QCOMPARE(scan, quint64(0));
+    QVERIFY(old.resolve(pageKey(0), &resolved)); QCOMPARE(resolved, first);
+    QVERIFY(current.resolve(pageKey(0), &resolved)); QCOMPARE(resolved, second);
+    const KisPageSnapshotArray<KisPageVersion> expected{first, second};
+    QCOMPARE(model.reachablePageVersions({pageKey(0)}), expected);
+    auto restore = model.prepareRestore(retained, nullptr); QVERIFY(restore.isValid());
+    QVERIFY(model.installRestore(std::move(restore), nullptr, nullptr).isCommitted());
     QVERIFY(model.releaseSnapshot(retained.token));
+    QVERIFY(model.captureCommittedRoot().resolve(pageKey(0), &resolved)); QCOMPARE(resolved, first);
 }
 
 void KisPageStoreReferenceTest::rootAdmissionSerializesWithFinalRelease_data()
@@ -4062,7 +4027,7 @@ void KisPageStoreReferenceTest::historyDiscardPreparationAtCapacity()
     const auto cleanup = qScopeGuard([&] { freeTestStoragePressure(filler); });
     quint32 removed = 0;
     const auto discard = [&] {
-        try { return coordinator.discardHistory(version.key, &version, 1, 0, &removed); }
+        try { return coordinator.discardHistory(version.key, &version, 1, &removed); }
         catch (const std::bad_alloc &) { return false; } // Same refusal consumed by the collector.
     };
     const bool fits = !mode && replicas <= 8;
@@ -4137,7 +4102,7 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
             debt.effects.clear();
             quint32 removed = 0;
             QVERIFY(coordinator.discardHistory(expected.key, candidates.values.data(), qsizetype(candidates.values.size()),
-                                               0, &removed));
+                                               &removed));
             QCOMPARE(removed, qsizetype(candidates.values.size()) == 32 ? ~quint32(0) : (quint32(1) << qsizetype(candidates.values.size())) - 1);
             QCOMPARE(debt.effects.size(), oracle.effects.size());
             for (const auto &effect : oracle.effects) {
@@ -4210,7 +4175,7 @@ void KisPageStoreReferenceTest::indexedHistorySlices()
 void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
 {
     QCOMPARE(sizeof(KisVersionSlotId), size_t(8));
-    QVERIFY(sizeof(KisPageValueCell) <= size_t(320));
+    QVERIFY(sizeof(KisPageValueCell) <= size_t(328));
     QVERIFY(sizeof(KisPageReplicaState) <= size_t(128));
     QVERIFY(sizeof(KisMetadataOverflowNode) <= size_t(64));
 
@@ -7252,11 +7217,15 @@ void KisPageStoreReferenceTest::viewRootsShareFinalValueIdentity()
         initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
         initial.surfaces = {surfaceEpochState()}; initial.manifest = {version};
         auto prepared = model->prepareInitialization(initial, nullptr, metadata.get());
-        QVERIFY(prepared); QVERIFY(model->installInitialization(std::move(prepared)));
+        QVERIFY(prepared);
+        auto values = metadata->viewValues();
+        auto *unpublished = values->prepareInitial(version); QVERIFY(unpublished);
+        QCOMPARE(unpublished->rootEdges.load(), quint64(0));
+        QVERIFY(model->installInitialization(std::move(prepared)));
+        QCOMPARE(unpublished->rootEdges.load(), quint64(1)); values->release(unpublished);
         auto root = model->captureCommittedRoot();
         auto *identity = root.selectedValue(version.key);
         QVERIFY(identity); QCOMPARE(identity->version, version);
-        auto values = metadata->viewValues();
         auto *staged = static_cast<KisPageValueCell *>(identity);
         QVERIFY(staged->initialIdentity); QVERIFY(!staged->indexed);
         QCOMPARE(metadata->pageCount(), qsizetype(0));
@@ -7289,7 +7258,7 @@ void KisPageStoreReferenceTest::viewRootsShareFinalValueIdentity()
         const auto old = page.versions.last().version;
         auto *oldMemory = values->pin(old); QVERIFY(oldMemory);
         quint32 removed = 0;
-        QVERIFY(metadata->discardHistory(page.key, &old, 1, 0, &removed));
+        QVERIFY(metadata->discardHistory(page.key, &old, 1, &removed));
         QCOMPARE(removed, quint32(1));
         QVERIFY(!metadata->cpuReadReplica(old).isValid()); QVERIFY(!values->pin(old));
         QCOMPARE(oldMemory->version, old);

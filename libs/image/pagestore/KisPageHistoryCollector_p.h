@@ -27,20 +27,16 @@ struct KisPageHistoryCollectorSnapshot
     qsizetype activeScans = 0;
     quint64 retryWakeups = 0;
     bool retryScheduled = false;
-    quint64 cachedReachableVersions = 0;
     bool jobScheduled = false;
     quint64 pagesVisited = 0;
     quint64 foregroundPagesVisited = 0;
     quint64 maximumPagesPerPass = 0;
     quint64 maximumVersionsPerPass = 0;
-    quint64 reachabilityRefreshes = 0;
-    quint64 reachabilityRootsVisited = 0;
-    quint64 maximumRootsPerPass = 0;
-    quint64 reachabilityRestarts = 0;
+    quint64 versionSlices = 0;
 };
 
 /**
- * Retained-root reachability and bounded historical-version collection.
+ * Bounded historical-version collection from original Value live edges.
  *
  * All methods ending in Locked require the PageStore owner mutex. Physical
  * retirement is delegated after releasing that mutex; this service never
@@ -53,7 +49,6 @@ class KisPageHistoryCollector final
 public:
     static constexpr qsizetype PageAdmissionBudget = 16;
     static constexpr qsizetype VersionScanBudget = 32;
-    static constexpr qsizetype RootVisitBudget = 32;
     static constexpr qsizetype IdleCapacityBudget = 16;
 
     using ReleaseOwnerLifetime = void (*)(void *context);
@@ -108,20 +103,10 @@ private:
     friend class KisPageReadCoordinator;
     struct Work : boost::intrusive::list_base_hook<>
     {
-        explicit Work(const KisPageKey &value) noexcept : key(value)
-        { candidates.bind(reinterpret_cast<KisPageVersion *>(candidateStorage.data()), VersionScanBudget); }
-        void markReachable(const KisPageVersion &) noexcept;
+        explicit Work(const KisPageKey &value) noexcept : key(value) {}
         boost::intrusive::set_member_hook<> indexHook;
         KisPageKey key;
         KisPageVersion after;
-        KisPageVersion sliceAfter;
-        // The original Work owns capacity; only real slice values exist.
-        alignas(KisPageVersion) std::array<std::byte, sizeof(KisPageVersion) * VersionScanBudget> candidateStorage;
-        KisMutationWorkspace::Array<KisPageVersion> candidates;
-        quint64 reachability = 0;
-        quint32 reachableMask = 0;
-        qsizetype historicalCount = 0;
-        bool scanning = false;
         bool repeat = false;
     };
     struct KeyLess {
@@ -139,10 +124,8 @@ private:
         boost::intrusive::member_hook<Work, boost::intrusive::set_member_hook<>, &Work::indexHook>,
         boost::intrusive::key_of_value<WorkKey>, boost::intrusive::compare<KeyLess>>;
     enum class SliceResult { Ready, Blocked, Removed };
-    SliceResult collectSliceLocked(Work &work,
-        quint64 &visitedVersions, qsizetype &rootBudget);
+    SliceResult collectSliceLocked(Work &work, quint64 &visitedVersions);
     bool collectPassLocked();
-    void endScanLocked(Work &work, bool finished = false);
     void queueWorkLocked(Work &work) noexcept;
     void disposeWork(Work *work) noexcept;
     bool hasSemanticWorkLocked() const;
@@ -168,7 +151,6 @@ private:
     KisMutationStorageAllocator<Work> m_workAllocator;
     WorkIndex m_work;
     boost::intrusive::list<Work> m_ready;
-    qsizetype m_activeScans = 0;
     bool m_rescanRequested = false;
     KisPageReclamationJobPointer m_task;
     std::shared_ptr<KisPageHistoryWakeContext> m_wakeContext;
@@ -181,10 +163,7 @@ private:
     quint64 m_foregroundPagesVisited = 0;
     quint64 m_maximumPagesPerPass = 0;
     quint64 m_maximumVersionsPerPass = 0;
-    quint64 m_reachabilityRefreshes = 0;
-    quint64 m_reachabilityRootsVisited = 0;
-    quint64 m_maximumRootsPerPass = 0;
-    quint64 m_reachabilityRestarts = 0;
+    quint64 m_versionSlices = 0;
 };
 
 #endif // KIS_PAGE_HISTORY_COLLECTOR_P_H

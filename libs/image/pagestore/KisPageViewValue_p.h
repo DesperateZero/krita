@@ -21,6 +21,10 @@ struct KisPageViewValue {
     // callbacks. The shard gate owns this bit; tree references own low bits.
     static constexpr quint64 OriginalLifetime = quint64(1) << 63;
     std::atomic<quint64> viewMemoryState{0};
+    // Semantic edges from live immutable nodes, distinct from raw memory
+    // copies and candidates. The epoch gate writes; the Store admission gate
+    // excludes publication while metadata tests this at its retirement cut.
+    std::atomic<quint64> rootEdges{0};
     void attachLifetime() noexcept
     { viewMemoryState.fetch_or(OriginalLifetime, std::memory_order_release); }
     bool detachLifetime() noexcept

@@ -2869,6 +2869,22 @@ KisPageRetirementRecord *KisPageMetadataCoordinator::PreparedPublication::origin
         ? found->replacement.native->backing : nullptr;
 }
 
+bool KisPageMetadataCoordinator::PreparedPublication::genericInputsChanged() const
+{
+    if (!data) return false;
+    for (size_t first = 0; first < data->entries.size();) {
+        const size_t end = data->batchEnd(first, data->entries.size());
+        QMutexLocker lock(&data->entries[first].shardOwner->mutex);
+        for (size_t i = first; i < end; ++i) {
+            const auto &entry = data->entries[i];
+            if (entry.originalPage->second.revision != entry.revision
+                || !entry.shardOwner->canMutate(entry.key(), entry.originalPage->second)) return true;
+        }
+        first = end;
+    }
+    return false;
+}
+
 bool KisPageMetadataCoordinator::PreparedPublication::hasDetachedBacking() const
 {
     return m_minimumEpoch.isValid() && std::any_of(m_rows.begin(), m_rows.end(),
@@ -5332,7 +5348,7 @@ KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVer
 
 bool KisPageMetadataCoordinator::discardHistory(
     const KisPageKey &key, const KisPageVersion *versions, qsizetype count,
-    quint32 reachableMask, quint32 *removedMask)
+    quint32 *removedMask)
 {
     *removedMask = 0;
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
@@ -5358,12 +5374,12 @@ bool KisPageMetadataCoordinator::discardHistory(
         quint32 selected = 0;
         size_t replicaCount = 0;
         for (qsizetype i = 0; i < count; ++i) {
-            if (reachableMask & (quint32(1) << i)) continue;
             if (!versions[i].isValid() || !(versions[i].key == key)) return false;
             KisVersionSlotId slot;
             if (!shard->records.findVersion(versions[i], &slot)) continue;
             const auto *record = shard->records.version(slot);
             if (record->publication != KisPagePublicationState::Historical
+                || record->rootEdges.load(std::memory_order_acquire)
                 || record->capturedReadViews.isValid() || record->native.nativeReaders
                 || (!record->authorityReplica.isValid()
                     && !(record->version.isDefaultPixel() && !record->replicaCount))) continue;
@@ -5407,6 +5423,19 @@ bool KisPageMetadataCoordinator::discardHistory(
             page = shard->pages.find(key);
             if (page == shard->pages.end() || !shard->canMutate(key, page->second)
                 || page->second.revision != revision) continue;
+            // The original Store gate serializes admission with collection. Check
+            // the live fact again after the debt preparation window; a raw root or
+            // candidate reference is deliberately insufficient protection. Implicit
+            // defaults remain reconstructible from the admitted surface revision.
+            bool protectedAgain = false;
+            for (qsizetype i = 0; i < count; ++i) {
+                if ((selected & (quint32(1) << i))
+                    && shard->records.version(selectedSlots[size_t(i)])->rootEdges.load(std::memory_order_acquire)) {
+                    protectedAgain = true;
+                    break;
+                }
+            }
+            if (protectedAgain) continue;
         }
         // All storage and claims exist. Removal only unlinks original records.
         quint64 removed = 0;
