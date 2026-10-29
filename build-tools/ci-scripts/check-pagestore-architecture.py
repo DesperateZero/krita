@@ -1204,7 +1204,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for contract in ("class KisPagePublicationCoordinator::KisPreparedMutationCommit final",
                          "KisMutationWorkspace workspace", "preparedCommit.prepareChanges",
                          "preparedCommit.beginBackingChanges", "preparedCommit.release",
-                         "publicationBackingReader", "KisPagePreparedBackingChange", "preparedCommit.prepareFees"):
+                         "publicationBackingReader", "KisPagePreparedBackingChange", "preparedCommit.acceptFees",
+                         "Acceptance::FeesRefused", "Acceptance::InstallRejected", "acceptIdleCapacity"):
             if contract not in source_text:
                 errors.append(f"Publication synchronous workspace contract is missing: {contract}")
         for retired in ("KisPreparedMutationCommit::Data", "preparedCommit.data",
@@ -1212,6 +1213,18 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                         "Array<KisBackingClassChange>", "KisPreparedMutationCommit::cancel"):
             if retired in source_text:
                 errors.append(f"Publication retains replaced storage protocol: {retired}")
+        ledger_text = "\n".join(code_only((REPOSITORY_ROOT / "libs/image/pagestore" / name).read_text(encoding="utf-8"))
+            for name in ("KisPageOwnerLedger.h", "KisPageOwnerLedger.cpp", "KisPageRetirementRecord_p.h"))
+        for contract in ("acceptProjectedChanges", "acceptRetirementDebt", "acceptBackingChanges",
+                         "InstallRejected", "classChanges", "HandoffClaim"):
+            if contract not in ledger_text:
+                errors.append(f"Synchronous backing acceptance contract is missing: {contract}")
+        for retired in ("KisBackingClassChangeReservation", "PreparedBackingChangeSlot", "prepareBackingChanges",
+                        "commitBackingChanges", "prepareIdleCapacity", "activeBorrowedChanges", "freePreparedChanges",
+                        "acceptsNewMember", "preservesCharge", "classClaim->claim", "claim->next",
+                        "acceptBackingChangesImpl", "acceptBackingChangesLocked", "acceptClassChanges"):
+            if retired in ledger_text or retired in source_text:
+                errors.append(f"Backing acceptance retains replaced escaping fee protocol: {retired}")
         if "QObject" in header_text:
             errors.append("R1 PublicationCoordinator must not inherit or own QObject behavior")
         if "DescriptorMap" in header_text:
@@ -1236,7 +1249,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisImageEpochReferenceModel::PreparedRootReservation restoreEpoch",
             "KisPagePublicationCoordinator::KisPreparedMutationCommit::isValid() const",
             "KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept",
-            "preparedCommit.tryInstall",
+            "preparedCommit.installRoot",
+            "KisPreparedMutationCommit::finishInstallation()",
         ):
             if contract not in publication_text:
                 errors.append(

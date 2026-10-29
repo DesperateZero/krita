@@ -43,38 +43,8 @@ struct KisBackingClassChange
     KisPageRetirementRecord *original = nullptr;
 };
 
-/**
- * One-shot owner reservation for a frozen set of backing-class changes.
- * Destruction cancels the budget reservation and releases the physical claims.
- * A successfully admitted empty set is valid without an entity slot/claim.
- */
-class KRITAIMAGE_EXPORT KisBackingClassChangeReservation final
-{
-public:
-    KisBackingClassChangeReservation() = default;
-    ~KisBackingClassChangeReservation();
-    KisBackingClassChangeReservation(KisBackingClassChangeReservation &&) noexcept;
-    KisBackingClassChangeReservation &operator=(KisBackingClassChangeReservation &&) noexcept;
-    KisBackingClassChangeReservation(const KisBackingClassChangeReservation &) = delete;
-    KisBackingClassChangeReservation &operator=(const KisBackingClassChangeReservation &) = delete;
-
-    bool isValid() const;
-    void release() noexcept;
-
-private:
-    KisBackingClassChangeReservation(KisPageOwnerLedger *owner, quint64 cookie);
-    KisPageOwnerLedger *m_owner = nullptr;
-    quint64 m_cookie = 0;
-    KisPagePreparedBackingChange *m_rows = nullptr;
-    KisPagePublicationRows m_publicationRows;
-    size_t m_count = 0;
-    KisBackingBudgetReservation m_budget;
-
-    friend class KisPageOwnerLedger;
-};
-
 /** Prepared accounting only; does not authorize a physical or logical write.
- * The ledger and its budget must outlive the reservation, as for class changes.
+ * The ledger and its budget must outlive this physical handoff reservation.
  */
 class KRITAIMAGE_EXPORT KisBackingHandoffReservation final
 {
@@ -137,11 +107,7 @@ public:
                                          KisBackingBudgetReservation &reservation,
                                          QString *error = nullptr);
     bool synchronizeBackingDomains(QString *error = nullptr);
-    KisBackingClassChangeReservation prepareBackingChanges(
-        KisPageSnapshotArray<KisBackingClassChange> changes,
-        const KisPageSnapshotArray<KisPageTransitionEffect> &retirementEffects,
-        QString *error = nullptr);
-    void commitBackingChanges(KisBackingClassChangeReservation &&reservation) noexcept;
+    enum class BackingAcceptance { FeesRefused, InstallRejected, Accepted };
     // Freeze a sole, resident physical owner and reserve its real transition
     // to ActivePending before taking the physical claim. Current/Pending also
     // retain cancellation debt. Detached Optional borrows without new future
@@ -235,24 +201,20 @@ private:
     // its compact identity directly; exported capabilities keep their checks.
     bool validatePublicationIdentity(const KisPageMetadataCoordinator &, const KisPagePublicationIdentity &) const;
     bool releasePublicationIdentity(const KisPagePublicationIdentity &);
-    using BackingChanges = std::vector<KisBackingClassChange, KisMutationStorageAllocator<KisBackingClassChange>>;
     KisPageRetirementRecords takeShutdownRetirementRecords();
-    // Synchronously read immutable publication facts into the caller's original
-    // workspace. Reader: 1 = change, 0 = end, -1 = invalid input. It must not
-    // acquire an owner/metadata/provider lock while the ledger gate is held.
-    // Prepared rows outlive the reservation; input facts need only this call.
-    KisBackingClassChangeReservation prepareBackingChanges(
-        KisPagePreparedBackingChange *rows, size_t capacity, void *context,
-        int (*read)(void *, KisBackingClassChange *), QString *error = nullptr,
-        KisPagePublicationRows publicationRows = {});
-    // Read the original frozen release rows; no intermediate class-change array.
-    // Uses the same claims, accounting policy and terminal as generic changes.
-    KisBackingClassChangeReservation prepareIdleCapacity(
+    // One synchronous R -> epoch/V acceptance. Inputs and all installation
+    // capacity are prepared before entry; install cannot call a provider,
+    // reenter this ledger, or leave partial state on refusal. Final references
+    // and physical delivery stay in the caller's unlocked cleanup.
+    // Reader: 1 = change, 0 = end, -1 = invalid input. It consumes immutable
+    // facts without acquiring another owner/metadata/provider gate.
+    BackingAcceptance acceptBackingChanges(
+        KisPagePreparedBackingChange *rows, size_t capacity, void *reader,
+        int (*read)(void *, KisBackingClassChange *),
+        void *context, bool (*install)(void *), QString *error = nullptr);
+    BackingAcceptance acceptIdleCapacity(
         KisPagePublicationRows rows, quint64 allowance,
-        QString *error = nullptr);
-    KisBackingClassChangeReservation prepareBackingChangesImpl(
-        BackingChanges changes,
-        const KisPageTransitionEffect *effects, qsizetype count, QString *error);
+        void *context, bool (*install)(void *), QString *error = nullptr);
     KisReplicaBackingFootprint observeBackingFootprint(
         const KisReplicaHandle &replica) const;
     // Internal only: the original queue/caller already owns this ledger record.
@@ -288,9 +250,6 @@ private:
                                KisBackingBudgetClass budgetClass,
                                KisBackingBudgetReservation *reservation,
                                QString *error);
-    void commitPreparedBackingChanges(quint64 cookie) noexcept;
-    void cancelPreparedBackingChanges(quint64 cookie) noexcept;
-    void finishBorrowedBackingChanges(KisBackingClassChangeReservation &, bool commit) noexcept;
     explicit KisPageOwnerLedger(const KisMutationStorageAllocator<KisPageOwnerLedger> &storage);
     class Private;
     struct PrivateReleaser { static void cleanup(Private *); };
@@ -299,7 +258,6 @@ private:
     friend class KisPageMutationSession;
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageOwnerDomainAdmission;
-    friend class KisBackingClassChangeReservation;
     friend class KisBackingHandoffReservation;
     friend class KisPageRetirementQueue;
     friend class KisPagePublicationCoordinator;

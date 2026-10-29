@@ -60,11 +60,6 @@ public:
     KisPageClassCounts &operator=(const KisPageClassCounts &other) noexcept
     { m_packed = other.m_packed; if (isWide()) copyWide(other); return *this; }
     static KisPageClassCounts single(Class cls) noexcept { return KisPageClassCounts(unit(rank(cls))); }
-    static bool preservesCharge(Class member, Class charge) noexcept
-    {
-        Q_ASSERT(member != Class::Count && charge != Class::Count);
-        return rank(member) >= rank(charge);
-    }
     quint64 packed() const noexcept { return m_packed; }
     bool isWide() const noexcept { return m_packed == Wide; }
     quint32 count(Class cls) const noexcept
@@ -275,8 +270,6 @@ struct KisPagePreparedBackingChange
     // a reference-only group's final row must not freeze its former charge.
     KisBackingBudgetClass changedCharge = KisBackingBudgetClass::Count;
     KisPageRetirementRecord **idleResult = nullptr;
-    const void *claim = nullptr;
-    const KisPagePreparedBackingChange *next = nullptr;
     KisPageBackingRecord *credit = nullptr;
     KisBackingBudgetClass creditBefore = KisBackingBudgetClass::Count;
 };

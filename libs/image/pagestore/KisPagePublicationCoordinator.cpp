@@ -219,13 +219,14 @@ public:
         , restoreTargets(KisMutationStorageAllocator<KisPageVersion>(&budget)) {}
     ~KisPreparedMutationCommit() = default;
     bool isValid() const;
-    bool tryInstall(KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
+    bool installRoot(KisRetainedImageEpochSnapshot *retainedAfter);
+    void finishInstallation();
     void clear() noexcept;
     void release() noexcept
     {
         // Attempts have one semantic cleanup guard. Before the first attempt,
         // proof validation can fail; only its original proof view remains.
-        Q_ASSERT(!owner && !backingReservation.isValid() && !metadata.isValid());
+        Q_ASSERT(!owner && !metadata.isValid());
         directoryHeads = decltype(directoryHeads){directoryHeads.get_allocator()};
         restoreTargets = decltype(restoreTargets){restoreTargets.get_allocator()};
         workspace.reset();
@@ -233,7 +234,7 @@ public:
     void prepareChanges(size_t descriptors, size_t changes, size_t feeChanges = 0)
     {
         Q_ASSERT(descriptorChanges.empty()
-            && publicationChanges.empty() && !backingReservation.isValid());
+            && publicationChanges.empty());
         workspace.reserve(layout(descriptors, changes, feeChanges ? feeChanges : changes));
         descriptorChanges.bind(workspace.at<PreparedDescriptorChange>(0), descriptors);
         publicationChanges.bind(workspace.at<PublicationChange>(phaseOffset), changes);
@@ -242,13 +243,15 @@ public:
     {
         publicationChanges.clear();
     }
-    template<class Reader>
-    KisBackingClassChangeReservation prepareFees(KisPageOwnerLedger &ledger, Reader &reader)
+    template<class Reader, class Install>
+    KisPageOwnerLedger::BackingAcceptance acceptFees(KisPageOwnerLedger &ledger, Reader &reader, Install &install)
     {
-        return ledger.prepareBackingChanges(workspace.at<KisPagePreparedBackingChange>(phaseOffset),
+        const auto accepted = ledger.acceptBackingChanges(workspace.at<KisPagePreparedBackingChange>(phaseOffset),
             backingCapacity, &reader, [](void *context, KisBackingClassChange *change) {
                 return (*static_cast<Reader *>(context))(change);
-            });
+            }, &install, [](void *context) { return (*static_cast<Install *>(context))(); });
+        if (accepted != KisPageOwnerLedger::BackingAcceptance::FeesRefused) finishInstallation();
+        return accepted;
     }
     KisPagePublicationCoordinator *owner = nullptr;
     KisPageTransaction transaction;
@@ -263,7 +266,6 @@ public:
     KisPageMetadataCoordinator::PublicationHeads directoryHeads;
     KisPageMetadataCoordinator::PublicationHeads restoreTargets;
     KisCompletionTicket completion;
-    KisBackingClassChangeReservation backingReservation;
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     KisImageEpochCommitResult result;
 private:
@@ -558,23 +560,24 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         change.acceptedOverlayIndex = size_t(found - state.proofs.begin());
     }
 
-    // The frozen release set is the only input to optional fees. Admission
-    // refusal keeps the original charge and terminal owner; publication is
-    // still legal. No physical or fee decision is invented after acceptance.
-    KisBackingClassChangeReservation capacityReservation;
+    // Fee refusal is optional; metadata refusal is terminal for this attempt.
+    // Run the same installer exactly once, with fees only when admitted.
+    auto install = [&] {
+        return !data->mutationCount || owner.m_metadata.installAcceptance(
+            std::move(data->metadata), data->transaction, error);
+    };
+    using Acceptance = KisPageOwnerLedger::BackingAcceptance;
+    auto accepted = Acceptance::FeesRefused;
     for (size_t i = 0; i < data->changes.size(); ++i) {
         if (!data->changes[i].detachesSuperseded) continue;
         const auto allowance = owner.idleAllowanceLocked();
         if (allowance)
-            capacityReservation = owner.m_owner.prepareIdleCapacity(
-                data->changes.subspan(i), allowance);
+            accepted = owner.m_owner.acceptIdleCapacity(data->changes.subspan(i), allowance,
+                &install, [](void *context) { return (*static_cast<decltype(install) *>(context))(); }, error);
         break;
     }
-
-    if (data->mutationCount && !owner.m_metadata.installAcceptance(std::move(data->metadata), data->transaction,
-            error)) return false;
-    if (capacityReservation.isValid())
-        owner.m_owner.commitBackingChanges(std::move(capacityReservation));
+    if (accepted == Acceptance::InstallRejected
+        || (accepted == Acceptance::FeesRefused && !install())) return false;
 
     for (const auto &change : std::as_const(data->changes)) {
         if (change.detachesSuperseded)
@@ -634,12 +637,13 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::isValid() const
         && (epoch.isValid() != restoreEpoch.isValid()) && completion.isValid();
 }
 
-bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall(KisRetainedImageEpochSnapshot *retainedAfter)
+bool KisPagePublicationCoordinator::KisPreparedMutationCommit::installRoot(KisRetainedImageEpochSnapshot *retainedAfter)
 {
     if (!isValid()) return false; // The original attempt guard owns rejection cleanup.
 
     auto &candidate = *this;
     KisPagePublicationCoordinator &owner = *candidate.owner;
+    ++owner.m_statistics.preparedMutationCommits;
     const KisImageEpochReferenceModel::InstallMetadataFunction installMetadata = [](void *context,
                                                                                     KisImageEpochId epoch) {
         auto &prepared = *static_cast<KisPreparedMutationCommit *>(context);
@@ -659,31 +663,32 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::tryInstall(KisRet
         ? owner.m_epochs.installRestore(std::move(candidate.restoreEpoch), &candidate, installMetadata)
         : owner.m_epochs.installCommit(std::move(candidate.epoch), &candidate, installMetadata, retainedAfter);
 
-    if (candidate.result.isCommitted()) {
-        owner.m_owner.commitBackingChanges(std::move(candidate.backingReservation));
-        candidate.metadata.forEachDetachedBacking(&owner, [](void *context, const KisReplicaHandle &replica,
-                                                                   KisPageRetirementRecord *record) {
+    return candidate.result.isCommitted();
+}
+
+void KisPagePublicationCoordinator::KisPreparedMutationCommit::finishInstallation()
+{
+    auto &coordinator = *owner;
+    // The synchronous fee acceptance has already ended. Actual capacity
+    // transfer may reenter the ledger/queue and must stay outside its gate.
+    if (result.isCommitted()) {
+        metadata.forEachDetachedBacking(owner, [](void *context, const KisReplicaHandle &replica,
+                                                   KisPageRetirementRecord *record) {
             auto &coordinator = *static_cast<KisPagePublicationCoordinator *>(context);
             coordinator.acceptCapacityLocked(replica, record);
             ++coordinator.m_statistics.detachedCurrentBackings;
         });
-        if (!owner.m_idleCapacity.empty()) owner.m_history.scheduleLocked();
-        ++owner.m_statistics.installedMutationCommits;
-    } else {
-        candidate.backingReservation.release();
-        ++owner.m_statistics.cancelledMutationCommits;
-    }
-    candidate.owner = nullptr;
-    return candidate.result.isCommitted();
+        if (!coordinator.m_idleCapacity.empty()) coordinator.m_history.scheduleLocked();
+        ++coordinator.m_statistics.installedMutationCommits;
+    } else ++coordinator.m_statistics.cancelledMutationCommits;
+    owner = nullptr;
 }
 
 void KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept
 {
-    if (owner && !result.isCommitted()) ++owner->m_statistics.cancelledMutationCommits;
     metadata = {};
     epoch = {};
     restoreEpoch = {};
-    backingReservation.release();
     metadataCleanup = {};
     descriptorChanges.clear();
     publicationChanges.clear();
@@ -1345,7 +1350,17 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         const KisCompletionTicket commitCompletion = m_readyHostCompletion;
         Q_ASSERT(commitCompletion.isValid()); // Prepared once by Store configuration.
 
-        const auto prepareFees = [&](bool cacheDetached) -> KisBackingClassChangeReservation {
+        preparedCommit.owner = this;
+        preparedCommit.transaction = transaction;
+        preparedCommit.completion = commitCompletion;
+        Q_ASSERT(preparedCommit.isValid());
+        auto install = [&] {
+            diagnostic.next(Phase::CommitRoot, pageWork);
+            diagnostic.next(Phase::CommitMetadataApply, publicationTransitionCount);
+            return preparedCommit.installRoot(retainedAfter);
+        };
+        using Acceptance = KisPageOwnerLedger::BackingAcceptance;
+        const auto acceptFees = [&](bool cacheDetached) {
             auto nextTarget = [proof = owned.proofs.begin(), proofEnd = owned.proofs.end(),
                                descriptor = descriptorChanges.begin(), descriptorEnd = descriptorChanges.end()]
                               (KisPageVersion *target, KisBackingBudgetClass *before) mutable {
@@ -1362,39 +1377,25 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             };
             auto reader = publicationBackingReader(publication, currentRoot, std::move(nextTarget),
                                                    cacheDetached ? idleAllowanceLocked() : 0);
-            return preparedCommit.prepareFees(m_owner, reader);
+            return preparedCommit.acceptFees(m_owner, reader, install);
         };
-        auto backingReservation = prepareFees(detachesBacking);
-        if (!backingReservation.isValid() && detachesBacking)
-            backingReservation = prepareFees(false);
-        // A reconstructible default cache may retire after the generic
-        // candidate copied its authority. Classify the original revision
-        // failure before considering a genuine detachment budget fallback.
-        if (!backingReservation.isValid() && publication.genericInputsChanged()) {
+        auto accepted = acceptFees(detachesBacking);
+        if (accepted == Acceptance::FeesRefused && detachesBacking)
+            accepted = acceptFees(false);
+        // Only an admission refusal may downgrade the detachment plan. Once
+        // installation was entered, its original metadata/root result owns
+        // repair or rejection; never replay it as an optional fee fallback.
+        if (accepted == Acceptance::FeesRefused && publication.genericInputsChanged()) {
             ++m_statistics.metadataRepreparations;
             continue;
         }
-        if (!backingReservation.isValid() && detachesBacking) {
-            // Keeping the old physical charge until retirement has a real
-            // Current peak. If refused, preserve the original history plan;
-            // no pixels or accepted work are replayed by this cold downgrade.
+        if (accepted == Acceptance::FeesRefused && detachesBacking) {
             disableDirectDetachment = true;
             ++m_statistics.detachmentBudgetFallbacks;
             continue;
         }
-        if (!backingReservation.isValid())
-            return {};
-
-        preparedCommit.owner = this;
-        preparedCommit.transaction = transaction;
-        preparedCommit.backingReservation = std::move(backingReservation);
-        preparedCommit.completion = commitCompletion;
-        ++m_statistics.preparedMutationCommits;
-        Q_ASSERT(preparedCommit.isValid());
-
-        diagnostic.next(Phase::CommitRoot, pageWork);
-        diagnostic.next(Phase::CommitMetadataApply, publicationTransitionCount);
-        const bool installed = preparedCommit.tryInstall(retainedAfter);
+        if (accepted == Acceptance::FeesRefused) return {};
+        const bool installed = accepted == Acceptance::Accepted;
         const bool metadataRejected =
             preparedCommit.result.status == KisImageEpochCommitStatus::Rejected;
         const KisImageEpochCommitResult committed = preparedCommit.result;
@@ -1599,22 +1600,20 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             return true;
         };
         auto reader = publicationBackingReader(publication, currentRoot, std::move(nextTarget));
-        auto backingReservation = preparedCommit.prepareFees(m_owner, reader);
-        if (!backingReservation.isValid()) {
+        preparedCommit.owner = this;
+        preparedCommit.completion = completion;
+        Q_ASSERT(preparedCommit.isValid());
+        auto install = [&] { return preparedCommit.installRoot(nullptr); };
+        using Acceptance = KisPageOwnerLedger::BackingAcceptance;
+        const auto accepted = preparedCommit.acceptFees(m_owner, reader, install);
+        if (accepted == Acceptance::FeesRefused) {
             if (publication.genericInputsChanged()) {
                 ++m_statistics.restoreMetadataRepreparations;
                 continue;
             }
             return {};
         }
-
-        preparedCommit.owner = this;
-        preparedCommit.backingReservation = std::move(backingReservation);
-        preparedCommit.completion = completion;
-        ++m_statistics.preparedMutationCommits;
-        Q_ASSERT(preparedCommit.isValid());
-
-        const bool installed = preparedCommit.tryInstall();
+        const bool installed = accepted == Acceptance::Accepted;
         const bool metadataRejected =
             preparedCommit.result.status == KisImageEpochCommitStatus::Rejected;
         restored = preparedCommit.result;
