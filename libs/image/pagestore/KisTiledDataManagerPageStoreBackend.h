@@ -113,8 +113,11 @@ public:
 
     // The caller's existing adapter gate surrounds only the original publish
     // closure and prepared compatibility installation, never the pixel body.
+    // Changes borrow the original Frame (or current history execution) and
+    // may be consumed only after publish succeeds, within this callback.
     using AdapterCompletion = std::function<bool(
-        const std::function<bool(QString *)> &publish, QString *error)>;
+        const std::function<bool(QString *)> &publish,
+        const KisPageMutationSession::AdapterChanges &changes, QString *error)>;
 
     bool configure(quint32 pixelSize,
                    const quint8 *defaultPixel,

@@ -12358,6 +12358,7 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
     std::unique_ptr<KisTilePageStoreLease> escaped;
     bool entered = false, nestedRejected = false, barrierRejected = false, legacyReady = mode == 0;
     bool completedCannotRevive = false;
+    QVector<KisLogicalPageId> acceptedPages; bool allPresent = true;
     QString error;
     const bool accepted = backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
         nullptr, &delivery, [&](bool, QString *) {
@@ -12375,8 +12376,12 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
                 }
             }
             return mode != 2 && legacyReady;
-        }, [&](const auto &publish, QString *failure) {
+        }, [&](const auto &publish, const auto &changes, QString *failure) {
             if (!publish(failure)) return false;
+            if (!changes.forEach([&](const KisPageKey &key, bool present) {
+                allPresent &= present && key.surface == backend.surface();
+                acceptedPages.append(key.page); return true;
+            })) return false;
             completedCannotRevive = !backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write);
             return completedCannotRevive;
         });
@@ -12384,6 +12389,10 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
     // The rejected raw attempt after the cut must not create another Frame.
     QCOMPARE(store->mutationStatistics().operationSessionsCreated - before, quint64(1));
     QCOMPARE(accepted, mode != 2);
+    QVERIFY(allPresent);
+    QCOMPARE(acceptedPages.size(), mode == 2 ? 0 : mode == 1 ? 2 : 1);
+    if (mode != 2) QVERIFY(acceptedPages.contains(KisLogicalPageId{0, 0}));
+    if (mode == 1) QVERIFY(acceptedPages.contains(KisLogicalPageId{1, 0}));
     QCOMPARE(completedCannotRevive, mode != 2);
     QCOMPARE(delivery.isEmpty(), mode == 2);
     QVERIFY(!store->closeSession()); // Real Frame claim or escaped native guard remains.
@@ -12430,7 +12439,7 @@ void KisPageStoreCpuMutationTest::managedFramesDiscoverTheirOwnThread()
                 result.nested = !backend.beginMutationBatch();
                 result.barrier = !backend.clearAll();
                 return result.resumed && i % 3 != 0;
-            }, [&](const auto &publish, QString *error) {
+            }, [&](const auto &publish, const auto &, QString *error) {
                 if (!publish(error)) return false;
                 // The original Frame still owns delivery, but its thread
                 // admission has ended. Other threads' Frames cannot veto it.

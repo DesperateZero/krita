@@ -49,10 +49,6 @@ std::unique_ptr<KisTiledDataManagerPageStoreBackend> preparePageStoreBackend(Kis
 }
 }
 
-// A result buffer, never a presence cache or page permission. Common brush
-// jobs use inline storage; larger declarations allocate once before pixels.
-using PagePresenceScratch = QVarLengthArray<quint8, 64>;
-
 // Capacity preparation does not publish tiles or change visible bounds.
 bool prepareExtent(KisTiledExtentManager &extent, const QRect &tileRange, QString *error)
 {
@@ -126,20 +122,6 @@ public:
             });
     }
 
-    void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
-                       KisTiledDataManagerPageStoreBackend *bridge, const QVector<KisLogicalPageId> &changed,
-                       const quint8 *present = nullptr)
-    {
-        // The original range claim covers preparation through this install:
-        // warm tiles cannot be removed; clear/restore/index replacement must
-        // reject that activity. Cold candidates belong to this same table and
-        // are consumed once because changed is a unique subset of coverage.
-        // A concurrent cold insertion can only supply an equivalent winner.
-        // Cursor/packed report writes; semantic producers supply final presence.
-        for (qsizetype i = 0; i < changed.size(); ++i)
-            installPage(table, extent, bridge, changed[i], !present || present[i]);
-    }
-
     bool prepareClear(KisTileHashTable &table, QString *error)
     {
         try {
@@ -171,14 +153,39 @@ public:
         return false;
     }
 
-    void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
-                       KisTiledDataManagerPageStoreBackend *bridge,
-                       const KisPageMutationSession::AdapterChanges &changes)
+    qsizetype installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
+                            KisTiledDataManagerPageStoreBackend *bridge,
+                            const KisPageMutationSession::AdapterChanges &changes)
     {
+        qsizetype installed = 0;
         changes.forEach([&](const KisPageKey &key, bool present) {
-            if (key.surface == bridge->surface()) installPage(table, extent, bridge, key.page, present);
+            if (key.surface == bridge->surface()) {
+                installPage(table, extent, bridge, key.page, present);
+                ++installed;
+            }
             return true;
         });
+        return installed;
+    }
+
+    // One synchronous manager cut for every ordinary operation. The caller
+    // supplies its existing gate; no adapter/Store lock is added here.
+    bool completeLocked(QWriteLocker &lock, KisTileHashTable &table, KisTiledExtentManager &extent,
+                        KisTiledDataManagerPageStoreBackend *bridge,
+                        const std::function<bool(QString *)> &publish,
+                        const KisPageMutationSession::AdapterChanges &changes, QString *error)
+    {
+        if (!publish(error)) {
+            lock.unlock();
+            return false;
+        }
+        KisPageStoreDiagnosticTimer installed(bridge->store(),
+            KisPageStoreDiagnosticPhase::MutationIndexRefresh, 0);
+        installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, 0);
+        const auto count = installLocked(table, extent, bridge, changes);
+        lock.unlock();
+        installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(count));
+        return true;
     }
 
     bool prepareRemovals(KisTileHashTable &table, const QVector<KisLogicalPageId> &pages, QString *error)
@@ -1055,7 +1062,7 @@ void KisTiledDataManager::purge(const QRect& area)
                 const bool prepared = preparedTiles.prepareRemovals(*m_hashTable, pages, failure);
                 phase.next(KisPageStoreDiagnosticPhase::MutationAdapterPrepared, quint64(pages.size()));
                 return prepared;
-            }, [&](const auto &publish, QString *failure) {
+            }, [&](const auto &publish, const auto &, QString *failure) {
                 if (!publish(failure)) return false;
                 KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
                     KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(pages.size()));
@@ -1118,15 +1125,13 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
             KisStrokeJobFailureContext::reportFailure(QStringLiteral("Clear exceeds compatibility index coordinates"));
             return;
         }
-        QVector<KisLogicalPageId> changed;
         QString error;
         OperationDelivery delivery;
         PreparedTileUpdates preparedTiles;
-        PagePresenceScratch present;
         const QRect pages(QPoint(xToCol(clearRect.left()), yToRow(clearRect.top())),
                           QPoint(xToCol(clearRect.right()), yToRow(clearRect.bottom())));
         if (!m_pageStoreBackend->fillRect(clearRect,
-                QByteArray(reinterpret_cast<const char *>(clearPixel), pixelSize), &error, &changed, &delivery,
+                QByteArray(reinterpret_cast<const char *>(clearPixel), pixelSize), &error, nullptr, &delivery,
                 [&](bool mayRemove, QString *failure) {
                     if (!prepareExtent(m_extentManager, pages, failure)) return false;
                     QReadLocker lock(&m_lock);
@@ -1134,17 +1139,11 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
                     // Do not repeat the caller's stale pre-wait selection.
                     return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure,
                         mayRemove ? completelyCoveredPages(clearRect, pages) : QRect{});
-                }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
+                }, [&](const auto &publish, const auto &changes, QString *failure) {
                     QWriteLocker lock(&m_lock);
-                    if (!publish(failure)) return false;
-                    KisPageStoreDiagnosticTimer installed(m_pageStoreBackend->store(),
-                        KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(changed.size()));
-                    installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(changed.size()));
-                    preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changed, present.data());
-                    lock.unlock();
-                    installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(changed.size()));
-                    return true;
-                }, &present))
+                    return preparedTiles.completeLocked(lock, *m_hashTable, m_extentManager,
+                        m_pageStoreBackend, publish, changes, failure);
+                }))
             KisStrokeJobFailureContext::reportFailure(error);
         return;
     }
@@ -1312,7 +1311,7 @@ void KisTiledDataManager::clear()
                 const bool prepared = preparedTiles.prepareClear(*m_hashTable, failure);
                 phase.next(KisPageStoreDiagnosticPhase::MutationAdapterPrepared, 1);
                 return prepared;
-            }, [&](const auto &publish, QString *failure) {
+            }, [&](const auto &publish, const auto &, QString *failure) {
                 if (!publish(failure)) return false;
                 KisPageStoreDiagnosticTimer phase(m_pageStoreBackend->store(),
                     KisPageStoreDiagnosticPhase::MutationIndexRefresh, 1);
@@ -1389,30 +1388,22 @@ PixelOperationResult KisTiledDataManager::copyPageStore(
         if (error) *error = QStringLiteral("Copy exceeds compatibility index coordinates");
         return PixelOperationResult::Failed;
     }
-    QVector<KisLogicalPageId> changed;
     OperationDelivery delivery;
     PreparedTileUpdates preparedTiles;
-    PagePresenceScratch present;
     const QRect pages(QPoint(xToCol(rect.left()), yToRow(rect.top())),
                       QPoint(xToCol(rect.right()), yToRow(rect.bottom())));
     if (!m_pageStoreBackend->copyFrom(*source->m_pageStoreBackend, sourceView, requestedRect,
-            rect, rough, error, &changed, &delivery,
+            rect, rough, error, nullptr, &delivery,
             [&](bool mayRemove, QString *failure) {
                 if (!prepareExtent(m_extentManager, pages, failure)) return false;
                 QReadLocker lock(&m_lock);
                 return preparedTiles.prepare(*m_hashTable, QRegion(pages), failure,
                     mayRemove ? (rough ? pages : completelyCoveredPages(rect, pages)) : QRect{});
-            }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
+            }, [&](const auto &publish, const auto &changes, QString *failure) {
                 QWriteLocker lock(&m_lock);
-                if (!publish(failure)) return false;
-                KisPageStoreDiagnosticTimer installed(m_pageStoreBackend->store(),
-                    KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(changed.size()));
-                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(changed.size()));
-                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changed, present.data());
-                lock.unlock();
-                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(changed.size()));
-                return true;
-            }, &present))
+                return preparedTiles.completeLocked(lock, *m_hashTable, m_extentManager,
+                    m_pageStoreBackend, publish, changes, failure);
+            }))
         return PixelOperationResult::Failed;
     return PixelOperationResult::Succeeded;
 }
@@ -1739,7 +1730,6 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
         return;
     }
     if (m_pageStoreBackend) {
-        QVector<KisLogicalPageId> changed;
         QString error;
         const bool legacyIntent = copyNeedsLiveLegacySource(rect, false);
         // Match the operation-private painter route: range reservation and
@@ -1749,7 +1739,7 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
         locker.unlock();
         diagnostic.next(Phase::WriteBytesBody, 1);
         const auto result = m_pageStoreBackend->writeBytes(data, x, y, width, height, dataRowStride,
-            legacyIntent, &changed, &error, &delivery, [&](QString *failure) {
+            legacyIntent, nullptr, &error, &delivery, [&](QString *failure) {
                 // Original claims prevent abort/restore from replacing this
                 // capacity between preparation and the post-pixel delta.
                 if (!prepareExtent(m_extentManager,
@@ -1759,19 +1749,10 @@ void KisTiledDataManager::writeBytes(const quint8 *data,
                 return preparedTiles.prepare(*m_hashTable,
                     std::array<QRect, 1>{QRect(QPoint(xToCol(rect.left()), yToRow(rect.top())),
                                              QPoint(xToCol(rect.right()), yToRow(rect.bottom())))}, failure);
-            }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
+            }, [&](const auto &publish, const auto &changes, QString *failure) {
                 locker.relock();
-                if (!publish(failure)) {
-                    locker.unlock();
-                    return false;
-                }
-                KisPageStoreDiagnosticTimer installed(m_pageStoreBackend->store(),
-                    KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(changed.size()));
-                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(changed.size()));
-                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changed);
-                locker.unlock();
-                installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(changed.size()));
-                return true;
+                return preparedTiles.completeLocked(locker, *m_hashTable, m_extentManager,
+                    m_pageStoreBackend, publish, changes, failure);
             });
         if (result == KisPageStoreWriteOperationResult::Succeeded) {
             diagnostic.next(Phase::WriteBytesBatchFinish, 1);
@@ -1914,24 +1895,17 @@ KisPageStoreWriteOperationResult KisTiledDataManager::writePageStoreOperation(
                 }
         }
     }
-    QVector<KisLogicalPageId> changed;
     OperationDelivery delivery;
     PreparedTileUpdates preparedTiles;
-    const auto result = m_pageStoreBackend->writeOperation(targets.values(), legacyIntent, operation, &changed, error,
+    const auto result = m_pageStoreBackend->writeOperation(targets.values(), legacyIntent, operation, nullptr, error,
         historyOwner, &delivery, [&](QString *failure) {
             if (!prepareExtent(m_extentManager, pageCoverage.boundingRect(), failure)) return false;
             QReadLocker lock(&m_lock);
             return preparedTiles.prepare(*m_hashTable, pageCoverage, failure);
-        }, [&](const std::function<bool(QString *)> &publish, QString *failure) {
+        }, [&](const auto &publish, const auto &changes, QString *failure) {
             QWriteLocker lock(&m_lock);
-            if (!publish(failure)) return false;
-            KisPageStoreDiagnosticTimer installed(m_pageStoreBackend->store(),
-                KisPageStoreDiagnosticPhase::MutationIndexRefresh, quint64(changed.size()));
-            installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstall, quint64(changed.size()));
-            preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, changed);
-            lock.unlock();
-            installed.next(KisPageStoreDiagnosticPhase::MutationAdapterInstalled, quint64(changed.size()));
-            return true;
+            return preparedTiles.completeLocked(lock, *m_hashTable, m_extentManager,
+                m_pageStoreBackend, publish, changes, failure);
         });
     return result;
 }

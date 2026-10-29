@@ -192,6 +192,17 @@ public:
     // Freeze the one original directory: actual changes first, claims-only
     // rows last. No entry moves, and retries reuse this same frozen D.
     KisPagePublicationRows publicationRows();
+    // The frozen directory already separates actual D from claims-only rows.
+    // Its original entries survive result cleanup through adapter delivery;
+    // never dereference their released publication workspace at this phase.
+    template<class Visit> bool visitPublishedEntries(const Visit &visit) const
+    {
+        if (!publishedCount) return true; // A successful no-op never froze D.
+        Q_ASSERT(index);
+        for (size_t i = 0; i < *publishedCount; ++i)
+            if (!visit(*static_cast<const KisMutationPageEntry *>((*index)[i]))) return false;
+        return true;
+    }
 
 private:
     // Private locator only. Keys and incarnations stay on the original

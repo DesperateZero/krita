@@ -4056,6 +4056,7 @@ void KisTiledDataManagerTest::testPageStoreChangedStorage()
         else if (phase == KisPageStoreDiagnosticPhase::PixelOperationChangedDeliver) ++deliveries;
     });
     QString error; int bodies = 0;
+    QVector<KisLogicalPageId> adapterChanges; bool adapterPresent = true;
     const auto result = backend->writeOperation(targets, false, [&](KisPixelWriteCursor *cursor) {
         ++bodies;
         for (int pass = 0; pass < 3; ++pass) for (int i = pages - 1; i >= 0; --i) {
@@ -4066,7 +4067,15 @@ void KisTiledDataManagerTest::testPageStoreChangedStorage()
             std::memset(cursor->rawData(), 0x61 + pass, size_t(bpp));
         }
         return outcome != 3;
-    }, &changed, &error, owner);
+    }, &changed, &error, owner, nullptr, {},
+        [&](const auto &publish, const auto &changes, QString *failure) {
+            if (!publish(failure)) return false;
+            return changes.forEach([&](const KisPageKey &key, bool present) {
+                adapterPresent &= present && key.surface == backend->surface();
+                adapterChanges.append(key.page);
+                return true;
+            });
+        });
     QCOMPARE(bodies, 1); QCOMPARE(prepares, 1); QCOMPARE(ranges, 1);
     QCOMPARE(preparedBytes, quint64(0)); // output precedes the original execution/range storage
     QCOMPARE(result, outcome == 3 ? KisPageStoreWriteOperationResult::Failed : KisPageStoreWriteOperationResult::Succeeded);
@@ -4075,6 +4084,21 @@ void KisTiledDataManagerTest::testPageStoreChangedStorage()
     if (outcome == 3) expectedChanged.clear();
     QCOMPARE(changed.size(), expectedChanged.size());
     QVERIFY(QSet<KisLogicalPageId>(changed.cbegin(), changed.cend()) == expectedChanged);
+    QVERIFY(adapterPresent);
+    QCOMPARE(adapterChanges.size(), expectedChanged.size());
+    QVERIFY(QSet<KisLogicalPageId>(adapterChanges.cbegin(), adapterChanges.cend()) == expectedChanged);
+    if (persistent && outcome != 3) {
+        // Earlier pending history rows must not leak into the next borrow's D.
+        bool empty = true;
+        QCOMPARE(backend->writeOperation(targets, false, [](KisPixelWriteCursor *) { return true; },
+            nullptr, &error, owner, nullptr, {},
+            [&](const auto &publish, const auto &changes, QString *failure) {
+                return publish(failure) && changes.forEach([&](const KisPageKey &, bool) {
+                    empty = false; return true;
+                });
+            }), KisPageStoreWriteOperationResult::Succeeded);
+        QVERIFY(empty);
+    }
     if (persistent) {
         auto hidden = backend->captureReadView(); QVERIFY(hidden.isValid());
         KisPageStoreReadPage read(store, hidden, {backend->surface(), targets.front()});
@@ -5973,7 +5997,7 @@ void KisTiledDataManagerTest::testPageStoreClearPreparedDelivery()
     QString error; bool prepared = false, delivered = false;
     QVERIFY(!backend->clearAll(&error, &delivery,
         [&](QString *failure) { prepared = true; *failure = QStringLiteral("test adapter refusal"); return false; },
-        [&](const auto &, QString *) { delivered = true; return true; }));
+        [&](const auto &, const auto &, QString *) { delivered = true; return true; }));
     QVERIFY(prepared); QVERIFY(!delivered); QVERIFY(delivery.isEmpty());
     QCOMPARE(backend->store()->sessionStats().committedTransactions, commits);
     QCOMPARE(dm.m_hashTable, originalTable); QCOMPARE(dm.extent(), extent);

@@ -436,7 +436,11 @@ public:
             if (accepted) leave();
             return accepted;
         };
-        const bool accepted = complete ? complete(publish, error) : publish(error);
+        // The callback invokes publish before visiting this borrowed view.
+        // Successful delivery keeps the original rows/claims alive; no key
+        // or presence projection is needed for the manager's installation.
+        const auto changes = session().sealedAdapterChanges();
+        const bool accepted = complete ? complete(publish, changes, error) : publish(error);
         if (accepted && delivery) {
             delivery->m_frame = std::move(original);
             delivery->m_legacy = std::move(legacy);
@@ -2303,7 +2307,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     // The manager's short completion owns the existing adapter gate. For a
     // standalone operation it surrounds publication and prepared installation;
     // history installs its pending working adapter before returning the borrow.
-    if (historyOwner && completeAdapter && !completeAdapter([](QString *) { return true; }, error))
+    if (historyOwner && completeAdapter && !completeAdapter([](QString *) { return true; },
+            KisPageMutationSession::executionAdapterChanges(execution), error))
         return Result::Failed;
     if (!execution.finish(error)) return Result::Failed;
     if (frame.isPresent() && !frame.finish(delivery, completeAdapter, error)) return Result::Failed;
@@ -2710,7 +2715,9 @@ bool KisTiledDataManagerPageStoreBackend::removePages(
         // No canonical work needs a new transaction. A whole-index clear can
         // still have compatibility remnants left by an independent producer.
         if (prepareAdapter && !prepareAdapter(error)) return false;
-        if (completeAdapter && !completeAdapter([](QString *) { return true; }, error)) return false;
+        const KisPageMutationSession::AdapterChanges changes(nullptr,
+            [](const void *, const void *, KisPageMutationSession::AdapterChanges::Visitor) { return true; });
+        if (completeAdapter && !completeAdapter([](QString *) { return true; }, changes, error)) return false;
         KisPageStoreDetail::setError(error, {});
         return true;
     }
@@ -2830,7 +2837,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         }
     }
     return frame.finish(delivery,
-        [&](const auto &publish, QString *failure) {
+        [&](const auto &publish, const auto &, QString *failure) {
             if (!publish(failure)) return false;
             if (completeAdapter) completeAdapter(changes.data(), changes.size());
             return true;

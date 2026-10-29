@@ -1692,8 +1692,10 @@ public:
         linked = true;
     }
     BoundEntry *entries() { return count == 1 ? &inlineEntry : reinterpret_cast<BoundEntry *>(this + 1); }
+    const BoundEntry *entries() const { return const_cast<Private *>(this)->entries(); }
     quint64 *touched()
     { return count <= 64 ? &inlineTouched : reinterpret_cast<quint64 *>(entries() + count); }
+    const quint64 *touched() const { return const_cast<Private *>(this)->touched(); }
     quint64 *prepared()
     {
         return count <= 64 ? &inlinePrepared : touched() + (count + 63) / 64;
@@ -2908,13 +2910,34 @@ bool KisPageMutationSession::visitAdapterPages(const std::function<void(const Ki
 
 KisPageMutationSession::AdapterChanges KisPageMutationSession::sealedAdapterChanges() const
 {
-    Q_ASSERT(d && d->state == Private::State::Detached);
+    // The borrowed view can be bound before publish: moving the same Session
+    // into a legacy extension does not move this original scope. Consumption
+    // is permitted only after the successful cut, while its owner retains it.
+    Q_ASSERT(d);
     return AdapterChanges(d.get(), [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
         const auto *scope = static_cast<const Private *>(changes);
-        for (auto slot = scope->writes.firstEntry(); slot.isValid(); slot = scope->writes.nextEntry(slot)) {
-            const auto *entry = scope->writes.at(slot);
-            if ((entry->isRemoval() || entry->hasPrivateResult()) &&
-                !visit(visitor, entry->key(), !entry->isRemoval())) return false;
+        Q_ASSERT(scope->state == Private::State::Detached);
+        return scope->writes.visitPublishedEntries([&](const KisMutationPageEntry &entry) {
+            return visit(visitor, entry.key(), !entry.isRemoval());
+        });
+    });
+}
+
+KisPageMutationSession::AdapterChanges KisPageMutationSession::executionAdapterChanges(
+    const KisPageMutationExecution &execution)
+{
+    Q_ASSERT(execution.d && !execution.d->finished && !execution.d->counters.activePins);
+    return AdapterChanges(execution.d.get(), [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
+        const auto *borrow = static_cast<const KisPageMutationExecution::Private *>(changes);
+        // The caller retains this exclusive execution until its synchronous
+        // adapter finishes. Other history rows are not this operation's D.
+        for (size_t word = 0; word < (borrow->count + 63) / 64; ++word) {
+            quint64 bits = borrow->touched()[word];
+            while (bits) {
+                const size_t i = word * 64 + qCountTrailingZeroBits(bits);
+                bits &= bits - 1;
+                if (!visit(visitor, borrow->entries()[i].entry->key(), true)) return false;
+            }
         }
         return true;
     });

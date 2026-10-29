@@ -178,7 +178,7 @@ class KRITAIMAGE_EXPORT KisPageMutationSession
 public:
     // Borrowed only during synchronous adapter hooks. Preparation consumes
     // the original ordered overlay candidate. A private batch's final install
-    // may instead visit its retained sealed entries, in original write order.
+    // may instead visit its retained sealed entries in the original frozen D.
     // Both expose unique actual changes without exporting another key array.
     class KRITAIMAGE_EXPORT AdapterChanges {
     public:
@@ -192,6 +192,7 @@ public:
         }
     private:
         friend class KisPageMutationSession;
+        friend class KisTiledDataManagerPageStoreBackend;
         using Visitor = bool (*)(const void *, const KisPageKey &, bool);
         using ForEach = bool (*)(const void *, const void *, Visitor);
         AdapterChanges(const void *changes, ForEach forEach) : m_changes(changes), m_forEach(forEach) {}
@@ -272,6 +273,7 @@ private:
     // access survives seal, and the transaction activity still ends normally.
     bool sealForAdapterDelivery(QString *error = nullptr, const AdapterPreparation &prepareAdapter = {});
     AdapterChanges sealedAdapterChanges() const;
+    static AdapterChanges executionAdapterChanges(const KisPageMutationExecution &);
     enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
     bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
         const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
