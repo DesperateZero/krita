@@ -6,7 +6,8 @@
 #define KIS_CPU_RESIDENT_BINDING_P_H
 
 #include <QMutex>
-#include <bitset>
+#include <algorithm>
+#include <array>
 #include <boost/intrusive/set.hpp>
 #include <mutex>
 #include <utility>
@@ -239,6 +240,7 @@ using KisCpuBindingLeaseMap = std::unordered_map<quint64, KisCpuBindingLease,
 struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
 {
     static constexpr quint64 OperationReplayWindow = 4096;
+    static constexpr size_t OperationReplayWordBits = 64;
 
     bool configure(const KisCpuResidentReplicaProviderConfig &requested,
                    const std::shared_ptr<KisCompletionRegistry> &registry,
@@ -248,8 +250,10 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
         if (!operation.isValid()) return false;
         if (operation.value > consumedOperationHighWater) return true;
         const quint64 age = consumedOperationHighWater - operation.value;
+        const size_t bit = size_t(operation.value % OperationReplayWindow);
         return age < OperationReplayWindow
-            && !consumedOperations.test(size_t(operation.value % OperationReplayWindow));
+            && !(consumedOperations[bit / OperationReplayWordBits]
+                 & (quint64(1) << (bit % OperationReplayWordBits)));
     }
     void consumeOperation(KisPageOperationId operation)
     {
@@ -257,16 +261,38 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
         if (operation.value > consumedOperationHighWater) {
             const quint64 advance = operation.value - consumedOperationHighWater;
             if (advance >= OperationReplayWindow) {
-                consumedOperations.reset();
-            } else {
-                for (quint64 offset = 1; offset <= advance; ++offset) {
-                    consumedOperations.reset(size_t(
-                        (consumedOperationHighWater + offset) % OperationReplayWindow));
-                }
+                consumedOperations.fill(0);
+            } else if (advance > 1) {
+                // Only expired positions are cleared. Global operation ids
+                // can skip unrelated providers: never visit each skipped id
+                // under this provider's gate. Each nonempty linear interval
+                // has at most two partial words; live neighbours stay intact.
+                // The arriving id is set below, so its previous bit need not
+                // be cleared. Adjacent arrivals require no clearing at all.
+                const auto clear = [&](size_t begin, size_t end) {
+                    const size_t first = begin / OperationReplayWordBits;
+                    const size_t last = (end - 1) / OperationReplayWordBits;
+                    const quint64 firstMask = ~quint64(0) << (begin % OperationReplayWordBits);
+                    const quint64 lastMask = ~quint64(0)
+                        >> (OperationReplayWordBits - 1 - ((end - 1) % OperationReplayWordBits));
+                    if (first == last) consumedOperations[first] &= ~(firstMask & lastMask);
+                    else {
+                        consumedOperations[first] &= ~firstMask;
+                        std::fill(consumedOperations.begin() + first + 1, consumedOperations.begin() + last, 0);
+                        consumedOperations[last] &= ~lastMask;
+                    }
+                };
+                const size_t begin = size_t((consumedOperationHighWater + 1) % OperationReplayWindow);
+                const size_t end = begin + size_t(advance - 1);
+                if (end > OperationReplayWindow) {
+                    clear(begin, OperationReplayWindow);
+                    clear(0, end - OperationReplayWindow);
+                } else clear(begin, end);
             }
             consumedOperationHighWater = operation.value;
         }
-        consumedOperations.set(size_t(operation.value % OperationReplayWindow));
+        const size_t bit = size_t(operation.value % OperationReplayWindow);
+        consumedOperations[bit / OperationReplayWordBits] |= quint64(1) << (bit % OperationReplayWordBits);
     }
     KisReplicaProviderId providerId() const { std::lock_guard<QMutex> lock(mutex); return config.provider; }
     KisReplicaProviderEpoch providerEpoch() const { std::lock_guard<QMutex> lock(mutex); return config.providerEpoch; }
@@ -284,7 +310,7 @@ struct KRITAIMAGE_EXPORT KisCpuResidentProviderState
     // Operation ids are globally monotonic but provider calls may arrive out
     // of order. Keep a fixed replay window and fail closed for older ids;
     // replay protection must not become a session-lifetime QSet.
-    std::bitset<OperationReplayWindow> consumedOperations;
+    std::array<quint64, OperationReplayWindow / OperationReplayWordBits> consumedOperations{};
     quint64 consumedOperationHighWater = 0;
 };
 

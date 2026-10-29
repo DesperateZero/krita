@@ -1240,14 +1240,15 @@
         "KisCompletionRegistry.h",
         "KisPageReplicaProvider.h",
         "QMutex",
-        "bitset",
+        "algorithm",
+        "array",
         "boost/intrusive/set.hpp",
         "mutex",
         "unordered_map",
         "utility",
         "variant"
       ],
-      "lines": 518,
+      "lines": 544,
       "member_fields": [
         "m_binding",
         "m_claimed",
@@ -1287,7 +1288,7 @@
         "SlotKey",
         "WriteState"
       ],
-      "sha256": "0b34494edc2a69bcf1e0f05945a4a1234687018a50d399c36c3a67dca6a379aa",
+      "sha256": "fad9ca422c11269a7ef907f5c48677d328dd640fb6e03495885a9504f4eed95a",
       "synchronization_declarations": 13
     },
     "libs/image/pagestore/KisDeferredMetadataCleanup_p.h": {
@@ -4083,7 +4084,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 145,
+      "container_declarations": 146,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -4129,12 +4130,14 @@
         "ctime",
         "functional",
         "kis_image_config.h",
+        "limits",
         "map",
         "memory",
         "pagestore/KisPageMetadataTestView.h",
         "pagestore/KisPageOwnerLedgerTestAccess.h",
         "pagestore/KisPageViewTestAccess.h",
         "random",
+        "set",
         "thread",
         "tiles3/kis_hline_iterator.h",
         "tiles3/kis_random_accessor.h",
@@ -4147,7 +4150,7 @@
         "utility",
         "vector"
       ],
-      "lines": 16411,
+      "lines": 16531,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -4216,7 +4219,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "8822f54406ee4420d98450a7e5bd709866d482f5d1c626d251205098b19cc2f7",
+      "sha256": "679363ef98b2d26e4cc1a49bb71e243c9f52e11a0b62991ba3cbd17a5910a700",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -7104,5 +7107,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "ee8fc8b760f43ce110f29d4d9946594ef034606f"
+  "working_tree_head": "acb4f2640b48bea0cac1c49805adb362d69a5abc"
 }

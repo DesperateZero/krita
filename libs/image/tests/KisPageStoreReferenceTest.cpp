@@ -23,9 +23,11 @@
 #include <array>
 #include <ctime>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <random>
+#include <set>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -1508,6 +1510,10 @@ private Q_SLOTS:
     void materializationOracleAndPublicationGuards();
     void fakeCpuProviderSupportsReorderingAndFailure();
     void productionCpuProviderPreservesFormatDefaultAndCowBytes();
+    void providerReplayWindow_data();
+    void providerReplayWindow();
+    void providerReplayConsumptionBoundaries_data();
+    void providerReplayConsumptionBoundaries();
     void tiles3ProviderUsesExistingTileStoreBehindLeases();
     void tiles3NativeCopyPreservesSourceAndRejectsInvalidWork();
     void tiles3SourceSurvivesFailedPreparation();
@@ -13127,6 +13133,120 @@ void KisPageStoreReferenceTest::fakeCpuProviderSupportsReorderingAndFailure()
                  succeed ? KisCompletionStatus::Succeeded : KisCompletionStatus::Failed);
         QCOMPARE(provider.validate(operation.replica, allocationDescriptor()), succeed);
     }
+}
+
+void KisPageStoreReferenceTest::providerReplayWindow_data()
+{
+    QTest::addColumn<quint64>("initialHigh");
+    QTest::addColumn<quint64>("advance");
+    for (quint64 gap : {1, 63, 64, 65, 4095, 4096, 4097, 8192}) {
+        for (quint64 offset : {0, 1, 63, 4095})
+            QTest::newRow(qPrintable(QStringLiteral("offset%1-gap%2").arg(offset).arg(gap))) << 8192 + offset << gap;
+        QTest::newRow(qPrintable(QStringLiteral("maximum-gap%1").arg(gap)))
+            << std::numeric_limits<quint64>::max() - gap << gap;
+    }
+}
+
+void KisPageStoreReferenceTest::providerReplayWindow()
+{
+    QFETCH(quint64, initialHigh); QFETCH(quint64, advance);
+    KisCpuResidentProviderState state;
+    // Independent absolute-id oracle: no circular positions, words or masks.
+    std::set<quint64> consumed;
+    quint64 high = 0;
+    const auto available = [&](quint64 id) {
+        return id && (id > high || (high - id < 4096 && consumed.count(id) == 0));
+    };
+    const auto submit = [&](quint64 id) {
+        const bool expected = available(id);
+        if (state.operationAvailable({id}) != expected) return false;
+        if (expected) {
+            state.consumeOperation({id});
+            high = std::max(high, id);
+            consumed.insert(id);
+            while (!consumed.empty() && high - *consumed.begin() >= 4096) consumed.erase(consumed.begin());
+        }
+        return state.operationAvailable({id}) == available(id);
+    };
+    const auto checkWindow = [&] {
+        if (state.operationAvailable({})) return false;
+        for (quint64 age = 0; age <= 4096 && age < high; ++age)
+            if (state.operationAvailable({high - age}) != available(high - age)) return false;
+        return high == std::numeric_limits<quint64>::max() || state.operationAvailable({high + 1});
+    };
+    QVERIFY(checkWindow());
+    QVERIFY(submit(initialHigh));
+    // Interleave consumed and unused late arrivals throughout the live range,
+    // so an over-wide edge clear would incorrectly accept a real replay.
+    for (quint64 age = 1; age < 4096; age += 17) QVERIFY(submit(initialHigh - age));
+    QVERIFY(checkWindow());
+    QVERIFY(submit(initialHigh + advance));
+    QVERIFY(checkWindow());
+    for (quint64 age : {0, 1, 63, 64, 65, 4094, 4095, 4096}) {
+        QVERIFY(submit(high - age));
+        QVERIFY(submit(high - age));
+        QVERIFY(checkWindow());
+    }
+    QVERIFY(submit(initialHigh));
+    QVERIFY(submit(0));
+    QVERIFY(checkWindow());
+}
+
+void KisPageStoreReferenceTest::providerReplayConsumptionBoundaries_data()
+{
+    QTest::addColumn<bool>("tiles3");
+    QTest::newRow("tiles3") << true;
+    QTest::newRow("independent-cpu") << false;
+}
+
+void KisPageStoreReferenceTest::providerReplayConsumptionBoundaries()
+{
+    QFETCH(bool, tiles3);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    const auto descriptor = allocationDescriptor();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {195}; config.providerEpoch = {1}; config.budgetBytes = 2 * descriptor.minimumByteSize();
+    std::shared_ptr<KisPageReplicaProvider> provider;
+    if (tiles3) {
+        auto real = std::make_shared<KisTiles3PageReplicaProvider>();
+        QVERIFY(real->configure(config, completions)); provider = real;
+    } else {
+        auto real = std::make_shared<KisCpuPageReplicaProvider>();
+        QVERIFY(real->configure(config, completions)); provider = real;
+    }
+    const auto create = [&](quint64 operation, KisPageVersion version) {
+        return provider->requestReplica({operation}, version, descriptor, KisPageAccessDomain::CpuRam,
+                                        KisPageAccessMode::Read, KisPagePriority::Normal);
+    };
+    // Malformed requests do not consume an id; accepted allocation attempts
+    // do, even if the physical budget subsequently refuses them.
+    QVERIFY(!create(10, {}).isValid());
+    const auto first = create(10, pageVersion(0, 1)); QVERIFY(first.isValid());
+    const auto second = create(11, pageVersion(0, 2)); QVERIFY(second.isValid());
+    QVERIFY(!create(12, pageVersion(0, 3)).isValid());
+    QVERIFY(provider->retire({13}, first.replica, {}).isValid());
+    QVERIFY(!create(12, pageVersion(0, 3)).isValid());
+    const auto replacement = create(14, pageVersion(0, 3)); QVERIFY(replacement.isValid());
+    KisReplicaTransferRequest request{{15}, second.replica, replacement.replica, descriptor,
+                                      KisReplicaTransferKind::WriteGenerationInitialization};
+    ++request.target.version.generation.value;
+    QVERIFY(request.isSameProviderTransfer());
+    QVERIFY(!provider->transfer(request, KisPagePriority::Normal).isValid());
+    request.target = replacement.replica;
+    QVERIFY(!provider->transfer(request, KisPagePriority::Normal).isValid());
+    request.operation = {16};
+    QVERIFY(provider->transfer(request, KisPagePriority::Normal).isValid());
+    // Physical retirement refusal leaves this SAME operation available.
+    auto binding = provider->cpuResidentBinding(second.replica); QVERIFY(binding);
+    bool pinned = binding->acquireRead(second.replica.allocationIdentity(), false);
+    QVERIFY(pinned);
+    const auto release = qScopeGuard([&] { if (pinned) binding->releaseRead(); });
+    QVERIFY(!provider->retire({17}, second.replica, {}).isValid());
+    binding->releaseRead(); pinned = false;
+    QVERIFY(provider->retire({17}, second.replica, {}).isValid());
+    QVERIFY(!provider->retire({17}, replacement.replica, {}).isValid());
+    QVERIFY(provider->retire({18}, replacement.replica, {}).isValid());
+    QCOMPARE(provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreReferenceTest::productionCpuProviderPreservesFormatDefaultAndCowBytes()
