@@ -182,17 +182,22 @@ void KisPageStorePhysicalClaimTest::freshResourceDelivery()
     const QByteArray bytes(qsizetype(f.desc.minimumByteSize()), char(0x69));
     const KisCpuPagePayload payload{bytes.constData(), qsizetype(f.desc.minimumRowBytes()), bytes.size()};
     const KisPageVersion version{key(0), {2}};
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
+    while (owner.nextOperationId().value <= 3) {} // Fixture imported explicit ids 1–3.
+    KisPageOperationId operation;
     // Native creation needs no fabricated public operation or ready ticket.
-    const KisCpuReplicaInput input{KisCpuReplicaInput::Kind(kind), external ? KisPageOperationId{10} : KisPageOperationId{},
+    const KisCpuReplicaInput input{KisCpuReplicaInput::Kind(kind), owner, operation,
         version, f.desc, KisPageWriteMode::PreserveContents, KisPagePriority::Normal,
         f.replica, f.binding, &payload, source};
     auto result = external ? f.provider->KisPageReplicaProvider::prepareCpuReplica(input)
                            : f.provider->prepareCpuReplica(input);
     QCOMPARE(result.nativeReady(), !external);
+    QCOMPARE(result.nativeReadyFrom(*f.provider), !external);
+    QCOMPARE(operation.isValid(), external);
     QCOMPARE(bool(result.externalOperation()), external);
     if (external) {
         QVERIFY(result.externalOperation()->isValid());
-        QCOMPARE(result.externalOperation()->operation, input.operation);
+        QCOMPARE(result.externalOperation()->operation, operation);
         QVERIFY(f.completions->verifyTerminal(result.externalOperation()->completion).succeeded());
     }
     const auto target = result.replica(version); QVERIFY(target.isValid()); QCOMPARE(target.version, version);
@@ -206,7 +211,7 @@ void KisPageStorePhysicalClaimTest::freshResourceDelivery()
     QCOMPARE(QByteArray(data, bytes.size()), QByteArray(bytes.size(), kind == 0 ? char(0x31) : kind == 2 ? char(0x69) : char(0x55)));
     QCOMPARE(data == reinterpret_cast<const char *>(f.tile->data()), kind == 4);
     binding->releaseRead(); data = nullptr;
-    QVERIFY(f.provider->retire({11}, target, {}).isValid());
+    QVERIFY(f.provider->retire(owner.nextOperationId(), target, {}).isValid());
     QVERIFY(!binding->acquireRead(target.allocationIdentity(), false));
     // The public adapter still consumes replay identity, even when its pixel
     // implementation is shared with the operation-free native factory.
@@ -233,9 +238,11 @@ void KisPageStorePhysicalClaimTest::freshCopyRequiresOriginalSource()
     const auto release = qScopeGuard([&] { if (failure == 2) f.binding->releaseWrite(); });
     if (failure == 3) QVERIFY(f.provider->retire({12}, f.replica, {}).isValid());
     const auto before = f.provider->payloadWork();
-    auto result = f.provider->prepareCpuReplica({KisCpuReplicaInput::Kind::Copy, {}, version, f.desc,
+    KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions)); KisPageOperationId operation;
+    auto result = f.provider->prepareCpuReplica({KisCpuReplicaInput::Kind::Copy, owner, operation, version, f.desc,
         KisPageWriteMode::PreserveContents, KisPagePriority::Normal, source, binding, nullptr, initialization});
     QVERIFY(!result.nativeReady()); QVERIFY(!result.replica(version).isValid()); QVERIFY(!result.error().isEmpty());
+    QVERIFY(!operation.isValid());
     QCOMPARE(f.provider->payloadWork().nativeDuplicatePages, before.nativeDuplicatePages);
 }
 

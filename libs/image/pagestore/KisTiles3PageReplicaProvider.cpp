@@ -1052,22 +1052,31 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
 KisCpuReplicaPreparation KisTiles3PageReplicaProvider::prepareCpuReplica(const KisCpuReplicaInput &input)
 {
     QMutexLocker locker(&d->mutex);
-    using Kind = KisCpuReplicaInput::Kind;
-    switch (input.kind) {
-    case Kind::Default:
-        return d->allocate(input.version, input.descriptor, KisPageAccessDomain::CpuRam);
-    case Kind::Copy:
-        return d->prepareCopy(input.source, input.version, input.descriptor, input.sourceBinding);
-    case Kind::Payload:
-        return input.payload ? d->allocate(input.version, input.descriptor,
-            KisPageAccessDomain::CpuRam, nullptr, input.payload)
-            : KisCpuReplicaPreparation::failed(QStringLiteral("CPU payload is missing"));
-    case Kind::SourceCopy:
-    case Kind::Alias:
-        return d->prepareSource(input.initialization, input.version, input.descriptor,
-            input.kind == Kind::Alias ? KisReplicaSourceUse::ImmutableAlias : KisReplicaSourceUse::WritableCopy);
+    auto result = [&]() -> KisCpuReplicaPreparation {
+        using Kind = KisCpuReplicaInput::Kind;
+        switch (input.kind) {
+        case Kind::Default:
+            return d->allocate(input.version, input.descriptor, KisPageAccessDomain::CpuRam);
+        case Kind::Copy:
+            return d->prepareCopy(input.source, input.version, input.descriptor, input.sourceBinding);
+        case Kind::Payload:
+            return input.payload ? d->allocate(input.version, input.descriptor,
+                KisPageAccessDomain::CpuRam, nullptr, input.payload)
+                : KisCpuReplicaPreparation::failed(QStringLiteral("CPU payload is missing"));
+        case Kind::SourceCopy:
+        case Kind::Alias:
+            return d->prepareSource(input.initialization, input.version, input.descriptor,
+                input.kind == Kind::Alias ? KisReplicaSourceUse::ImmutableAlias : KisReplicaSourceUse::WritableCopy);
+        }
+        return KisCpuReplicaPreparation::failed(QStringLiteral("CPU preparation kind is invalid"));
+    }();
+    // Only this actual producer may sign a native result. A custom provider
+    // forwarding another producer's result cannot assume its direct authority.
+    if (auto *native = std::get_if<KisCpuReplicaPreparation::Native>(&result.m_result)) {
+        Q_ASSERT(!native->issuer);
+        native->issuer = this;
     }
-    return KisCpuReplicaPreparation::failed(QStringLiteral("CPU preparation kind is invalid"));
+    return result;
 }
 
 

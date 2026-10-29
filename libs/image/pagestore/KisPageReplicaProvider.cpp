@@ -6,27 +6,30 @@
 
 #include "KisPageReplicaProvider.h"
 #include "KisCpuResidentBinding_p.h"
+#include "KisPageOwnerLedger.h"
 
 KisCpuReplicaPreparation KisPageReplicaProvider::prepareCpuReplica(const KisCpuReplicaInput &input)
 {
     using Kind = KisCpuReplicaInput::Kind;
+    if (!input.m_operation.isValid()) input.m_operation = input.m_owner.nextOperationId();
+    const auto operation = input.m_operation;
     KisReplicaOperation result;
     switch (input.kind) {
     case Kind::Default:
-        result = prepareWrite(input.operation, input.version, input.descriptor,
+        result = prepareWrite(operation, input.version, input.descriptor,
             KisPageAccessDomain::CpuRam, input.mode, input.priority);
         break;
     case Kind::Copy:
-        result = prepareSynchronousWriteCopy(input.operation, input.source, input.version,
+        result = prepareSynchronousWriteCopy(operation, input.source, input.version,
             input.descriptor, input.priority);
         break;
     case Kind::Payload:
-        if (input.payload) result = prepareSynchronousCpuPayload(input.operation, input.version,
+        if (input.payload) result = prepareSynchronousCpuPayload(operation, input.version,
             input.descriptor, *input.payload, input.priority);
         break;
     case Kind::SourceCopy:
     case Kind::Alias:
-        result = prepareSynchronousSource(input.operation, input.initialization, input.version,
+        result = prepareSynchronousSource(operation, input.initialization, input.version,
             input.descriptor, input.kind == Kind::Alias ? KisReplicaSourceUse::ImmutableAlias
                                                       : KisReplicaSourceUse::WritableCopy, input.priority);
         break;

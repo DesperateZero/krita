@@ -5238,8 +5238,7 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
     auto *shard = core->shards[shardIndex].get();
     if (native->location.shard != shard || native->reserved || !target.isValid()
         || !(write.baseVersion.key == write.version.key)
-        || !(target.version == write.version) || !write.transaction.isValid()
-        || !write.operation.isValid()) return false;
+        || !(target.version == write.version) || !write.transaction.isValid()) return false;
     QMutexLocker lock(&shard->mutex);
     const auto *preparedValue = native->location.shard == shard
         ? shard->arenas.versions.get(native->location.value) : nullptr;

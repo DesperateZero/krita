@@ -1406,7 +1406,6 @@ KisPageMutationSession::Private::prepareTarget(
     auto &acquire = selected->write;
     const auto &descriptor = selected->descriptor();
     if (alias && !(descriptor == initialization->descriptor())) return {};
-    acquire.operation = owner->owner.nextOperationId();
     // The input retains the source through checkout. Recovery may replace it
     // only on success; Fresh and rejection consume this same original fact.
     const auto &source = acquire.source;
@@ -1520,8 +1519,12 @@ KisPageMutationSession::Private::prepareTarget(
                 ? KisPageStoreDiagnosticPhase::MutationAliasPrepare : KisPageStoreDiagnosticPhase::WriteProviderPrepare, 1);
             preparation = owner->writeCoordinator.prepareFreshCpuReplica(intent, *targetProvider,
                 *selected, KisPagePriority::Interactive, payload, initialization);
-            target = preparation.replica(acquire.version);
             nativeReady = preparation.nativeReady();
+            if (nativeReady && !preparation.nativeReadyFrom(*targetProvider)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("CPU creation result has a foreign native issuer"));
+                return {};
+            }
+            target = preparation.replica(acquire.version);
             ownsNewTarget = ownsPreparedReplica(target, acquire.version, *targetProvider,
                 alias ? nullptr : &source)
                 && (!previous || !(target.physicalSlotIdentity() == previous->target().physicalSlotIdentity()));

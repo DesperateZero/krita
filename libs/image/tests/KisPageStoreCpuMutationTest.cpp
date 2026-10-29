@@ -91,6 +91,7 @@ public:
     std::function<void()> beforeCapabilities;
     std::function<void(const KisReplicaHandle &, const KisReplicaOperation &)> afterRetire;
     std::function<void()> beforePrepareWrite;
+    std::function<KisCpuReplicaPreparation(const KisCpuReplicaInput &)> cpuPreparationOverride;
     std::function<void()> beforeTransfer;
     std::function<void(const KisReplicaHandle &)> beforeBinding;
     std::function<void(const KisReplicaHandle &)> beforeWriteResolve;
@@ -138,6 +139,8 @@ public:
       }
       ++freshRequests;
       auto r = p->prepareWrite(o, v, d, domain, m, pri); lastTarget = r.replica; return r; }
+    KisCpuReplicaPreparation prepareCpuReplica(const KisCpuReplicaInput &input) override
+    { return cpuPreparationOverride ? cpuPreparationOverride(input) : KisPageReplicaProvider::prepareCpuReplica(input); }
     KisReplicaOperation prepareSynchronousWriteCopy(KisPageOperationId o, const KisReplicaHandle &s,
         const KisPageVersion &v, const KisPageAllocationDescriptor &d, KisPagePriority pri) override
     { if (rejectWrite) return {}; ++freshRequests;
@@ -551,23 +554,76 @@ private Q_SLOTS:
         const std::shared_ptr<const KisPageReplicaSource> initialization;
         int callbacks = 0;
         f.provider->beforePrepareWrite = [&] { ++callbacks; };
-        quint64 operation = 10;
+        KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions));
         for (auto mode : {KisPageWriteMode::PreserveContents, KisPageWriteMode::DiscardContents}) {
+            KisPageOperationId operation;
             const KisPageVersion target{key(1), {1}};
-            const KisCpuReplicaInput input{KisCpuReplicaInput::Kind::Default, {operation++}, target,
+            const KisCpuReplicaInput input{KisCpuReplicaInput::Kind::Default, owner, operation, target,
                 f.importedDescriptor, mode, KisPagePriority::Interactive, source, binding, nullptr, initialization};
             f.provider->rejectWrite = true;
             auto rejected = f.provider->prepareCpuReplica(input);
+            QVERIFY(operation.isValid()); const auto expected = operation;
             QVERIFY(!rejected.nativeReady()); QVERIFY(rejected.externalOperation());
             QVERIFY(!rejected.externalOperation()->isValid()); QCOMPARE(f.provider->lastWriteMode, mode);
             f.provider->rejectWrite = false;
             auto accepted = f.provider->prepareCpuReplica(input);
             QVERIFY(!accepted.nativeReady()); QVERIFY(accepted.externalOperation());
             QVERIFY(accepted.externalOperation()->isValid()); QCOMPARE(f.provider->lastWriteMode, mode);
-            QCOMPARE(accepted.externalOperation()->operation, input.operation);
-            QVERIFY(f.provider->p->retire({100 + operation}, accepted.replica(target), {}).isValid());
+            QCOMPARE(operation, expected); QCOMPARE(accepted.externalOperation()->operation, operation);
+            QVERIFY(f.provider->p->retire(owner.nextOperationId(), accepted.replica(target), {}).isValid());
         }
         QCOMPARE(callbacks, 4);
+    }
+    void cpuPreparationRejectsForwardedAuthority()
+    {
+        for (bool native : {false, true}) {
+            Fixture f; QVERIFY(f.init(4, 1));
+            KisPageOwnerLedger identities; QVERIFY(identities.configure(f.completions));
+            const auto &descriptor = f.importedDescriptor;
+            const KisPageVersion next{key(), {2}};
+            const auto collision = f.provider->p->prepareWrite(identities.nextOperationId(), next, descriptor,
+                cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+            QVERIFY(collision.isValid());
+            auto foreign = std::make_shared<KisTiles3PageReplicaProvider>();
+            KisCpuResidentReplicaProviderConfig config;
+            config.provider = f.provider->providerId(); config.providerEpoch = f.provider->providerEpoch();
+            config.budgetBytes = 64 * 1024 * 1024;
+            QVERIFY(foreign->configure(config, f.completions));
+            QVERIFY(foreign->prepareWrite(identities.nextOperationId(), f.initialReplicas.first().version, descriptor,
+                cpu.domain, KisPageWriteMode::DiscardContents, KisPagePriority::Normal).isValid());
+            KisReplicaHandle forwarded;
+            int calls = 0;
+            f.provider->cpuPreparationOverride = [&](const KisCpuReplicaInput &input) {
+                ++calls;
+                if (!native) return KisCpuReplicaPreparation::external(collision);
+                auto result = foreign->prepareCpuReplica(input);
+                forwarded = result.replica(input.version);
+                return result;
+            };
+            auto view = f.store->captureReadView(); QVERIFY(view.isValid());
+            auto reader = view.readResidentPage(key()); QVERIFY(reader.isValid()); // Exclude reuse.
+            const auto tx = f.store->beginCurrentTransaction(); auto scope = f.begin(tx);
+            auto writer = scope.beginWrite(key(), KisPageWriteMode::DiscardContents, &f.error);
+            QVERIFY(!writer.isValid()); QCOMPARE(calls, 1);
+            if (native) {
+                QVERIFY(f.error.contains(QStringLiteral("foreign native issuer")));
+                QCOMPARE(forwarded, collision.replica); // All exported fields collide deliberately.
+                QCOMPARE(f.provider->retireCalls.load(), 0);
+                QVERIFY(f.provider->p->validate(collision.replica, descriptor));
+                QVERIFY(foreign->validate(forwarded, descriptor));
+                QVERIFY(foreign->retire(identities.nextOperationId(), forwarded, {}).isValid());
+                QVERIFY(f.provider->p->retire(identities.nextOperationId(), collision.replica, {}).isValid());
+            } else {
+                // No base adapter was entered: expected operation stays zero,
+                // so a cached external success cannot authorize this request.
+                // Owned-result retirement keeps its real background endpoint.
+                QVERIFY(f.store->waitForRetirementIdle());
+                QVERIFY(!f.provider->p->validate(collision.replica, descriptor));
+            }
+            f.provider->cpuPreparationOverride = {};
+            QVERIFY(scope.cancel()); QVERIFY(f.store->abort(tx));
+            QCOMPARE(*static_cast<const quint8 *>(reader.data()), quint8(0x31));
+        }
     }
     void processStorageReportsReservationSeparately();
     void pageStoreMementoStorageIsProcessOwned();
