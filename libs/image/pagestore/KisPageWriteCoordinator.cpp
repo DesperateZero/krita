@@ -3544,6 +3544,22 @@ KisPageWritePlanKind KisPageWriteCoordinator::select(
         : KisPageWritePlanKind::SemanticOnly;
 }
 
+KisCpuReplicaPreparation KisPageWriteCoordinator::prepareFreshCpuReplica(
+    const KisPageWriteIntent &intent, KisPageReplicaProvider &provider,
+    const KisPageWriteSelection &selection, KisPagePriority priority, const KisCpuPagePayload *payload,
+    const std::shared_ptr<const KisPageReplicaSource> &initialization) const
+{
+    using Kind = KisCpuReplicaInput::Kind;
+    const auto plan = select(intent);
+    const auto kind = intent.inputKind == KisPageWriteInputKind::Semantic ? Kind::Alias
+        : plan == KisPageWritePlanKind::FreshPayload ? Kind::Payload
+        : initialization ? Kind::SourceCopy
+        : plan == KisPageWritePlanKind::FreshCow ? Kind::Copy : Kind::Default;
+    const auto &write = selection.write;
+    return provider.prepareCpuReplica({kind, write.operation, write.version, selection.descriptor(),
+        write.writeMode, priority, write.source, selection.binding, payload, initialization});
+}
+
 KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
     const KisPageWriteIntent &intent, KisPageReplicaProvider &provider,
     const KisPageWriteInput &write, const KisPageAllocationDescriptor &descriptor,

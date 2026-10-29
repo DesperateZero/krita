@@ -11,6 +11,7 @@
 #include <mutex>
 #include <utility>
 #include <unordered_map>
+#include <variant>
 #include "KisCompletionRegistry.h"
 #include "KisPageReplicaProvider.h"
 
@@ -73,6 +74,7 @@ private:
     friend class KisPageMetadataCoordinator;
     friend class KisCpuWriteBindingReservation;
     friend class KisCpuBackingHandoff;
+    friend class KisCpuReplicaPreparation;
     friend class KisTiles3PageReplicaProvider;
     template<class Binding> friend struct KisCpuResidentAllocationIndex;
     // Only exported through an already active owner-issued read guard.
@@ -121,6 +123,76 @@ private:
     const KisPageAccessDomain m_domain;
     const KisReplicaLayout m_layout;
     std::shared_ptr<KisPageReadinessSignal> m_retirementReadiness;
+};
+
+// Borrowed inputs of one synchronous creation call; no storage/owner or
+// second mutable write selection. The external operation id is ignored by
+// the native physical factory and used only by the public-provider adapter.
+struct KisCpuReplicaInput
+{
+    enum class Kind { Default, Copy, Payload, SourceCopy, Alias };
+    Kind kind;
+    KisPageOperationId operation;
+    const KisPageVersion &version;
+    const KisPageAllocationDescriptor &descriptor;
+    KisPageWriteMode mode;
+    KisPagePriority priority;
+    const KisReplicaHandle &source;
+    const std::shared_ptr<KisCpuResidentBinding> &sourceBinding;
+    const KisCpuPagePayload *payload;
+    const std::shared_ptr<const KisPageReplicaSource> &initialization;
+};
+
+// Only the actual native producer may issue the compact ready alternative.
+// A custom provider's public operation remains untrusted until the original
+// owner validates it. This stack sum type adds no heap allocation or cleanup
+// authority: every owned rejected result uses the original retirement record.
+class KRITAIMAGE_EXPORT KisCpuReplicaPreparation
+{
+public:
+    KisCpuReplicaPreparation() = default;
+    KisCpuReplicaPreparation(KisCpuReplicaPreparation &&) noexcept = default;
+    KisCpuReplicaPreparation &operator=(KisCpuReplicaPreparation &&) noexcept = default;
+    KisCpuReplicaPreparation(const KisCpuReplicaPreparation &) = delete;
+    KisCpuReplicaPreparation &operator=(const KisCpuReplicaPreparation &) = delete;
+    static KisCpuReplicaPreparation external(KisReplicaOperation result)
+    { KisCpuReplicaPreparation value; value.m_result = std::move(result); return value; }
+    static KisCpuReplicaPreparation failed(QString error)
+    { KisCpuReplicaPreparation value; value.m_result = std::move(error); return value; }
+    bool nativeReady() const
+    { const auto *binding = std::get_if<std::shared_ptr<KisCpuResidentBinding>>(&m_result); return binding && *binding; }
+    const KisReplicaOperation *externalOperation() const
+    { return std::get_if<KisReplicaOperation>(&m_result); }
+    KisReplicaHandle replica(const KisPageVersion &version) const
+    {
+        if (const auto *external = externalOperation()) return external->replica;
+        const auto *binding = std::get_if<std::shared_ptr<KisCpuResidentBinding>>(&m_result);
+        // Fresh producer slots always begin at incarnation one. Never infer
+        // the expected identity from mutable state after returning the result.
+        return binding && *binding ? (*binding)->projectHandle(version, 1) : KisReplicaHandle{};
+    }
+    std::shared_ptr<KisCpuResidentBinding> takeNativeBinding()
+    {
+        auto *binding = std::get_if<std::shared_ptr<KisCpuResidentBinding>>(&m_result);
+        return binding ? std::move(*binding) : std::shared_ptr<KisCpuResidentBinding>{};
+    }
+    QString error() const
+    {
+        if (const auto *external = externalOperation()) return external->error;
+        const auto *failure = std::get_if<QString>(&m_result);
+        return failure ? *failure : QString{};
+    }
+    KisReplicaOperation takeExternalOperation(KisPageOperationId operation)
+    {
+        if (auto *external = std::get_if<KisReplicaOperation>(&m_result)) return std::move(*external);
+        Q_ASSERT(!nativeReady());
+        return KisReplicaOperation::failed(operation, error());
+    }
+private:
+    friend class KisTiles3PageReplicaProvider;
+    explicit KisCpuReplicaPreparation(std::shared_ptr<KisCpuResidentBinding> binding)
+        : m_result(std::move(binding)) {}
+    std::variant<std::shared_ptr<KisCpuResidentBinding>, KisReplicaOperation, QString> m_result;
 };
 
 struct KisCpuBindingLease

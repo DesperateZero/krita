@@ -85,6 +85,7 @@ public:
         KisPageOperationId operation, const KisPageVersion &version,
         const KisPageAllocationDescriptor &descriptor, const KisCpuPagePayload &payload,
         KisPagePriority priority) override;
+    KisCpuReplicaPreparation prepareCpuReplica(const KisCpuReplicaInput &input) override;
     KisReplicaOperation transfer(const KisReplicaTransferRequest &request,
                                  KisPagePriority priority) override;
     KisReplicaAccess resolveAccess(KisPageLeaseId lease,

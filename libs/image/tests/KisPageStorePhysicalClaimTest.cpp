@@ -10,6 +10,7 @@
 #include <atomic>
 #include <thread>
 #include <memory>
+#include <cstring>
 
 #include "KisCpuResidentBinding_p.h"
 #include "KisTiles3PageReplicaProvider.h"
@@ -92,6 +93,10 @@ class KisPageStorePhysicalClaimTest : public QObject
 {
     Q_OBJECT
 private Q_SLOTS:
+    void freshResourceDelivery_data();
+    void freshResourceDelivery();
+    void freshCopyRequiresOriginalSource_data();
+    void freshCopyRequiresOriginalSource();
     void terminalConsumptionWaitsForClassAcceptance();
     void unfundedRetirementPreservesCharge_data();
     void unfundedRetirementPreservesCharge();
@@ -157,6 +162,82 @@ private Q_SLOTS:
     void optionalCapacityCheckout_data();
     void optionalCapacityCheckout();
 };
+
+void KisPageStorePhysicalClaimTest::freshResourceDelivery_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<int>("kind"); QTest::addColumn<bool>("external");
+    for (int bpp : {1, 4, 8, 16}) for (int kind = 0; kind != 5; ++kind) for (bool external : {false, true})
+        QTest::newRow(qPrintable(QStringLiteral("bpp%1-kind%2-external%3").arg(bpp).arg(kind).arg(external)))
+            << bpp << kind << external;
+}
+
+void KisPageStorePhysicalClaimTest::freshResourceDelivery()
+{
+    QFETCH(int, bpp); QFETCH(int, kind); QFETCH(bool, external);
+    Fixture f; QVERIFY(f.init(bpp));
+    auto *initial = f.binding->acquireWrite(f.replica.allocationIdentity()); QVERIFY(initial);
+    std::memset(initial, 0x55, size_t(f.desc.minimumByteSize())); f.binding->releaseWrite();
+    std::shared_ptr<const KisPageReplicaSource> source;
+    if (kind >= 3) { source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source); }
+    const QByteArray bytes(qsizetype(f.desc.minimumByteSize()), char(0x69));
+    const KisCpuPagePayload payload{bytes.constData(), qsizetype(f.desc.minimumRowBytes()), bytes.size()};
+    const KisPageVersion version{key(0), {2}};
+    // Native creation needs no fabricated public operation or ready ticket.
+    const KisCpuReplicaInput input{KisCpuReplicaInput::Kind(kind), external ? KisPageOperationId{10} : KisPageOperationId{},
+        version, f.desc, KisPageWriteMode::PreserveContents, KisPagePriority::Normal,
+        f.replica, f.binding, &payload, source};
+    auto result = external ? f.provider->KisPageReplicaProvider::prepareCpuReplica(input)
+                           : f.provider->prepareCpuReplica(input);
+    QCOMPARE(result.nativeReady(), !external);
+    QCOMPARE(bool(result.externalOperation()), external);
+    if (external) {
+        QVERIFY(result.externalOperation()->isValid());
+        QCOMPARE(result.externalOperation()->operation, input.operation);
+        QVERIFY(f.completions->verifyTerminal(result.externalOperation()->completion).succeeded());
+    }
+    const auto target = result.replica(version); QVERIFY(target.isValid()); QCOMPARE(target.version, version);
+    auto binding = external ? f.provider->cpuResidentBinding(target) : result.takeNativeBinding();
+    QVERIFY(binding); QVERIFY(binding->matchesHandle(target));
+    QCOMPARE(binding.get(), f.provider->cpuResidentBinding(target).get());
+    if (!external) { QVERIFY(!result.nativeReady()); QVERIFY(!result.replica(version).isValid()); }
+    const auto *data = static_cast<const char *>(binding->acquireRead(target.allocationIdentity(), false));
+    QVERIFY(data);
+    const auto release = qScopeGuard([&] { if (data) binding->releaseRead(); });
+    QCOMPARE(QByteArray(data, bytes.size()), QByteArray(bytes.size(), kind == 0 ? char(0x31) : kind == 2 ? char(0x69) : char(0x55)));
+    QCOMPARE(data == reinterpret_cast<const char *>(f.tile->data()), kind == 4);
+    binding->releaseRead(); data = nullptr;
+    QVERIFY(f.provider->retire({11}, target, {}).isValid());
+    QVERIFY(!binding->acquireRead(target.allocationIdentity(), false));
+    // The public adapter still consumes replay identity, even when its pixel
+    // implementation is shared with the operation-free native factory.
+    if (external) QVERIFY(!f.provider->KisPageReplicaProvider::prepareCpuReplica(input).externalOperation()->isValid());
+}
+
+void KisPageStorePhysicalClaimTest::freshCopyRequiresOriginalSource_data()
+{
+    QTest::addColumn<int>("failure");
+    for (int i = 0; i != 4; ++i) QTest::newRow(qPrintable(QString::number(i))) << i;
+}
+
+void KisPageStorePhysicalClaimTest::freshCopyRequiresOriginalSource()
+{
+    QFETCH(int, failure);
+    Fixture f, foreign; QVERIFY(f.init()); QVERIFY(foreign.init());
+    const KisPageVersion version{key(0), {2}};
+    auto source = f.replica;
+    auto binding = failure == 0 ? foreign.binding : f.binding;
+    std::shared_ptr<const KisPageReplicaSource> initialization;
+    // The foreign provider deliberately has identical exported ids/slots.
+    if (failure == 1) ++source.version.generation.value;
+    if (failure == 2) QVERIFY(f.binding->acquireWrite(f.replica.allocationIdentity()));
+    const auto release = qScopeGuard([&] { if (failure == 2) f.binding->releaseWrite(); });
+    if (failure == 3) QVERIFY(f.provider->retire({12}, f.replica, {}).isValid());
+    const auto before = f.provider->payloadWork();
+    auto result = f.provider->prepareCpuReplica({KisCpuReplicaInput::Kind::Copy, {}, version, f.desc,
+        KisPageWriteMode::PreserveContents, KisPagePriority::Normal, source, binding, nullptr, initialization});
+    QVERIFY(!result.nativeReady()); QVERIFY(!result.replica(version).isValid()); QVERIFY(!result.error().isEmpty());
+    QCOMPARE(f.provider->payloadWork().nativeDuplicatePages, before.nativeDuplicatePages);
+}
 
 void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained_data()
 {

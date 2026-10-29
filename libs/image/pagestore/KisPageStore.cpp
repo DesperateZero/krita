@@ -1487,7 +1487,9 @@ KisPageMutationSession::Private::prepareTarget(
             --owner->activeProviderCalls;
         });
         KisPageBackingPreparation backing;
-        KisReplicaOperation allocation;
+        KisCpuReplicaPreparation preparation;
+        KisReplicaHandle target;
+        std::shared_ptr<KisCpuResidentBinding> binding;
         KisPageRetirementRecord *registeredBacking = nullptr;
         bool ownsNewTarget = false;
         bool accepted = false;
@@ -1498,8 +1500,10 @@ KisPageMutationSession::Private::prepareTarget(
             if (lock.isLocked()) lock.unlock();
             if (!accepted && ownsNewTarget) {
                 writable.reset();
-                owner->retirementQueue.retireOrDefer(allocation.replica, targetProvider, {}, std::move(backing), registeredBacking);
+                owner->retirementQueue.retireOrDefer(target, targetProvider, {}, std::move(backing), registeredBacking);
             }
+            binding.reset();
+            preparation = {};
             backing = {};
             lock.relock();
         });
@@ -1510,17 +1514,19 @@ KisPageMutationSession::Private::prepareTarget(
             if (storageRefused) *storageRefused = true;
             return {};
         }
-        std::shared_ptr<KisCpuResidentBinding> binding;
+        bool nativeReady = false;
         try {
             KisPageStoreDiagnosticTimer prepare(diagnosticOwner, alias
                 ? KisPageStoreDiagnosticPhase::MutationAliasPrepare : KisPageStoreDiagnosticPhase::WriteProviderPrepare, 1);
-            allocation = owner->writeCoordinator.prepareFreshReplica(intent, *targetProvider,
-                acquire, descriptor, {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
-                KisPagePriority::Interactive, payload, initialization);
-            ownsNewTarget = ownsPreparedReplica(allocation.replica, acquire.version, *targetProvider,
+            preparation = owner->writeCoordinator.prepareFreshCpuReplica(intent, *targetProvider,
+                *selected, KisPagePriority::Interactive, payload, initialization);
+            target = preparation.replica(acquire.version);
+            nativeReady = preparation.nativeReady();
+            ownsNewTarget = ownsPreparedReplica(target, acquire.version, *targetProvider,
                 alias ? nullptr : &source)
-                && (!previous || !(allocation.replica.physicalSlotIdentity() == previous->target().physicalSlotIdentity()));
-            if (ownsNewTarget) binding = targetProvider->cpuResidentBinding(allocation.replica);
+                && (!previous || !(target.physicalSlotIdentity() == previous->target().physicalSlotIdentity()));
+            if (ownsNewTarget) binding = nativeReady ? preparation.takeNativeBinding()
+                                                   : targetProvider->cpuResidentBinding(target);
         } catch (const std::bad_alloc &) {
             if (storageRefused) *storageRefused = true;
             KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation provider preparation storage was refused"));
@@ -1529,29 +1535,32 @@ KisPageMutationSession::Private::prepareTarget(
         backing.retirement->backingNode.second.nativeBinding = binding;
         auto *preparedBacking = backing.retirement.get();
         const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
-            allocation.replica, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
+            target, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);
         if (backingOwned) registeredBacking = preparedBacking;
         const bool finalPayload = !alias && intent.inputKind == KisPageWriteInputKind::FinalPayload && directPayload;
         if (!alias && !finalPayload && ownsNewTarget) {
-            writable = KisCpuWriteBindingReservation::acquire(binding, allocation.replica.allocationIdentity());
+            writable = KisCpuWriteBindingReservation::acquire(binding, target.allocationIdentity());
             result.data = pinWritable(writable, local);
         }
-        const bool ready = backingOwned && allocation.isValid() && allocation.status == KisPageRequestStatus::Ready
-            && allocation.replica.domain == KisPageAccessDomain::CpuRam
-            && allocation.replica.layout.matches(descriptor)
+        const auto *external = preparation.externalOperation();
+        const bool ready = backingOwned && (nativeReady || (external && external->isValid()
+                && external->status == KisPageRequestStatus::Ready))
+            && target.domain == KisPageAccessDomain::CpuRam
+            && target.layout.matches(descriptor)
             && (alias || (binding && (finalPayload || result.data)))
-            && owner->owner.verifyTerminalProviderResult(acquire.operation, allocation, error).succeeded();
+            && (nativeReady || owner->owner.verifyTerminalProviderResult(acquire.operation, *external, error).succeeded());
         lock.relock();
         if (!ready) {
-            if (error && error->isEmpty()) *error = QStringLiteral("CPU mutation native allocation/access failed");
+            if (error && error->isEmpty()) *error = preparation.error().isEmpty()
+                ? QStringLiteral("CPU mutation native allocation/access failed") : preparation.error();
             return {};
         }
         auto *oldBacking = previous ? previous->backing : nullptr;
         std::optional<KisReplicaHandle> oldTarget;
         if (previous) oldTarget.emplace(previous->target());
         if (!previous && !owner->writeCoordinator.validateWriteBase(acquire, true, error)) return {};
-        accepted = previous ? owner->metadata.replacePrivateWrite(page, allocation.replica)
-            : owner->metadata.acceptPrivateTarget(acquire, acquire.source, allocation.replica, page,
+        accepted = previous ? owner->metadata.replacePrivateWrite(page, target)
+            : owner->metadata.acceptPrivateTarget(acquire, acquire.source, target, page,
                 owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias);
         if (!accepted) return {};
         page->binding() = std::move(binding);

@@ -67,6 +67,7 @@ public:
     std::shared_ptr<KisTiles3PageReplicaProvider> p = std::make_shared<KisTiles3PageReplicaProvider>();
     mutable int validationsUntilFailure = -1;
     std::atomic<bool> rejectWrite{false};
+    KisPageWriteMode lastWriteMode = KisPageWriteMode::DiscardContents;
     bool returnExistingWriteReplica = false;
     bool returnExistingRequestReplica = false;
     std::atomic<bool> rejectRetire{false};
@@ -130,7 +131,7 @@ public:
       return p->requestReplica(o, v, d, domain, m, pri); }
     KisReplicaOperation prepareWrite(KisPageOperationId o, const KisPageVersion &v,
         const KisPageAllocationDescriptor &d, KisPageAccessDomain domain, KisPageWriteMode m, KisPagePriority pri) override
-    { if (beforePrepareWrite) beforePrepareWrite(); if (rejectWrite) return {};
+    { lastWriteMode = m; if (beforePrepareWrite) beforePrepareWrite(); if (rejectWrite) return {};
       if (returnExistingWriteReplica) {
           KisReplicaOperation reused; reused.status = KisPageRequestStatus::Ready;
           reused.operation = o; reused.replica = lastTarget; return reused;
@@ -542,6 +543,32 @@ class KisPageStoreCpuMutationTest : public QObject
     Q_OBJECT
 private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
+    void nativePreparationAdapterPreservesContract()
+    {
+        Fixture f; QVERIFY(f.init(4, 1));
+        const KisReplicaHandle source;
+        const std::shared_ptr<KisCpuResidentBinding> binding;
+        const std::shared_ptr<const KisPageReplicaSource> initialization;
+        int callbacks = 0;
+        f.provider->beforePrepareWrite = [&] { ++callbacks; };
+        quint64 operation = 10;
+        for (auto mode : {KisPageWriteMode::PreserveContents, KisPageWriteMode::DiscardContents}) {
+            const KisPageVersion target{key(1), {1}};
+            const KisCpuReplicaInput input{KisCpuReplicaInput::Kind::Default, {operation++}, target,
+                f.importedDescriptor, mode, KisPagePriority::Interactive, source, binding, nullptr, initialization};
+            f.provider->rejectWrite = true;
+            auto rejected = f.provider->prepareCpuReplica(input);
+            QVERIFY(!rejected.nativeReady()); QVERIFY(rejected.externalOperation());
+            QVERIFY(!rejected.externalOperation()->isValid()); QCOMPARE(f.provider->lastWriteMode, mode);
+            f.provider->rejectWrite = false;
+            auto accepted = f.provider->prepareCpuReplica(input);
+            QVERIFY(!accepted.nativeReady()); QVERIFY(accepted.externalOperation());
+            QVERIFY(accepted.externalOperation()->isValid()); QCOMPARE(f.provider->lastWriteMode, mode);
+            QCOMPARE(accepted.externalOperation()->operation, input.operation);
+            QVERIFY(f.provider->p->retire({100 + operation}, accepted.replica(target), {}).isValid());
+        }
+        QCOMPARE(callbacks, 4);
+    }
     void processStorageReportsReservationSeparately();
     void pageStoreMementoStorageIsProcessOwned();
     void tiles3ReadCaptureStorageRefusalIsRecoverable();

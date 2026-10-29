@@ -15,6 +15,8 @@
 #include "KisMutationStorage_p.h"
 
 class KisCpuResidentBinding;
+struct KisCpuReplicaInput;
+class KisCpuReplicaPreparation;
 
 struct KRITAIMAGE_EXPORT KisCpuResidentReplicaProviderConfig
 {
@@ -384,6 +386,10 @@ public:
                                               KisPageAccessDomain domain,
                                               KisPageWriteMode mode,
                                               KisPagePriority priority) = 0;
+    // Synchronous CPU creation consumes the original physical result directly.
+    // The default is the explicit boundary for providers exposing operations;
+    // their identity/completion policy is still verified by the owner.
+    virtual KisCpuReplicaPreparation prepareCpuReplica(const KisCpuReplicaInput &input);
     // Optional direct initialization. Return independent mutable storage with
     // every logical pixel initialized, not an alias of caller memory. Ordinary
     // prepareWrite/default/discard semantics are deliberately unchanged.

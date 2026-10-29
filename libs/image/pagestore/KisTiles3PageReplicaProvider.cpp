@@ -753,12 +753,12 @@ public:
         return true;
     }
 
-    KisReplicaOperation allocate(
-        KisPageOperationId operation,
+    KisCpuReplicaPreparation allocate(
         const KisPageVersion &version,
         const KisPageAllocationDescriptor &descriptor,
         KisPageAccessDomain domain,
-        KisTileData *copySource = nullptr, const KisCpuPagePayload *payload = nullptr)
+        KisTileData *copySource = nullptr, const KisCpuPagePayload *payload = nullptr,
+        const KisPageOperationId *operation = nullptr)
     try
     {
         // This allocator returns independent mutable storage only; complete
@@ -768,35 +768,31 @@ public:
             if (tileData) tileData->deref();
         });
         if (!config.isValid()) {
-            return KisReplicaOperation::failed(
-                operation, QStringLiteral("tiles3 provider is not configured"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 provider is not configured"));
         }
         if (!version.isValid() ||
             domain != KisPageAccessDomain::CpuRam ||
             !supportsNativeTileLayout(descriptor) ||
-            !operationAvailable(operation) ||
+            (operation && !operationAvailable(*operation)) ||
             (payload && (copySource || !payload->isValidFor(descriptor)))) {
-            return KisReplicaOperation::failed(
-                operation, QStringLiteral("tiles3 allocation request is invalid"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 allocation request is invalid"));
         }
-        consumeOperation(operation);
+        if (operation) consumeOperation(*operation);
 
         const quint64 byteSize = descriptor.minimumByteSize();
         if (byteSize > config.budgetBytes - qMin(config.budgetBytes, committedBytes)
             || !canAllocateHandle()) {
-            return KisReplicaOperation::failed(
-                operation,
-                QStringLiteral("tiles3 page budget or identity is exhausted"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 page budget or identity is exhausted"));
         }
         const auto retirementCompletion = completions->allocatePending(completionSource);
         auto failCompletion = qScopeGuard([&]() {
             if (retirementCompletion.isValid()) completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
         });
         if (!retirementCompletion.isValid())
-            return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 retirement completion preparation failed"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 retirement completion preparation failed"));
         auto prepared = prepareAdoption(version, descriptor);
         if (!prepared.handle.isValid())
-            return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 physical identity or budget is exhausted"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 physical identity or budget is exhausted"));
         if (payload) {
             tileData = KisTileDataStore::instance()->createTileDataFromRows(
                 qint32(descriptor.format.pixelStride), static_cast<const quint8 *>(payload->data),
@@ -822,35 +818,106 @@ public:
             work.defaultInitializedBytes += byteSize;
         }
         if (!tileData || !tileData->ref()) {
-            return KisReplicaOperation::failed(
-                operation, QStringLiteral("tiles3 tile allocation failed"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 tile allocation failed"));
         }
 
         if (!tileData->blockSwapping()) {
-            return KisReplicaOperation::failed(
-                operation, QStringLiteral("tiles3 tile residency admission failed"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 tile residency admission failed"));
         }
         const quintptr address = reinterpret_cast<quintptr>(tileData->data());
         const bool aligned = address != 0 &&
             address % descriptor.format.pixelAlignment == 0;
         tileData->unblockSwapping();
         if (!aligned) {
-            return KisReplicaOperation::failed(
-                operation,
-                QStringLiteral("tiles3 tile allocation alignment is insufficient"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 tile allocation alignment is insufficient"));
         }
 
-        const KisReplicaHandle handle = prepared.handle;
+        // The original index consumes prepared.allocation. Only a direct
+        // receiver retains this same binding; public callers receive a handle.
+        std::shared_ptr<KisCpuResidentBinding> native = operation ? nullptr : prepared.allocation;
         if (!adopt(prepared, tileData, retirementCompletion)) {
-            return KisReplicaOperation::failed(operation,
-                                   QStringLiteral("tiles3 physical payload budget is exhausted"));
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 physical payload budget is exhausted"));
         }
         failCompletion.dismiss();
-        return {KisPageRequestStatus::Ready, operation, handle, readyCompletion, {}};
+        return operation ? KisCpuReplicaPreparation::external(
+            {KisPageRequestStatus::Ready, *operation, prepared.handle, readyCompletion, {}})
+            : KisCpuReplicaPreparation(std::move(native));
     }
     catch (const std::bad_alloc &)
     {
-        return KisReplicaOperation::failed(operation, QStringLiteral("tiles3 adoption storage preparation failed"));
+        return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 adoption storage preparation failed"));
+    }
+
+    KisCpuReplicaPreparation prepareCopy(const KisReplicaHandle &source,
+        const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
+        const std::shared_ptr<KisCpuResidentBinding> &knownBinding,
+        const KisPageOperationId *operation = nullptr)
+    {
+        std::shared_ptr<Tiles3ResidentBinding> located;
+        auto *binding = dynamic_cast<Tiles3ResidentBinding *>(knownBinding.get());
+        if (knownBinding) {
+            if (!binding || !binding->belongsTo(&handoffAdmission) || !binding->matchesHandle(source))
+                return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source binding is foreign or stale"));
+        } else {
+            const auto it = findExactAllocation(source);
+            if (it != allocations.end()) located = providerBinding(it);
+            binding = located.get();
+        }
+        KisTileData *sourceTile = binding ? binding->guardedTile() : nullptr;
+        if (!targetVersion.isValid() || !(source.version.key == targetVersion.key) ||
+            targetVersion.generation.value <= source.version.generation.value ||
+            !source.layout.matches(descriptor) || !sourceTile) {
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source is stale or mutable"));
+        }
+        // Same exact source and physical pin for native and public callers.
+        // A supplied stable binding removes location, never read exclusion.
+        if (!binding->acquireRead(source.allocationIdentity(), false))
+            return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source binding is busy or retired"));
+        const auto releaseSource = qScopeGuard([&] { binding->releaseRead(); });
+        return allocate(targetVersion, descriptor, source.domain, sourceTile, nullptr, operation);
+    }
+
+    KisCpuReplicaPreparation prepareSource(const std::shared_ptr<const KisPageReplicaSource> &source,
+        const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
+        KisReplicaSourceUse use, const KisPageOperationId *operation = nullptr)
+    try
+    {
+        const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
+        if (!config.isValid() || !input || input->owner != sourceOwner ||
+            !(input->descriptor() == descriptor) || !targetVersion.isValid() ||
+            !supportsNativeTileLayout(descriptor) || (operation && !operationAvailable(*operation)) ||
+            (use != KisReplicaSourceUse::ImmutableAlias && use != KisReplicaSourceUse::WritableCopy)) {
+            return KisCpuReplicaPreparation::failed(QStringLiteral("immutable source is foreign, stale or incompatible"));
+        }
+        // Aliasing never forces swap-in just to validate an address.
+        if (use == KisReplicaSourceUse::WritableCopy) {
+            if (!input->tile->blockSwapping())
+                return KisCpuReplicaPreparation::failed(QStringLiteral("immutable source residency admission failed"));
+            const auto unpin = qScopeGuard([&] { input->tile->unblockSwapping(); });
+            return allocate(targetVersion, descriptor, KisPageAccessDomain::CpuRam, input->tile, nullptr, operation);
+        }
+        if (!canAllocateHandle())
+            return KisCpuReplicaPreparation::failed(QStringLiteral("immutable alias budget or identity is exhausted"));
+        if (operation) consumeOperation(*operation);
+        const auto retirementCompletion = completions->allocatePending(completionSource);
+        auto failCompletion = qScopeGuard([&] {
+            if (retirementCompletion.isValid()) completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
+        });
+        if (!retirementCompletion.isValid())
+            return KisCpuReplicaPreparation::failed(QStringLiteral("alias retirement completion preparation failed"));
+        auto prepared = prepareAdoption(targetVersion, descriptor, input->tile);
+        std::shared_ptr<KisCpuResidentBinding> native = operation ? nullptr : prepared.allocation;
+        if (!adopt(prepared, input->tile, retirementCompletion))
+            return KisCpuReplicaPreparation::failed(QStringLiteral("immutable alias physical budget is exhausted"));
+        ++work.adoptedPages; work.adoptedBytes += descriptor.minimumByteSize();
+        failCompletion.dismiss();
+        return operation ? KisCpuReplicaPreparation::external(
+            {KisPageRequestStatus::Ready, *operation, prepared.handle, readyCompletion, {}})
+            : KisCpuReplicaPreparation(std::move(native));
+    }
+    catch (const std::bad_alloc &)
+    {
+        return KisCpuReplicaPreparation::failed(QStringLiteral("immutable alias storage preparation failed"));
     }
 
     quint64 nextPhysicalSlot = 1;
@@ -943,7 +1010,7 @@ KisReplicaOperation KisTiles3PageReplicaProvider::requestReplica(
     Q_UNUSED(mode);
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
-    return d->allocate(operation, version, descriptor, domain);
+    return d->allocate(version, descriptor, domain, nullptr, nullptr, &operation).takeExternalOperation(operation);
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::prepareWrite(
@@ -966,7 +1033,8 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousCpuPayload(
 {
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
-    return d->allocate(operation, version, descriptor, KisPageAccessDomain::CpuRam, nullptr, &payload);
+    return d->allocate(version, descriptor, KisPageAccessDomain::CpuRam, nullptr, &payload, &operation)
+        .takeExternalOperation(operation);
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
@@ -978,29 +1046,28 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousWriteCopy(
 {
     Q_UNUSED(priority);
     QMutexLocker locker(&d->mutex);
-    const auto it = d->findExactAllocation(source);
-    KisTileData *sourceTile = it != d->allocations.end() ? it->guardedTile() : nullptr;
-    if (!targetVersion.isValid() ||
-        !(source.version.key == targetVersion.key) ||
-        targetVersion.generation.value <= source.version.generation.value ||
-        !source.layout.matches(descriptor) ||
-        !sourceTile) {
-        return KisReplicaOperation::failed(operation,
-            QStringLiteral("tiles3 native copy source is stale or mutable"));
+    return d->prepareCopy(source, targetVersion, descriptor, {}, &operation).takeExternalOperation(operation);
+}
+
+KisCpuReplicaPreparation KisTiles3PageReplicaProvider::prepareCpuReplica(const KisCpuReplicaInput &input)
+{
+    QMutexLocker locker(&d->mutex);
+    using Kind = KisCpuReplicaInput::Kind;
+    switch (input.kind) {
+    case Kind::Default:
+        return d->allocate(input.version, input.descriptor, KisPageAccessDomain::CpuRam);
+    case Kind::Copy:
+        return d->prepareCopy(input.source, input.version, input.descriptor, input.sourceBinding);
+    case Kind::Payload:
+        return input.payload ? d->allocate(input.version, input.descriptor,
+            KisPageAccessDomain::CpuRam, nullptr, input.payload)
+            : KisCpuReplicaPreparation::failed(QStringLiteral("CPU payload is missing"));
+    case Kind::SourceCopy:
+    case Kind::Alias:
+        return d->prepareSource(input.initialization, input.version, input.descriptor,
+            input.kind == Kind::Alias ? KisReplicaSourceUse::ImmutableAlias : KisReplicaSourceUse::WritableCopy);
     }
-    // Join the same binding gate as generic reads, transfer and retire BEFORE consuming a
-    // preclone or looking at source bytes. A physical/native writer rejects
-    // here instead of waiting on its swap pin while holding the provider lock.
-    // Keep the original source binding for the whole cold allocation. It is pinned once for both cache-hit
-    // and copy paths; duplicatePinnedTileData must not take a nested read lock.
-    const auto sourceBinding = d->providerBinding(it);
-    if (!sourceBinding || !sourceBinding->acquireRead(source.allocationIdentity(), false)) {
-        return KisReplicaOperation::failed(operation,
-            QStringLiteral("tiles3 native copy source binding is busy or retired"));
-    }
-    const auto releaseSource = qScopeGuard([&] { sourceBinding->releaseRead(); });
-    return d->allocate(operation, targetVersion, descriptor, source.domain,
-                       sourceTile);
+    return KisCpuReplicaPreparation::failed(QStringLiteral("CPU preparation kind is invalid"));
 }
 
 
@@ -1127,49 +1194,10 @@ KisReplicaOperation KisTiles3PageReplicaProvider::prepareSynchronousSource(
     KisPageOperationId operation, const std::shared_ptr<const KisPageReplicaSource> &source,
     const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
     KisReplicaSourceUse use, KisPagePriority priority)
-try
 {
     Q_UNUSED(priority);
-    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
     QMutexLocker locker(&d->mutex);
-    if (!d->config.isValid() || !input || input->owner != d->sourceOwner ||
-        !(input->descriptor() == descriptor) || !targetVersion.isValid() ||
-        !supportsNativeTileLayout(descriptor) || !d->operationAvailable(operation) ||
-        (use != KisReplicaSourceUse::ImmutableAlias && use != KisReplicaSourceUse::WritableCopy)) {
-        return KisReplicaOperation::failed(operation, QStringLiteral("immutable source is foreign, stale or incompatible"));
-    }
-    // Residency is needed only for independent pixel initialization. Holding
-    // an alias source never forces swap-in merely to validate an address.
-    if (use == KisReplicaSourceUse::WritableCopy) {
-        if (!input->tile->blockSwapping()) {
-            return KisReplicaOperation::failed(
-                operation, QStringLiteral("immutable source residency admission failed"));
-        }
-        const auto unpin = qScopeGuard([&] { input->tile->unblockSwapping(); });
-        return d->allocate(operation, targetVersion, descriptor, KisPageAccessDomain::CpuRam, input->tile);
-    }
-    const quint64 bytes = descriptor.minimumByteSize();
-    if (!d->canAllocateHandle())
-        return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias budget or identity is exhausted"));
-    d->consumeOperation(operation);
-    const auto retirementCompletion = d->completions->allocatePending(d->completionSource);
-    auto failCompletion = qScopeGuard([&] {
-        if (retirementCompletion.isValid()) d->completions->completePrepared(retirementCompletion, KisCompletionStatus::Failed);
-    });
-    if (!retirementCompletion.isValid())
-        return KisReplicaOperation::failed(operation, QStringLiteral("alias retirement completion preparation failed"));
-    auto prepared = d->prepareAdoption(targetVersion, descriptor, input->tile);
-    const KisReplicaHandle handle = prepared.handle;
-    if (!d->adopt(prepared, input->tile, retirementCompletion)) {
-        return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias physical budget is exhausted"));
-    }
-    ++d->work.adoptedPages; d->work.adoptedBytes += bytes;
-    failCompletion.dismiss();
-    return {KisPageRequestStatus::Ready, operation, handle, d->readyCompletion, {}};
-}
-catch (const std::bad_alloc &)
-{
-    return KisReplicaOperation::failed(operation, QStringLiteral("immutable alias storage preparation failed"));
+    return d->prepareSource(source, targetVersion, descriptor, use, &operation).takeExternalOperation(operation);
 }
 
 

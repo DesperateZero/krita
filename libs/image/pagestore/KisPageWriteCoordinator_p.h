@@ -49,6 +49,7 @@ class KisPageStoreDiagnosticTimer;
 class KisPageStore;
 class KisCpuWriteBindingReservation;
 class KisCpuResidentBinding;
+class KisCpuReplicaPreparation;
 struct KisPageTransition;
 struct KisPagePrivateWrite;
 struct KisPageWriteSelection;
@@ -368,6 +369,9 @@ public:
         KisPagePriority, const KisCpuPagePayload *,
         const std::shared_ptr<const KisPageReplicaSource> &initialization,
         bool *synchronousCopy = nullptr) const;
+    KisCpuReplicaPreparation prepareFreshCpuReplica(const KisPageWriteIntent &,
+        KisPageReplicaProvider &, const KisPageWriteSelection &, KisPagePriority,
+        const KisCpuPagePayload *, const std::shared_ptr<const KisPageReplicaSource> &) const;
     bool registerTransferBridge(const std::shared_ptr<KisPageReplicaTransferBridge> &bridge);
     KisCompletionTicket initializeFreshReplica(
         const KisPageWriteIntent &intent, bool initializedDuringAllocation,
