@@ -6810,7 +6810,7 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
 
 void KisPageStoreReferenceTest::logicalDefaultWriteSurvivesCacheRemoval()
 {
-    for (quint64 generation : {quint64(1), quint64(17)}) for (int route : {0, 1, 2}) {
+    for (quint64 generation : {quint64(1), quint64(17)}) for (int route : {0, 1, 2}) for (bool cached : {false, true}) {
         KisPageMetadataCoordinator metadata;
         MetadataEffectReceiver effects; attachEffects(metadata, effects);
         QVERIFY(metadata.configure(1));
@@ -6818,10 +6818,18 @@ void KisPageStoreReferenceTest::logicalDefaultWriteSurvivesCacheRemoval()
         auto initial = initialPageState(base, {});
         initial.publishedDefaultPixelRevision = base.defaultPixelRevision;
         initial.versions.first().replicas.clear();
-        QVERIFY(metadata.registerPage(initial));
+        if (cached) QVERIFY(metadata.registerPage(initial));
+        else {
+            QVERIFY(metadata.registerImplicitPage(base));
+            // Repeated registration must not rewind the original highwater.
+            QVERIFY(metadata.registerImplicitPage({base.key, {1}, base.defaultPixelRevision}));
+            QCOMPARE(metadata.footprint().versions, quint64(0));
+            QVERIFY(!metadata.versionDescriptor(base));
+        }
         KisPageWriteSelection selected;
         QCOMPARE(metadata.selectMutationBase(base, false, &selected),
             KisPageMetadataCoordinator::MutationBaseSelection::Selected);
+        QCOMPARE(selected.write.version.generation.value, generation + 1);
         auto &write = selected.write;
         write.transaction = {71}; write.operation = {72}; write.writer = {73};
         write.writeMode = KisPageWriteMode::DiscardContents;
@@ -6832,7 +6840,7 @@ void KisPageStoreReferenceTest::logicalDefaultWriteSurvivesCacheRemoval()
         // Deliberately remove the optional record after admission/preparation.
         // Only the writer's exact input can preserve a non-unit generation.
         const auto collected = metadata.collectHistoryValues();
-        QCOMPARE(collected.retired, size_t(1));
+        QCOMPARE(collected.retired, size_t(cached));
         KisPageMetadataCoordinator::VersionInfo absent;
         QVERIFY(metadata.versionSnapshot(base, &absent)); QVERIFY(!absent.version.isValid());
         if (route == 0) {
@@ -7300,6 +7308,11 @@ void KisPageStoreReferenceTest::viewRootsShareFinalValueIdentity()
         auto *staged = static_cast<KisPageValueCell *>(identity);
         QVERIFY(staged->initialIdentity); QVERIFY(!staged->indexed);
         QCOMPARE(metadata->pageCount(), qsizetype(0));
+        // Runtime implicit registration cannot consume the real manifest's
+        // not-yet-adopted cell or replace its already active root identity.
+        QVERIFY(!metadata->registerImplicitPage({version.key, {1}, 7}));
+        QCOMPARE(metadata->pageCount(), qsizetype(0));
+        QCOMPARE(root.selectedValue(version.key), identity);
         QVERIFY(!metadata->cpuReadReplica(version).isValid());
         QCOMPARE(metadata->footprint().versionArena.usedSlots, quint64(1));
         QVERIFY(metadata->registerPage(page));

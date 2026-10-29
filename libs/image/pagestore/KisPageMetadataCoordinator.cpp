@@ -4615,6 +4615,43 @@ KisPageWriteClaim *KisPageMetadataCoordinator::prepareWriteClaim(const KisPageKe
     return nullptr;
 }
 
+bool KisPageMetadataCoordinator::registerImplicitPage(const KisPageVersion &currentDefault, QString *error) try
+{
+    auto *core = m_core.load(std::memory_order_acquire);
+    auto *shard = Private::shardFor(core, currentDefault.key);
+    const auto fail = [&](const QString &reason) { KisPageStoreDetail::setError(error, reason); return false; };
+    if (!shard || !currentDefault.isValid() || !currentDefault.isDefaultPixel()
+        || currentDefault.generation.value == std::numeric_limits<quint64>::max())
+        return fail(QStringLiteral("implicit page identity is invalid"));
+    decltype(shard->pages) prepared(shard->pages.get_allocator());
+    QMutexLocker lock(&shard->mutex);
+    auto page = shard->pages.find(currentDefault.key);
+    if (page == shard->pages.end()) {
+        lock.unlock();
+        prepared.try_emplace(currentDefault.key);
+        lock.relock();
+        page = shard->pages.find(currentDefault.key);
+    }
+    if (page != shard->pages.end() && page->second.hasMetadata()) {
+        KisPageStoreDetail::setError(error, {});
+        return true;
+    }
+    auto &control = page == shard->pages.end() ? prepared.begin()->second : page->second;
+    // A real initial manifest cell must be filled by initialization. This
+    // runtime path cannot discard or reinterpret its outstanding root edge.
+    if (control.initialIdentity.isValid())
+        return fail(QStringLiteral("implicit page conflicts with pending initialization"));
+    control.nextGeneration = KisPageGeneration{currentDefault.generation.value + 1};
+    control.registered = true;
+    if (page == shard->pages.end()) shard->pages.insert(prepared.extract(prepared.begin()));
+    core->registeredPages.fetchAndAddRelease(1);
+    KisPageStoreDetail::setError(error, {});
+    return true;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("implicit page control storage was refused"));
+    return false;
+}
+
 bool KisPageMetadataCoordinator::registerPage(const KisPageStateSnapshot &initial, QString *error) try
 {
     if (initial.nativeGeneration.isValid() || initial.nativeTransaction.isValid()) {
@@ -4737,11 +4774,11 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
     KisVersionSlotId selectedSlot = knownSlot ? *knownSlot : KisVersionSlotId{};
     const auto *record = selectedSlot.isValid() || shard->records.findVersion(base, &selectedSlot)
         ? shard->records.version(selectedSlot) : nullptr;
-    if (!record) {
+    if (!record && !base.isDefaultPixel()) {
         KisPageStoreDetail::setError(error, QStringLiteral("write base version is absent"));
         return MutationBaseSelection::Absent;
     }
-    if (!(record->version == base))
+    if (record && !(record->version == base))
         return reject(QStringLiteral("write base location selects another version"));
     ++shard->mutationBaseVersionInputs;
     if (kisOnPageStoreReclamationThread()) ++shard->backgroundMutationBaseVersionInputs;
@@ -4749,9 +4786,9 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
         return reject(QStringLiteral("write page already has a writer"));
     const KisPageVersion target{base.key, page->second.nextGeneration};
     if (!target.isValid()) return reject(QStringLiteral("write generation is unavailable"));
-    const auto *authority = shard->records.replica(record->authorityReplica);
-    const bool virtualDefault = base.isDefaultPixel() && !record->replicaCount && !authority
-        && record->publication == KisPagePublicationState::Historical;
+    const auto *authority = record ? shard->records.replica(record->authorityReplica) : nullptr;
+    const bool virtualDefault = base.isDefaultPixel() && (!record
+        || (!record->replicaCount && !authority && record->publication == KisPagePublicationState::Historical));
     if (!authority && !virtualDefault)
         return reject(QStringLiteral("write base has no exact authority"));
 
@@ -4762,7 +4799,7 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
     auto &write = selection->write;
     write.baseVersion = base;
     write.version = target;
-    write.baseWasPrepared = record->publication == KisPagePublicationState::Prepared;
+    write.baseWasPrepared = record && record->publication == KisPagePublicationState::Prepared;
     write.baseSlot = selectedSlot;
     write.baseLocation = {shard, &*page, shardIndex};
     if (authority) {
@@ -4770,11 +4807,12 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
         if (!write.source.isValid())
             return reject(QStringLiteral("write base has no exact authority"));
     }
-    const auto *facts = &record->native;
-    selection->layout = facts->descriptor;
-    if (authority && facts->nativeReplica == record->authorityReplica)
-        selection->binding = facts->nativeBinding;
-    if (discoverBefore && !base.isDefaultPixel() && record->replicaCount > 1
+    if (record) {
+        selection->layout = record->native.descriptor;
+        if (authority && record->native.nativeReplica == record->authorityReplica)
+            selection->binding = record->native.nativeBinding;
+    }
+    if (discoverBefore && !base.isDefaultPixel() && record && record->replicaCount > 1
         && authority && authority->validity == KisReplicaValidity::Valid
         && !authority->activeOperation.isValid() && !authority->pinCount
         && !authority->overflow.isValid()) {
@@ -5026,7 +5064,8 @@ try {
         KisVersionSlotId base;
         return page->revisionCanAdvance() && !page->activity.hasWriter()
             && !page->activity.publicationClaim && page->nextGeneration == write.version.generation
-            && shard->records.findVersion(write.baseVersion, &base);
+            && ((!write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !write.source.isValid())
+                || shard->records.findVersion(write.baseVersion, &base));
     };
     if (!valid()) return false;
     const MetadataArenaDemand demand{1, 0, 0};
@@ -5117,8 +5156,10 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
     auto *base = shard->records.version(baseSlot);
     MetadataPage *page = nullptr;
     auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
-    if (originalShard && base && base->version == write.baseVersion
-        && node->first == write.version.key) {
+    const bool originalSource = base ? base->version == write.baseVersion
+        : !write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !source.isValid();
+    if (originalShard && originalSource && node->first == write.version.key
+        && &node->second == native->location.page) {
         page = &node->second;
     } else {
         // Generic inputs and invalidated locators resolve the current page.

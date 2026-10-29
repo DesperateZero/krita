@@ -1386,7 +1386,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if obsolete in metadata_text:
                 errors.append(f"view selection restored metadata head/role coupling: {obsolete}")
         for contract in ("KisVersionSlotId initialIdentity", "committedCount", "currentRoot->resolveVersion",
-                         "writerDefaultGeneration", "writerDefaultRevision", "displacedDefault"):
+                         "writerDefaultGeneration", "writerDefaultRevision", "displacedDefault", "registerImplicitPage"):
             if contract not in metadata_text:
                 errors.append(f"view/content ownership boundary is missing: {contract}")
         for contract in (

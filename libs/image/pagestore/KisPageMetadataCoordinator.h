@@ -237,6 +237,9 @@ public:
     qsizetype shardFor(const KisPageKey &key) const;
 
     bool registerPage(const KisPageStateSnapshot &initial, QString *error = nullptr);
+    // Runtime implicit content belongs to its actual view/surface. Register
+    // only the original page control; no default Value or replica is needed.
+    bool registerImplicitPage(const KisPageVersion &currentDefault, QString *error = nullptr);
     bool pageSnapshot(const KisPageKey &key, const KisImageEpochRootSnapshot &view,
                       KisPageStateSnapshot *snapshot) const;
     KisPageSnapshotArray<KisPageKey> pageKeys() const;

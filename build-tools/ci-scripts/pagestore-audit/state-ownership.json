@@ -50,26 +50,26 @@
       ]
     },
     {
-      "id": "BR1-OWN-MUTATION-OWNED-TRANSACTION",
-      "fact": "standalone transaction terminal responsibility, including refused cancel or abort",
-      "status": "canonical",
-      "target-authoritative-owner": "KisPageMutationSession::Private original scope",
-      "current-writers": [
-        "KisPageMutationSession::Private ownsTransaction"
-      ],
-      "read-only-observers": [
-        "backend finishOwnedTransaction and raw-lease barrier admission"
-      ],
       "creation-paths": [
         "KisPageMutationSession::takeTransactionOwnership transfers the already-created standalone transaction into its original scope"
       ],
+      "current-writers": [
+        "KisPageMutationSession::Private ownsTransaction"
+      ],
+      "fact": "standalone transaction terminal responsibility, including refused cancel or abort",
+      "id": "BR1-OWN-MUTATION-OWNED-TRANSACTION",
+      "lock-or-claim": "scope mutex plus Store owner mutex and original transaction; history collector schedules the original intrusive orphan link",
+      "read-only-observers": [
+        "backend finishOwnedTransaction and raw-lease barrier admission"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisPageMutationSession::Private original scope",
       "terminal-paths": [
         "finishOwnedTransaction clears ownership only after accepted commit/abort or facade-gone terminal cleanup",
         "releaseOrRetain and retryOrphans share cancelAndAbort on the same original scope; no manager callback enters orphan retirement",
         "borrowed explicit history never takes this ownership; source storage and scope lifetime remain until accepted cancellation/terminal release",
         "Eligible anonymous Final/AdapterDelivery accepts directly through the common canonical commit input while the sole original session transfers to CommitPreparation under the Store gate. Success relinquishes ownsTransaction only after acceptance; rejection retains original cancellation/abort responsibility."
-      ],
-      "lock-or-claim": "scope mutex plus Store owner mutex and original transaction; history collector schedules the original intrusive orphan link"
+      ]
     },
     {
       "creation-paths": [
@@ -519,7 +519,8 @@
       "creation-paths": [
         "MetadataShard::assign and installActivityHeader",
         "KisPageMetadataCoordinator exact content and private writer acceptance",
-        "ViewRoot-bound commit/restore/default preparation; no per-page current-head installation"
+        "ViewRoot-bound commit/restore/default preparation; no per-page current-head installation",
+        "Runtime implicit default selection registers only PageControl/highwater; actual read materialization uses the existing Attach/Materialize acceptance, never a full initial snapshot or a synthetic current-default Value. Real manifest initialization still fills its original identity."
       ],
       "current-writers": [
         "KisPageMetadataCoordinator compact shard page/activity records and typed arenas"

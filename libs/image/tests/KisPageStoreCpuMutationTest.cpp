@@ -2502,20 +2502,16 @@ void KisPageStoreCpuMutationTest::lastRootReleaseVisitsOnlyAffectedHistory()
         QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, base,
             QRect(pages * 64, 0, 64, 64), QByteArray(f.bpp, char(0x94)), &f.error));
         QVERIFY(f.store->waitForRetirementIdle());
-        // Fix the observation boundary: the current-default cache check has
-        // completed before commit can queue its later actual obsolescence.
-        QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(1));
-        // First-touch selection currently creates one explicit virtual default
-        // plus the prepared result. Its default-history cleanup is separate
-        // from the old base releasing page 0, and must remain in this account.
-        QCOMPARE(f.store->sessionStats().pageVersions - versions, qsizetype(2));
+        // First-touch writing creates only its result. Implicit default
+        // identity needs neither a cached Value nor a later GC visit.
+        QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(0));
+        QCOMPARE(f.store->sessionStats().pageVersions - versions, qsizetype(1));
         QVERIFY(f.store->commit(base, f.store->preparedPages(base)).isValid());
     }
     if (exit == 3) captured = {};
     QVERIFY(f.store->waitForRetirementIdle());
     const auto after = f.store->readScopeStatistics();
-    const quint64 defaultCleanup = exit == 2 ? 2 : 0; // current-cache check, then actual old-default removal
-    QCOMPARE(after.historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(1) + defaultCleanup);
+    QCOMPARE(after.historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(1));
     QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(pages));
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2 * pages + (exit == 2)));
     KisPageReadView old; old.kind = KisPageReadViewKind::CommittedEpoch; old.epoch = unrelated.snapshot.epoch; old.retention = unrelated.token;
@@ -2600,13 +2596,17 @@ void KisPageStoreCpuMutationTest::multiPageHistorySharesValueBudget()
     }
     resume.release(); unblock.dismiss(); QVERIFY(f.store->waitForRetirementIdle());
     const auto stats = f.store->readScopeStatistics();
-    QVERIFY(stats.maximumHistoryValuesPerPass > 0 && stats.maximumHistoryValuesPerPass <= 32);
+    // All old content is still protected. A first write no longer creates
+    // synthetic default-cache work just to make this counter nonzero.
+    QCOMPARE(stats.maximumHistoryValuesPerPass, quint64(0));
     for (int column = 0; column < 8; ++column) {
         auto before = views.front().readResidentPage(key(column)); QVERIFY(before.isValid());
         QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x31));
         QCOMPARE(quint8(f.pixel({}, column)[0]), quint8(0x70));
     }
     views.clear(); QVERIFY(f.store->waitForRetirementIdle());
+    const auto collected = f.store->readScopeStatistics();
+    QVERIFY(collected.maximumHistoryValuesPerPass > 0 && collected.maximumHistoryValuesPerPass <= 32);
     QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(8 * 64 * 64 * bpp));
     QVERIFY(f.store->closeSession());
@@ -7018,7 +7018,7 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
         QVERIFY(refused);
         const auto registrations = f.metadata.pageRegistrationCount();
         const KisPageVersion implicit{key(3), {1}, surface.defaultPixelRevision};
-        QVERIFY(!publication->ensureVirtualDefaultLocked(implicit, surface, &f.error));
+        QVERIFY(!f.metadata.registerImplicitPage(implicit, &f.error));
         QCOMPARE(f.metadata.pageRegistrationCount(), registrations);
         QVERIFY(!f.metadata.versionDescriptor(firstVersion));
         QVERIFY(!f.metadata.versionDescriptor(secondVersion));
@@ -7093,9 +7093,35 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
         duplicate.surface = {2};
         QVERIFY(publication->prepareDefaultRevisionsLocked({surface, duplicate}, &f.error));
         QCOMPARE(publication->m_defaultRevisionHighWater.size(), size_t(2));
-        QVERIFY(publication->ensureVirtualDefaultLocked(implicit, surface, &f.error));
+        QVERIFY(f.metadata.registerImplicitPage(implicit, &f.error));
         QCOMPARE(f.metadata.pageRegistrationCount(), registrations + 1);
-        QCOMPARE(*f.metadata.versionDescriptor(implicit), descriptor);
+        QVERIFY(!f.metadata.versionDescriptor(implicit));
+        KisPageMetadataCoordinator::VersionInfo implicitInfo;
+        QVERIFY(f.metadata.versionSnapshot(implicit, &implicitInfo));
+        QVERIFY(!implicitInfo.version.isValid());
+        // Resume the fixture after the earlier stopped-owner rejection.
+        f.operational = true;
+        const auto stopAgain = qScopeGuard([&] { f.operational = false; });
+        // The original control is sufficient at zero headroom. Selecting the
+        // implicit source must not reconstruct an empty Value or descriptor.
+        const auto beforeImplicitSelection = f.live();
+        const auto implicitPressureBytes = size_t(f.limits.metadataArenaBytes - beforeImplicitSelection);
+        void *implicitPressure = allocateTestStoragePressure(&f.budget, implicitPressureBytes, 1);
+        auto releaseImplicitPressure = qScopeGuard([&] {
+            freeTestStoragePressure(&f.budget, implicitPressure, implicitPressureBytes, 1);
+        });
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        KisPageWriteIntent implicitIntent; implicitIntent.key = implicit.key;
+        KisPageWriteSelection selectedImplicit;
+        QVERIFY2(publication->selectWriteBaseLocked(selectionTransaction, implicitIntent, &selectedImplicit, &f.error), qPrintable(f.error));
+        QCOMPARE(selectedImplicit.write.baseVersion, implicit);
+        QVERIFY(!selectedImplicit.write.baseSlot.isValid() && !selectedImplicit.write.source.isValid());
+        QCOMPARE(selectedImplicit.descriptor(), descriptor);
+        QVERIFY(!f.metadata.versionDescriptor(implicit));
+        QCOMPARE(f.live(), f.limits.metadataArenaBytes);
+        freeTestStoragePressure(&f.budget, implicitPressure, implicitPressureBytes, 1);
+        releaseImplicitPressure.dismiss();
+        QCOMPARE(f.live(), beforeImplicitSelection);
         const auto beforeWorkspace = f.live();
         workspace.reserve(256);
         QVERIFY(f.live() > beforeWorkspace);
@@ -14420,9 +14446,10 @@ void KisPageStoreCpuMutationTest::staleFirstWriteKeepsCurrentDefault()
     // page: its old default must not become Published to bypass the conflict.
     QCOMPARE(f.store->sessionStats().activeControlWritePages, qsizetype(0));
     QVERIFY(f.store->waitForRetirementIdle());
-    // Current-default cache reuse is decided from the real root. The stale
-    // default is reclaimed; no metadata head or role keeps it alive.
-    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
+    // Selection creates no default Value. A surface cut after the control
+    // exists still installs its current default through cold publication;
+    // that separate real cut is not the stale writer's source/cache.
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(duringProvider ? 1 : 0));
     QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
     QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));

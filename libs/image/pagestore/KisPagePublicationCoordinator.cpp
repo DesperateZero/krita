@@ -140,74 +140,6 @@ auto publicationBackingReader(const PreparedPublication &publication,
 
 } // namespace
 
-bool KisPagePublicationCoordinator::ensureVirtualDefaultLocked(
-    const KisPageVersion &version, const KisSurfaceEpochState &surface, QString *error)
-{
-    if (!version.isValid() || !version.isDefaultPixel() || !surface.isValid()
-        || !(surface.surface == version.key.surface)
-        || surface.defaultPixelRevision != version.defaultPixelRevision) {
-        KisPageStoreDetail::setError(error, QStringLiteral("virtual default identity is invalid"));
-        return false;
-    }
-    const KisPageAllocationDescriptor descriptor = surface.allocationDescriptor();
-    if (!descriptor.isValid())
-        return false;
-    PreparedDescriptors requested;
-    try { requested = prepareDescriptorLocked(version, descriptor); }
-    catch (const std::bad_alloc &) {
-        KisPageStoreDetail::setError(error, QStringLiteral("virtual default descriptor storage budget was refused"));
-        return false;
-    }
-    const auto attachHistorical = [&] {
-        KisPageTransition attach;
-        attach.kind = KisPageTransitionKind::AttachHistoricalDefault;
-        attach.version = version;
-        const auto result = m_metadata.applyOwner(version.key, attach);
-        if (!result.accepted) KisPageStoreDetail::setError(error, result.rejectionReason);
-        return result.accepted;
-    };
-    KisPageMetadataCoordinator::VersionInfo page;
-    if (m_metadata.versionSnapshot(version, &page)) {
-        if (!page.version.isValid() && !attachHistorical()) return false;
-    } else {
-        // A first access through an older transaction/view must not turn its
-        // default revision into today's published head of a virgin coordinate.
-        const auto current = m_epochs.captureCommittedRoot();
-        KisPageVersion head;
-        KisSurfaceEpochState currentSurface;
-        if (!current.resolve(version.key, &head) || !head.isDefaultPixel()
-            || !current.surfaceState(version.key.surface, &currentSurface))
-            return false;
-        PreparedDescriptors published;
-        if (!(head == version)) {
-            try { published = prepareDescriptorLocked(head, currentSurface.allocationDescriptor()); }
-            catch (const std::bad_alloc &) {
-                KisPageStoreDetail::setError(error, QStringLiteral("virtual default descriptor storage budget was refused"));
-                return false;
-            }
-        }
-        KisPageVersionStateSnapshot implicit;
-        implicit.version = head;
-        implicit.publication = KisPagePublicationState::Published;
-        KisPageStateSnapshot initial;
-        initial.key = version.key;
-        initial.publishedEpoch = current.epoch();
-        initial.publishedGeneration = head.generation;
-        initial.publishedDefaultPixelRevision = head.defaultPixelRevision;
-        initial.nextGeneration = KisPageGeneration{head.generation.value + 1};
-        initial.versions.append(implicit);
-        if (!m_metadata.registerPage(initial, error))
-            return false;
-        if (!(head == version)) {
-            installDescriptorAdditionsLocked(&published);
-            if (!attachHistorical()) return false;
-        }
-    }
-    installDescriptorAdditionsLocked(&requested);
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
-
 // Synchronous commit state never escapes this call. Independent metadata,
 // root and descriptor outputs retain their own original lifetime owners.
 class KisPagePublicationCoordinator::KisPreparedMutationCommit final
@@ -1772,7 +1704,13 @@ bool KisPagePublicationCoordinator::selectWriteBaseLocked(
         return m_epochs.surfaceState(intent.key.surface, overlay, &*surface);
     };
     if (selected == Selected::Absent) {
-        if (!rootSurface() || !ensureVirtualDefaultLocked(base, *surface, error)) return false;
+        // Implicit content is already identified by the view. Only a virgin
+        // coordinate needs control/highwater; no empty Value or descriptor
+        // is created merely to discard those default bytes in this write.
+        KisPageVersion current;
+        if (!base.isDefaultPixel() || !rootSurface()
+            || !m_epochs.resolve(base.key, {}, &current)
+            || !m_metadata.registerImplicitPage(current, error)) return false;
         selected = m_metadata.selectMutationBase(base, discoverBefore, selection, error, &slot);
     }
     if (selected != Selected::Selected) return false;

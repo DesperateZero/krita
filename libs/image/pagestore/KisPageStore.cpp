@@ -424,7 +424,6 @@ public:
 
 
     bool ensureDefaultPageLocked(const KisPageVersion &version,
-                                 KisImageEpochId publishedEpoch,
                                  const KisSurfaceEpochState &surface,
                                  KisPageAccessRequirement access,
                                  KisPagePriority priority,
@@ -434,15 +433,17 @@ public:
                                  QString *error)
     {
         KisPageMetadataCoordinator::VersionInfo existing;
+        bool registered = false;
         const auto isMaterialized = [&] {
-            if (!metadata.versionSnapshot(version, &existing)) return false;
+            registered = metadata.versionSnapshot(version, &existing);
+            if (!registered) return false;
             return existing.version.isValid() && !existing.needsDefaultMaterialization(version);
         };
         if (isMaterialized()) {
             KisPageStoreDetail::setError(error, {});
             return true;
         }
-        if (!version.isDefaultPixel() || !publishedEpoch.isValid() || !surface.isValid()
+        if (!version.isDefaultPixel() || !surface.isValid()
             || !(surface.surface == version.key.surface) || surface.defaultPixelRevision != version.defaultPixelRevision
             || !access.isValid() || !locker) {
             KisPageStoreDetail::setError(error, QStringLiteral("implicit default page request is invalid"));
@@ -478,6 +479,10 @@ public:
             KisPageStoreDetail::setError(error, QStringLiteral("implicit default has no committed root"));
             return false;
         }
+        // The requested default may be historical. The current view supplies
+        // only the virgin coordinate's generation highwater, never another
+        // default Value/descriptor that this read does not consume.
+        if (!registered && !metadata.registerImplicitPage(currentVersion, error)) return false;
         KisBackingBudgetClass backingClass = currentVersion == version
             ? KisBackingBudgetClass::Current : KisBackingBudgetClass::RetainedHistory;
         Q_ASSERT(descriptors.empty());
@@ -562,42 +567,26 @@ public:
 
         // A competing caller may have completed between provider allocation
         // and registration. Keep exactly one authority and retire the loser.
-        if (metadata.versionSnapshot(version, &existing)) {
-            if (existing.version.isValid() && !existing.needsDefaultMaterialization(version)) {
-                retireRejected();
-                KisPageStoreDetail::setError(error, {});
-                return true;
-            }
-            KisPageTransition attach;
-            attach.kind = existing.version.isValid() ? KisPageTransitionKind::MaterializeDefault
-                                          : KisPageTransitionKind::AttachHistoricalDefault;
-            attach.version = version;
-            attach.target = allocation.replica;
-            const KisPageMetadataTransitionResult attached = metadata.applyOwner(version.key, attach);
-            if (!attached.accepted) {
-                retireRejected();
-                KisPageStoreDetail::setError(error, attached.rejectionReason);
-                return false;
-            }
-        } else {
-            KisPageVersionStateSnapshot versionState;
-            versionState.version = version;
-            versionState.publication = KisPagePublicationState::Published;
-            versionState.replicas.append({allocation.replica, KisReplicaValidity::Valid, {}, {}, 0, {}});
-            versionState.authority = allocation.replica;
-
-            KisPageStateSnapshot page;
-            page.key = version.key;
-            page.publishedEpoch = publishedEpoch;
-            page.publishedGeneration = version.generation;
-            page.publishedDefaultPixelRevision = version.defaultPixelRevision;
-            page.nextGeneration = KisPageGeneration{version.generation.value + 1};
-            page.versions.append(versionState);
-            if (!metadata.registerPage(page, &failure)) {
-                retireRejected();
-                KisPageStoreDetail::setError(error, failure);
-                return false;
-            }
+        if (!metadata.versionSnapshot(version, &existing)) {
+            retireRejected();
+            KisPageStoreDetail::setError(error, QStringLiteral("implicit page control disappeared"));
+            return false;
+        }
+        if (existing.version.isValid() && !existing.needsDefaultMaterialization(version)) {
+            retireRejected();
+            KisPageStoreDetail::setError(error, {});
+            return true;
+        }
+        KisPageTransition attach;
+        attach.kind = existing.version.isValid() ? KisPageTransitionKind::MaterializeDefault
+                                                : KisPageTransitionKind::AttachHistoricalDefault;
+        attach.version = version;
+        attach.target = allocation.replica;
+        const auto attached = metadata.applyOwner(version.key, attach);
+        if (!attached.accepted) {
+            retireRejected();
+            KisPageStoreDetail::setError(error, attached.rejectionReason);
+            return false;
         }
         publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
         KisPageStoreDetail::setError(error, {});
@@ -4572,37 +4561,12 @@ KisReadRequest KisPageStore::acquireReadImpl(const KisPageKey &key,
             locker.relock();
         }
         KisSurfaceEpochState surface;
-        KisImageEpochId publishedEpoch;
-        if (captured) {
-            publishedEpoch = captured->epoch();
-        } else if (view.kind == KisPageReadViewKind::CurrentCommittedEpoch) {
-            publishedEpoch = d->epochs.captureCommittedRoot().epoch();
-        } else if (view.kind == KisPageReadViewKind::CommittedEpoch || view.kind == KisPageReadViewKind::ExactVersion) {
-            publishedEpoch = view.epoch;
-        } else {
-            publishedEpoch = d->epochs.activeTransaction(view.transaction).baseEpoch;
-        }
         QString failure;
         if (!(captured ? captured->resolveSurfaceState(key.surface, &surface)
                        : d->publicationCoordinator.resolveSurfaceLocked(key.surface, view, &surface))) {
             return fail(QStringLiteral("PageStore default surface metadata is unavailable"));
         }
-        if (!hasPage) {
-            // A private/historical default read must not install its revision
-            // as the current published metadata head of a virgin coordinate.
-            KisPageVersion committedVersion;
-            KisSurfaceEpochState committedSurface;
-            const KisPageReadView current;
-            if (!d->publicationCoordinator.resolveVersionLocked(key, current, &committedVersion)
-                || !d->publicationCoordinator.resolveSurfaceLocked(key.surface, current, &committedSurface)
-                || !d->publicationCoordinator.ensureVirtualDefaultLocked(committedVersion,
-                                                  committedSurface,
-                                                  &failure)) {
-                return fail(failure.isEmpty()
-                    ? QStringLiteral("committed default identity is unavailable") : failure);
-            }
-        }
-        if (!d->ensureDefaultPageLocked(version, publishedEpoch, surface, access, priority,
+        if (!d->ensureDefaultPageLocked(version, surface, access, priority,
                                        &locker, defaultDescriptors, &failure)) {
             return fail(failure.isEmpty()
                 ? QStringLiteral("PageStore default page materialization failed") : failure);
