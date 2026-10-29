@@ -52,7 +52,7 @@ void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record)
     // terminal's actual references now, independently of its allocation tail.
     record->wait.reset();
     record->retirementResult.error.clear();
-    record->backingNode.second.nativeBinding.reset();
+    record->backingNode.second.releaseNativeBinding();
     record->backingNode.second.retirementHeadroom.release();
     record->provider.reset();
     record->orphanReservation.release();
@@ -289,9 +289,16 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record, Retire
         if (record.lastUse.isValid())
             status = m_owner.watchCompletion(record.lastUse, scheduleReady, &wait->subscription);
         if (status != KisPageReadinessStatus::Waiting) {
-            const auto binding = record.provider->cpuResidentBinding(record.replica());
+            // The original terminal already retains the native capability. Only
+            // a real external result needs provider selection here.
+            std::shared_ptr<KisCpuResidentBinding> external;
+            auto *binding = record.backingNode.second.binding().get();
+            if (!binding) {
+                external = record.provider->cpuResidentBinding(record.replica());
+                binding = external.get();
+            }
             status = binding ? binding->watchRetirementReadiness(
-                record.replica().allocationIdentity(), scheduleReady, &wait->subscription)
+                record.backingNode.second.identity(), scheduleReady, &wait->subscription)
                 : KisPageReadinessStatus::Unavailable;
         }
     }
@@ -468,7 +475,7 @@ void KisPageRetirementQueue::defer(KisPageRetirementRecordPointer record, Retire
     KisPageRetirementRecords admitted;
     admitted.push_back(*record.release());
     QMutexLocker lock(&m_mutex);
-    m_pendingBytes += admitted.front().replica().layout.byteSize;
+    m_pendingBytes += admitted.front().backingNode.second.byteSize();
     enqueuePendingLocked(admitted, admitted.begin());
     updatePeaksLocked();
 }
@@ -478,7 +485,7 @@ void KisPageRetirementQueue::finishAttemptLocked(
 {
     --m_activeReplicas;
     if (retired) {
-        m_pendingBytes -= entry->replica().layout.byteSize;
+        m_pendingBytes -= entry->backingNode.second.byteSize();
         m_nextRetryDelayMs = 1;
     } else {
         enqueuePendingLocked(batch, entry);
@@ -580,7 +587,7 @@ void KisPageRetirementQueue::retireOrDefer(
     // Registered resources already carry their provider and exact identity.
     // Only unregistered results retain the external input and the caller's
     // funded orphan preparation.
-    if (!owned) { record->backingNode.second.replica = replica; record->provider = provider; }
+    if (!owned) { record->backingNode.second.setReplica(replica); record->provider = provider; }
     record->lastUse = lastUse;
     // Registered records already carry the registration-time permission.
     // An unregistered result fixes it once on entry to this original owner.
@@ -735,7 +742,7 @@ void KisPageRetirementQueue::acceptRecord(KisPageRetirementRecordPointer record)
     // Transfer needs neither a provider callback nor additional storage.
     const bool background = record->backgroundRetirement;
     QMutexLocker lock(&m_mutex);
-    m_pendingBytes += record->replica().layout.byteSize;
+    m_pendingBytes += record->backingNode.second.byteSize();
     m_ready.push_back(*record.release());
     updatePeaksLocked();
     if (background) schedulePassLocked();

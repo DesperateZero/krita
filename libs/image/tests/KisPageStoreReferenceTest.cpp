@@ -13696,7 +13696,7 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     KisPageRetirementQueue queue(owner, metadata, budget, references, &references,
         [](void *p) { static_cast<QAtomicInt *>(p)->deref(); });
     auto record = kisPreparePageRetirementRecord(&budget);
-    record->backingNode.second.replica = result.replica; record->provider = provider;
+    record->backingNode.second.setReplica(result.replica); record->provider = provider;
     QVERIFY(!queue.retireRecord(*record)); // Actual provider returns Pending.
     const auto retirement = record->retirementOperation;
     QVERIFY(retirement.isValid());

@@ -8880,20 +8880,46 @@ void KisPageStoreCpuMutationTest::backgroundRetirementAllocationFailureRetries()
 
 void KisPageStoreCpuMutationTest::noSignalPinRetirementRetries()
 {
-    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
-    const auto replica = f.provider->lastTarget;
-    const auto binding = f.provider->cpuResidentBinding(replica);
-    QVERIFY(binding); QVERIFY(binding->acquireRead(replica.allocationIdentity(), true));
-    bool pinned = true;
-    auto unpin = qScopeGuard([&] { if (pinned) binding->releaseRead(); });
-    f.provider->rejectBindingFor = replica; // provider has no subscribable binding
-    QVERIFY(f.fill(0x77));
-    QTRY_VERIFY(f.store->sessionStats().retirementRetryWakeups > 0);
-    QCOMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(1));
-    binding->releaseRead(); pinned = false;
-    QTRY_COMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(0));
-    QCOMPARE(f.store->sessionStats().scheduledRetirementRetries, qsizetype(0));
-    QVERIFY(f.store->closeSession());
+    for (bool retainedNative : {false, true}) {
+        Fixture f;
+        // An imported account has never retained a native binding. Hiding a
+        // later lookup alone cannot erase a capability already held by Fresh.
+        QVERIFY(f.init(4, retainedNative ? 0 : 1));
+        if (retainedNative) QVERIFY(f.fill(0x31));
+        const auto replica = retainedNative ? f.provider->lastTarget : f.initialReplicas.first();
+        const auto binding = f.provider->cpuResidentBinding(replica);
+        QVERIFY(binding); QVERIFY(binding->acquireRead(replica.allocationIdentity(), true));
+        bool pinned = true;
+        std::atomic<bool> retirementAttempted{false};
+        std::atomic<int> retirementSelections{0};
+        f.provider->afterRetire = [&](const auto &retired, const auto &) {
+            if (retired == replica) retirementAttempted.store(true);
+        };
+        f.provider->beforeBinding = [&](const auto &selected) {
+            if (selected == replica && retirementAttempted.load()) ++retirementSelections;
+        };
+        auto cleanup = qScopeGuard([&] {
+            if (pinned) binding->releaseRead();
+            f.store.reset(); kisDrainPageStoreReclamation();
+            f.provider->afterRetire = {}; f.provider->beforeBinding = {};
+        });
+        f.provider->rejectBindingFor = replica;
+        const auto beforeRetry = f.store->sessionStats().retirementRetryWakeups;
+        QVERIFY(f.fill(0x77));
+        QTRY_VERIFY(retirementAttempted.load());
+        QTRY_COMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(1));
+        if (!retainedNative) {
+            // Truly no subscribable capability: the original retry guarantee
+            // must still progress without any new foreground input.
+            QTRY_VERIFY(f.store->sessionStats().retirementRetryWakeups > beforeRetry);
+            QVERIFY(retirementSelections.load() > 0);
+        }
+        binding->releaseRead(); pinned = false;
+        QTRY_COMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(0));
+        if (retainedNative) QCOMPARE(retirementSelections.load(), 0);
+        QCOMPARE(f.store->sessionStats().scheduledRetirementRetries, qsizetype(0));
+        QVERIFY(f.store->closeSession());
+    }
 }
 
 void KisPageStoreCpuMutationTest::retirementRetryCloseAndLifetime()

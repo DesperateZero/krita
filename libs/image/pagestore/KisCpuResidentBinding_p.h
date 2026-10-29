@@ -75,6 +75,7 @@ protected:
 private:
     friend class KisPageMetadataCoordinator;
     friend struct KisPageReplicaState;
+    friend struct KisPageBackingRecord;
     friend class KisCpuWriteBindingReservation;
     friend class KisCpuBackingHandoff;
     friend class KisCpuReplicaPreparation;

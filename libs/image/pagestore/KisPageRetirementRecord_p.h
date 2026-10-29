@@ -6,6 +6,7 @@
 #include "KisPageRetirementStorage_p.h"
 #include "KisPageBackingBudget_p.h"
 #include "KisPageReplicaProvider.h"
+#include "KisCpuResidentBinding_p.h"
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/set.hpp>
 #include <tuple>
@@ -32,7 +33,94 @@ struct KisPageIdleCapacity {
 
 struct KisPageBackingRecord
 {
-    KisReplicaHandle replica;
+    // The ledger owns the accepted incarnation, not the Resource's current
+    // mutable generation. Its immutable facts already live in the retained
+    // binding. External results alone need an independent complete snapshot.
+    KisPageBackingRecord() noexcept {}
+    KisReplicaHandle replica() const noexcept
+    {
+        if (m_kind == Kind::Resource) {
+            const auto &slot = m_binding->m_slot;
+            return {slot.provider, slot.providerEpoch, {slot.slot, m_facts.native.incarnation},
+                {m_binding->m_key, m_facts.native.generation, m_facts.native.defaultRevision},
+                m_binding->m_domain, m_binding->m_layout};
+        }
+        return m_kind == Kind::External ? m_facts.external : KisReplicaHandle{};
+    }
+    bool matches(const KisReplicaHandle &value) const noexcept
+    {
+        if (m_kind == Kind::Resource)
+            return immutableMatches(value) && m_facts.native.incarnation == value.allocation.generation
+                && m_facts.native.generation == value.version.generation
+                && m_facts.native.defaultRevision == value.version.defaultPixelRevision;
+        return m_kind == Kind::External && m_facts.external == value;
+    }
+    void setReplica(const KisReplicaHandle &value) noexcept
+    {
+        if (immutableMatches(value)) {
+            // Copy these before replacing an external snapshot in this union.
+            const Native next{value.allocation.generation, value.version.generation, value.version.defaultPixelRevision};
+            new (&m_facts.native) Native(next); m_kind = Kind::Resource;
+        } else {
+            if (m_kind != Kind::External || &value != &m_facts.external)
+                new (&m_facts.external) KisReplicaHandle(value);
+            m_kind = Kind::External;
+        }
+    }
+    const std::shared_ptr<KisCpuResidentBinding> &binding() const noexcept { return m_binding; }
+    void retainNativeBinding(const std::shared_ptr<KisCpuResidentBinding> &binding)
+    { Q_ASSERT(m_kind == Kind::Empty && !m_binding); m_binding = binding; }
+    void releaseNativeBinding() noexcept
+    {
+        // The logical terminal is consumed; a surviving physical/account
+        // endpoint must not retain this terminal's provider or capability.
+        if (m_kind == Kind::Resource) m_kind = Kind::Empty;
+        m_binding.reset();
+    }
+    void advance(KisPageGeneration generation, quint64 defaultRevision,
+                 const std::shared_ptr<KisCpuResidentBinding> &binding) noexcept
+    {
+        Q_ASSERT(m_kind != Kind::Empty);
+        if (m_kind == Kind::Resource) {
+            ++m_facts.native.incarnation;
+            m_facts.native.generation = generation;
+            m_facts.native.defaultRevision = defaultRevision;
+        } else {
+            ++m_facts.external.allocation.generation;
+            m_facts.external.version.generation = generation;
+            m_facts.external.version.defaultPixelRevision = defaultRevision;
+            if (!m_binding && binding) {
+                m_binding = binding;
+                setReplica(m_facts.external); // First real native capability.
+            }
+        }
+    }
+    const KisPageKey &key() const noexcept
+    { Q_ASSERT(m_kind != Kind::Empty); return m_kind == Kind::Resource ? m_binding->m_key : m_facts.external.version.key; }
+    quint64 byteSize() const noexcept
+    { Q_ASSERT(m_kind != Kind::Empty); return m_kind == Kind::Resource ? m_binding->m_layout.byteSize : m_facts.external.layout.byteSize; }
+    KisReplicaAllocationIdentity identity() const noexcept
+    {
+        if (m_kind != Kind::Resource) return m_kind == Kind::External ? m_facts.external.allocationIdentity() : KisReplicaAllocationIdentity{};
+        const auto &slot = m_binding->m_slot;
+        return {slot.provider, slot.providerEpoch, {slot.slot, m_facts.native.incarnation}};
+    }
+private:
+    bool immutableMatches(const KisReplicaHandle &value) const noexcept
+    {
+        return m_binding && m_binding->m_slot == value.physicalSlotIdentity()
+            && m_binding->m_key == value.version.key && m_binding->m_domain == value.domain
+            && m_binding->m_layout == value.layout;
+    }
+    struct Native { quint64 incarnation; KisPageGeneration generation; quint64 defaultRevision; };
+    union Facts {
+        Facts() noexcept {}
+        Native native;
+        KisReplicaHandle external;
+    } m_facts;
+    enum class Kind : quint8 { Empty, Resource, External };
+    Kind m_kind = Kind::Empty;
+public:
     KisBackingBudgetClass budgetClass = KisBackingBudgetClass::ActivePending;
     KisBackingBudgetReservation retirementHeadroom;
     // Non-null only while the ledger owns the enclosing retirement record.
@@ -42,7 +130,8 @@ struct KisPageBackingRecord
     KisPageBackingRecord *next = nullptr;
     // The provider's stable allocation record follows this original backing,
     // including idle/handoff and rejected retirement. No D workspace survives.
-    std::shared_ptr<KisCpuResidentBinding> nativeBinding;
+private:
+    std::shared_ptr<KisCpuResidentBinding> m_binding;
 };
 
 // Counts are ordered by the actual fee priority, not by the public enum.
@@ -305,7 +394,7 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
     // Registration, idle handoff and terminal consumption share this one
     // identity. Taking terminal ownership freezes it; no second handle is made.
-    const KisReplicaHandle &replica() const noexcept { return backingNode.second.replica; }
+    KisReplicaHandle replica() const noexcept { return backingNode.second.replica(); }
     std::shared_ptr<KisPageReplicaProvider> provider;
     // Valid only on the non-owning publication idle chain; the ledger owns
     // this same record until checkout or original retirement handoff.

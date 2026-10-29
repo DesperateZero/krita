@@ -63,7 +63,9 @@ private:
     KisPageOwnerLedger *m_owner = nullptr;
     KisPageBackingIndex::iterator m_source;
     KisPagePhysicalBackingRecord *m_physical = nullptr;
-    KisReplicaHandle m_target;
+    // The original source/claim fixes all physical facts and next incarnation.
+    KisPageGeneration m_targetGeneration;
+    quint64 m_targetDefaultRevision = 0;
     KisBackingBudgetReservation m_budget;
     bool m_cpuOptionalFee = false;
     friend class KisPageOwnerLedger;
@@ -246,7 +248,7 @@ private:
     KisPageRetirementRecordPointer takeRetirementRecord(KisPageRetirementRecord &record,
         const KisReplicaHandle &expected);
     KisPageRetirementRecordPointer takeRetirementRecordLocked(KisPageBackingRecord &backing,
-        const KisReplicaHandle &replica, KisBackingBudgetClass *originalClass);
+        KisBackingBudgetClass *originalClass);
     bool reclassifyBackingLocked(KisPageBackingIndex::iterator found,
         KisBackingBudgetClass budgetClass,
         KisBackingBudgetReservation *reservation, QString *error);

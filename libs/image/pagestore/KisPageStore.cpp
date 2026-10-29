@@ -1535,7 +1535,7 @@ KisPageMutationSession::Private::prepareTarget(
             KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation provider preparation storage was refused"));
             return {};
         }
-        backing.retirement->backingNode.second.nativeBinding = binding;
+        backing.retirement->backingNode.second.retainNativeBinding(binding);
         auto *preparedBacking = backing.retirement.get();
         const bool backingOwned = ownsNewTarget && owner->owner.registerBacking(
             target, backing.reservation, KisBackingBudgetClass::ActivePending, error, &backing.retirement);

@@ -429,7 +429,7 @@ public:
                                     : backings.find(change.replica.allocationIdentity());
         if (!change.replica.isValid() || found == backings.end()
             || found->second.budgetClass != change.before
-            || !(found->second.replica == change.replica)
+            || !found->second.matches(change.replica)
             || change.before == change.after
             || static_cast<size_t>(change.after) >= static_cast<size_t>(KisBackingBudgetClass::Count)) {
             KisPageStoreDetail::setError(error, QStringLiteral("backing class change is invalid"));
@@ -547,7 +547,7 @@ public:
             const auto &replica = effects[i].replica;
             const auto found = backings.find(replica.allocationIdentity());
             if (!replica.isValid() || found == backings.end()
-                || !(found->second.replica == replica) || !found->second.retirement) {
+                || !found->second.matches(replica) || !found->second.retirement) {
                 KisPageStoreDetail::setError(error, QStringLiteral("retirement effect has no registered backing and original record"));
                 return BackingAcceptance::FeesRefused;
             }
@@ -966,7 +966,7 @@ KisBackingHandoffReservation::KisBackingHandoffReservation(
     KisBackingHandoffReservation &&other) noexcept
     : m_owner(std::exchange(other.m_owner, nullptr))
     , m_source(other.m_source), m_physical(other.m_physical)
-    , m_target(other.m_target), m_budget(std::move(other.m_budget))
+    , m_targetGeneration(other.m_targetGeneration), m_targetDefaultRevision(other.m_targetDefaultRevision), m_budget(std::move(other.m_budget))
     , m_cpuOptionalFee(std::exchange(other.m_cpuOptionalFee, false))
 {}
 
@@ -978,7 +978,8 @@ KisBackingHandoffReservation &KisBackingHandoffReservation::operator=(
     m_owner = std::exchange(other.m_owner, nullptr);
     m_source = other.m_source;
     m_physical = other.m_physical;
-    m_target = other.m_target;
+    m_targetGeneration = other.m_targetGeneration;
+    m_targetDefaultRevision = other.m_targetDefaultRevision;
     m_budget = std::move(other.m_budget);
     m_cpuOptionalFee = std::exchange(other.m_cpuOptionalFee, false);
     return *this;
@@ -1220,7 +1221,7 @@ try {
         }
         auto &node = (*preparedRetirement)->backingNode;
         node.first = key;
-        node.second.replica = replica;
+        node.second.setReplica(replica);
         node.second.budgetClass = budgetClass;
         const auto installedBacking = d->backings.insert(node);
         Q_ASSERT(installedBacking.second);
@@ -1271,7 +1272,7 @@ KisBackingBudgetClass KisPageOwnerLedger::backingClass(
     QMutexLocker locker(&d->mutex);
     if (!replica.isValid()) return KisBackingBudgetClass::Count;
     const auto found = d->backings.find(replica.allocationIdentity());
-    return found == d->backings.end() || !(found->second.replica == replica)
+    return found == d->backings.end() || !found->second.matches(replica)
         ? KisBackingBudgetClass::Count : found->second.budgetClass;
 }
 
@@ -1288,14 +1289,13 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecordImpl(
     if (originalClass) *originalClass = KisBackingBudgetClass::Count;
     if (registered) *registered = false;
     const auto found = d->backings.find(replica.allocationIdentity());
-    if (found == d->backings.end() || !(found->second.replica == replica)) return {};
+    if (found == d->backings.end() || !found->second.matches(replica)) return {};
     if (registered) *registered = true;
-    return takeRetirementRecordLocked(found->second, replica, originalClass);
+    return takeRetirementRecordLocked(found->second, originalClass);
 }
 
 KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecordLocked(
-    KisPageBackingRecord &backing, const KisReplicaHandle &replica,
-    KisBackingBudgetClass *originalClass)
+    KisPageBackingRecord &backing, KisBackingBudgetClass *originalClass)
 {
     // A prepared writer must commit/cancel before transferring this member.
     // Claims on other aliases do not transfer this logical responsibility.
@@ -1303,8 +1303,7 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecordLocked(
     KisPageRetirementRecordPointer record(std::exchange(backing.retirement, nullptr));
     if (record) {
         if (originalClass) *originalClass = backing.budgetClass;
-        Q_ASSERT(record->replica() == replica && record->provider);
-        Q_UNUSED(replica);
+        Q_ASSERT(&record->backingNode.second == &backing && record->provider);
     }
     return record;
 }
@@ -1317,8 +1316,8 @@ KisPageRetirementRecordPointer KisPageOwnerLedger::takeRetirementRecord(
     QMutexLocker lock(&d->mutex);
     auto &node = original.backingNode;
     if (!node.is_linked() || original.storage.budget != d->backingBudget
-        || node.second.retirement != &original || !(node.second.replica == expected)) return {};
-    return takeRetirementRecordLocked(node.second, expected, nullptr);
+        || node.second.retirement != &original || !node.second.matches(expected)) return {};
+    return takeRetirementRecordLocked(node.second, nullptr);
 }
 
 KisPageRetirementRecords KisPageOwnerLedger::takeShutdownRetirementRecords()
@@ -1327,7 +1326,7 @@ KisPageRetirementRecords KisPageOwnerLedger::takeShutdownRetirementRecords()
     KisPageRetirementRecords records;
     for (auto &entry : d->backings) {
         auto &backing = entry.second;
-        auto record = takeRetirementRecordLocked(backing, backing.replica, nullptr);
+        auto record = takeRetirementRecordLocked(backing, nullptr);
         if (!record) continue; // The original queue already owns this record.
         records.push_back(*record.release());
     }
@@ -1364,7 +1363,7 @@ bool KisPageOwnerLedger::reclassifyBackingImpl(
     const BackingKey key = replica.allocationIdentity();
     auto found = d->backings.find(key);
     if (found == d->backings.end() || !found->second.retirement
-        || !(found->second.replica == replica) || !d->backingBudget
+        || !found->second.matches(replica) || !d->backingBudget
         || (reservation && reservation->owner != d->backingBudget)
         || d->isHandoffBacking(found->second)) {
         KisPageStoreDetail::setError(error, reservation
@@ -1702,7 +1701,7 @@ try
             if (authority.layout.byteSize > allowance) continue;
             const auto found = d->backings.find(authority.allocationIdentity());
             if (!authority.isValid() || found == d->backings.end()
-                || !(found->second.replica == authority)) return -1;
+                || !found->second.matches(authority)) return -1;
             // Metadata detachment is independent of this optional fee choice.
             // Only actual pending backings consume the idle allowance; another
             // legal class neither poisons the whole D nor authorizes reuse.
@@ -1753,7 +1752,7 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
                                      : d->backings.find(oldKey);
     if (!d->backingBudget || backing == d->backings.end()
         || !backing->second.retirement
-        || !(backing->second.replica == source)
+        || !backing->second.matches(source)
         || (backing->second.budgetClass != KisBackingBudgetClass::Current
             && backing->second.budgetClass != KisBackingBudgetClass::ActivePending
             && backing->second.budgetClass != KisBackingBudgetClass::OptionalCache
@@ -1809,7 +1808,8 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     KisBackingHandoffReservation result;
     result.m_source = backing;
     result.m_physical = physical;
-    result.m_target = target;
+    result.m_targetGeneration = target.version.generation;
+    result.m_targetDefaultRevision = target.version.defaultPixelRevision;
     result.m_budget = std::move(reservation);
     result.m_cpuOptionalFee = cpuOptionalFee;
     physical->classClaim = HandoffClaim;
@@ -1831,7 +1831,6 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     Q_ASSERT(found != d->backings.end() && &found->second == source
              && physical->classClaim == HandoffClaim);
     const auto before = source->budgetClass;
-    const auto &target = reservation.m_target;
     if (before != KisBackingBudgetClass::ActivePending) {
         // The original handoff claim already froze sole ownership. Consume
         // that fact directly; no count search or fallible class operation.
@@ -1847,14 +1846,12 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     // Intrusive storage permits this order-preserving key update: keep the
     // original node, iterator and physical membership instead of erasing and
     // reinserting a resource merely because its permission generation changed.
-    Q_ASSERT(target.allocation.generation == found->first.allocation.generation + 1);
+    auto targetIdentity = found->first;
+    ++targetIdentity.allocation.generation;
     Q_ASSERT(std::next(found) == d->backings.end()
-        || KisPageBackingIdentityLess{}(target.allocationIdentity(), std::next(found)->first));
-    found->first = target.allocationIdentity();
-    source->replica = target;
-    // Generic/imported capacity may acquire its first native capability here.
-    // Keep that original binding through later idle cycles as on native Fresh.
-    if (!source->nativeBinding) source->nativeBinding = binding;
+        || KisPageBackingIdentityLess{}(targetIdentity, std::next(found)->first));
+    found->first = targetIdentity;
+    source->advance(reservation.m_targetGeneration, reservation.m_targetDefaultRevision, binding);
     Q_ASSERT(physical->classClaim == HandoffClaim);
 
     // Detached optional capacity has no visible value to recover. A failed
@@ -2124,7 +2121,7 @@ KisVerifiedCompletion KisPageOwnerLedger::observeRetirementOperation(KisPageReti
             || node.first != record.retirementOperation.value) return {};
         if (record.retirementResult.isValid()) {
             const auto &result = record.retirementResult;
-            if (node.second.completion.isValid() || !(result.replica == record.replica())
+            if (node.second.completion.isValid() || !record.backingNode.second.matches(result.replica)
                 || !(result.operation == record.retirementOperation)
                 || !d->registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch)))
                 return {}; // Accepted but mismatched: never reissue or refund.

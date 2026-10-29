@@ -1190,8 +1190,14 @@ void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
             f.binding->releaseRead(); pinned = false;
         }
         QVERIFY(physical.tryClaim());
+        auto *original = prepared.originalRecord();
+        QVERIFY(original);
         auto writer = physical.commit(); QVERIFY(writer.isValid());
-        QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
+        // Physical retag cannot silently advance this ledger's accepted identity.
+        QCOMPARE(original->replica(), old);
+        QVERIFY(ledger.commitBackingHandoff(std::move(prepared), writer.binding()));
+        QCOMPARE(original->replica(), targetReplica);
+        QCOMPARE(original->backingNode.second.binding(), f.binding);
         current = targetReplica;
         QVERIFY(current.physicalSlotIdentity() == physicalIdentity);
         QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::Count);
@@ -1276,7 +1282,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     auto terminal = kisPreparePageRetirementRecord(&budget);
     auto *original = terminal.get();
     QVERIFY(ledger.registerBacking(f.replica, backing, initialClass, &f.error, &terminal));
-    QVERIFY(!original->backingNode.second.nativeBinding); // Generic registration owns no CPU capability yet.
+    QVERIFY(!original->backingNode.second.binding()); // Generic registration owns no CPU capability yet.
     auto physical = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
     const auto targetReplica = physical.target();
     QVERIFY(physical.isValid()); const auto target = targetReplica;
@@ -1304,9 +1310,11 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     }
     QVERIFY(physical.tryClaim());
     auto writer = physical.commit(); QVERIFY(writer.isValid());
-    QVERIFY(!original->backingNode.second.nativeBinding); // Cancelled preparations did not install it.
+    QVERIFY(!original->backingNode.second.binding()); // Cancelled preparations did not install it.
+    QCOMPARE(original->replica(), f.replica); // Retagged Resource, still the old accepted ledger identity.
     QVERIFY(ledger.commitBackingHandoff(std::move(prepared), writer.binding()));
-    QCOMPARE(original->backingNode.second.nativeBinding, f.binding);
+    QCOMPARE(original->replica(), targetReplica);
+    QCOMPARE(original->backingNode.second.binding(), f.binding);
     QVERIFY(!prepared.isValid());
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
         parentBefore - (shared && optional ? bytes : 0));

@@ -1776,7 +1776,7 @@ KisPageIdleCapacity KisPagePublicationCoordinator::takeIdleCapacityLocked(const 
         m_retirementQueue.acceptDetachedRecord(*record, record->replica());
         return {};
     }
-    return {record->replica(), record->backingNode.second.nativeBinding, record};
+    return {record->replica(), record->backingNode.second.binding(), record};
     // Ledger retains the original record until retag or retirement.
 }
 
@@ -1790,7 +1790,7 @@ void KisPagePublicationCoordinator::collectExpiredIdleCapacityLocked(qint64 now,
     while (budget-- > 0 && !m_idleCapacity.empty()) {
         auto &record = m_idleCapacity.front();
         if (record.idleDeadline > now) break;
-        auto *indexed = m_metadata.exchangeIdleCapacity(record.replica().version.key, nullptr);
+        auto *indexed = m_metadata.exchangeIdleCapacity(record.backingNode.second.key(), nullptr);
         Q_ASSERT(indexed == &record); Q_UNUSED(indexed);
         m_idleCapacity.pop_front();
         record.idleDeadline = 0;
