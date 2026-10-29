@@ -32,12 +32,28 @@
 #include <memory>
 #include <map>
 #include <utility>
+#include <boost/intrusive/set.hpp>
 
 namespace {
 
 template<class Key, class Value>
 using StorageMap = std::map<Key, Value, std::less<Key>,
     KisMutationStorageAllocator<std::pair<const Key, Value>>>;
+
+// Borrow the real operation's stack storage. Thread discovery is indexed;
+// unrelated active operations neither allocate a registry node nor get scanned.
+struct OperationLink : boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>
+{
+    const Qt::HANDLE thread = QThread::currentThreadId();
+    struct Key {
+        using type = Qt::HANDLE;
+        const type &operator()(const OperationLink &link) const { return link.thread; }
+    };
+};
+using OperationIndex = boost::intrusive::set<OperationLink,
+    boost::intrusive::key_of_value<OperationLink::Key>,
+    boost::intrusive::compare<std::less<Qt::HANDLE>>,
+    boost::intrusive::constant_time_size<false>>;
 
 std::atomic<quint64> nextTiles3ProviderId{0x4000000000000000ULL};
 
@@ -275,7 +291,7 @@ public:
     StorageMap<const KisMemento *, KisPageStoreMemento> mementos;
     KisTiledDataManagerPageStoreLease *anonymousLeases = nullptr;
     StorageMap<Qt::HANDLE, std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>> cpuMutationBatches;
-    OperationFrame *operationFrames = nullptr; // Borrowed stack admission; no paid thread node.
+    OperationIndex operationFrames;
     // Configuration is published once and the backend/store lifetime is
     // owned by KisTiledDataManager.  Tile lookup is a production hot path,
     // so readers must not serialize on the control-plane mutex merely to
@@ -350,7 +366,7 @@ public:
 // link expresses adapter nesting/barriers only; it is neither a write set nor
 // another cancellation owner. A real legacy pointer creates its extension on
 // demand and moves this SAME Session into it before exposing that pointer.
-class KisTiledDataManagerPageStoreBackend::OperationFrame
+class KisTiledDataManagerPageStoreBackend::OperationFrame : public OperationLink
 {
 public:
     explicit OperationFrame(KisTiledDataManagerPageStoreBackend &owner) : owner(owner) {}
@@ -363,12 +379,9 @@ public:
     }
     void leave()
     {
-        if (previous) {
+        if (is_linked()) {
             QMutexLocker lock(&owner.d->mutex);
-            *previous = next;
-            if (next) next->previous = previous;
-            previous = nullptr;
-            next = nullptr;
+            owner.d->operationFrames.erase(owner.d->operationFrames.iterator_to(*this));
         }
     }
     bool begin(QString *error, KisPageMutationSession *reservation = nullptr,
@@ -376,15 +389,11 @@ public:
     {
         {
             QMutexLocker lock(&owner.d->mutex);
-            if (owner.currentOperationLocked()
-                || owner.d->cpuMutationBatches.count(thread)) {
+            if (owner.d->cpuMutationBatches.count(thread)
+                || !owner.d->operationFrames.insert(*this).second) {
                 KisPageStoreDetail::setError(error, QStringLiteral("nested native CPU batch is not supported"));
                 return false;
             }
-            next = owner.d->operationFrames;
-            previous = &owner.d->operationFrames;
-            if (next) next->previous = &this->next;
-            owner.d->operationFrames = this;
         }
         original = owner.beginFrameSession(error, false, reservation, execution);
         return original.isActive();
@@ -435,9 +444,6 @@ public:
         }
         return accepted;
     }
-    OperationFrame *next = nullptr;
-    OperationFrame **previous = nullptr;
-    const Qt::HANDLE thread = QThread::currentThreadId();
 private:
     KisTiledDataManagerPageStoreBackend &owner;
     KisPageMutationSession original;
@@ -448,9 +454,8 @@ private:
 KisTiledDataManagerPageStoreBackend::OperationFrame *
 KisTiledDataManagerPageStoreBackend::currentOperationLocked() const
 {
-    for (auto *frame = d->operationFrames; frame; frame = frame->next)
-        if (frame->thread == QThread::currentThreadId()) return frame;
-    return nullptr;
+    const auto it = d->operationFrames.find(QThread::currentThreadId());
+    return it == d->operationFrames.end() ? nullptr : static_cast<OperationFrame *>(&*it);
 }
 
 KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
@@ -1246,7 +1251,7 @@ bool KisTiledDataManagerPageStoreBackend::cancelAnonymousLeasesForBarrier(
 {
     {
         QMutexLocker locker(&d->mutex);
-        if (d->operationFrames) {
+        if (!d->operationFrames.empty()) {
             KisPageStoreDetail::setError(error, QStringLiteral("clear requires managed operations to finish"));
             return false;
         }
@@ -1805,7 +1810,7 @@ bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
     if (!owner || d->currentMemento != owner || !d->activeHistory.isValid() ||
-        !d->operational || !d->cpuMutationBatches.empty() || d->operationFrames || d->anonymousLeases) {
+        !d->operational || !d->cpuMutationBatches.empty() || !d->operationFrames.empty() || d->anonymousLeases) {
         KisPageStoreDetail::setError(error, QStringLiteral("history mutation owner is unavailable"));
         return false;
     }

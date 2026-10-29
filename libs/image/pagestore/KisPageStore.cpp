@@ -1655,6 +1655,10 @@ public:
         // unlink and workspace handback. Terminal offering cannot see half
         // of this lifetime, and returning a borrow needs no second gate.
         Q_ASSERT(counters.activePins == 0);
+        for (size_t i = 0; i < count; ++i) {
+            Q_ASSERT(entries()[i].entry->isExecutionBorrowed());
+            entries()[i].entry->setExecutionBorrowed(false);
+        }
         if (!finished) scope->state = KisPageMutationSession::Private::State::Failed;
         scope->counters.merge(counters);
         if (previous) previous->next = next;
@@ -1667,6 +1671,10 @@ public:
     { return std::make_tuple(key.surface.value, key.page.row, key.page.column); }
     void link()
     {
+        for (size_t i = 0; i < count; ++i) {
+            Q_ASSERT(!entries()[i].entry->isExecutionBorrowed());
+            entries()[i].entry->setExecutionBorrowed(true);
+        }
         next = scope->executions;
         if (next) next->previous = this;
         scope->executions = this;
@@ -1837,12 +1845,6 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
         return result;
     }
     auto *range = candidate->entries();
-    for (auto *active = d->executions; active; active = active->next)
-        for (const auto &page : std::as_const(pages))
-            if (active->find({surface, page})) {
-                KisPageStoreDetail::setError(error, QStringLiteral("execution range overlaps an outstanding borrow"));
-                return result;
-            }
     bool accepted = false;
     const auto rollback = qScopeGuard([&] {
         if (accepted) return;
@@ -1865,6 +1867,10 @@ KisPageMutationExecution KisPageMutationSession::borrowExecution(
         auto &entry = d->writes.getOrCreate(intent, &newEntry);
         range[i] = {&entry, Private::pageFor(&entry)};
         if (newEntry) created[i / 64] |= quint64(1) << (i % 64);
+        if (entry.isExecutionBorrowed()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("execution range overlaps an outstanding borrow"));
+            return result;
+        }
         ++i;
     }
     QMutexLocker ownerLock(&d->owner->mutex);

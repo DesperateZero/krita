@@ -837,6 +837,7 @@ private Q_SLOTS:
         QTest::newRow("escaped-legacy-cancel") << 2;
     }
     void managedFrameOwnsAdapterLifetime();
+    void managedFramesDiscoverTheirOwnThread();
     void allocatedPagesMergesOverlay_data()
     {
         QTest::addColumn<int>("pages");
@@ -10925,6 +10926,9 @@ void KisPageStoreCpuMutationTest::executionBorrowExclusionAndFailure()
     QVERIFY(!scope.borrowExecution({99}, {{0, 0}}).isActive());
     QVERIFY(scope.isActive());
     QVERIFY(!scope.borrowExecution({1}, {{0, 0}, {2, 0}}).isActive());
+    // A late overlap returns only this candidate's newly created prefix.
+    // The occupied row must stay borrowed even without an active pixel pin.
+    QVERIFY(!scope.borrowExecution({1}, {{-1, 0}, {0, 0}, {2, 0}}).isActive());
     QCOMPARE(f.store->sessionStats().activeCpuWritePages, claims);
     QVERIFY(!scope.beginWrite(key(2)).isValid()); QVERIFY(!scope.removePage(key(2)));
     QVERIFY(!scope.seal());
@@ -12321,6 +12325,53 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
     QCOMPARE(pixel(0), mode == 2 ? 0x31 : 0x61);
     QCOMPARE(pixel(1), mode == 1 ? 0x72 : 0x31);
     QVERIFY(store->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::managedFramesDiscoverTheirOwnThread()
+{
+    KisTiledDataManagerPageStoreBackend backend; const quint8 blank = 0x2a;
+    QVERIFY(backend.configure(1, &blank));
+    constexpr int count = 12;
+    struct Result { bool entered = false, resumed = false, nested = false, barrier = false, reentry = false, accepted = false; };
+    std::array<Result, count> results{};
+    std::vector<std::thread> workers;
+    QSemaphore entered, resume;
+    for (int i = 0; i < count; ++i) workers.emplace_back([&, i] {
+        auto &result = results[i];
+        KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+        result.accepted = backend.fillRect(QRect(i * 64, 0, 1, 1), QByteArray(1, char(0x61)), nullptr,
+            nullptr, &delivery, [&](bool, QString *) {
+                result.entered = true;
+                entered.release();
+                result.resumed = resume.tryAcquire(1, 10000);
+                result.nested = !backend.beginMutationBatch();
+                result.barrier = !backend.clearAll();
+                return result.resumed && i % 3 != 0;
+            }, [&](const auto &publish, QString *error) {
+                if (!publish(error)) return false;
+                // The original Frame still owns delivery, but its thread
+                // admission has ended. Other threads' Frames cannot veto it.
+                auto next = backend.beginMutationBatch(error);
+                result.reentry = next && next->finish(error);
+                return result.reentry;
+            });
+    });
+    const bool allEntered = entered.tryAcquire(count, 10000);
+    resume.release(count);
+    for (auto &worker : workers) worker.join();
+    QVERIFY(allEntered);
+    for (int i = 0; i < count; ++i) {
+        const auto &result = results[i];
+        QVERIFY(result.entered && result.resumed && result.nested && result.barrier);
+        QCOMPARE(result.accepted, i % 3 != 0);
+        QCOMPARE(result.reentry, i % 3 != 0);
+        quint8 pixel = 0;
+        QVERIFY(backend.readBytes(&pixel, i * 64, 0, 1, 1, 1));
+        QCOMPARE(pixel, i % 3 ? quint8(0x61) : blank);
+    }
+    QCOMPARE(backend.store()->sessionStats().activeTransactions, qsizetype(0));
+    QCOMPARE(backend.store()->sessionStats().activeCpuWritePages, qsizetype(0));
+    QVERIFY(backend.store()->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::concurrentBatchAbandonment()

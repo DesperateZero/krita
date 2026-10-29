@@ -28,7 +28,7 @@
     {
       "creation-paths": [
         "beginFrameSession creates/adopts the one original MutationSession for both managed operations and real legacy boundaries.",
-        "Managed pixel, fill/copy, remove/clear, trim and standalone writable-page operations keep that original Session directly. OperationFrame has a borrowed intrusive stack admission link; no ordinary shared legacy control, batch facade or paid thread node is created.",
+        "Managed pixel, fill/copy, remove/clear, trim and standalone writable-page operations keep that original Session directly. OperationFrame has a borrowed intrusive ordered stack admission index; no ordinary shared legacy control, batch facade or paid thread node is created.",
         "Only a real legacy key admitted by the SAME original Session creates a legacy client extension and transfers that Session. Raw/getTile within managed operations checks its claim before allocating the shared control/thread index; standalone known-key raw and writable-page callers reserve the one inert Frame before transaction activation. Explicit unknown-key public batches and iterators retain their original transaction boundary."
       ],
       "current-writers": [
@@ -36,7 +36,7 @@
       ],
       "fact": "legacy adapter clients, raw-lease barrier membership and per-thread batch slot",
       "id": "BR1-OWN-COMPAT-TRANSACTION-GROUP",
-      "lock-or-claim": "backend registry gate protects intrusive active operation links and real legacy thread slots; leaseMutex protects real legacy pointers/client return. Original Frame claim and cancellation are distinct from adapter client membership.",
+      "lock-or-claim": "backend registry gate protects the intrusive ordered active-operation index and real legacy thread slots; leaseMutex protects real legacy pointers/client return. Original Frame claim and cancellation are distinct from adapter client membership.",
       "read-only-observers": [
         "tile lock bridge",
         "writable iterator and operation scopes"
@@ -87,7 +87,8 @@
         "KisTransactionData explicitly opts its existing memento into one backend history mutation during quiescent initialization; each declared cursor operation borrows that original session without creating a new transaction or pending-page map",
         "KisPainter multi-dab jobs use the bounded pixel cursor through the original PaintDevice coordinate adapter; an explicit synchronously borrowed KisTransaction selects its original history session, while the default operation keeps its original terminal guarantee. Immutable dabs and a captured selection are inputs, not writer authorities",
         "Multi-dab declares the union of actual clipped dab rectangles through the original device wrap/offset adapter; manager-local page geometry is coalesced before compatibility lookup and the original admission/execution owns the distinct targets. Temporary geometry grants no writer authority and does not claim bounding-box gaps.",
-        "The default brush partitions ordinary and mirrored jobs through the PaintDevice cursor coordinate mapping into disjoint mapped storage patches. A job retains ordered dabs across all its source-coordinate clips; the temporary patch index has no write authority, and original operation admission and mirror phase barriers remain responsible for execution."
+        "The default brush partitions ordinary and mirrored jobs through the PaintDevice cursor coordinate mapping into disjoint mapped storage patches. A job retains ordered dabs across all its source-coordinate clips; the temporary patch index has no write authority, and original operation admission and mirror phase barriers remain responsible for execution.",
+        "Original Frame rows carry their actual execution-borrow occupation under the Frame gate. Binding checks only the requested original rows; successful linking sets occupation and final execution/guard return clears it. Candidate refusal never clears an existing borrower, and initial range activation uses the same linking policy."
       ],
       "current-writers": [
         "KisPageWriteAdmission through KisPageWriteCoordinator"

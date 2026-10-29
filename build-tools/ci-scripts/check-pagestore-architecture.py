@@ -928,7 +928,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                     "prepareMutationBatch", "promoteLegacy"):
         if retired in backend_text or retired in backend_header:
             errors.append("managed adapter restored a superseded batch protocol: " + retired)
-    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationFrame *operationFrames",
+    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationIndex operationFrames",
+                     "operationFrames.find(QThread::currentThreadId())", "constant_time_size<false>",
                      "original.sealForAdapterDelivery", "delivery->m_frame = std::move(original)",
                      "prepared->mutation = std::move(original)", "currentOperationLocked()", "if (accepted) leave()",
                      "session().reserveLegacyMutationPage(key, error, present)", "reserveLegacyPage(key,",

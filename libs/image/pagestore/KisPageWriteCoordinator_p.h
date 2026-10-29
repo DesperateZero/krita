@@ -114,6 +114,10 @@ public:
     const KisPageKey &key() const { return intent.key; }
     KisPageVersion preparedTargetVersion() const;
     bool isExposed() const { return state == KisMutationPageEntryState::Exposed; }
+    // Structural ownership, protected by the containing Frame gate. A live
+    // execution owns this row even when it currently has no pixel pin.
+    bool isExecutionBorrowed() const { return executionBorrowed; }
+    void setExecutionBorrowed(bool borrowed) { executionBorrowed = borrowed; }
     bool acceptsMutableInput() const { return state < KisMutationPageEntryState::Exposed; }
     bool hasPrivateResult() const
     { return state == KisMutationPageEntryState::PrivatePrepared || state == KisMutationPageEntryState::AliasAccepted; }
@@ -142,6 +146,7 @@ private:
     KisPagePrivateWrite *coldPageStorage = nullptr;
     KisPageWriteClaim *writeClaim = nullptr; // Stable original PageControl location.
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
+    bool executionBorrowed = false;
 
     quint32 slotIndex = 0;
     friend class KisPageWriteAdmission;
