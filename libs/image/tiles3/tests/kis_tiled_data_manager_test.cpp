@@ -5355,6 +5355,61 @@ void KisTiledDataManagerTest::testPageStoreTrimPreparedDelivery()
     }
 }
 
+void KisTiledDataManagerTest::testPageStoreTrimOriginalRows_data()
+{
+    QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("history");
+    for (int bpp : {1, 4, 8, 16}) for (bool history : {false, true})
+        QTest::newRow(qPrintable(QString("%1-history%2").arg(bpp).arg(history))) << bpp << history;
+}
+
+void KisTiledDataManagerTest::testPageStoreTrimOriginalRows()
+{
+    QFETCH(int, bpp); QFETCH(bool, history);
+    const QByteArray blank(bpp, char(0x13)), color(bpp, char(0x57));
+    auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
+    KisTiledDataManager dm(bpp, bytes(blank));
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    // Missing partial and unchanged wrappers coexist with a warm partial page
+    // and a removed page. Installation must consume each original row once.
+    QVERIFY(backend->fillRect(QRect(0, 0, 128, 64), color));
+    dm.clear(QRect(128, 0, 128, 64), bytes(color));
+    QVERIFY(!dm.m_hashTable->getExistingTileForPreparedUpdate(0, 0));
+    QVERIFY(!dm.m_hashTable->getExistingTileForPreparedUpdate(1, 0));
+    auto warm = dm.m_hashTable->getExistingTileForPreparedUpdate(2, 0); QVERIFY(warm);
+    auto before = backend->captureReadView(); QVERIFY(before.isValid());
+    const auto memento = history ? dm.getMemento() : KisMementoSP{};
+    const auto counts = store->mutationStatistics();
+    {
+        KisStrokeJobFailureContext failure(true);
+        dm.setExtent(QRect(1, 0, 129, 64));
+        QVERIFY2(!failure.failed(), qPrintable(failure.error()));
+    }
+    const auto after = store->mutationStatistics();
+    QCOMPARE(after.generationsReserved - counts.generationsReserved, quint64(2));
+    QCOMPARE(after.writablePinsAcquired - counts.writablePinsAcquired, quint64(2));
+    QCOMPARE(after.pagesSealed - counts.pagesSealed, quint64(2));
+    QCOMPARE(after.maximumPinnedPagesPerExecution, quint64(1));
+    QCOMPARE(dm.m_hashTable->numTiles(), 3);
+    QCOMPARE(dm.m_hashTable->getExistingTileForPreparedUpdate(2, 0), warm);
+    QVERIFY(!dm.m_hashTable->getExistingTileForPreparedUpdate(3, 0));
+    QByteArray actual(256 * bpp, Qt::Uninitialized), expected(256 * bpp, char(0x13));
+    memset(expected.data() + bpp, 0x57, size_t(129 * bpp));
+    dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+    QCOMPARE(actual, expected);
+    auto old = before.readResidentPage({{1}, {0, 0}}); QVERIFY(old.isValid());
+    QCOMPARE(QByteArray(static_cast<const char *>(old.data()), int(old.byteSize())),
+             QByteArray(int(old.byteSize()), char(0x57)));
+    old = {}; before = {};
+    if (history) {
+        QVERIFY(dm.tryCommit()); dm.rollback(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+        QCOMPARE(actual, QByteArray(actual.size(), char(0x57)));
+        dm.rollforward(memento);
+        dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 256, 1);
+        QCOMPARE(actual, expected); dm.purgeHistory(memento);
+    }
+}
+
 void KisTiledDataManagerTest::testPageStoreTrimPreparationRefusal()
 {
     const quint8 blank = 0x13, color = 0x57;

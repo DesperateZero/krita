@@ -193,6 +193,8 @@ private Q_SLOTS:
     void testPageStoreTrimPreparedDelivery_data();
     void testPageStoreTrimPreparedDelivery();
     void testPageStoreTrimPreparationRefusal();
+    void testPageStoreTrimOriginalRows_data();
+    void testPageStoreTrimOriginalRows();
     void testPageStoreRegionWriteFailure_data();
     void testPageStoreRegionWriteFailure();
     void testVoidDrawingFailure_data();

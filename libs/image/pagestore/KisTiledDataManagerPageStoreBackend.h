@@ -281,14 +281,10 @@ private:
     KisSharedPtr<KisTile> ensureWritablePage(qint32 column, qint32 row, QString *error);
     bool completeAdapters(KisTiledDataManagerPageStoreWriteBatch::Private &batch, bool published,
         const KisPageMutationSession::AdapterInstallation &installAdapter = {});
-    struct TrimPage {
-        KisLogicalPageId page;
-        QRect extent;
-        QRect kept;
-    };
     bool trimToRect(const QRect &rect, QString *error, OperationDelivery *delivery,
-        const std::function<bool(const QVector<KisLogicalPageId> &, QString *)> &prepareAdapter,
-        const std::function<void(const TrimPage *, qsizetype)> &completeAdapter);
+        const std::function<bool(const QVector<KisLogicalPageId> &,
+            const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter,
+        const KisPageMutationSession::AdapterInstallation &completeAdapter);
     std::shared_ptr<std::pmr::memory_resource> extentStorage() const;
 
     // A new manager read selects current; a retained TileSP keeps its existing

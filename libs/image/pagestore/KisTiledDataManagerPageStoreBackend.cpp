@@ -2778,8 +2778,9 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
 
 bool KisTiledDataManagerPageStoreBackend::trimToRect(
     const QRect &rect, QString *error, OperationDelivery *delivery,
-    const std::function<bool(const QVector<KisLogicalPageId> &, QString *)> &prepareAdapter,
-    const std::function<void(const TrimPage *, qsizetype)> &completeAdapter) try
+    const std::function<bool(const QVector<KisLogicalPageId> &,
+        const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter,
+    const KisPageMutationSession::AdapterInstallation &completeAdapter) try
 {
     if (delivery && !delivery->isEmpty()) {
         KisPageStoreDetail::setError(error, QStringLiteral("adapter delivery output is already occupied"));
@@ -2796,7 +2797,6 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
     KisPageStore *pageStore = store();
     if (!pageStore || !frame.begin(error)) return false;
 
-    KisPageSnapshotArray<TrimPage> changes;
     const auto pages = allocatedPages();
     for (const auto &page : pages) {
         const qint64 x = qint64(page.column) * KisTileData::WIDTH;
@@ -2808,9 +2808,8 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
             return false;
         }
         const QRect extent(int(x), int(y), KisTileData::WIDTH, KisTileData::HEIGHT);
-        const auto kept = extent.intersected(rect);
-        if (kept == extent) continue;
-        changes.append({page, extent, kept});
+        if (!rect.contains(extent) &&
+            !frame.session().reserveLegacyMutationPage({surface(), page}, error)) return false;
     }
     const auto transaction = frame.session().transaction();
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
@@ -2820,20 +2819,20 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim surface is unavailable or incompatible"));
         return false;
     }
-    // Complete actual claims precede adapter preparation and the first band.
-    for (const auto &change : changes)
-        if (!frame.session().reserveLegacyMutationPage({surface(), change.page}, error)) return false;
-    // allocatedPages is ordered and unique; filtering preserves that order.
-    if (prepareAdapter && !prepareAdapter(pages, error)) return false;
+    // The original admitted rows are the complete change set. No second key
+    // or geometry array, and no single-page Execution owner, survives a band.
+    // Claims precede all adapter preparation and the first pixel write.
+    const auto admitted = frame.session().admittedAdapterPages();
+    if (prepareAdapter && !prepareAdapter(pages, admitted, error)) return false;
     const auto &pixel = state.format.defaultPixel;
     const qsizetype stride = qsizetype(KisTileData::WIDTH) * pixel.size();
-    for (const auto &change : changes) {
-        if (change.kept.isEmpty()) {
-            if (!frame.session().removePage({surface(), change.page}, error)) return false;
-            continue;
-        }
-        auto execution = frame.session().borrowExecution(surface(), {change.page}, error);
-        auto guard = execution.beginWrite({surface(), change.page}, error);
+    if (!admitted.forEach([&](const KisPageKey &admittedKey, bool) {
+        const auto key = admittedKey;
+        const QRect extent(key.page.column * KisTileData::WIDTH, key.page.row * KisTileData::HEIGHT,
+                           KisTileData::WIDTH, KisTileData::HEIGHT);
+        const auto kept = extent.intersected(rect);
+        if (kept.isEmpty()) return frame.session().removePage(key, error);
+        auto guard = frame.session().beginWrite(key, error);
         if (!guard.isValid()) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page acquisition failed"));
             return false;
@@ -2843,10 +2842,10 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page layout is invalid"));
             return false;
         }
-        const int left = change.kept.left() - change.extent.left();
-        const int top = change.kept.top() - change.extent.top();
-        const int right = left + change.kept.width();
-        const int bottom = top + change.kept.height();
+        const int left = kept.left() - extent.left();
+        const int top = kept.top() - extent.top();
+        const int right = left + kept.width();
+        const int bottom = top + kept.height();
         const auto fill = [&](int row, int column, int count) {
             quint8 *target = data + row * stride + column * pixel.size();
             if (pixel.size() == 1) memset(target, quint8(pixel[0]), size_t(count));
@@ -2863,16 +2862,12 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
                 fill(row, right, KisTileData::WIDTH - right);
             }
         }
-        guard = {};
-        if (execution.finishPreparedWrites(nullptr, error) < 0 || !execution.finish(error)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page release failed"));
-            return false;
-        }
-    }
+        return true; // This guard returns before the next original row.
+    })) return false;
     return frame.finish(delivery,
-        [&](const auto &publish, const auto &, QString *failure) {
+        [&](const auto &publish, const auto &changes, QString *failure) {
             if (!publish(failure)) return false;
-            if (completeAdapter) completeAdapter(changes.data(), changes.size());
+            if (completeAdapter) completeAdapter(changes);
             return true;
         }, error);
 }
