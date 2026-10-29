@@ -237,6 +237,8 @@ private:
     RecordAdmission prepareRetirementOperation(KisPageRetirementRecord &record,
                                                KisPageOperationId *operation);
     void cancelRetirementOperation(KisPageRetirementRecord &record);
+    KisVerifiedCompletion acceptRetirementOperation(KisPageRetirementRecord &record,
+                                                    const KisReplicaOperation &result);
     KisVerifiedCompletion observeRetirementOperation(KisPageRetirementRecord &record);
     bool consumeRetirementOperation(KisPageRetirementRecord &record,
                                     const KisVerifiedCompletion &terminal);

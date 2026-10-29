@@ -1901,8 +1901,7 @@ bool KisPageOwnerLedger::rollbackBackingRegistration(KisPageRetirementRecord &re
     KisBackingBudgetReservation releasedHeadroom;
     KisPagePhysicalBackingPointer releasedPhysical;
     QMutexLocker lock(&d->mutex);
-    if (record.operationNode.is_linked() || record.retirementOperation.isValid()
-        || record.retirementResult.isValid() || !record.backingNode.is_linked()
+    if (record.operationNode.is_linked() || record.retirementAccepted || !record.backingNode.is_linked()
         || d->isHandoffBacking(record.backingNode.second)) return false;
     return d->settleBacking(record, releasedHeadroom, releasedPhysical);
 }
@@ -2091,7 +2090,7 @@ KisPageOwnerLedger::prepareRetirementOperation(KisPageRetirementRecord &record,
     if (admission == RecordAdmission::Refused
         || (admission == RecordAdmission::Unregistered
             && record.orphanReservation.isValid() && !record.orphanDebtAdmitted)
-        || !d->completions || record.operationNode.is_linked()) return admission;
+        || !d->completions || record.operationNode.is_linked() || record.retirementAccepted) return admission;
     *operation = KisPageStoreDetail::allocateMonotonicId<KisPageOperationId>(&s_nextOperationId);
     if (!operation->isValid()) return admission;
     record.operationNode.first = operation->value;
@@ -2105,9 +2104,37 @@ void KisPageOwnerLedger::cancelRetirementOperation(KisPageRetirementRecord &reco
 {
     QMutexLocker lock(&d->mutex);
     auto &node = record.operationNode;
-    Q_ASSERT(node.is_linked() && node.second.retirement == &record && !node.second.completion.isValid());
-    if (node.is_linked() && node.second.retirement == &record && !node.second.completion.isValid())
+    Q_ASSERT(node.is_linked() && node.second.retirement == &record
+        && !record.retirementAccepted && !node.second.completion.isValid());
+    if (node.is_linked() && node.second.retirement == &record
+        && !record.retirementAccepted && !node.second.completion.isValid())
         d->operations.erase(d->operations.iterator_to(node));
+}
+
+KisVerifiedCompletion KisPageOwnerLedger::acceptRetirementOperation(
+    KisPageRetirementRecord &record, const KisReplicaOperation &result)
+{
+    std::shared_ptr<KisCompletionRegistry> registry;
+    {
+        QMutexLocker lock(&d->mutex);
+        auto &node = record.operationNode;
+        Q_ASSERT(result.isValid() && node.is_linked()
+            && node.second.retirement == &record && !record.retirementAccepted);
+        if (!result.isValid() || record.retirementAccepted) return {};
+        // Acceptance is irreversible even when the returned identity is wrong.
+        // No ticket is installed in that case: neither replay nor refund is legal.
+        record.retirementAccepted = true;
+        if (!d->completions || !node.is_linked() || node.second.retirement != &record
+            || node.second.completion.isValid() || node.first != result.operation.value
+            || !record.backingNode.second.matches(result.replica)
+            || !d->registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch)))
+            return {};
+        node.second.completion = result.completion;
+        registry = d->completions;
+    }
+    // The first observation shares the acceptance window; synchronous results
+    // do not need another ledger acquisition merely to read back this ticket.
+    return registry->verifyTerminal(result.completion);
 }
 
 KisVerifiedCompletion KisPageOwnerLedger::observeRetirementOperation(KisPageRetirementRecord &record)
@@ -2118,16 +2145,7 @@ KisVerifiedCompletion KisPageOwnerLedger::observeRetirementOperation(KisPageReti
         QMutexLocker lock(&d->mutex);
         auto &node = record.operationNode;
         if (!d->completions || !node.is_linked() || node.second.retirement != &record
-            || node.first != record.retirementOperation.value) return {};
-        if (record.retirementResult.isValid()) {
-            const auto &result = record.retirementResult;
-            if (node.second.completion.isValid() || !record.backingNode.second.matches(result.replica)
-                || !(result.operation == record.retirementOperation)
-                || !d->registeredProvider(providerKey(result.replica.provider, result.replica.providerEpoch)))
-                return {}; // Accepted but mismatched: never reissue or refund.
-            node.second.completion = result.completion;
-            record.retirementResult = {};
-        }
+            || !record.retirementAccepted) return {};
         ticket = node.second.completion;
         registry = d->completions;
     }
@@ -2142,12 +2160,12 @@ bool KisPageOwnerLedger::consumeRetirementOperation(KisPageRetirementRecord &rec
     QMutexLocker lock(&d->mutex);
     auto &node = record.operationNode;
     if (!terminal.isValid() || !node.is_linked() || node.second.retirement != &record
-        || node.first != record.retirementOperation.value
+        || !record.retirementAccepted
         || !(node.second.completion == terminal.ticket())) return false;
     if (terminal.succeeded() && record.backingNode.is_linked()
         && !d->settleBacking(record, releasedHeadroom, releasedPhysical)) return false;
     d->operations.erase(d->operations.iterator_to(node));
-    record.retirementOperation = {};
+    record.retirementAccepted = false;
     return true; // Failed/cancelled consumes only this attempt, retaining backing.
 }
 
@@ -2209,7 +2227,7 @@ KisPageReadinessStatus KisPageOwnerLedger::watchRetirementOperation(
         QMutexLocker lock(&d->mutex);
         const auto &node = record.operationNode;
         if (!node.is_linked() || node.second.retirement != &record
-            || node.first != record.retirementOperation.value) return KisPageReadinessStatus::Unavailable;
+            || !record.retirementAccepted) return KisPageReadinessStatus::Unavailable;
         ticket = node.second.completion;
         registry = d->completions;
     }

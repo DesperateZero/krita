@@ -402,9 +402,10 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     // Fixed at original retirement-owner admission; retries never re-query
     // provider code or maintain another wake-eligibility policy.
     bool backgroundRetirement = false;
+    // The original node owns the sole operation identity/ticket. An accepted
+    // but invalid provider envelope has no ticket and must never be replayed.
+    bool retirementAccepted = false;
     KisCompletionTicket lastUse;
-    KisPageOperationId retirementOperation;
-    KisReplicaOperation retirementResult;
     KisPageProviderOperationNode operationNode;
     KisPageBackingNode backingNode;
     KisPagePhysicalBackingRecord physical;

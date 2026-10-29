@@ -51,7 +51,6 @@ void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record)
     // The physical account may still serve another alias. End the consumed
     // terminal's actual references now, independently of its allocation tail.
     record->wait.reset();
-    record->retirementResult.error.clear();
     record->backingNode.second.releaseNativeBinding();
     record->backingNode.second.retirementHeadroom.release();
     record->provider.reset();
@@ -282,7 +281,7 @@ void KisPageRetirementQueue::prepareWait(KisPageRetirementRecord &record, Retire
     auto status = KisPageReadinessStatus::Unavailable;
     if (needsBudget) {
         status = m_owner.watchRetirementBudget(record, scheduleReady, &wait->budgetWaiter);
-    } else if (record.retirementOperation.isValid()) {
+    } else if (record.retirementAccepted) {
         status = m_owner.watchRetirementOperation(record,
                                                 scheduleReady, &wait->subscription);
     } else {
@@ -385,7 +384,8 @@ KisPageRetirementQueue::RetirementOutcome
 KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
 {
     if (!record.provider) return RetirementOutcome::Pending;
-    if (!record.retirementOperation.isValid()) {
+    KisVerifiedCompletion terminal;
+    if (!record.retirementAccepted) {
         KisPageOperationId operation;
         const auto admission = m_owner.prepareRetirementOperation(record, &operation);
         if (admission == KisPageOwnerLedger::RecordAdmission::Refused)
@@ -412,12 +412,10 @@ KisPageRetirementQueue::attemptRetirement(KisPageRetirementRecord &record)
         }
         if (!result.isValid()) return RetirementOutcome::Pending;
         cancelPrepared.dismiss();
-        record.retirementOperation = operation;
-        record.retirementResult = result;
-    }
+        terminal = m_owner.acceptRetirementOperation(record, result);
+    } else terminal = m_owner.observeRetirementOperation(record);
     // Accepted operations only observe their original ticket. One immutable
     // terminal proof authorizes both operation consumption and backing refund.
-    const auto terminal = m_owner.observeRetirementOperation(record);
     if (!terminal.isValid() || !m_owner.consumeRetirementOperation(record, terminal))
         return RetirementOutcome::Pending;
     if (!terminal.succeeded()) return RetirementOutcome::Pending;

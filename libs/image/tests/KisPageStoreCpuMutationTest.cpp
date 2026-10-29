@@ -1014,6 +1014,20 @@ private Q_SLOTS:
         QTest::newRow("cancelled") << true;
     }
     void terminalConsumptionRetainsFailedAttempt();
+    void terminalPreparationReentryAndRefusal_data()
+    {
+        QTest::addColumn<bool>("throws");
+        QTest::newRow("refused") << false;
+        QTest::newRow("allocation-exception") << true;
+    }
+    void terminalPreparationReentryAndRefusal();
+    void terminalConsumptionRejectsMismatchedAcceptance_data()
+    {
+        QTest::addColumn<int>("mismatch");
+        QTest::newRow("logical-generation") << 0;
+        QTest::newRow("operation") << 1;
+        QTest::newRow("provider-epoch") << 2;
+    }
     void terminalConsumptionRejectsMismatchedAcceptance();
     void synchronousSharedOrphanKeepsAcceptedOperation();
     void orphanRetirementObservationResumesPending();
@@ -6654,13 +6668,18 @@ void KisPageStoreCpuMutationTest::terminalConsumptionRetainsFailedAttempt()
     auto record = f.owner.takeRetirementRecord(f.replica); QVERIFY(record);
     auto ticket = f.physical.completions->allocatePending(
         f.physical.completions->registerSource(KisCompletionDomain::CpuJob));
-    f.physical.provider->retirementOverride = [ticket](KisPageOperationId op, const KisReplicaHandle &replica) {
+    bool preparedOnly = false, reentered = true;
+    f.physical.provider->retirementOverride = [&](KisPageOperationId op, const KisReplicaHandle &replica) {
+        preparedOnly = record->operationNode.is_linked() && record->operationNode.first == op.value
+            && !record->retirementAccepted && !record->operationNode.second.completion.isValid();
+        reentered = f.retirement.retireRecord(*record);
         return KisReplicaOperation{KisPageRequestStatus::Pending, op, replica, ticket, {}};
     };
     const auto bytes = f.physical.provider->memoryUsage().committedBytes;
     QVERIFY(!f.retirement.retireRecord(*record));
-    const auto operation = record->retirementOperation;
-    QVERIFY(operation.isValid());
+    QVERIFY(preparedOnly && !reentered);
+    const KisPageOperationId operation{record->operationNode.first};
+    QVERIFY(operation.isValid() && record->retirementAccepted);
     QVERIFY(!f.owner.rollbackBackingRegistration(*record));
     QVERIFY(!f.owner.reclassifyBacking(f.replica, KisBackingBudgetClass::Current));
     // Real metadata pressure after acceptance cannot require another allocation
@@ -6670,7 +6689,8 @@ void KisPageStoreCpuMutationTest::terminalConsumptionRetainsFailedAttempt()
     const auto cleanup = qScopeGuard([&] { freeTestStoragePressure(&f.budget, filler, fillerBytes, 1); });
     QVERIFY(!f.retirement.retireRecord(*record));
     QCOMPARE(f.physical.provider->retireCalls.load(), 1);
-    QCOMPARE(record->retirementOperation, operation);
+    QCOMPARE(record->operationNode.first, operation.value);
+    QVERIFY(record->retirementAccepted);
     bool notified = false;
     KisPageReadinessSubscription subscription;
     QCOMPARE(f.owner.watchRetirementOperation(*record, [&] { notified = true; }, &subscription),
@@ -6684,7 +6704,7 @@ void KisPageStoreCpuMutationTest::terminalConsumptionRetainsFailedAttempt()
     QVERIFY(unrelated.isValid());
     QVERIFY(!f.owner.consumeRetirementOperation(*record, unrelated));
     QVERIFY(!f.retirement.retireRecord(*record));
-    QVERIFY(!record->retirementOperation.isValid() && !record->operationNode.is_linked());
+    QVERIFY(!record->retirementAccepted && !record->operationNode.is_linked());
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
     QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::RetirementDebt);
     QCOMPARE(f.budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam,
@@ -6699,28 +6719,67 @@ void KisPageStoreCpuMutationTest::terminalConsumptionRetainsFailedAttempt()
     QVERIFY(!f.owner.consumeRetirementOperation(*record, f.physical.completions->verifyTerminal(ticket)));
 }
 
+void KisPageStoreCpuMutationTest::terminalPreparationReentryAndRefusal()
+{
+    QFETCH(bool, throws);
+    ReadTerminalFixture f;
+    f.physical.provider->disableBackgroundRetirement = true;
+    QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
+    auto record = f.owner.takeRetirementRecord(f.replica); QVERIFY(record);
+    KisPageOperationId prepared;
+    bool originalPrepared = false, reentered = true, rollback = true;
+    f.physical.provider->retirementOverride = [&](KisPageOperationId op, const KisReplicaHandle &) -> KisReplicaOperation {
+        prepared = op;
+        originalPrepared = record->operationNode.is_linked() && record->operationNode.first == op.value
+            && !record->retirementAccepted && !record->operationNode.second.completion.isValid();
+        reentered = f.retirement.retireRecord(*record);
+        rollback = f.owner.rollbackBackingRegistration(*record);
+        if (throws) throw std::bad_alloc();
+        return {};
+    };
+    const auto bytes = f.physical.provider->memoryUsage().committedBytes;
+    QVERIFY(!f.retirement.retireRecord(*record));
+    QVERIFY(prepared.isValid() && originalPrepared && !reentered && !rollback);
+    QCOMPARE(f.physical.provider->retireCalls.load(), 1);
+    QVERIFY(!record->retirementAccepted && !record->operationNode.is_linked());
+    QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
+    QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::RetirementDebt);
+    QCOMPARE(f.physical.provider->memoryUsage().committedBytes, bytes);
+    f.physical.provider->retirementOverride = {};
+    QVERIFY(f.retirement.retireRecord(*record));
+    QVERIFY(record->operationNode.first != prepared.value);
+    QCOMPARE(f.physical.provider->retireCalls.load(), 2);
+    QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::Count);
+    QCOMPARE(f.budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].live.cpuRam, quint64(0));
+}
+
 void KisPageStoreCpuMutationTest::terminalConsumptionRejectsMismatchedAcceptance()
 {
+    QFETCH(int, mismatch);
     ReadTerminalFixture f;
     f.physical.provider->disableBackgroundRetirement = true;
     QVERIFY2(f.init(nullptr, true), qPrintable(f.error));
     auto record = f.owner.takeRetirementRecord(f.replica); QVERIFY(record);
     auto ticket = f.physical.completions->allocatePending(
         f.physical.completions->registerSource(KisCompletionDomain::CpuJob));
-    f.physical.provider->retirementOverride = [ticket](KisPageOperationId op, const KisReplicaHandle &replica) {
-        auto wrong = replica; ++wrong.version.generation.value;
+    f.physical.provider->retirementOverride = [ticket, mismatch](KisPageOperationId op, const KisReplicaHandle &replica) {
+        auto wrong = replica;
+        if (mismatch == 0) ++wrong.version.generation.value;
+        else if (mismatch == 1) ++op.value;
+        else ++wrong.providerEpoch.value;
         return KisReplicaOperation{KisPageRequestStatus::Pending, op, wrong, ticket, {}};
     };
     QVERIFY(!f.retirement.retireRecord(*record));
     QVERIFY(f.physical.completions->complete(ticket, KisCompletionStatus::Failed));
     for (int i = 0; i < 3; ++i) QVERIFY(!f.retirement.retireRecord(*record));
     QCOMPARE(f.physical.provider->retireCalls.load(), 1);
-    QVERIFY(record->operationNode.is_linked() && record->retirementResult.isValid());
+    QVERIFY(record->operationNode.is_linked() && record->retirementAccepted);
+    QVERIFY(!record->operationNode.second.completion.isValid());
     QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::RetirementDebt);
     QVERIFY(!f.owner.rollbackBackingRegistration(*record));
-    // Test teardown repairs the deliberately corrupt provider envelope only.
+    // Test teardown installs the intended ticket after the deliberately corrupt envelope.
     // This is not a production recovery path or permission to replay acceptance.
-    record->retirementResult.replica = record->replica();
+    record->operationNode.second.completion = ticket;
     QVERIFY(!f.retirement.retireRecord(*record));
     f.physical.provider->retirementOverride = {};
     QVERIFY(f.retirement.retireRecord(*record));

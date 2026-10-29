@@ -13698,8 +13698,8 @@ void KisPageStoreReferenceTest::ownerLedgerSeparatesDetachedRetirement()
     auto record = kisPreparePageRetirementRecord(&budget);
     record->backingNode.second.setReplica(result.replica); record->provider = provider;
     QVERIFY(!queue.retireRecord(*record)); // Actual provider returns Pending.
-    const auto retirement = record->retirementOperation;
-    QVERIFY(retirement.isValid());
+    const KisPageOperationId retirement{record->operationNode.first};
+    QVERIFY(retirement.isValid() && record->retirementAccepted);
     auto duplicate = result; duplicate.operation = retirement;
     QVERIFY(!owner.bindProviderOperation(retirement, duplicate));
     QVERIFY(!owner.releaseTerminalProviderOperation(retirement));
