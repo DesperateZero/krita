@@ -120,9 +120,10 @@ struct KisPagePublicationChange {
     // Metadata's detachment plan, revalidated against real consumers at install.
     // It grants neither a budget class change nor optional idle capacity.
     bool detachesSuperseded = false;
-    // Native publication borrows its frozen producer's original source.
-    // Only a removal/foreign source needs a value in the preparation owner's
-    // authority storage. All consumers finish before either source dies.
+    // The original root/overlay retains the superseded Value through the cut.
+    // Its inline authority is consumed under Store admission. Real external
+    // or non-inline authority alone borrows an independent cold snapshot.
+    const KisPageValueCell *supersededValue = nullptr;
     const KisReplicaHandle *supersededAuthority = nullptr;
     // Commit output, borrowed until immediate handover under Store admission.
     KisPageRetirementRecord *acceptedIdle = nullptr;
@@ -149,8 +150,12 @@ struct KisPagePublicationChange {
     bool hasMutation() const { return superseded.isValid() || replacement.native; }
     const KisPageVersion &mutationVersion() const
     { return superseded.isValid() ? superseded.version : replacement.version(); }
-    const KisReplicaHandle *expectedAuthority() const
-    { return superseded.native ? supersededAuthority : nullptr; }
+    bool hasSupersededAuthority() const { return supersededValue || supersededAuthority; }
+    KisReplicaHandle supersededReplica() const
+    {
+        return supersededValue ? supersededValue->primaryReplica.handle(supersededValue->version)
+            : supersededAuthority ? *supersededAuthority : KisReplicaHandle{};
+    }
 };
 using KisPagePublicationChanges = std::vector<KisPagePublicationChange,
     KisMutationStorageAllocator<KisPagePublicationChange>>;

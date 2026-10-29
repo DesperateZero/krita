@@ -1646,10 +1646,15 @@ struct ShardRecordStore {
         unindexPhysical(*record);
         unindexPublication(page, record);
         unlinkVersion(page, record);
+        // Original root/overlay references can outlive the logical cut just
+        // like the Frame. Keep terminal identity in this same cell, without
+        // keeping the Resource alive after its existing release handover.
+        const bool retainIdentity = record->frameHeld
+            || (record->viewMemoryState.load(std::memory_order_relaxed) & ~KisPageViewValue::OriginalLifetime);
         auto primary = record->primaryReplica;
-        if (record->frameHeld) primary.detachResource(record->version);
+        if (retainIdentity) primary.detachResource(record->version);
         eraseChildren(record);
-        if (record->frameHeld) record->primaryReplica = primary;
+        if (retainIdentity) record->primaryReplica = primary;
         const bool indexErased = exactVersions.eraseExact(identity, slot);
         auto *facts = &record->native;
         Q_ASSERT(facts);
@@ -1821,16 +1826,23 @@ struct MetadataShard : KisPageMetadataShardMetrics {
         ++nativeValuesAccepted;
     }
 
-    bool validDetachment(const MetadataPage &page, const KisPageVersion &version,
-        const KisPagePrivateWrite *native, KisPageTransactionId transaction,
-        bool nativeValue, const KisReplicaHandle *authority, KisVersionSlotId slot = {}) const
+    bool validDetachment(const MetadataPage &page, const KisPagePublicationChange &input,
+                         KisPageTransactionId transaction) const
     {
+        const auto *native = input.replacement.native;
+        const auto &version = input.mutationVersion();
         const auto &activity = page.activity;
         if (native ? activity.nativeWrite != native || !native->reserved || !native->completed
                         || !native->isSealed() || !(native->sealedBy() == transaction)
                    : activity.hasWriter()) return false;
-        return (native && version == native->version())
-            || records.isPreparedBy(version, transaction, nativeValue, authority, slot);
+        if (native && version == native->version()) return true;
+        if (input.supersededValue) {
+            const auto *source = records.version(input.superseded.metadataSlot);
+            if (source != input.supersededValue || !(source->authorityReplica == kisInlineReplicaSlot(source->slot)))
+                return false;
+        }
+        return records.isPreparedBy(version, transaction, input.superseded.native,
+            input.superseded.native ? input.supersededAuthority : nullptr, input.superseded.metadataSlot);
     }
 
     void installDetachment(MetadataPage &page, const KisPageVersion &version, KisPagePrivateWrite *native,
@@ -1885,7 +1897,12 @@ struct MetadataShard : KisPageMetadataShardMetrics {
             || (native ? page.activity.nativeWrite != native || !native->reserved
                 || !native->completed || !native->isSealed() || !(native->sealedBy() == transaction)
                 : bool(page.activity.nativeWrite))) return false;
-        if (input.supersededAuthority && input.supersededAuthority->isValid()
+        if (input.supersededValue) {
+            // Same original Value, not two equal projections of its authority.
+            // Store admission excludes placement changes during fee/install.
+            if (published != input.supersededValue
+                || !(published->authorityReplica == kisInlineReplicaSlot(published->slot))) return false;
+        } else if (input.supersededAuthority && input.supersededAuthority->isValid()
             && (!published || !(records.projectReplica(published->authorityReplica) == *input.supersededAuthority))) return false;
         const auto visit = [&](auto apply) {
             for (auto slot = page.firstMutable; slot.isValid();) {
@@ -3105,10 +3122,13 @@ KisPageMetadataCoordinator::PreparedPublication::backingAuthority(
         const auto found = std::lower_bound(m_rows.begin(), m_rows.end(), version.key,
             [](const auto &row, const auto &key) { return MetadataKeyLess{}(row.replacement.key(), key); });
         if (found != m_rows.end() && found->replacement.key() == version.key && !found->replacement.removal) {
-            if (found->supersededAuthority && found->supersededAuthority->version == version) {
-                if (detached) *detached = found->detachesSuperseded;
-                if (idleResult && found->detachesSuperseded) *idleResult = &found->acceptedIdle;
-                return *found->supersededAuthority;
+            if (found->superseded.version == version) {
+                const auto source = found->supersededReplica();
+                if (source.version == version) {
+                    if (detached) *detached = found->detachesSuperseded;
+                    if (idleResult && found->detachesSuperseded) *idleResult = &found->acceptedIdle;
+                    return source;
+                }
             }
             if (found->replacement.version() == version) {
                 if (found->replacement.native) return found->replacement.native->target();
@@ -3174,9 +3194,10 @@ void KisPageMetadataCoordinator::PreparedPublication::forEachDetachedBacking(voi
     void (*visit)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const
 {
     if (!m_minimumEpoch.isValid()) return;
-    for (const auto &row : m_rows)
-        if (row.detachesSuperseded && row.supersededAuthority && row.supersededAuthority->isValid())
-            visit(context, *row.supersededAuthority, row.acceptedIdle);
+    for (const auto &row : m_rows) if (row.detachesSuperseded) {
+        const auto source = row.supersededReplica();
+        if (source.isValid()) visit(context, source, row.acceptedIdle);
+    }
 }
 
 KisPageMetadataCoordinator::DeferredPublicationCleanup::DeferredPublicationCleanup() = default;
@@ -3382,7 +3403,7 @@ try {
     for (size_t i = 0; i < count; ++i) {
         auto &input = rows[i];
         if (published) {
-            input.superseded = {}; input.supersededAuthority = nullptr;
+            input.superseded = {}; input.supersededAuthority = nullptr; input.supersededValue = nullptr;
             input.acceptedIdle = nullptr; input.canonicalRecord = nullptr;
             if (!(input.replacement.key() == input.replacement.version().key) && !input.replacement.removal) return {};
         }
@@ -3407,7 +3428,7 @@ try {
             releases += !native;
         } else if (native) {
             input.detachesSuperseded = input.detachesSuperseded
-                && input.superseded.native && input.expectedAuthority()
+                && input.superseded.native && input.hasSupersededAuthority()
                 && !(input.mutationVersion() == native->version());
         } else {
             releases += input.detachesSuperseded;
@@ -3455,12 +3476,15 @@ try {
                 const auto *current = shard->records.version(work.input->superseded.metadataSlot);
                 if (native) {
                     ++shard->preparedPublicationPages;
-                    // A writer may be based on an earlier Prepared result. Its
-                    // source is then distinct from the old committed authority.
-                    // Retain only that genuinely independent canonical output.
-                    const bool distinct = native->source.isValid() && !(native->source.version == selected);
-                    work.input->supersededAuthority = distinct ? nullptr : &native->source;
-                    releases += distinct;
+                    // The old committed Value, rather than the writer's pixel
+                    // source, owns this fee/terminal fact. The original root
+                    // retains its memory through installation and cleanup.
+                    if (value && current && current->authorityReplica == kisInlineReplicaSlot(value->slot)) {
+                        work.input->supersededValue = current;
+                    } else if (!current || !current->authorityReplica.isValid()) {
+                        static const KisReplicaHandle empty;
+                        work.input->supersededAuthority = &empty;
+                    } else ++releases; // Real non-inline/default-cache authority.
                 }
                 work.input->detachesSuperseded = detachCurrent && current && shard->records.canDetachSelected(current);
             }
@@ -3477,7 +3501,7 @@ try {
             const auto &input = *rows[i].metadataAcceptance.input;
             if (i > first && rows[i - 1].metadataAcceptance.input->mutationVersion().key == input.mutationVersion().key)
                 return {};
-            external |= !input.replacement.native || (published && !input.supersededAuthority);
+            external |= !input.replacement.native || (published && !input.hasSupersededAuthority());
         }
         if (external) ++retainedShards;
         first = end;
@@ -3513,14 +3537,14 @@ try {
             // Bind each original position once, in bounded preparation gates.
             for (size_t batch = first; batch < end;) {
                 while (batch < end && rows[batch].metadataAcceptance.input->replacement.native
-                    && (!published || rows[batch].metadataAcceptance.input->supersededAuthority)) ++batch;
+                    && (!published || rows[batch].metadataAcceptance.input->hasSupersededAuthority())) ++batch;
                 if (batch == end) break;
                 const size_t batchEnd = std::min(end, batch + 16);
                 QMutexLocker lock(&shard->mutex);
                 for (size_t i = batch; i < batchEnd; ++i) {
                     auto &work = rows[i].metadataAcceptance;
                     auto &input = *work.input;
-                    if (input.replacement.native && (!published || input.supersededAuthority)) continue;
+                    if (input.replacement.native && (!published || input.hasSupersededAuthority())) continue;
                     if (!retained) {
                         result.m_acceptanceReferences->retainShard(shard);
                         retained = true;
@@ -3532,8 +3556,7 @@ try {
                     }
                     if (!page || !shard->canMutate(input.mutationVersion().key, *page)
                         || (published ? !shard->validPublication(*page, input, work, transaction.id, minimumEpoch)
-                            : !shard->validDetachment(*page, input.mutationVersion(), nullptr,
-                                transaction.id, input.superseded.native, input.expectedAuthority(), input.superseded.metadataSlot))) return {};
+                            : !shard->validDetachment(*page, input, transaction.id))) return {};
                     if (!published) input.detachesSuperseded = input.detachesSuperseded
                         && shard->records.canDetachPrepared(input.mutationVersion());
                     if (published || input.detachesSuperseded) {
@@ -3671,8 +3694,7 @@ bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepare
                 : static_cast<MetadataPage *>(work.page);
             if (!page || !shard->canMutate(version.key, *page)) break;
             if (published ? !shard->validPublication(*page, input, work, transaction.id, epoch)
-                : !shard->validDetachment(*page, version, native, transaction.id,
-                    input.superseded.native, input.expectedAuthority(), input.superseded.metadataSlot)) break;
+                : !shard->validDetachment(*page, input, transaction.id)) break;
             const auto *current = published ? shard->records.version(work.input->superseded.metadataSlot) : nullptr;
             const auto &sourceVersion = published ? input.superseded.version : version;
             const bool available = !input.detachesSuperseded
@@ -5372,7 +5394,6 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
     activity.writerTransaction = write.transaction;
     if (targetBinding) *targetBinding = native->exchangeBinding(std::move(*targetBinding), target);
     else native->value->primaryReplica.setHandle(target, native->binding().get());
-    native->source = source;
     native->reserved = true;
     native->completed = complete;
     Q_ASSERT(native->location.page == page && native->location.shardIndex == shardIndex);

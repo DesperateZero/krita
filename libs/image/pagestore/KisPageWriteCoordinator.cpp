@@ -3727,7 +3727,9 @@ KisPageWriteInput KisPageWriteCoordinator::writeInput(const KisMutationPageEntry
     write.version = result->version();
     write.writeMode = entry.intent.mode;
     write.transaction = transaction;
-    write.source = result->source;
+    // Replacing an existing private target is source adoption. The original
+    // initialization capability supplies its pixels; no old pixel source is
+    // reconstructed or retained for publication of this same final Value.
     return write;
 }
 

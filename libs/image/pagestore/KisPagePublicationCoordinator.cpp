@@ -517,7 +517,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
             [](void *p) { return (*static_cast<decltype(accept) *>(p))(); }, error)) return false;
     for (const auto &change : std::as_const(data->changes)) {
         if (change.detachesSuperseded)
-            owner.acceptCapacityLocked(*change.supersededAuthority, change.acceptedIdle);
+            owner.acceptCapacityLocked(change.supersededReplica(), change.acceptedIdle);
     }
     data->releaseCapacity();
     data->installed = true;
@@ -1929,6 +1929,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
             // and original row survive a capacity refusal, candidate tails do not.
             entry.superseded = {};
             entry.supersededAuthority = nullptr;
+            entry.supersededValue = nullptr;
             entry.detachesSuperseded = false;
             entry.acceptedIdle = nullptr;
             entry.acceptedOverlayIndex = 0;
@@ -1973,10 +1974,13 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
                 }
             }
             if (superseded.isValid()) {
-                // The original result already retains its exact source. A
-                // foreign/generic source projects at its real boundary.
-                if (native && native->source.version == superseded.version) {
-                    entry.supersededAuthority = &native->source;
+                // The original overlay holds this Value until acceptSelection
+                // exchanges it into row.acceptedValue. Borrow that same memory,
+                // never the incoming writer's earlier initialization source.
+                const auto *selected = static_cast<const KisPageValueCell *>(
+                    (state->proofs.begin() + entry.acceptedOverlayIndex)->second.value);
+                if (native && superseded.native && selected->authorityReplica == kisInlineReplicaSlot(selected->slot)) {
+                    entry.supersededValue = selected;
                 } else {
                     // This is the actual independent input, not a second
                     // copy for every native row. Reserve once so earlier

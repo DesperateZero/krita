@@ -1696,8 +1696,8 @@ try
         while (index < count) {
             auto &row = rows[index++];
             if (!row.detachesSuperseded) continue;
-            if (!row.supersededAuthority) return -1;
-            const auto &authority = *row.supersededAuthority;
+            if (!row.hasSupersededAuthority()) return -1;
+            const auto authority = row.supersededReplica();
             if (authority.layout.byteSize > allowance) continue;
             const auto found = d->backings.find(authority.allocationIdentity());
             if (!authority.isValid() || found == d->backings.end()

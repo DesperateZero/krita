@@ -1363,6 +1363,7 @@ private Q_SLOTS:
     void preparedMetadataClaimsDoNotLoseConcurrentReaders();
     void preparedPublicationMatchesFullReferenceTransitions();
     void nativeValueFrameLifetime();
+    void supersededValueTerminalIdentity();
     void publicationResourceWindow_data()
     {
         QTest::addColumn<bool>("native"); QTest::addColumn<int>("pages"); QTest::addColumn<int>("outcome");
@@ -6960,7 +6961,7 @@ void KisPageStoreReferenceTest::privateMutationLocationsAreNotAuthority()
         QVERIFY(coordinator.acceptPrivateTarget(selected, selected.write.source, target, &result, 32, nullptr,
                                                 {}, completedAtAcceptance));
         QCOMPARE(result.completed, completedAtAcceptance);
-        QCOMPARE(result.source, selected.write.source);
+        QCOMPARE(result.target(), target);
         static_assert(!std::is_copy_constructible_v<KisPagePrivateWrite>);
         KisPageEditValues copiedValues;
         KisPagePrivateWrite copied(copiedValues);
@@ -7239,6 +7240,79 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
         QCOMPARE(rows[0]->target(), firstTarget);
         rows[0].reset(); rows[1].reset();
         QVERIFY(shard.expired());
+    }
+}
+
+void KisPageStoreReferenceTest::supersededValueTerminalIdentity()
+{
+    for (const bool keepFrame : {false, true}) {
+        auto completions = std::make_shared<KisCompletionRegistry>();
+        auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
+        QVERIFY(provider->configure({{81}, {1}, 4 * 1024 * 1024}, completions));
+        KisPageMetadataCoordinator metadata;
+        QVERIFY(metadata.configure(1));
+        const auto base = pageVersion(0, 1);
+        const auto initial = replica(base, 1, 1, 1);
+        QVERIFY(metadata.registerPage(initialPageState(base, initial)));
+        auto values = metadata.viewValues();
+        KisPageViewValue *oldMemory = nullptr;
+        const auto release = qScopeGuard([&] { values->release(oldMemory); });
+        KisPageEditValues edit;
+        std::array<std::unique_ptr<KisPagePrivateWrite>, 2> frames;
+        std::weak_ptr<KisCpuResidentBinding> oldBinding;
+        KisReplicaHandle previous = initial;
+        KisReplicaHandle oldAuthority;
+        const KisPageTransaction tx{{74}, {1}};
+        const auto completion = completions->allocatePending(completions->registerSource(KisCompletionDomain::HostLogical));
+        QVERIFY(completions->complete(completion, KisCompletionStatus::Succeeded));
+        QVERIFY(metadata.bindCpuProofIssuer(1, completion));
+        for (int i = 0; i < 2; ++i) {
+            KisPageWriteInput input;
+            input.baseVersion = previous.version; input.source = previous;
+            input.version = pageVersion(0, quint64(2 + i)); input.transaction = tx.id;
+            input.baseWasPrepared = i != 0;
+            const auto allocated = provider->prepareWrite({quint64(100 + i)}, input.version,
+                allocationDescriptor(), KisPageAccessDomain::CpuRam,
+                KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+            QVERIFY(allocated.isValid());
+            auto &frame = frames[size_t(i)]; frame = std::make_unique<KisPagePrivateWrite>(edit);
+            auto selected = selectPrivateInput(metadata, input);
+            QVERIFY(metadata.preparePrivateValue(selected, frame.get(), nullptr));
+            auto binding = provider->cpuResidentBinding(allocated.replica); QVERIFY(binding);
+            if (!i) oldBinding = binding;
+            QVERIFY(metadata.acceptPrivateTarget(selected, input.source, allocated.replica,
+                frame.get(), 64, nullptr, {}, true, &binding));
+            if (i) QCOMPARE(selected.binding, oldBinding.lock());
+            selected = {}; // Pixel preparation ends before the publication cut.
+            QVERIFY(freezeOriginalValue(metadata, *frame, tx.id, 1));
+            KisPagePublicationChange row{KisPagePublicationChange::Replacement(frame.get())};
+            if (i) {
+                row.superseded = {oldMemory->version, tx.id, 0, true, oldMemory->slot};
+                row.supersededValue = static_cast<KisPageValueCell *>(oldMemory);
+                row.detachesSuperseded = true;
+                QCOMPARE(row.supersededReplica(), oldAuthority);
+            }
+            auto prepared = metadata.prepareAcceptance(tx, {&row, 1});
+            QVERIFY(prepared.isValid());
+            QVERIFY(metadata.installAcceptance(std::move(prepared), tx));
+            metadata.finishAcceptance({&row, 1});
+            if (i) {
+                QVERIFY(row.detachesSuperseded);
+                QCOMPARE(row.supersededReplica(), oldAuthority);
+                QVERIFY(!metadata.cpuReadReplica(oldAuthority.version).isValid());
+                // The original view memory remains usable for terminal identity
+                // after metadata detached and released the actual Resource.
+                frames[1]->releasedBinding.reset();
+                provider.reset();
+                QVERIFY(oldBinding.expired());
+                QCOMPARE(row.supersededReplica(), oldAuthority);
+            } else {
+                previous = allocated.replica; oldAuthority = previous;
+                oldMemory = values->pin(frame->version(), frame->valueSlot());
+                QVERIFY(oldMemory);
+                if (!keepFrame) frame.reset(); // The view alone owns old memory.
+            }
+        }
     }
 }
 
@@ -11703,7 +11777,7 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
     QVERIFY(!reconstructed.writer.isValid()); // Native aliases acquire no generic lease token.
     QCOMPARE(reconstructed.transaction, prepared.transaction);
     QCOMPARE(reconstructed.writeMode, prepared.writeMode);
-    QCOMPARE(reconstructed.source, prepared.source);
+    QVERIFY(!reconstructed.source.isValid()); // Alias adoption consumes its initialization capability.
     QCOMPARE(pendingResult.target(), prepared.target);
     QVERIFY(metadata.cancelPrivateResult(&pendingResult));
     const KisPageTransactionId transaction{91};

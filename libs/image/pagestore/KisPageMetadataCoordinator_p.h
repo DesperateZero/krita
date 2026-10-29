@@ -269,7 +269,6 @@ struct KisPagePrivateWrite {
     KisPagePrivateWrite &operator=(const KisPagePrivateWrite &) = delete;
     KisPageEditValues &edit;
     KisPageValueCell *value = nullptr;
-    KisReplicaHandle source;
     KisPageRetirementRecord *backing = nullptr;
     bool hasValue() const { return value != nullptr; }
     const KisPageVersion &version() const { Q_ASSERT(value); return value->version; }
