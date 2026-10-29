@@ -194,10 +194,7 @@ public:
         owner.attachBackingBudget(backingBudget);
         metadata.attachBackingBudget(backingBudget);
         epochs.attachBackingBudget(backingBudget);
-        metadata.attachRetirementDebtOwner(this,
-                                           &Private::prepareRetirementDebt,
-                                           &Private::commitRetirementDebt,
-                                           &Private::cancelRetirementDebt);
+        metadata.attachRetirementOwner(this, &Private::acceptRetirement, &Private::deliverRetirement);
     }
 
     ~Private()
@@ -212,25 +209,19 @@ public:
         allocator.deallocate(owner, 1);
     }
 
-    static bool prepareRetirementDebt(void *context,
-                                      const KisPageTransitionEffect *effects, qsizetype count,
-                                      quint64 *cookie,
-                                      QString *error)
+    static bool acceptRetirement(void *context,
+        const KisPageTransitionEffect *effects, qsizetype count,
+        void *installation, bool (*install)(void *), QString *error)
     {
-        return static_cast<Private *>(context)->owner.prepareRetirementDebt(effects, count, cookie, error);
+        return static_cast<Private *>(context)->owner.acceptRetirementDebt(
+            effects, count, installation, install, error);
     }
 
-    static void commitRetirementDebt(void *context, quint64 cookie,
-                                      const KisPageTransitionEffect *effects, qsizetype count) noexcept
+    static void deliverRetirement(void *context,
+        const KisPageTransitionEffect *effects, qsizetype count) noexcept
     {
         auto *self = static_cast<Private *>(context);
-        self->owner.commitRetirementDebt(cookie);
         for (qsizetype i = 0; i < count; ++i) self->retirementQueue.acceptEffect(effects[i]);
-    }
-
-    static void cancelRetirementDebt(void *context, quint64 cookie) noexcept
-    {
-        static_cast<Private *>(context)->owner.cancelRetirementDebt(cookie);
     }
 
     static void releaseRetirementLifetime(void *context)

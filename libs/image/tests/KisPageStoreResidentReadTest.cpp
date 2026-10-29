@@ -753,16 +753,14 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
         auto r = budget.reserve(delta, nullptr); QVERIFY(owner.registerBacking(replica, r, KisBackingBudgetClass::Current));
     }
     KisPageMetadataCoordinator metadata;
-    metadata.attachRetirementDebtOwner(&owner,
-        [](void *context, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
-            return static_cast<KisPageOwnerLedger *>(context)->prepareRetirementDebt(effects, count, cookie, error);
+    metadata.attachRetirementOwner(&owner,
+        [](void *context, const KisPageTransitionEffect *effects, qsizetype count,
+            void *installation, bool (*install)(void *), QString *error) {
+            return static_cast<KisPageOwnerLedger *>(context)->acceptRetirementDebt(
+                effects, count, installation, install, error);
         },
-        // This fixture's manual retirement owner retains the original Ledger
-        // records until the explicit physical cleanup below; it has no queue.
-        [](void *context, quint64 cookie, const KisPageTransitionEffect *, qsizetype) noexcept {
-            static_cast<KisPageOwnerLedger *>(context)->commitRetirementDebt(cookie);
-        },
-        [](void *context, quint64 cookie) noexcept { static_cast<KisPageOwnerLedger *>(context)->cancelRetirementDebt(cookie); });
+        // This fixture retains original Ledger records for explicit cleanup.
+        [](void *, const KisPageTransitionEffect *, qsizetype) noexcept {});
     QVERIFY(metadata.configure(4));
     KisPageStateSnapshot page; page.key = version.key; page.publishedEpoch = {1};
     page.publishedGeneration = {1}; page.nextGeneration = {2};

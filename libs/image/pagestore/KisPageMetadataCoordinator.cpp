@@ -1547,7 +1547,7 @@ struct ShardRecordStore {
         return unusedPrepared(identity);
     }
 
-    bool putAcceptedBatch(MetadataPage *page, const KisPageWorkingResult &accepted)
+    bool reserveAcceptedBatch(const KisPageWorkingResult &accepted, ReservationSet *reservation)
     {
         Q_ASSERT(accepted.accepted);
         if (!accepted.accepted) return false;
@@ -1568,16 +1568,26 @@ struct ShardRecordStore {
             replicaCount += snapshotIt->replicas.size();
         }
 
-        ReservationSet reservation;
-        if (!reserve(batchDemand(snapshots), newVersions, replicaCount, &reservation))
-            return false;
+        return reserve(batchDemand(snapshots), newVersions, replicaCount, reservation);
+    }
 
+    bool installAcceptedBatch(MetadataPage *page, const KisPageWorkingResult &accepted,
+                              ReservationSet *reservation, bool revalidate)
+    {
+        const auto &snapshots = accepted.next.versions;
+        // Other pages can change the shared physical index during the R -> V
+        // handoff even when this page revision is unchanged. Check the whole
+        // input before installing any record; capacity is already retained.
+        if (revalidate) for (const auto &snapshot : snapshots) {
+            KisVersionSlotId existing;
+            findVersion(snapshot.version, &existing);
+            if (!canInstallPhysical(snapshot, existing)) return false;
+        }
         for (const auto &snapshot : snapshots) {
-            const bool stored = putReserved(page, snapshot, &reservation);
+            const bool stored = putReserved(page, snapshot, reservation);
             Q_ASSERT(stored);
             Q_UNUSED(stored);
         }
-        reservation.cancel(this);
         return true;
     }
 
@@ -4119,20 +4129,16 @@ void KisPageMetadataCoordinator::attachBackingBudget(
     m_budget = &budget;
 }
 
-void KisPageMetadataCoordinator::attachRetirementDebtOwner(
-    void *context,
-    PrepareRetirementDebt prepare,
-    CommitRetirementEffects commit,
-    FinalizeRetirementDebt cancel)
+void KisPageMetadataCoordinator::attachRetirementOwner(
+    void *context, AcceptRetirement accept, DeliverRetirement deliver)
 {
     QMutexLocker locker(&m_configurationMutex);
     Q_ASSERT(!m_core.load(std::memory_order_relaxed));
-    Q_ASSERT(context && prepare && commit && cancel);
-    Q_ASSERT(!m_retirementDebtContext);
-    m_retirementDebtContext = context;
-    m_prepareRetirementDebt = prepare;
-    m_commitRetirementDebt = commit;
-    m_cancelRetirementDebt = cancel;
+    Q_ASSERT(context && accept && deliver);
+    Q_ASSERT(!m_retirementContext);
+    m_retirementContext = context;
+    m_acceptRetirement = accept;
+    m_deliverRetirement = deliver;
 }
 
 KisCpuReadBinding
@@ -5414,11 +5420,6 @@ bool KisPageMetadataCoordinator::retireHistoryValues(
         Effects prepared{Effects::allocator_type(storageOwner.borrowed())};
         std::array<std::shared_ptr<const KisPageAllocationDescriptor>, HistoryCollection::Limit> releasedDescriptors;
         std::array<std::shared_ptr<KisCpuResidentBinding>, HistoryCollection::Limit> releasedBindings;
-        quint64 debtCookie = 0;
-        bool debtPrepared = false;
-        const auto cancelDebt = qScopeGuard([&] {
-            if (debtPrepared) m_cancelRetirementDebt(m_retirementDebtContext, debtCookie);
-        });
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
         if (page == shard->pages.end() || !page->second.hasMetadata()) return true;
@@ -5459,56 +5460,64 @@ bool KisPageMetadataCoordinator::retireHistoryValues(
             }
         }
         const quint64 revision = page->second.revision;
-        if (!prepared.empty()) {
-            if (!m_prepareRetirementDebt) { ++shard->rejectedTransitions; return false; }
-            lock.unlock();
-            const bool accepted = m_prepareRetirementDebt(m_retirementDebtContext,
-                prepared.data(), qsizetype(prepared.size()), &debtCookie, nullptr);
-            debtPrepared = accepted;
-            lock.relock();
-            if (!accepted) { ++shard->rejectedTransitions; return false; }
+        bool stale = false;
+        auto install = [&] {
+            if (!lock.isLocked()) lock.relock();
             page = shard->pages.find(key);
             if (page == shard->pages.end() || !shard->canMutate(key, page->second)
-                || page->second.revision != revision) continue;
-            // The original Store gate serializes admission with collection. Check
-            // the live fact again after the debt preparation window; a raw root or
-            // candidate reference is deliberately insufficient protection. Implicit
-            // defaults remain reconstructible from the admitted surface revision.
-            bool protectedAgain = false;
+                || page->second.revision != revision) {
+                stale = true;
+                lock.unlock();
+                return false;
+            }
+            // A root admission can change retention without changing the page
+            // revision. Recheck the original live edge at the actual accept cut.
             for (size_t i = 0; i < count; ++i) {
                 if ((selected & (quint32(1) << i))
                     && values[i]->rootEdges.load(std::memory_order_acquire)) {
-                    protectedAgain = true;
-                    break;
+                    stale = true;
+                    lock.unlock();
+                    return false;
                 }
             }
-            if (protectedAgain) continue;
+            // All storage and claims exist. Removal only unlinks original records.
+            quint64 removed = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (!(selected & (quint32(1) << i))) continue;
+                auto *value = static_cast<KisPageValueCell *>(values[i]);
+                shard->records.remove(&page->second, value, &releasedDescriptors[i], &releasedBindings[i]);
+                ++removed;
+            }
+            ++page->second.revision;
+            ++shard->localTransitionSequences;
+            shard->localVersionInputs += removed;
+            shard->localVersionRemovals += removed;
+            if (kisOnPageStoreReclamationThread()) {
+                ++shard->backgroundLocalTransitionSequences;
+                shard->backgroundLocalVersionInputs += removed;
+                shard->backgroundLocalVersionRemovals += removed;
+            }
+            ++shard->acceptedTransitions;
+            *removedMask = selected;
+            lock.unlock();
+            return true;
+        };
+        bool accepted;
+        if (prepared.empty()) accepted = install();
+        else {
+            lock.unlock();
+            accepted = m_acceptRetirement && m_acceptRetirement(m_retirementContext,
+                prepared.data(), qsizetype(prepared.size()), &install,
+                [](void *p) { return (*static_cast<decltype(install) *>(p))(); }, nullptr);
         }
-        // All storage and claims exist. Removal only unlinks original records.
-        quint64 removed = 0;
-        for (size_t i = 0; i < count; ++i) {
-            if (!(selected & (quint32(1) << i))) continue;
-            auto *value = static_cast<KisPageValueCell *>(values[i]);
-            shard->records.remove(&page->second, value, &releasedDescriptors[i], &releasedBindings[i]);
-            ++removed;
+        if (!accepted) {
+            if (stale) continue;
+            lock.relock();
+            ++shard->rejectedTransitions;
+            return false;
         }
-        ++page->second.revision;
-        ++shard->localTransitionSequences;
-        shard->localVersionInputs += removed;
-        shard->localVersionRemovals += removed;
-        if (kisOnPageStoreReclamationThread()) {
-            ++shard->backgroundLocalTransitionSequences;
-            shard->backgroundLocalVersionInputs += removed;
-            shard->backgroundLocalVersionRemovals += removed;
-        }
-        ++shard->acceptedTransitions;
-        *removedMask = selected;
-        lock.unlock();
-        if (debtPrepared) {
-            m_commitRetirementDebt(m_retirementDebtContext, debtCookie,
-                                    prepared.data(), qsizetype(prepared.size()));
-            debtPrepared = false;
-        }
+        if (!prepared.empty())
+            m_deliverRetirement(m_retirementContext, prepared.data(), qsizetype(prepared.size()));
         return true;
     }
 }
@@ -5971,42 +5980,6 @@ try {
                 shard->backgroundLocalVersionInputs -= quint64(inputVersions.size());
             }
         };
-        quint64 retirementDebtCookie = 0;
-        bool retirementDebtPrepared = false;
-        const auto cancelRetirementDebt = qScopeGuard([&] {
-            if (retirementDebtPrepared && m_cancelRetirementDebt) {
-                m_cancelRetirementDebt(m_retirementDebtContext,
-                                        retirementDebtCookie);
-            }
-        });
-        if (!effects.empty()) {
-            if (!m_prepareRetirementDebt) {
-                ++shard->rejectedTransitions;
-                result.rejectionReason = QStringLiteral("retirement effect receiver is not configured");
-                return result;
-            }
-            QString debtError;
-            lock.unlock();
-            const bool debtAccepted = m_prepareRetirementDebt(m_retirementDebtContext,
-                                                               effects.data(), qsizetype(effects.size()),
-                                                               &retirementDebtCookie,
-                                                               &debtError);
-            retirementDebtPrepared = debtAccepted;
-            lock.relock();
-            if (!debtAccepted) {
-                ++shard->rejectedTransitions;
-                result.storageRefused = true;
-                result.rejectionReason = debtError.isEmpty()
-                    ? QStringLiteral("retirement debt budget is exhausted") : debtError;
-                return result;
-            }
-            page = shard->pages.find(key);
-            if (page == shard->pages.end() || !shard->canMutate(key, page->second)
-                || page->second.revision != expectedRevision) {
-                discardStaleAttempt();
-                continue;
-            }
-        }
         const MetadataArenaDemand demand = shard->records.batchDemand(next.versions);
         const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
             page = shard->pages.find(key);
@@ -6032,50 +6005,103 @@ try {
             result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
             return result;
         }
+        const bool needsRetirement = !effects.empty();
+        bool activityRetained = false;
+        auto *originalPage = &page->second;
         auto discardActivity = qScopeGuard([&] {
-            const auto activity = shard->activities.find(key);
-            if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
+            if (!lock.isLocked()) lock.relock();
+            if (activityRetained) shard->releasePublicationActivity(key, *originalPage);
+            else {
+                const auto activity = shard->activities.find(key);
+                if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
+            }
         });
-        // The next values already witness retention. No second removal set
-        // may allocate after installation starts.
+        if (needsRetirement && !shard->reservePublicationActivity(page->second)) {
+            result.storageRefused = true;
+            result.rejectionReason = QStringLiteral("metadata activity reservation is exhausted");
+            return result;
+        }
+        activityRetained = needsRetirement;
+        // Prepare every real output before entering R. These original arena
+        // and index reservations survive V being dropped for fee acceptance.
         releasedDescriptors.resize(size_t(inputVersions.size()));
         releasedBindings.resize(size_t(inputVersions.size()));
-        if (!shard->records.putAcceptedBatch(&page->second, step)) {
+        ShardRecordStore::ReservationSet reservation;
+        if (!shard->records.reserveAcceptedBatch(step, &reservation)) {
             ++shard->rejectedTransitions;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             return result;
         }
-        quint64 removed = 0;
-        for (const auto &version : inputVersions) {
-            if (!next.findVersion(version)) {
-                shard->records.remove(&page->second, version, &releasedDescriptors[size_t(removed)],
-                                      &releasedBindings[size_t(removed)]);
-                ++removed;
+        auto cancelReservation = qScopeGuard([&] {
+            if (!lock.isLocked()) lock.relock();
+            reservation.cancel(&shard->records);
+        });
+        bool stale = false;
+        auto install = [&] {
+            if (!lock.isLocked()) lock.relock();
+            page = shard->pages.find(key);
+            if (page == shard->pages.end() || !shard->canMutate(key, page->second)
+                || page->second.revision != expectedRevision) {
+                stale = true;
+                lock.unlock();
+                return false;
             }
+            if (!shard->records.installAcceptedBatch(&page->second, step, &reservation, needsRetirement)) {
+                result.rejectionReason = QStringLiteral("metadata physical ownership changed before acceptance");
+                lock.unlock();
+                return false;
+            }
+            quint64 removed = 0;
+            for (const auto &version : inputVersions) {
+                if (!next.findVersion(version)) {
+                    shard->records.remove(&page->second, version, &releasedDescriptors[size_t(removed)],
+                                          &releasedBindings[size_t(removed)]);
+                    ++removed;
+                }
+            }
+            const bool headerInstalled = shard->installHeader(key, &page->second, nextHeader);
+            Q_ASSERT(headerInstalled);
+            Q_UNUSED(headerInstalled);
+            ++page->second.revision;
+            shard->localVersionInstalls += quint64(next.versions.size());
+            shard->localVersionRemovals += removed;
+            if (background) {
+                shard->backgroundLocalVersionInstalls += quint64(next.versions.size());
+                shard->backgroundLocalVersionRemovals += removed;
+            }
+            shard->acceptedTransitions += quint64(count);
+            result.accepted = true;
+            if (needsRetirement) lock.unlock();
+            return true;
+        };
+        bool accepted;
+        QString debtError;
+        if (!needsRetirement) accepted = install();
+        else {
+            lock.unlock();
+            accepted = m_acceptRetirement && m_acceptRetirement(m_retirementContext,
+                effects.data(), qsizetype(effects.size()), &install,
+                [](void *p) { return (*static_cast<decltype(install) *>(p))(); }, &debtError);
         }
-        const bool headerInstalled = shard->installHeader(key, &page->second, nextHeader);
-        Q_ASSERT(headerInstalled);
-        Q_UNUSED(headerInstalled);
-        // installHeader already installed or removed the authoritative
-        // activity under the shard gate. The preparation rollback must not
-        // revisit that map after this successful path unlocks the gate.
+        if (!lock.isLocked()) lock.relock();
+        if (!accepted) {
+            if (stale) { discardStaleAttempt(); continue; }
+            ++shard->rejectedTransitions;
+            if (result.rejectionReason.isEmpty()) {
+                result.storageRefused = true;
+                result.rejectionReason = debtError.isEmpty()
+                    ? QStringLiteral("retirement acceptance receiver is absent or refused") : debtError;
+            }
+            return result;
+        }
+        reservation.cancel(&shard->records);
+        cancelReservation.dismiss();
+        if (activityRetained) shard->releasePublicationActivity(key, *originalPage);
         discardActivity.dismiss();
-        ++page->second.revision;
-        shard->localVersionInstalls += quint64(next.versions.size());
-        shard->localVersionRemovals += removed;
-        if (background) {
-            shard->backgroundLocalVersionInstalls += quint64(next.versions.size());
-            shard->backgroundLocalVersionRemovals += removed;
-        }
-        shard->acceptedTransitions += quint64(count);
-        result.accepted = true;
         auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
-        if (retirementDebtPrepared) {
-            m_commitRetirementDebt(m_retirementDebtContext, retirementDebtCookie,
-                                    effects.data(), qsizetype(effects.size()));
-            retirementDebtPrepared = false;
-        }
+        if (needsRetirement)
+            m_deliverRetirement(m_retirementContext, effects.data(), qsizetype(effects.size()));
         Q_UNUSED(releasedBlocks);
         return result;
     }

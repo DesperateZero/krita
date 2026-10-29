@@ -158,18 +158,11 @@ public:
     bool commitBackingHandoff(
         KisBackingHandoffReservation &&reservation,
         const std::shared_ptr<KisCpuResidentBinding> &binding = {}) noexcept;
-    /**
-     * Pre-admit every replica emitted by a local metadata transition to
-     * RetirementDebt. The returned cookie freezes the exact backing classes;
-     * metadata must commit it only after its authoritative detach succeeds,
-     * or cancel it on every rejection/stale retry. Each effect must still own
-     * its registered backing and original retirement record.
-     */
-    bool prepareRetirementDebt(const KisPageTransitionEffect *effects, qsizetype count,
-                               quint64 *cookie,
-                               QString *error = nullptr);
-    void commitRetirementDebt(quint64 cookie) noexcept;
-    void cancelRetirementDebt(quint64 cookie) noexcept;
+    // Internal synchronous acceptance. The installer must be preallocated,
+    // obey R -> V, and leave metadata unchanged on refusal. Delivery and
+    // destruction of released references occur after this call has returned.
+    bool acceptRetirementDebt(const KisPageTransitionEffect *effects, qsizetype count,
+                              void *context, bool (*install)(void *), QString *error);
 
     bool registerProvider(const std::shared_ptr<KisPageReplicaProvider> &provider,
                           QString *error = nullptr);

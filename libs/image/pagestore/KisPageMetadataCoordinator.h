@@ -243,18 +243,12 @@ public:
     KisPageMetadataFootprint footprint() const;
 
 private:
-    using PrepareRetirementDebt = bool (*)(void *,
-                                           const KisPageTransitionEffect *, qsizetype,
-                                           quint64 *,
-                                           QString *);
-    using CommitRetirementEffects = void (*)(void *, quint64,
-                                             const KisPageTransitionEffect *, qsizetype) noexcept;
-    using FinalizeRetirementDebt = void (*)(void *, quint64) noexcept;
+    using RetirementInstall = bool (*)(void *);
+    using AcceptRetirement = bool (*)(void *, const KisPageTransitionEffect *, qsizetype,
+                                       void *, RetirementInstall, QString *);
+    using DeliverRetirement = void (*)(void *, const KisPageTransitionEffect *, qsizetype) noexcept;
     void attachBackingBudget(KisBackingBudgetController &budget);
-    void attachRetirementDebtOwner(void *context,
-                                   PrepareRetirementDebt prepare,
-                                   CommitRetirementEffects commit,
-                                   FinalizeRetirementDebt cancel);
+    void attachRetirementOwner(void *context, AcceptRetirement accept, DeliverRetirement deliver);
     // Production-only bounded input and transition result. Neither API exports
     // the complete history or transfer effects to callers. The same
     // state-machine guards run on touched records plus indexed global collision
@@ -624,10 +618,9 @@ private:
     std::shared_ptr<Private> m_coreMemory;
     mutable QMutex m_configurationMutex;
     KisBackingBudgetController *m_budget = nullptr;
-    void *m_retirementDebtContext = nullptr;
-    PrepareRetirementDebt m_prepareRetirementDebt = nullptr;
-    CommitRetirementEffects m_commitRetirementDebt = nullptr;
-    FinalizeRetirementDebt m_cancelRetirementDebt = nullptr;
+    void *m_retirementContext = nullptr;
+    AcceptRetirement m_acceptRetirement = nullptr;
+    DeliverRetirement m_deliverRetirement = nullptr;
 };
 
 #endif // KIS_PAGE_METADATA_COORDINATOR_H

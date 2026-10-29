@@ -607,6 +607,88 @@ public:
         return true;
     }
 
+    bool prepareBackingChangesLocked(BackingChanges changes,
+        const KisPageTransitionEffect *retirementEffects, qsizetype count,
+        quint64 *cookie, QString *error)
+    {
+        if (!changes.get_allocator().budget && changes.empty())
+            changes = BackingChanges(KisMutationStorageAllocator<KisBackingClassChange>(backingBudget));
+        if (changes.get_allocator().budget != backingBudget) {
+            KisPageStoreDetail::setError(error, QStringLiteral("backing change storage belongs to another budget"));
+            return false;
+        }
+        bool needsRetirementChange = false;
+        for (qsizetype i = 0; i < count; ++i) {
+            const auto &effect = retirementEffects[i];
+            if (!effect.replica.isValid()) {
+                KisPageStoreDetail::setError(error, QStringLiteral("publication retirement effect is invalid"));
+                return false;
+            }
+            const BackingKey key = effect.replica.allocationIdentity();
+            const auto found = backings.find(key);
+            if (found == backings.end() || !(found->second.replica == effect.replica)
+                || !found->second.retirement) {
+                KisPageStoreDetail::setError(error, QStringLiteral("retirement effect has no registered backing and original record"));
+                return false;
+            }
+            needsRetirementChange |= found->second.budgetClass != KisBackingBudgetClass::RetirementDebt;
+        }
+        if (count && (!changes.empty() || needsRetirementChange)) {
+            // Merge initial targets and repeated retirement effects in one paid
+            // index array. Numeric indices survive growth of the original changes
+            // carrier, and final append order stays that of the caller's effects.
+            const size_t initial = changes.size();
+            ChargedVector<size_t> targets{KisMutationStorageAllocator<size_t>(backingBudget)};
+            if (size_t(count) > targets.max_size() - initial) throw std::bad_alloc();
+            targets.reserve(initial + size_t(count));
+            for (size_t i = 0; i < initial + size_t(count); ++i) targets.push_back(i);
+            const auto keyAt = [&](size_t i) {
+                return i < initial ? changes[i].replica.allocationIdentity()
+                                   : retirementEffects[i - initial].replica.allocationIdentity();
+            };
+            const KisPageBackingIdentityLess less;
+            std::sort(targets.begin(), targets.end(), [&](size_t a, size_t b) {
+                const auto left = keyAt(a), right = keyAt(b);
+                if (less(left, right)) return true;
+                if (less(right, left)) return false;
+                return a < b;
+            });
+            size_t selected = 0;
+            for (size_t first = 0; first < targets.size();) {
+                const auto key = keyAt(targets[first]);
+                size_t last = first + 1;
+                while (last < targets.size() && keyAt(targets[last]) == key) ++last;
+                size_t effect = first;
+                while (effect < last && targets[effect] < initial) ++effect;
+                if (effect < last) {
+                    if (targets[first] < initial) {
+                        if (changes[targets[first]].after != KisBackingBudgetClass::RetirementDebt) {
+                            KisPageStoreDetail::setError(error, QStringLiteral("retired publication backing has a competing target class"));
+                            return false;
+                        }
+                    } else if (backings.find(key)->second.budgetClass != KisBackingBudgetClass::RetirementDebt) {
+                        targets[selected++] = targets[effect];
+                    }
+                }
+                first = last;
+            }
+            targets.resize(selected);
+            std::sort(targets.begin(), targets.end());
+            for (const size_t index : targets) {
+                const auto &replica = retirementEffects[index - initial].replica;
+                changes.push_back({replica, backings.find(replica.allocationIdentity())->second.budgetClass,
+                                  KisBackingBudgetClass::RetirementDebt});
+            }
+        }
+
+        auto next = [position = changes.cbegin(), end = changes.cend()](KisBackingClassChange *change) mutable {
+            if (position == end) return false;
+            *change = *position++;
+            return true;
+        };
+        return prepareClassChanges(changes.size(), next, cookie, error);
+    }
+
     template<class NextChange, class Rows>
     bool prepareProjectedChanges(ResolvedBackingChange first, NextChange &next, size_t maximum,
         Rows &rows, const void *claim, KisBackingBudgetReservation &reservation, QString *error)
@@ -1302,8 +1384,23 @@ try {
             node.release(); // The original physical index owns this endpoint.
         } else {
             if (physical->domainClaim || !d->acceptsNewMember(*physical, budgetClass)) {
-                KisPageStoreDetail::setError(
-                    error, QStringLiteral("shared physical backing transition is active"));
+                // Report the dependency while the original claim is still
+                // protected. By the time the caller unwinds, its owner may
+                // have committed and a generic error loses the actual cause.
+                if (error) {
+                    const auto *claim = physical->classClaim;
+                    const bool handoff = claim == HandoffClaim;
+                    size_t selected = 0;
+                    auto changedCharge = KisBackingBudgetClass::Count;
+                    if (!handoff) for (; claim; claim = claim->next) {
+                        ++selected;
+                        changedCharge = claim->changedCharge;
+                    }
+                    *error = QStringLiteral("shared physical backing transition is active: slot=%1 domain=%2 handoff=%3 charge=%4 target=%5 incoming=%6 selected=%7")
+                        .arg(physicalKey.slot).arg(physical->domainClaim).arg(handoff)
+                        .arg(int(physical->chargedClass)).arg(int(changedCharge))
+                        .arg(int(budgetClass)).arg(selected);
+                }
                 return false;
             }
             if (physical->domain != footprint.domain
@@ -1883,83 +1980,8 @@ try {
         return {};
     }
 
-    if (!changes.get_allocator().budget && changes.empty())
-        changes = BackingChanges(KisMutationStorageAllocator<KisBackingClassChange>(d->backingBudget));
-    if (changes.get_allocator().budget != d->backingBudget) {
-        KisPageStoreDetail::setError(error, QStringLiteral("backing change storage belongs to another budget"));
-        return {};
-    }
-    bool needsRetirementChange = false;
-    for (qsizetype i = 0; i < count; ++i) {
-        const auto &effect = retirementEffects[i];
-        if (!effect.replica.isValid()) {
-            KisPageStoreDetail::setError(error, QStringLiteral("publication retirement effect is invalid"));
-            return {};
-        }
-        const BackingKey key = effect.replica.allocationIdentity();
-        const auto found = d->backings.find(key);
-        if (found == d->backings.end() || !(found->second.replica == effect.replica)
-            || !found->second.retirement) {
-            KisPageStoreDetail::setError(error, QStringLiteral("retirement effect has no registered backing and original record"));
-            return {};
-        }
-        needsRetirementChange |= found->second.budgetClass != KisBackingBudgetClass::RetirementDebt;
-    }
-    if (count && (!changes.empty() || needsRetirementChange)) {
-        // Merge initial targets and repeated retirement effects in one paid
-        // index array. Numeric indices survive growth of the original changes
-        // carrier, and final append order stays that of the caller's effects.
-        const size_t initial = changes.size();
-        ChargedVector<size_t> targets{KisMutationStorageAllocator<size_t>(d->backingBudget)};
-        if (size_t(count) > targets.max_size() - initial) throw std::bad_alloc();
-        targets.reserve(initial + size_t(count));
-        for (size_t i = 0; i < initial + size_t(count); ++i) targets.push_back(i);
-        const auto keyAt = [&](size_t i) {
-            return i < initial ? changes[i].replica.allocationIdentity()
-                               : retirementEffects[i - initial].replica.allocationIdentity();
-        };
-        const KisPageBackingIdentityLess less;
-        std::sort(targets.begin(), targets.end(), [&](size_t a, size_t b) {
-            const auto left = keyAt(a), right = keyAt(b);
-            if (less(left, right)) return true;
-            if (less(right, left)) return false;
-            return a < b;
-        });
-        size_t selected = 0;
-        for (size_t first = 0; first < targets.size();) {
-            const auto key = keyAt(targets[first]);
-            size_t last = first + 1;
-            while (last < targets.size() && keyAt(targets[last]) == key) ++last;
-            size_t effect = first;
-            while (effect < last && targets[effect] < initial) ++effect;
-            if (effect < last) {
-                if (targets[first] < initial) {
-                    if (changes[targets[first]].after != KisBackingBudgetClass::RetirementDebt) {
-                        KisPageStoreDetail::setError(error, QStringLiteral("retired publication backing has a competing target class"));
-                        return {};
-                    }
-                } else if (d->backings.find(key)->second.budgetClass != KisBackingBudgetClass::RetirementDebt) {
-                    targets[selected++] = targets[effect];
-                }
-            }
-            first = last;
-        }
-        targets.resize(selected);
-        std::sort(targets.begin(), targets.end());
-        for (const size_t index : targets) {
-            const auto &replica = retirementEffects[index - initial].replica;
-            changes.push_back({replica, d->backings.find(replica.allocationIdentity())->second.budgetClass,
-                              KisBackingBudgetClass::RetirementDebt});
-        }
-    }
-
-    auto next = [position = changes.cbegin(), end = changes.cend()](KisBackingClassChange *change) mutable {
-        if (position == end) return false;
-        *change = *position++;
-        return true;
-    };
     quint64 cookie = 0;
-    if (!d->prepareClassChanges(changes.size(), next, &cookie, error)) return {};
+    if (!d->prepareBackingChangesLocked(std::move(changes), retirementEffects, count, &cookie, error)) return {};
     return {this, cookie};
 } catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("backing change storage budget is exhausted"));
@@ -2124,33 +2146,38 @@ bool KisPageOwnerLedger::commitBackingHandoff(
     return true;
 }
 
-bool KisPageOwnerLedger::prepareRetirementDebt(
+bool KisPageOwnerLedger::acceptRetirementDebt(
     const KisPageTransitionEffect *effects, qsizetype count,
-    quint64 *cookie,
-    QString *error)
-{
-    if (!cookie) {
-        KisPageStoreDetail::setError(error, QStringLiteral("retirement debt cookie output is missing"));
+    void *context, bool (*install)(void *), QString *error)
+try {
+    if (count < 0 || (count && !effects) || !install) {
+        KisPageStoreDetail::setError(error, QStringLiteral("retirement acceptance input is invalid"));
         return false;
     }
-    *cookie = 0;
-    auto reservation = prepareBackingChangesImpl({}, effects, count, error);
-    if (!reservation.isValid())
+    if (!synchronizeBackingDomains(error)) return false;
+    QMutexLocker lock(&d->mutex);
+    if (!d->backingBudget) {
+        KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
         return false;
-    *cookie = std::exchange(reservation.m_cookie, 0);
-    reservation.m_owner = nullptr;
+    }
+    quint64 cookie = 0;
+    if (!d->prepareBackingChangesLocked({}, effects, count, &cookie, error)) return false;
+    auto *slot = cookie ? d->preparedChange(cookie) : nullptr;
+    bool committed = false;
+    const auto finish = qScopeGuard([&] {
+        if (slot) d->finishPreparedChange(*slot, cookie, committed);
+    });
+    // This is the preallocated metadata installer, never a provider/user
+    // callback. It acquires V after R, revalidates, and changes no metadata on
+    // refusal. The physical claim cannot escape this synchronous acceptance.
+    if (!install(context)) return false;
+    if (slot) d->commitProjectedChanges(slot->changes, slot->changes.data(), slot->reservation);
+    committed = true;
     KisPageStoreDetail::setError(error, {});
     return true;
-}
-
-void KisPageOwnerLedger::commitRetirementDebt(quint64 cookie) noexcept
-{
-    commitPreparedBackingChanges(cookie);
-}
-
-void KisPageOwnerLedger::cancelRetirementDebt(quint64 cookie) noexcept
-{
-    cancelPreparedBackingChanges(cookie);
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("retirement acceptance storage budget is exhausted"));
+    return false;
 }
 
 void KisPageOwnerLedger::commitPreparedBackingChanges(quint64 cookie) noexcept

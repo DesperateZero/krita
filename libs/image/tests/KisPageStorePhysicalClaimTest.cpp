@@ -439,22 +439,23 @@ void KisPageStorePhysicalClaimTest::handoffDebtFollowsTerminal()
     if (finish == 0) {
         QVERIFY2(ledger.reclassifyBacking(target, KisBackingBudgetClass::RetirementDebt, &f.error), qPrintable(f.error));
     } else if (finish < 3) {
-        KisPageTransitionEffect effect; effect.replica = target; quint64 cookie = 0;
-        QVERIFY2(ledger.prepareRetirementDebt(&effect, 1, &cookie, &f.error), qPrintable(f.error));
+        KisPageTransitionEffect effect; effect.replica = target;
         if (finish == 2) {
-            ledger.cancelRetirementDebt(cookie);
+            bool entered = false;
+            QVERIFY(!ledger.acceptRetirementDebt(&effect, 1, &entered,
+                [](void *p) { *static_cast<bool *>(p) = true; return false; }, &f.error));
+            QVERIFY(entered);
             QCOMPARE(ledger.backingClass(target), KisBackingBudgetClass::ActivePending);
             QVERIFY(!budget.reserve(pressure, &f.error).isValid());
-            // A cancelled preparation must leave the same headroom able to
-            // follow another actual swap-in and swap-out, without new quota.
+            // Cancellation keeps original headroom through a real domain move.
             if (swapped) {
                 auto access = f.provider->resolveAccess({610}, {611}, target, cpu, KisPageAccessMode::Read);
                 QVERIFY(access.isValid()); QCOMPARE(static_cast<const quint8 *>(access.cpuReadData)[0], quint8(0x75));
                 f.provider->releaseAccess(std::move(access), {}); QVERIFY(f.swap());
             }
-            QVERIFY2(ledger.prepareRetirementDebt(&effect, 1, &cookie, &f.error), qPrintable(f.error));
         }
-        ledger.commitRetirementDebt(cookie);
+        QVERIFY2(ledger.acceptRetirementDebt(&effect, 1, nullptr,
+            [](void *) { return true; }, &f.error), qPrintable(f.error));
     } else {
         auto publication = ledger.prepareBackingChanges({{target, KisBackingBudgetClass::ActivePending, KisBackingBudgetClass::Current}}, {}, &f.error);
         QVERIFY2(publication.isValid(), qPrintable(f.error)); ledger.commitBackingChanges(std::move(publication));
@@ -553,9 +554,12 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     QVector<KisPageTransitionEffect> effects; KisPageTransitionEffect effect; effect.replica = target; effects.append(effect);
     if (!keepAlias) { effect.replica = alias.replica; effects.append(effect); }
     if (reverse) std::reverse(effects.begin(), effects.end());
-    quint64 cookie = 0; QVERIFY2(ledger.prepareRetirementDebt(effects.constData(), effects.size(), &cookie, &f.error), qPrintable(f.error));
-    ledger.cancelRetirementDebt(cookie);
-    QVERIFY2(ledger.prepareRetirementDebt(effects.constData(), effects.size(), &cookie, &f.error), qPrintable(f.error)); ledger.commitRetirementDebt(cookie);
+    bool entered = false;
+    QVERIFY(!ledger.acceptRetirementDebt(effects.constData(), effects.size(), &entered,
+        [](void *p) { *static_cast<bool *>(p) = true; return false; }, &f.error));
+    QVERIFY(entered);
+    QVERIFY2(ledger.acceptRetirementDebt(effects.constData(), effects.size(), nullptr,
+        [](void *) { return true; }, &f.error), qPrintable(f.error));
     const auto firstNodeBytes = budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
     QVERIFY(f.provider->retire({621}, target, {}).isValid()); KisPageOwnerLedgerTestAccess::withdrawRegistration(ledger, target);
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,

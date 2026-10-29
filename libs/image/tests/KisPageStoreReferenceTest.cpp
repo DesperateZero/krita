@@ -74,27 +74,22 @@ namespace
 struct MetadataEffectReceiver {
     QVector<KisPageTransitionEffect> effects, candidate;
     quint64 prepared = 0, committed = 0, cancelled = 0;
-    static bool prepare(void *p, const KisPageTransitionEffect *values, qsizetype count,
-                        quint64 *cookie, QString *)
+    static bool accept(void *p, const KisPageTransitionEffect *values, qsizetype count,
+                       void *context, bool (*install)(void *), QString *)
     {
         auto &self = *static_cast<MetadataEffectReceiver *>(p);
         self.candidate = QVector<KisPageTransitionEffect>(values, values + count);
-        self.prepared += quint64(count); *cookie = quint64(count);
+        self.prepared += quint64(count);
+        if (!install(context)) {
+            self.candidate.clear(); self.cancelled += quint64(count);
+            return false;
+        }
+        self.effects = std::move(self.candidate);
+        self.committed += quint64(count);
         return true;
     }
-    static void commit(void *p, quint64 cookie, const KisPageTransitionEffect *values, qsizetype count) noexcept
-    {
-        auto &self = *static_cast<MetadataEffectReceiver *>(p);
-        Q_ASSERT(cookie == quint64(count) && self.candidate.size() == count);
-        for (qsizetype i = 0; i < count; ++i) self.candidate[i] = values[i];
-        self.effects = std::move(self.candidate);
-        self.committed += cookie;
-    }
-    static void cancel(void *p, quint64 cookie) noexcept
-    {
-        auto &self = *static_cast<MetadataEffectReceiver *>(p);
-        self.candidate.clear(); self.cancelled += cookie;
-    }
+    static void deliver(void *, const KisPageTransitionEffect *, qsizetype) noexcept {}
+
 };
 
 struct CollidingIndexKey {
@@ -1035,8 +1030,7 @@ class KisPageStoreReferenceTest : public QObject
 
     static void attachEffects(KisPageMetadataCoordinator &metadata, MetadataEffectReceiver &receiver)
     {
-        metadata.attachRetirementDebtOwner(&receiver, &MetadataEffectReceiver::prepare,
-                                           &MetadataEffectReceiver::commit, &MetadataEffectReceiver::cancel);
+        metadata.attachRetirementOwner(&receiver, &MetadataEffectReceiver::accept, &MetadataEffectReceiver::deliver);
     }
 
 private Q_SLOTS:
@@ -1426,6 +1420,13 @@ private Q_SLOTS:
     void backingClaimsPreserveSelectedAliases();
     void backingRegistrationPreservesPreparedCharge_data();
     void backingRegistrationPreservesPreparedCharge();
+    void retirementAcceptanceSerializesRegistration_data()
+    {
+        QTest::addColumn<bool>("commit");
+        QTest::newRow("commit") << true;
+        QTest::newRow("cancel") << false;
+    }
+    void retirementAcceptanceSerializesRegistration();
     void emptyBackingChangesNeedNoEntityStorage();
     void referenceOnlyChangesNeedNoFeeSlot();
     void originalCapacityRowsPreserveSelectionAndRollback();
@@ -3746,17 +3747,17 @@ void KisPageStoreReferenceTest::historyAdmissionDuringDebtPreparation()
         bool admitted = false;
     } debt;
     debt.admit = [&] { return model->installInitialization(std::move(pending)); };
-    metadata.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
+    metadata.attachRetirementOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count,
+            void *installation, bool (*install)(void *), QString *error) {
             auto &d = *static_cast<Debt *>(p);
-            if (!MetadataEffectReceiver::prepare(&d.effects, effects, count, cookie, error)) return false;
-            if (!d.admitted) d.admitted = d.admit();
-            return d.admitted;
-        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
-            MetadataEffectReceiver::commit(&static_cast<Debt *>(p)->effects, cookie, effects, count);
-        }, +[](void *p, quint64 cookie) noexcept {
-            MetadataEffectReceiver::cancel(&static_cast<Debt *>(p)->effects, cookie);
-        });
+            auto lateAdmission = [&] {
+                if (!d.admitted) d.admitted = d.admit();
+                return d.admitted && install(installation);
+            };
+            return MetadataEffectReceiver::accept(&d.effects, effects, count, &lateAdmission,
+                [](void *p) { return (*static_cast<decltype(lateAdmission) *>(p))(); }, error);
+        }, +[](void *, const KisPageTransitionEffect *, qsizetype) noexcept {});
     auto source = metadata.viewValues();
     auto *value = source->pin(old); QVERIFY(value); source->release(value);
     quint32 removed = 0;
@@ -4061,23 +4062,23 @@ void KisPageStoreReferenceTest::historyDiscardPreparationAtCapacity()
         bool reject = false, protect = false;
         bool changed = false;
     } debt{{}, &coordinator, version, replicas ? old.replicas.first().replica : KisReplicaHandle{}, &budget, 0, 0, mode == 1, mode == 2, false};
-    coordinator.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *values, qsizetype count, quint64 *cookie, QString *error) {
+    coordinator.attachRetirementOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count,
+            void *installation, bool (*install)(void *), QString *error) {
             auto &debt = *static_cast<Debt *>(p); ++debt.calls;
             if (debt.reject) return false;
-            if (!MetadataEffectReceiver::prepare(&debt.receiver, values, count, cookie, error)) return false;
-            if (debt.protect && !debt.changed) {
-                KisPageTransition capture; capture.kind = KisPageTransitionKind::AcquireRead;
-                capture.version = debt.version; capture.target = debt.readTarget; capture.lease = {991};
-                debt.changed = debt.metadata->applyOwner(debt.version.key, capture).accepted;
-                debt.afterProtection = debt.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
-            }
-            return true;
-        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *values, qsizetype count) noexcept {
-            MetadataEffectReceiver::commit(&static_cast<Debt *>(p)->receiver, cookie, values, count);
-        }, +[](void *p, quint64 cookie) noexcept {
-            MetadataEffectReceiver::cancel(&static_cast<Debt *>(p)->receiver, cookie);
-        });
+            auto lateProtection = [&] {
+                if (debt.protect && !debt.changed) {
+                    KisPageTransition capture; capture.kind = KisPageTransitionKind::AcquireRead;
+                    capture.version = debt.version; capture.target = debt.readTarget; capture.lease = {991};
+                    debt.changed = debt.metadata->applyOwner(debt.version.key, capture).accepted;
+                    debt.afterProtection = debt.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+                }
+                return install(installation);
+            };
+            return MetadataEffectReceiver::accept(&debt.receiver, effects, count, &lateProtection,
+                [](void *p) { return (*static_cast<decltype(lateProtection) *>(p))(); }, error);
+        }, +[](void *, const KisPageTransitionEffect *, qsizetype) noexcept {});
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
     const auto before = live();
     void *filler = mode ? nullptr : allocateTestStoragePressure(&budget, size_t(limits.metadataArenaBytes - before), 1);
@@ -6415,18 +6416,16 @@ void KisPageStoreReferenceTest::concurrentRetirementDebtRefusalPreservesPage()
     KisBackingBudgetController budget;
     KisPageMetadataCoordinator coordinator;
     coordinator.attachBackingBudget(budget);
-    coordinator.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *, qsizetype, quint64 *, QString *error) {
+    coordinator.attachRetirementOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count,
+            void *installation, bool (*install)(void *), QString *error) {
+            Q_UNUSED(effects); Q_UNUSED(count); Q_UNUSED(installation); Q_UNUSED(install);
             auto &d = *static_cast<Debt *>(p);
             d.entered.fetch_add(1, std::memory_order_acq_rel);
             while (d.entered.load(std::memory_order_acquire) != 2) std::this_thread::yield();
             *error = QStringLiteral("retirement receiver refuses capacity");
             return false;
-        }, +[](void *p, quint64, const KisPageTransitionEffect *, qsizetype) noexcept {
-            static_cast<Debt *>(p)->committed.fetch_add(1);
-        }, +[](void *p, quint64) noexcept {
-            static_cast<Debt *>(p)->cancelled.fetch_add(1);
-        });
+        }, +[](void *, const KisPageTransitionEffect *, qsizetype) noexcept {});
     QVERIFY(coordinator.configure(1));
     const auto initial = pageWithHistory(1);
     QVERIFY(coordinator.registerPage(initial));
@@ -6471,24 +6470,23 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     coordinator.attachBackingBudget(budget);
     // Synthetic metadata oracle: this receiver owns its effect contract.
     // Actual provider/backing transfer remains in the ledger/queue tests.
-    coordinator.attachRetirementDebtOwner(&debt,
-        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count, quint64 *cookie, QString *error) {
-            auto &d = *static_cast<Debt *>(p);
-            MetadataEffectReceiver::prepare(&d.receiver, effects, count, cookie, error);
-            ++d.prepared;
-            if (d.fill) {
-                const auto live = d.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
-                d.bytes = size_t(d.limit - live);
-                d.filler = allocateTestStoragePressure(d.budget, d.bytes, 1);
-            }
-            return true;
-        }, +[](void *p, quint64 cookie, const KisPageTransitionEffect *effects, qsizetype count) noexcept {
-            auto &d = *static_cast<Debt *>(p); ++d.committed;
-            MetadataEffectReceiver::commit(&d.receiver, cookie, effects, count);
-        }, +[](void *p, quint64 cookie) noexcept {
-            auto &d = *static_cast<Debt *>(p); ++d.cancelled;
-            MetadataEffectReceiver::cancel(&d.receiver, cookie);
-        });
+    coordinator.attachRetirementOwner(&debt,
+        +[](void *p, const KisPageTransitionEffect *effects, qsizetype count,
+            void *installation, bool (*install)(void *), QString *error) {
+            auto &d = *static_cast<Debt *>(p); ++d.prepared;
+            auto atCapacity = [&] {
+                if (d.fill) {
+                    const auto live = d.budget->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+                    d.bytes = size_t(d.limit - live);
+                    d.filler = allocateTestStoragePressure(d.budget, d.bytes, 1);
+                }
+                return install(installation);
+            };
+            const bool accepted = MetadataEffectReceiver::accept(&d.receiver, effects, count, &atCapacity,
+                [](void *p) { return (*static_cast<decltype(atCapacity) *>(p))(); }, error);
+            if (accepted) ++d.committed; else ++d.cancelled;
+            return accepted;
+        }, +[](void *, const KisPageTransitionEffect *, qsizetype) noexcept {});
     QVERIFY(coordinator.configure(1));
     auto initial = pageWithHistory(17);
     auto &current = initial.versions.first();
@@ -6533,9 +6531,8 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
     QVERIFY(KisPageStateMachine().validateInvariants(initial));
     QVERIFY(coordinator.registerPage(initial));
     if (variant != 0) {
-        // Debt acceptance fills the budget. Occupy the actual spare replica
-        // slots too, so the subsequent atomic install requires arena growth
-        // rather than relying on a redundant temporary hash allocation.
+        // Occupy actual spare replicas. Preparation must grow and retain the
+        // required arena before the receiver fills the remaining hard budget.
         const quint64 spare = coordinator.footprint().replicaArena.freeSlots;
         if (spare) {
             const auto fillerVersion = pageVersion(1, 1);
@@ -6548,8 +6545,14 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         QCOMPARE(coordinator.footprint().replicaArena.freeSlots, quint64(0));
     }
     const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
-    const quint64 baseline = live();
+    auto expected = initial;
+    QVector<KisPageTransitionEffect> effects;
+    for (const auto &transition : transitions) {
+        const auto step = KisPageStateMachine().apply(expected, transition);
+        QVERIFY(step.accepted); expected = step.next; effects += step.effects;
+    }
     bool accepted = false;
+    int refused = 0;
     for (size_t headroom : {size_t(0), size_t(512), size_t(2048), size_t(8192), size_t(65536)}) {
         const size_t bytes = size_t(limits.metadataArenaBytes - live()) - headroom;
         void *filler = allocateTestStoragePressure(&budget, bytes, 1);
@@ -6560,8 +6563,9 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         const auto before = coordinator.metrics();
         const auto result = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size());
         accepted = result.accepted;
-        if (headroom == 0 || variant != 0) {
-            QVERIFY(!result.accepted);
+        if (headroom == 0) QVERIFY(!accepted);
+        if (!accepted) {
+            ++refused;
             QVERIFY(!result.rejectionReason.isEmpty());
             QVERIFY(debt.receiver.effects.isEmpty());
             QCOMPARE(coordinator.metrics().localVersionInstalls, before.localVersionInstalls);
@@ -6570,21 +6574,15 @@ void KisPageStoreReferenceTest::genericWorkingStorageRefusalIsAtomic()
         }
         if (accepted) break;
     }
-    if (variant == 0) QVERIFY(accepted);
-    else {
-        QVERIFY(debt.prepared > 0);
-        QCOMPARE(debt.cancelled, debt.prepared); QCOMPARE(debt.committed, 0);
+    QVERIFY(refused > 0);
+    QVERIFY(accepted);
+    // Once preparation enters the receiver, filling every remaining byte
+    // cannot invalidate its already retained metadata capacity.
+    if (variant != 0) {
+        QCOMPARE(debt.prepared, 1);
+        QCOMPARE(debt.cancelled, 0);
+        QCOMPARE(debt.committed, 1);
     }
-    QCOMPARE(live(), baseline); // Every failed working value returned its actual fee.
-    debt.fill = false;
-    auto expected = initial;
-    QVector<KisPageTransitionEffect> effects;
-    for (const auto &transition : transitions) {
-        const auto step = KisPageStateMachine().apply(expected, transition);
-        QVERIFY(step.accepted); expected = step.next; effects += step.effects;
-    }
-    const auto result = coordinator.applyOwnerSequence(initial.key, transitions.constData(), transitions.size());
-    QVERIFY2(result.accepted, qPrintable(result.rejectionReason));
     QCOMPARE(debt.receiver.effects.size(), effects.size());
     for (qsizetype i = 0; i < effects.size(); ++i) QCOMPARE(debt.receiver.effects[i].replica, effects[i].replica);
     KisPageStateSnapshot actual; QVERIFY(coordinator.pageSnapshot(initial.key, &actual));
@@ -10501,12 +10499,12 @@ void KisPageStoreReferenceTest::emptyBackingChangesNeedNoEntityStorage()
     owner.commitBackingChanges(std::move(moved));
     QVERIFY(!moved.isValid());
     for (auto &result : empty) result.release();
-    quint64 cookie = 99;
-    QVERIFY(owner.prepareRetirementDebt(nullptr, 0, &cookie, &error));
-    QCOMPARE(cookie, quint64(0));
-    owner.commitRetirementDebt(cookie);
-    owner.cancelRetirementDebt(cookie);
-    QVERIFY(!owner.prepareRetirementDebt(nullptr, 1, &cookie, &error));
+    int installed = 0;
+    const auto accept = [](void *p) { ++*static_cast<int *>(p); return true; };
+    QVERIFY(owner.acceptRetirementDebt(nullptr, 0, &installed, accept, &error));
+    QCOMPARE(installed, 1);
+    QVERIFY(!owner.acceptRetirementDebt(nullptr, 1, &installed, accept, &error));
+    QCOMPARE(installed, 1);
     QCOMPARE(metadata(), before);
 }
 
@@ -10700,12 +10698,9 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     // Filtered retirement effects must also finish without another empty claim.
     QVERIFY(owner.reclassifyBacking(*rows[1].supersededAuthority, Class::RetirementDebt, &error));
     const KisPageTransitionEffect effect{*rows[1].supersededAuthority, {}};
-    quint64 cookie = 99;
     const auto before = budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam;
-    QVERIFY(owner.prepareRetirementDebt(&effect, 1, &cookie, &error));
-    QCOMPARE(cookie, quint64(0));
+    QVERIFY(owner.acceptRetirementDebt(&effect, 1, nullptr, [](void *) { return true; }, &error));
     QCOMPARE(budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam, before);
-    owner.commitRetirementDebt(cookie);
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
     for (const auto &row : rows) KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, *row.supersededAuthority);
 }
@@ -10953,6 +10948,74 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge()
         QCOMPARE(bucket.reserved.cpuRam, quint64(0));
         if (kind != Class::MetadataArena) QCOMPARE(bucket.live.cpuRam, quint64(0));
     }
+}
+
+void KisPageStoreReferenceTest::retirementAcceptanceSerializesRegistration()
+{
+    QFETCH(bool, commit);
+    using Class = KisBackingBudgetClass;
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    KisPageOwnerLedger owner; owner.attachBackingBudget(budget);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisCpuPageReplicaProvider>();
+    KisCpuResidentReplicaProviderConfig config;
+    config.provider = {1}; config.providerEpoch = {1}; config.budgetBytes = 8192;
+    QString error;
+    QVERIFY(owner.configure(completions, &error));
+    QVERIFY(provider->configure(config, completions, &error));
+    QVERIFY(owner.registerProvider(provider, &error));
+    const auto history = replica(pageVersion(0, 1), 1, 1, 1, 1);
+    const auto alias = replica(pageVersion(1, 1), 1, 1, 1, 2);
+    KisBackingBudgetDelta initial; initial.bucket(size_t(Class::RetainedHistory)).cpuRam = 4096;
+    auto first = budget.reserve(initial, &error);
+    QVERIFY(first.isValid());
+    QVERIFY(owner.registerBacking(history, first, Class::RetainedHistory, &error));
+    auto record = kisPreparePageRetirementRecord(&budget);
+    KisBackingBudgetDelta incoming; incoming.bucket(size_t(Class::ActivePending)).cpuRam = 4096;
+    auto reservation = budget.reserve(incoming, &error);
+    QVERIFY(reservation.isValid());
+    QSemaphore entered, resume, registering, finished;
+    bool accepted = false, registered = false;
+    QString retirementError, registrationError;
+    auto install = [&] { entered.release(); resume.acquire(); return commit; };
+    const KisPageTransitionEffect effect{history, {}};
+    std::thread retirement([&] {
+        accepted = owner.acceptRetirementDebt(&effect, 1, &install,
+            [](void *p) { return (*static_cast<decltype(install) *>(p))(); }, &retirementError);
+    });
+    std::thread registration;
+    const auto join = qScopeGuard([&] {
+        resume.release();
+        if (retirement.joinable()) retirement.join();
+        if (registration.joinable()) registration.join();
+    });
+    QVERIFY2(entered.tryAcquire(1, 5000), "retirement did not reach its controlled installation window");
+    registration = std::thread([&] {
+        registering.release();
+        registered = owner.registerBacking(alias, reservation, Class::ActivePending, &registrationError, &record);
+        finished.release();
+    });
+    QVERIFY(registering.tryAcquire(1, 5000));
+    // The independent input cannot observe a half-accepted physical fee. It
+    // finishes after the existing mutex window, without a retry or false refusal.
+    const bool finishedInside = finished.tryAcquire(1, 20);
+    resume.release(); retirement.join(); registration.join();
+    QVERIFY(!finishedInside);
+    QCOMPARE(accepted, commit);
+    QVERIFY2(registered, qPrintable(registrationError));
+    QCOMPARE(owner.backingClass(history), commit ? Class::RetirementDebt : Class::RetainedHistory);
+    QCOMPARE(owner.backingClass(alias), Class::ActivePending);
+    for (Class kind : {Class::Current, Class::RetainedHistory, Class::ActivePending, Class::RetirementDebt}) {
+        const auto usage = budget.usage().buckets[size_t(kind)];
+        QCOMPARE(usage.live.cpuRam, kind == Class::ActivePending ? quint64(4096) : quint64(0));
+        QCOMPARE(usage.reserved.cpuRam, quint64(0));
+    }
+    const KisPageTransitionEffect effects[] = {{history, {}}, {alias, {}}};
+    QVERIFY(owner.acceptRetirementDebt(effects, 2, nullptr, [](void *) { return true; }, &error));
+    KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, history);
+    KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, alias);
+    QCOMPARE(budget.usage().buckets[size_t(Class::RetirementDebt)].live.cpuRam, quint64(0));
 }
 
 void KisPageStoreReferenceTest::retirementAliasesExposeRetainedCharge_data()
@@ -11440,20 +11503,19 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
                  .reserved.cpuRam,
              4096u);
     mergedReservation.release();
-    quint64 debtCookie = 0;
-    QVERIFY2(owner.prepareRetirementDebt(duplicatedRetirement.constData(), duplicatedRetirement.size(), &debtCookie, &error),
-             qPrintable(error));
-    auto preparedDebt = budget.usage();
-    QCOMPARE(preparedDebt.buckets[size_t(KisBackingBudgetClass::RetainedHistory)].live.cpuRam,
-             4096u);
-    QCOMPARE(preparedDebt.buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,
-             4096u);
-    owner.cancelRetirementDebt(debtCookie);
-    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,
-             0u);
-    QVERIFY2(owner.prepareRetirementDebt(retireCurrent.constData(), retireCurrent.size(), &debtCookie, &error),
-             qPrintable(error));
-    owner.commitRetirementDebt(debtCookie);
+    auto inspectDebt = [&] {
+        const auto prepared = budget.usage();
+        return prepared.buckets[size_t(KisBackingBudgetClass::RetainedHistory)].live.cpuRam == 4096u
+            && prepared.buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam == 4096u;
+    };
+    bool inspected = false;
+    auto cancelDebt = [&] { inspected = inspectDebt(); return false; };
+    QVERIFY(!owner.acceptRetirementDebt(duplicatedRetirement.constData(), duplicatedRetirement.size(), &cancelDebt,
+        [](void *p) { return (*static_cast<decltype(cancelDebt) *>(p))(); }, &error));
+    QVERIFY(inspected);
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, 0u);
+    QVERIFY2(owner.acceptRetirementDebt(retireCurrent.constData(), retireCurrent.size(), nullptr,
+        [](void *) { return true; }, &error), qPrintable(error));
     const auto committedDebt = budget.usage();
     QCOMPARE(committedDebt.buckets[size_t(KisBackingBudgetClass::RetainedHistory)].live.cpuRam,
              0u);

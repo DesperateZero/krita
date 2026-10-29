@@ -8687,6 +8687,14 @@ public:
         for(qint32 i = 0; i < NUM_CYCLES; i++) {
             qint32 type = rng.bounded(NUM_TYPES);
             profile.operation(type);
+            KisStrokeJobFailureContext failure(true);
+            const auto requireSuccess = [&](const char *operation, bool result = true) {
+                if (!result || failure.failed()) {
+                    qFatal("BR1 stress first failure: seed=%u worker=%d cycle=%d type=%d operation=%s result=%d error=%s",
+                           workerSeed, m_worker, i, type, operation, int(result),
+                           qPrintable(failure.error()));
+                }
+            };
 
             qint32 t;
 
@@ -8697,6 +8705,7 @@ public:
                     buf = new quint8[dm.pixelSize()];
                     memcpy(buf, dm.defaultPixel(), dm.pixelSize());
                     dm.setDefaultPixel(buf);
+                    requireSuccess("setDefaultPixel");
                     delete[] buf;
                 }
                 break;
@@ -8707,17 +8716,23 @@ public:
 
                     tile = dm.getTile(m_accessRect.x() / TILE_DIMENSION,
                                       m_accessRect.y() / TILE_DIMENSION, false);
+                    requireSuccess("getTile(read)", bool(tile));
                     tile->lockForRead();
                     tile->unlockForRead();
+                    requireSuccess("tileRead");
                     tile = dm.getTile(m_accessRect.x() / TILE_DIMENSION,
                                       m_accessRect.y() / TILE_DIMENSION, true);
+                    requireSuccess("getTile(write)", bool(tile));
                     tile->lockForWrite();
                     tile->unlockForWrite();
+                    requireSuccess("tileWrite");
 
                     tile = dm.getOldTile(m_accessRect.x() / TILE_DIMENSION,
                                          m_accessRect.y() / TILE_DIMENSION);
+                    requireSuccess("getOldTile", bool(tile));
                     tile->lockForRead();
                     tile->unlockForRead();
+                    requireSuccess("oldTileRead");
                 }
                 break;
             case 3:
@@ -8742,6 +8757,7 @@ public:
                         dm.readBytes(buf, m_accessRect.x(), m_accessRect.y(),
                                      m_accessRect.width(), m_accessRect.height());
                     });
+                    requireSuccess("readBytes");
                     profile.phase(KisBr1StressProfile::WriteBytes, [&] {
                         dm.writeBytes(buf, m_accessRect.x(), m_accessRect.y(),
                                       m_accessRect.width(), m_accessRect.height());
@@ -8760,14 +8776,20 @@ public:
             case 8:
                 run_exclusive(profiledLock,t) {
                     profile.phase(KisBr1StressProfile::HistoryBegin, [&] { m_memento = dm.getMemento(); });
+                    requireSuccess("getMemento", bool(m_memento));
                     profile.phase(KisBr1StressProfile::HistoryClear, [&] {
                         dm.clear(m_accessRect.x(), m_accessRect.y(),
                                  m_accessRect.width(), m_accessRect.height(), 2);
                     });
+                    requireSuccess("historyClear");
                     profile.phase(KisBr1StressProfile::HistoryCommit, [&] { dm.commit(); });
+                    requireSuccess("commit");
                     profile.phase(KisBr1StressProfile::Rollback, [&] { dm.rollback(m_memento); });
+                    requireSuccess("rollback");
                     profile.phase(KisBr1StressProfile::Rollforward, [&] { dm.rollforward(m_memento); });
+                    requireSuccess("rollforward");
                     profile.phase(KisBr1StressProfile::Purge, [&] { dm.purgeHistory(m_memento); });
+                    requireSuccess("purgeHistory");
                     m_memento = 0;
                 }
                 break;
@@ -8788,6 +8810,7 @@ public:
                 }
                 break;
             }
+            requireSuccess("operation complete");
         }
         profile.report(workerSeed);
         if (stageProfile) {
