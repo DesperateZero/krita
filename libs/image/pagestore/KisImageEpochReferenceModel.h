@@ -115,6 +115,7 @@ private:
     friend class KisPagePublicationCoordinator;
     friend class KisPageStore;
     friend class KisCapturedReadView;
+    friend class KisPageMetadataCoordinator;
     friend class KisPageStoreReferenceTest;
 };
 

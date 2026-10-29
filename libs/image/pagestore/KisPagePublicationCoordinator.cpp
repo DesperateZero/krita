@@ -215,7 +215,7 @@ class KisPagePublicationCoordinator::KisPreparedMutationCommit final
 public:
     using PublicationChange = KisPageMetadataCoordinator::PublicationChange;
     explicit KisPreparedMutationCommit(KisBackingBudgetController &budget)
-        : workspace(&budget), directoryHeads(KisMutationStorageAllocator<KisPageVersion>(&budget))
+        : workspace(&budget), directoryKeys(KisMutationStorageAllocator<KisPageKey>(&budget))
         , restoreTargets(KisMutationStorageAllocator<KisPageVersion>(&budget)) {}
     ~KisPreparedMutationCommit() = default;
     bool isValid() const;
@@ -227,7 +227,7 @@ public:
         // Attempts have one semantic cleanup guard. Before the first attempt,
         // proof validation can fail; only its original proof view remains.
         Q_ASSERT(!owner && !metadata.isValid());
-        directoryHeads = decltype(directoryHeads){directoryHeads.get_allocator()};
+        directoryKeys = decltype(directoryKeys){directoryKeys.get_allocator()};
         restoreTargets = decltype(restoreTargets){restoreTargets.get_allocator()};
         workspace.reset();
     }
@@ -263,8 +263,8 @@ public:
     KisMutationWorkspace::Array<PreparedDescriptorChange> descriptorChanges;
     KisMutationWorkspace::Array<PublicationChange> publicationChanges;
     PreparedDescriptors descriptorNodes;
-    KisPageMetadataCoordinator::PublicationHeads directoryHeads;
-    KisPageMetadataCoordinator::PublicationHeads restoreTargets;
+    KisPageMetadataCoordinator::RegisteredKeys directoryKeys;
+    std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> restoreTargets;
     KisCompletionTicket completion;
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     KisImageEpochCommitResult result;
@@ -693,7 +693,7 @@ void KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept
     descriptorChanges.clear();
     publicationChanges.clear();
     descriptorNodes.reset();
-    directoryHeads.clear();
+    directoryKeys.clear();
     restoreTargets.clear();
     transaction = {};
     completion = {};
@@ -1216,9 +1216,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         }
         const KisImageEpochId prospectiveEpoch{currentRoot.epoch().value + 1};
         auto &publicationChanges = preparedCommit.publicationChanges;
-        auto &registeredPages = preparedCommit.directoryHeads;
+        auto &registeredPages = preparedCommit.directoryKeys;
         const quint64 directoryRevision = m_metadata.pageRegistrationCount();
-        try { if (changesSurfaceDefault) registeredPages = m_metadata.publicationHeads(); }
+        try { if (changesSurfaceDefault) registeredPages = m_metadata.registeredPageKeys(); }
         catch (const std::bad_alloc &) { return {}; }
         const auto replacesDefault = [&](const KisPageVersion &page) {
             const auto surfaceChange = surfaceChangeFor(page.key.surface);
@@ -1227,14 +1227,18 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                 && !owned.proofs.count(page.key)
                 && page.isDefaultPixel();
         };
-        const auto replacements = std::count_if(registeredPages.cbegin(), registeredPages.cend(), replacesDefault);
+        const auto replacements = std::count_if(registeredPages.cbegin(), registeredPages.cend(), [&](const auto &key) {
+            KisPageVersion page;
+            return currentRoot.resolve(key, &page) && replacesDefault(page);
+        });
         try {
             const size_t descriptorCount = size_t(replacements) + owned.removals.size();
             preparedCommit.prepareChanges(descriptorCount, descriptorCount, owned.proofs.size() + descriptorCount);
         }
         catch (const std::bad_alloc &) { return {}; }
-        for (const KisPageVersion &page : registeredPages) {
-            if (!replacesDefault(page)) continue;
+        for (const KisPageKey &key : registeredPages) {
+            KisPageVersion page;
+            if (!currentRoot.resolve(key, &page) || !replacesDefault(page)) continue;
             const KisSurfaceEpochChange &change = *surfaceChangeFor(page.key.surface);
             const KisPageVersion currentVersion = page;
 
@@ -1242,7 +1246,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             replacement.version = {page.key, page.generation, change.after.defaultPixelRevision};
             replacement.descriptor = change.after.allocationDescriptor();
             KisPageMetadataCoordinator::PublicationInfo inputs;
-            if (!m_metadata.queryPublication(page.key, replacement.version, &inputs)) {
+            if (!m_metadata.queryPublication(currentVersion, replacement.version, &inputs)) {
                 return {};
             }
             const auto &published = inputs.current;
@@ -1271,7 +1275,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         for (const KisPageKey &key : owned.removals) {
             KisPageMetadataCoordinator::PublicationInfo page;
             KisSurfaceEpochState surface;
-            if (!m_metadata.queryPublication(key, {}, &page)
+            KisPageVersion current;
+            if (!currentRoot.resolve(key, &current) || !m_metadata.queryPublication(current, {}, &page)
                 || !m_epochs.surfaceState(key.surface, transactionView, &surface)) {
                 return {};
             }
@@ -1294,7 +1299,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         try { preparedCommit.descriptorNodes = prepareDescriptorAdditionsLocked(descriptorChanges.data(), descriptorChanges.size()); }
         catch (const std::bad_alloc &) { return {}; }
         ownerLock.unlock();
-        registeredPages = decltype(preparedCommit.directoryHeads){registeredPages.get_allocator()};
+        registeredPages = decltype(preparedCommit.directoryKeys){registeredPages.get_allocator()};
         const quint64 publicationTransitionCount = quint64(owned.proofs.size() + publicationChanges.size());
         diagnostic.next(Phase::CommitEpochPrepare, pageWork);
         KisImageEpochCommitResult candidateFailure;
@@ -1310,14 +1315,14 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             const bool detach = !disableDirectDetachment && rootCandidate.mayDetachPreviousRoot();
             if constexpr (std::is_same_v<Input, KisPageOperationPublication>) {
                 publication = m_metadata.prepareAcceptance(transaction, owned.proofs.rows, nullptr,
-                    prospectiveEpoch, detach, publicationChanges.data(), qsizetype(publicationChanges.size()));
+                    prospectiveEpoch, detach, publicationChanges.data(), qsizetype(publicationChanges.size()), &currentRoot);
             } else try {
                 KisPagePublicationChanges inputs{KisMutationStorageAllocator<KisPagePublicationChange>(&m_budget)};
                 inputs.reserve(owned.proofs.size());
                 for (const auto &entry : owned.proofs)
                     inputs.emplace_back(KisPagePublicationChange::Replacement{&entry.second, transaction.id});
                 publication = m_metadata.prepareAcceptance(transaction, std::move(inputs), nullptr,
-                    prospectiveEpoch, detach, publicationChanges.data(), qsizetype(publicationChanges.size()));
+                    prospectiveEpoch, detach, publicationChanges.data(), qsizetype(publicationChanges.size()), &currentRoot);
             } catch (const std::bad_alloc &) {
                 // This independent input needs real acceptance storage. A
                 // refused preparation has not installed pixels, fees or root;
@@ -1503,7 +1508,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             ownerLock.relock();
         });
         auto &restoreTargets = preparedCommit.restoreTargets;
-        auto &registeredPages = preparedCommit.directoryHeads;
+        auto &registeredPages = preparedCommit.directoryKeys;
         auto &restoredDefaultVersions = preparedCommit.descriptorChanges;
         try {
             if (!retainedRoot.appendRestoreTargets(currentRoot, &restoreTargets)) return {};
@@ -1512,8 +1517,10 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                 // are unique by shard ownership; suffix insertions need no second
                 // membership authority or quadratic prefix scan.
                 const size_t originalTargets = restoreTargets.size();
-                registeredPages = m_metadata.publicationHeads();
-                for (const KisPageVersion &page : registeredPages) {
+                registeredPages = m_metadata.registeredPageKeys();
+                for (const KisPageKey &key : registeredPages) {
+                    KisPageVersion page;
+                    if (!currentRoot.resolve(key, &page)) return {};
                     const auto end = restoreTargets.cbegin() + originalTargets;
                     const auto found = std::lower_bound(restoreTargets.cbegin(), end, page.key,
                         [](const auto &version, const auto &key) { return overlayKeyLess(version.key, key); });
@@ -1533,7 +1540,9 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             preparedCommit.prepareChanges(restoreTargets.size(), restoreTargets.size());
             for (const KisPageVersion &version : std::as_const(restoreTargets)) {
                 KisPageMetadataCoordinator::PublicationInfo page;
-                if (!m_metadata.queryPublication(version.key, version, &page)) {
+                KisPageVersion current;
+                if (!currentRoot.resolve(version.key, &current)
+                    || !m_metadata.queryPublication(current, version, &page)) {
                     return {};
                 }
                 if (!page.target.version.isValid() && version.isDefaultPixel()) {
@@ -1552,7 +1561,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         catch (const std::bad_alloc &) { return {}; }
 
         ownerLock.unlock();
-        registeredPages = decltype(preparedCommit.directoryHeads){registeredPages.get_allocator()};
+        registeredPages = decltype(preparedCommit.directoryKeys){registeredPages.get_allocator()};
         KisPageStoreDiagnosticTimer diagnostic(diagnosticOwner,
                                                Phase::RestoreTransitionPreflight,
                                                quint64(restoreTargets.size()));
@@ -1566,7 +1575,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             adapterPrepared = true;
         }
         auto &publication = preparedCommit.metadata;
-        publication = m_metadata.prepareRestoration(nextEpoch, restoreTargets.data(), qsizetype(restoreTargets.size()));
+        publication = m_metadata.prepareRestoration(currentRoot, nextEpoch, restoreTargets.data(), qsizetype(restoreTargets.size()));
         KisImageEpochCommitResult candidateFailure;
         auto &rootCandidate = preparedCommit.restoreEpoch;
         rootCandidate = m_epochs.prepareRestore(source, &candidateFailure);

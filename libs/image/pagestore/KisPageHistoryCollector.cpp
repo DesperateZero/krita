@@ -76,7 +76,12 @@ KisPageHistoryCollector::~KisPageHistoryCollector()
 
 bool KisPageHistoryCollector::collectPassLocked()
 {
-    const auto work = m_metadata.collectHistoryValues();
+    const auto work = m_metadata.collectHistoryValues(&m_epochs,
+        +[](void *owner, const KisPageVersion &version) {
+            KisPageVersion current;
+            return static_cast<KisImageEpochReferenceModel *>(owner)->resolve(version.key, {}, &current)
+                && current == version;
+        });
     ++m_collectionPasses;
     m_valuesVisited += work.examined;
     m_retiredValues += work.retired;

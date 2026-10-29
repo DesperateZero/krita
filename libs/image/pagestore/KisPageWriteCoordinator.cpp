@@ -3181,16 +3181,34 @@ KisPageWriteCoordinator::KisPageWriteCoordinator(KisPageMetadataCoordinator &met
 {
 }
 
+bool KisPageWriteCoordinator::validateWriteBase(const KisPageWriteInput &write, bool native, QString *error) const
+{
+    if (write.baseWasPrepared) {
+        if (native) return true; // Checked with the actual target acceptance.
+        KisPageMetadataCoordinator::VersionInfo base;
+        if (metadata->versionSnapshot(write.baseVersion, &base)
+            && base.publication == KisPagePublicationState::Prepared
+            && base.preparedBy == write.transaction) return true;
+    } else {
+        KisPageVersion current;
+        if (epoch->resolve(write.baseVersion.key, {}, &current)
+            && current == write.baseVersion) return true;
+    }
+    KisPageStoreDetail::setError(error, QStringLiteral("write base is no longer selected"));
+    return false;
+}
+
 KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(
     KisPageWriteInput &write, const KisReplicaHandle &target)
 {
+    KisPageMetadataTransitionResult rejected;
+    if (!validateWriteBase(write, false, &rejected.rejectionReason)) return rejected;
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
     // source; the target still initializes directly from the exact default.
     if (write.baseVersion.isDefaultPixel() && !write.source.isValid()) {
         KisPageMetadataCoordinator::VersionInfo current;
-        if (!metadata->versionSnapshot(write.baseVersion, &current) || !current.version.isValid()) {
-            KisPageMetadataTransitionResult rejected;
+        if (!metadata->versionSnapshot(write.baseVersion, &current)) {
             rejected.rejectionReason = QStringLiteral("write default base disappeared");
             return rejected;
         }
@@ -3331,6 +3349,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     // install rechecks actual blockers and the exact recovery identity.
     if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
+    if (!validateWriteBase(write, bool(native))) return false;
     if (!physical.tryClaim()) return false;
     const bool installed = native
         ? metadata->acceptPrivateTarget(write, acceptedSource, physical.target(), native, transientLimit, nullptr,

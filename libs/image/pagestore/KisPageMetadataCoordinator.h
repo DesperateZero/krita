@@ -23,6 +23,7 @@
 #include "KisCompletionRegistry.h"
 #include "KisPageStateMachine.h"
 
+class KisImageEpochRootSnapshot;
 class KisCpuResidentBinding;
 struct KisPagePrivateWrite;
 struct KisPageWriteInput;
@@ -103,7 +104,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
     mutable quint64 fullSnapshotVersionInputs = 0;
     mutable quint64 backgroundSnapshotExports = 0;
     mutable quint64 backgroundSnapshotVersionInputs = 0;
-    quint64 publicationHistoryNodesTransferred = 0;
+    // Actual writes/additions into the committed content phase. Changing
+    // ViewRoot selection alone no longer installs a metadata history role.
+    quint64 publicationCommittedValuesInstalled = 0;
     quint64 publicationAdditionRecordsTransferred = 0;
     // M2 block payload causality. A candidate is one successful lock-external
     // system allocation; only an attached candidate becomes shard capacity.
@@ -129,7 +132,7 @@ struct KRITAIMAGE_EXPORT KisPageMetadataMetrics : KisPageMetadataShardMetrics {
     quint64 installedMutationPages = 0;
     quint64 rejectedMutationInstalls = 0;
     // Candidate work includes failed/retried preparation; transferred work is shard-local.
-    quint64 publicationHistoryNodesPrepared = 0;
+    quint64 publicationCommittedValuesPrepared = 0;
     quint64 publicationAdditionRecordsPrepared = 0;
     quint64 cpuReadBindings = 0;
 };
@@ -194,7 +197,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataFootprint {
     quint64 metadataPageBytes = 0;
     quint64 metadataPageActivityBytes = 0;
     quint64 versions = 0;
-    quint64 historicalValues = 0;
+    quint64 committedValues = 0;
+    // Count in the explicitly supplied footprint view; zero without a view.
+    quint64 selectedCommittedValues = 0;
     quint64 replicas = 0;
     quint64 readLeases = 0;
     quint64 pendingLastUses = 0;
@@ -232,7 +237,8 @@ public:
     qsizetype shardFor(const KisPageKey &key) const;
 
     bool registerPage(const KisPageStateSnapshot &initial, QString *error = nullptr);
-    bool pageSnapshot(const KisPageKey &key, KisPageStateSnapshot *snapshot) const;
+    bool pageSnapshot(const KisPageKey &key, const KisImageEpochRootSnapshot &view,
+                      KisPageStateSnapshot *snapshot) const;
     KisPageSnapshotArray<KisPageKey> pageKeys() const;
     KisPageSnapshotArray<KisReplicaHandle> shutdownReplicaHandles() const;
     KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
@@ -240,7 +246,7 @@ public:
                                                const KisVerifiedCompletion &completion);
     qsizetype pageCount() const;
     KisPageMetadataMetrics metrics() const;
-    KisPageMetadataFootprint footprint() const;
+    KisPageMetadataFootprint footprint(const KisImageEpochRootSnapshot *view = nullptr) const;
 
 private:
     using RetirementInstall = bool (*)(void *);
@@ -259,7 +265,6 @@ private:
     // its funded candidate array; leases/tokens are never exported here.
     struct VersionInfo {
         KisPageVersion version;
-        KisPageGeneration publishedGeneration;
         KisPagePublicationState publication = KisPagePublicationState::Unpublished;
         KisPageTransactionId preparedBy;
         KisReplicaHandle authority;
@@ -267,8 +272,7 @@ private:
         bool captured = false;
         bool isVirtualDefault() const {
             return version.isDefaultPixel() && !replicaCount && !authority.isValid()
-                && (publication == KisPagePublicationState::Published
-                    || publication == KisPagePublicationState::Historical);
+                && publication == KisPagePublicationState::Historical;
         }
         bool needsDefaultMaterialization(const KisPageVersion &identity) const {
             return identity.isDefaultPixel() && (!version.isValid() || isVirtualDefault());
@@ -344,14 +348,15 @@ private:
         VersionInfo current;
         VersionInfo target;
     };
-    // Current head and optional exact target share one shard cut. No replica
-    // or protection arrays escape this observation; preparation revalidates.
-    bool queryPublication(const KisPageKey &key, const KisPageVersion &target,
+    // The original ViewRoot selects current; this observer only resolves its
+    // exact Value and an optional target at one shard cut. It never chooses a
+    // second current head. No replica/protection arrays escape.
+    bool queryPublication(const KisPageVersion &current, const KisPageVersion &target,
                           PublicationInfo *info) const;
-    using PublicationHeads = std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>>;
+    using RegisteredKeys = std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>>;
     // Paid directory identities, not a coherent epoch view. The owner's
     // registration revision and per-page candidate revisions still apply.
-    PublicationHeads publicationHeads() const;
+    RegisteredKeys registeredPageKeys() const;
     // Cold diagnostic enumeration; no reclamation fallback or history scan.
     // Callback runs under V and cannot reenter metadata.
     void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &)) const;
@@ -406,7 +411,8 @@ private:
         bool blocked = false;
     };
     size_t pendingValueChecks() const;
-    HistoryCollection collectHistoryValues();
+    HistoryCollection collectHistoryValues(void *cacheOwner = nullptr,
+        bool (*keepDefault)(void *, const KisPageVersion &) = nullptr);
     void clearValueChecks();
     // Notification gate only: the callback must not enter Store/V/budget or
     // perform collection. Its owner disconnects before destroying the task.
@@ -504,10 +510,11 @@ private:
         friend class KisPageMetadataCoordinator;
     };
     PreparedPublication preparePublication(const KisPageTransaction &transaction,
+                                           const KisImageEpochRootSnapshot &currentRoot,
                                            KisImageEpochId minimumEpoch,
                                            const KisPageSnapshotArray<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
-    PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
+    PreparedPublication prepareRestoration(const KisImageEpochRootSnapshot &currentRoot, KisImageEpochId minimumEpoch,
                                            const KisPageSnapshotArray<KisPageTransition> &transitions,
                                            QString *error = nullptr) const;
     struct PublicationChange {
@@ -516,10 +523,11 @@ private:
         KisReplicaHandle target;
     };
     PreparedPublication preparePublication(const KisPageTransaction &transaction,
+                                           const KisImageEpochRootSnapshot &currentRoot,
                                            KisImageEpochId minimumEpoch,
                                            const PublicationChange *changes, qsizetype count,
                                            QString *error = nullptr, bool detachUnprotectedCurrent = false) const;
-    PreparedPublication prepareRestoration(KisImageEpochId minimumEpoch,
+    PreparedPublication prepareRestoration(const KisImageEpochRootSnapshot &currentRoot, KisImageEpochId minimumEpoch,
                                            const KisPageVersion *versions, qsizetype count,
                                            QString *error = nullptr) const;
     enum class PreparationKind : quint8 { Publication, RecoverableWrite, PrivateWrite };
@@ -531,7 +539,8 @@ private:
                                                PreparationKind kind = PreparationKind::Publication,
                                                const KisPageVersion *versions = nullptr,
                                                const PublicationChange *changes = nullptr,
-                                               bool detachUnprotectedCurrent = false) const;
+                                               bool detachUnprotectedCurrent = false,
+                                               const KisImageEpochRootSnapshot *currentRoot = nullptr) const;
     // Original D accepts native results and external detachments atomically.
     // Exact identity, writers and real readers are revalidated before edits;
     // changed retention preserves the frozen preparation for fee revalidation.
@@ -542,11 +551,13 @@ private:
                                         KisPagePublicationRows rows,
                                         QString *error = nullptr, KisImageEpochId minimumEpoch = {},
                                         bool detachCurrent = false,
-                                        const PublicationChange *generic = nullptr, qsizetype genericCount = 0) const;
+                                        const PublicationChange *generic = nullptr, qsizetype genericCount = 0,
+                                        const KisImageEpochRootSnapshot *currentRoot = nullptr) const;
     PreparedPublication prepareAcceptance(const KisPageTransaction &,
         std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>> &&,
         QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
-        const PublicationChange *generic = nullptr, qsizetype genericCount = 0) const;
+        const PublicationChange *generic = nullptr, qsizetype genericCount = 0,
+                                        const KisImageEpochRootSnapshot *currentRoot = nullptr) const;
     // Continue the same frozen D after its source disposition changed. The
     // final cells and positions remain intact; no additional slots are made.
     bool revalidateAcceptance(PreparedPublication &, QString *error = nullptr) const;

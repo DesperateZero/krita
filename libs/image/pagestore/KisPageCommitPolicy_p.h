@@ -42,7 +42,9 @@ template<class Prepared, class Published, class Transition, class Visit, class E
 void kisPageApplyCommit(const Transition &transition, Prepared *prepared, Published *published,
                         Visit visit, Edit edit)
 {
-    edit(*published, KisPagePublicationState::Historical, published->preparedBy);
+    // An implicit surface default may have no materialized Value. Its view
+    // identity participates in validation, but there is no content to edit.
+    if (published) edit(*published, KisPagePublicationState::Historical, published->preparedBy);
     visit([&](auto &candidate) {
         if (candidate.publication == KisPagePublicationState::Prepared
             && candidate.preparedBy == transition.transaction

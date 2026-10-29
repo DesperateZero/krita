@@ -323,6 +323,9 @@ public:
                                                 const KisPageVersion &target = {},
                                                 KisPageRetirementRecordPointer *preparedRetirement = nullptr);
 
+    // Store admission gate must be held through metadata acceptance. Native
+    // acceptance consumes the source phase in its existing shard window.
+    bool validateWriteBase(const KisPageWriteInput &, bool native, QString *error = nullptr) const;
     KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &, const KisReplicaHandle &target);
     // Both adapters try the same physical reuse/metadata/accounting protocol.
     // A success writes the original private or request target, not selection.

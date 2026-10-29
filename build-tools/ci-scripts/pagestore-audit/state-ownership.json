@@ -517,15 +517,14 @@
     },
     {
       "creation-paths": [
-        "KisPageMetadataCoordinator::registerPage",
-        "MetadataShard::assign and installHeader",
-        "KisPageMetadataCoordinator transition installation",
-        "KisPageMetadataCoordinator publication installation"
+        "MetadataShard::assign and installActivityHeader",
+        "KisPageMetadataCoordinator exact content and private writer acceptance",
+        "ViewRoot-bound commit/restore/default preparation; no per-page current-head installation"
       ],
       "current-writers": [
         "KisPageMetadataCoordinator compact shard page/activity records and typed arenas"
       ],
-      "fact": "logical page header, activity, version, replica and rare protection metadata",
+      "fact": "page concurrency and exact Value content/replica/protection facts; current selection belongs only to ViewRoot",
       "id": "BR1-OWN-METADATA-RECORDS",
       "lock-or-claim": "single metadata shard mutex plus page revision/publication claim",
       "read-only-observers": [
@@ -541,7 +540,7 @@
         "coordinator close",
         "PreparedPublication owns paid Data with bounded trailing claim/publication/growth values, a sorted authority array and nested installation protections. Local projection scopes and the original Data retain storage roots; all their nested working values, arrays and growth carriers use explicit borrowing allocators. Every actual allocation still retains its original owner and charge until physical free. Data declares its root before borrowed members and its deleter retains that root through final free, covering cancellation, incremental and worker cleanup after controller detachment. Arena directory roots live in the arena before its borrowed directory; prepared directories borrow the preparing scope, so swapping into the arena preserves both lifetimes. Shard maps borrow the original budgetAuthority that outlives them. Ordinary publication compacts original deltas and transfers appended records; recoverable preparation transfers base/target records to installRecords. The same Data is its bounded reusable reclamation job; no second cleanup job exists. Entries keep their original activity reservation through transient install claims, and releaseActivity remains shared by cancellation, incremental clear and destruction; semantic reset does not skip physical reservations",
         "Generic transition work and public oracle value/COW arrays share the single StateMachine policy. Local owner sequences consume their original paid work value and retain only input version identities for accepted removals and stale-attempt accounting. Strict page revision revalidation covers every unlocked growth/retirement preparation; rejection changes no authoritative record and cancels prepared Debt. Nested format byte storage and immutable snapshot arrays have actual process allocation owners. Validation scans original input without duplicate Qt sets",
-        "Each original version owns one prepaid VersionFactsArena slot for descriptor and internal CPU proof. Growth, directories, reservations and block release use the original shard budget lifecycle; descriptor and read-binding destruction transfers to existing unlocked cleanup. Native writer/publication facts live in the original 136-byte page record (32-byte activity facts plus an 8-byte non-owning idle record link beyond the former 96-byte page). Only actual generic writer/handoff payload uses the sparse activity map; the at-most-104-byte full activity image is a temporary projection. Unretained Published and Prepared acceptance reuse the original record slots; all D claims and late protection are revalidated before edits. Canonical commit shares the state-machine commit rule and retains only its actual publication delta; generic restore/default paths retain the complete representation they consume. These layout bounds describe the integrated implementation, not a minimum-cost or M6 memory qualification."
+        "The original Value owns content phase and replica/binding facts. Committed content has one stored phase; Published is projected only for an explicitly supplied view. PageControl holds initial identity only before registration, generation high water, real writer/claim/revision and idle link; it stores neither current version nor published epoch. Generic writer retains the exact implicit default identity, or the already pinned source replica owner, so optional-cache removal cannot erase its base. Actual committed-source write admission is checked against the current root after provider unlock; Prepared source phase/transaction is consumed in native acceptance. Default cache policy is queried only for actual default reclaim candidates outside V; original source rows deliver displaced caches without fake content-phase writes. Existing explicit content receives reclamation from its last root edge, not a premature current-value queue entry. Native and generic published acceptance preserve real claims, pins, late readers, root identity and one-shot installation; restore selection does not rewrite metadata roles. Full Resource/Frame migration and ordinary net costs remain open."
       ]
     },
     {

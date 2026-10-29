@@ -1380,6 +1380,15 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for obsolete in ("historySlice", "linkHistory", "unlinkHistory", "firstHistory", "lastHistory", "takeUnrootedKeys"):
             if obsolete in metadata_text:
                 errors.append(f"obsolete history projection/index returned: {obsolete}")
+        for obsolete in ("KisVersionSlotId publishedVersion", "KisImageEpochId publishedEpoch;",
+                         "writerBaseVersion", "installReservedHeader", "assignHeader",
+                         "publicationHistoryNodesPrepared", "publicationHistoryNodesTransferred"):
+            if obsolete in metadata_text:
+                errors.append(f"view selection restored metadata head/role coupling: {obsolete}")
+        for contract in ("KisVersionSlotId initialIdentity", "committedCount", "currentRoot->resolveVersion",
+                         "writerDefaultGeneration", "writerDefaultRevision", "displacedDefault"):
+            if contract not in metadata_text:
+                errors.append(f"view/content ownership boundary is missing: {contract}")
         for contract in (
             "using VersionArena = KisShardSlotArena<KisPageValueCell, 16 * 1024>",
             "using ReplicaArena = KisShardSlotArena<KisPageReplicaState, 32 * 1024>",
@@ -1417,8 +1426,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct MetadataMapAllocator : KisMutationStorageAllocator<T, false>",
             "decltype(pages)::allocator_type(storage.borrowed(), &mapAllocationBytes)",
             "const auto storage = data->storage.borrowed()",
-            "assignHeader",
-            "installReservedHeader",
+            "assignActivityHeader",
+            "installActivityHeader",
             "projectReplica",
             "metadataPageActivityBytes",
             "KisPageMetadataCoordinator::HistoryCollection",

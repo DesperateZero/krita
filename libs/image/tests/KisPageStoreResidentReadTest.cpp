@@ -1,3 +1,4 @@
+#include "pagestore/KisPageMetadataTestView.h"
 #include "pagestore/KisPageOwnerLedgerTestAccess.h"
 /*
  * SPDX-FileCopyrightText: 2026 Krita contributors
@@ -752,7 +753,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
         KisBackingBudgetDelta delta; delta.bucket(size_t(KisBackingBudgetClass::Current)).cpuRam = replica.layout.byteSize;
         auto r = budget.reserve(delta, nullptr); QVERIFY(owner.registerBacking(replica, r, KisBackingBudgetClass::Current));
     }
-    KisPageMetadataCoordinator metadata;
+    KisPageMetadataCoordinator metadata; KisPageMetadataTestView metadataView;
     metadata.attachRetirementOwner(&owner,
         [](void *context, const KisPageTransitionEffect *effects, qsizetype count,
             void *installation, bool (*install)(void *), QString *error) {
@@ -768,7 +769,7 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
     old.version = version; old.publication = KisPagePublicationState::Published; old.authority = a.replica;
     old.replicas = {{a.replica, KisReplicaValidity::Valid, {}, {}, 0, {}},
                     {b.replica, KisReplicaValidity::Valid, {}, {}, 0, {}}};
-    page.versions = {old}; QVERIFY(metadata.registerPage(page));
+    page.versions = {old}; QVERIFY(metadataView.registerPage(metadata, page));
     const auto coldSource = metadata.selectCpuReadBinding(version);
     QVERIFY(!coldSource.binding); QCOMPARE(coldSource.replica, a.replica);
     auto stale = KisPageReadCoordinator::resolveSelectedCpuReadBinding(metadata, owner, coldSource); QVERIFY(stale);
@@ -802,9 +803,10 @@ void KisPageStoreResidentReadTest::retainedVersionRediscoveryAfterRetag()
         QVERIFY(metadata.applyOwner(version.key, finish).accepted);
         finish.kind = KisPageTransitionKind::PublishWrite; QVERIFY(metadata.applyOwner(version.key, finish).accepted);
         finish.kind = KisPageTransitionKind::CommitTransaction; finish.imageEpoch = {2};
-        auto publication = metadata.preparePublication(tx, {2}, {finish});
+        auto publication = metadata.preparePublication(tx, metadataView.root(), {2}, {finish});
         QVERIFY(publication.isValid());
         QVERIFY(metadata.installPublication(std::move(publication), tx, {2}));
+        QVERIFY(metadataView.accept(metadata, {2}, finish.version));
     } else {
         auto cancel = write; cancel.kind = KisPageTransitionKind::CancelWrite;
         QVERIFY(metadata.applyOwner(version.key, cancel).accepted);

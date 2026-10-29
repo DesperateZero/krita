@@ -41,6 +41,11 @@ template<class State>
 bool releaseWriterBeforeImage(State &state,
                               const KisPageWriterStateSnapshot &writer)
 {
+    // The admitted logical default belongs to its exact surface identity.
+    // Its optional cache is neither a before-image pin nor required to exist
+    // at completion/cancellation; a later materialization adds no owned pin.
+    if (writer.baseVersion.isDefaultPixel() && !writer.baseAuthority.isValid()
+        && writer.mode == KisPageWriteMode::DiscardContents) return true;
     auto *base = state.findVersion(writer.baseVersion);
     auto *authority = base ? base->findReplica(writer.baseAuthority) : nullptr;
     if (!base || (!logicalDefaultBeforeImage(base, writer) &&

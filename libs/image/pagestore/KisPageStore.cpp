@@ -328,9 +328,10 @@ public:
         result.closed = closed;
         result.registeredPages = metadata.pageCount();
         if (includeMetadataFootprint) {
-            const KisPageMetadataFootprint metadataFootprint = metadata.footprint();
+            const auto currentRoot = epochs.captureCommittedRoot();
+            const KisPageMetadataFootprint metadataFootprint = metadata.footprint(&currentRoot);
             result.pageVersions = qsizetype(metadataFootprint.versions);
-            result.historicalValues = qsizetype(metadataFootprint.historicalValues);
+            result.historicalValues = qsizetype(metadataFootprint.committedValues - metadataFootprint.selectedCommittedValues);
             result.replicas = qsizetype(metadataFootprint.replicas);
         }
         result.immutableRoots = epochs.rootCount();
@@ -1561,6 +1562,7 @@ KisPageMutationSession::Private::prepareTarget(
         auto *oldBacking = previous ? previous->backing : nullptr;
         std::optional<KisReplicaHandle> oldTarget;
         if (previous) oldTarget.emplace(previous->target());
+        if (!previous && !owner->writeCoordinator.validateWriteBase(acquire, true, error)) return {};
         accepted = previous ? owner->metadata.replacePrivateWrite(page, allocation.replica)
             : owner->metadata.acceptPrivateTarget(acquire, acquire.source, allocation.replica, page,
                 owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias);
@@ -4445,7 +4447,7 @@ bool KisPageStore::finalizeInitialization(QString *error)
     for (const KisPageVersion &version : d->epochs.captureCommittedRoot().manifest()) {
         KisPageMetadataCoordinator::VersionInfo page;
         if (!d->publicationCoordinator.descriptorLocked(version) || !d->metadata.versionSnapshot(version, &page)
-            || !(page.publishedGeneration == version.generation)) {
+            || !(page.version == version)) {
             KisPageStoreDetail::setError(error, QStringLiteral("PageStore initial manifest is not fully adopted"));
             return false;
         }

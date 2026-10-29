@@ -84,6 +84,10 @@ struct KisPageWriteInput {
     KisPageWriterToken writer; // Only the generic lease consumer needs a token.
     KisPageTransactionId transaction;
     KisPageWriteMode writeMode = KisPageWriteMode::PreserveContents;
+    // Original source kind survives provider unlock. A Prepared source must
+    // still belong to this transaction; a committed source is admitted by
+    // the view owner against the actual current root after relocking.
+    bool baseWasPrepared = false;
     KisPageWriteInput() = default;
     explicit KisPageWriteInput(const KisPageTransition &value)
         : baseVersion(value.baseVersion), version(value.version), source(value.source),
@@ -168,6 +172,8 @@ struct KisPageValueState {
     KisReplicaSlotId authorityReplica;
     KisPageTransactionId preparedBy;
     quint32 replicaCount = 0;
+    // Historical denotes an accepted content value, irrespective of current
+    // root selection. Published exists only in a requested view projection.
     KisPagePublicationState publication = KisPagePublicationState::Unpublished;
     // The original edit holds memory, not a history/read protection edge.
     // Removing a view may detach the value before its Frame finishes delivery.
