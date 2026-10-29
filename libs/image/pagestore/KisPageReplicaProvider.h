@@ -408,6 +408,12 @@ public:
     virtual bool validateCpuBinding(const KisReplicaHandle &replica,
                                    const KisPageAllocationDescriptor &descriptor,
                                    const std::shared_ptr<KisCpuResidentBinding> &binding) const;
+    // Preparation grants provenance/layout/custom-provider facts only. The
+    // final CPU binding gate supplies dynamic identity and revoke validation.
+    // Generic providers retain their real validation policy here.
+    virtual bool prepareCpuPublication(const KisReplicaHandle &replica,
+                                      const KisPageAllocationDescriptor &descriptor,
+                                      const std::shared_ptr<KisCpuResidentBinding> &binding) const;
     virtual KisReplicaOperation retire(KisPageOperationId operation,
                                        const KisReplicaHandle &replica,
                                        const KisCompletionTicket &lastUse) = 0;

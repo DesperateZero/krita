@@ -1651,7 +1651,7 @@ catch (const std::bad_alloc &)
     return false; // No acknowledgement before the whole prepared cut validates.
 }
 
-KisPageOwnerLedger::BackingAcceptance KisPageOwnerLedger::acceptBackingChanges(
+KisPageOwnerLedger::BackingAcceptance KisPageOwnerLedger::acceptPreparedBackingChanges(
     KisPagePreparedBackingChange *rows, size_t capacity, void *reader,
     int (*read)(void *, KisBackingClassChange *),
     void *context, bool (*install)(void *), QString *error)
@@ -1660,7 +1660,6 @@ try {
         KisPageStoreDetail::setError(error, QStringLiteral("backing change workspace is invalid"));
         return BackingAcceptance::FeesRefused;
     }
-    if (!synchronizeBackingDomains(error)) return BackingAcceptance::FeesRefused;
     QMutexLocker locker(&d->mutex);
     if (!d->backingBudget) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
@@ -1678,7 +1677,7 @@ try {
     return BackingAcceptance::FeesRefused;
 }
 
-KisPageOwnerLedger::BackingAcceptance KisPageOwnerLedger::acceptIdleCapacity(
+KisPageOwnerLedger::BackingAcceptance KisPageOwnerLedger::acceptPreparedIdleCapacity(
     KisPagePublicationRows rows, quint64 allowance,
     void *context, bool (*install)(void *), QString *error)
 try
@@ -1688,7 +1687,6 @@ try
         KisPageStoreDetail::setError(error, QStringLiteral("capacity release range is invalid"));
         return BackingAcceptance::FeesRefused;
     }
-    if (!synchronizeBackingDomains(error)) return BackingAcceptance::FeesRefused;
     QMutexLocker locker(&d->mutex);
     if (!d->backingBudget) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
@@ -2335,6 +2333,14 @@ KisReplicaHandle KisPageOwnerLedger::publicationAuthority(const KisPagePublicati
 
 bool KisPageOwnerLedger::validatePublicationIdentity(const KisPageMetadataCoordinator &metadata,
     const KisPagePublicationIdentity &identity) const
+{ return inspectPublicationIdentity(metadata, identity, false); }
+
+bool KisPageOwnerLedger::preparePublicationIdentity(const KisPageMetadataCoordinator &metadata,
+    const KisPagePublicationIdentity &identity) const
+{ return inspectPublicationIdentity(metadata, identity, true); }
+
+bool KisPageOwnerLedger::inspectPublicationIdentity(const KisPageMetadataCoordinator &metadata,
+    const KisPagePublicationIdentity &identity, bool preparation) const
 try
 {
     if (!identity.native) {
@@ -2353,10 +2359,12 @@ try
     KisReplicaHandle authority;
     if (!metadata.cpuPreparedAuthority(identity, issuer, &authority, &descriptor, &binding)
         || !descriptor || !descriptor->isValid() || !authority.layout.matches(*descriptor)) return false;
-    // This is the real dynamic boundary. Internal validation consumes the
-    // original authority; the immutable completion belongs to public export.
+    // Public observation checks current binding authority. Internal preparing
+    // establishes provider policy; the final Resource window checks revocation.
     const auto authorityProvider = provider(authority.provider, authority.providerEpoch);
-    return authorityProvider && authorityProvider->validateCpuBinding(authority, *descriptor, binding);
+    return authorityProvider && (preparation
+        ? authorityProvider->prepareCpuPublication(authority, *descriptor, binding)
+        : authorityProvider->validateCpuBinding(authority, *descriptor, binding));
 }
 catch (const std::bad_alloc &) { return false; }
 
@@ -2385,7 +2393,7 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
     return metadata && metadata->ownsCpuProof(proof, issuer);
 }
 
-bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
+bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     KisPageTransactionId transaction, QString *error, bool complete)
 {
     if (!transaction.isValid() || (rows.size() && !rows)) return false;
@@ -2413,8 +2421,8 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
         if (registered) authorityProvider = registered->provider;
         if (!metadata) return false;
     }
-    // Real provider validation seals the original Value. No synchronous
-    // output needs a validation-stamp range or a fabricated public proof.
+    // Provider preparation establishes provenance/layout/custom policy.
+    // Final binding identity/revocation is consumed at the actual cut.
     for (auto &row : rows) {
         auto *result = row.replacement.native;
         if (row.replacement.removal || result->isSealed()) continue;
@@ -2424,14 +2432,14 @@ bool KisPageOwnerLedger::validatePrivateWrites(KisPagePublicationRows rows,
             selected = key;
         }
         if (!result->descriptor() || !authorityProvider
-            || !authorityProvider->validateCpuBinding(result->target(), *result->descriptor(), result->binding())) {
+            || !authorityProvider->prepareCpuPublication(result->target(), *result->descriptor(), result->binding())) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
             return false;
         }
-        if (!metadata->sealPrivateValue(*result, transaction, issuer, complete)) {
-            KisPageStoreDetail::setError(error, QStringLiteral("CPU original result changed during validation"));
-            return false;
-        }
+    }
+    if (!metadata->freezePrivateValues(rows, transaction, issuer, complete)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU original results changed during freezing"));
+        return false;
     }
     KisPageStoreDetail::setError(error, {});
     return true;

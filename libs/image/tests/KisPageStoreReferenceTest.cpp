@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "KisCompletionRegistry.h"
+#include "KisCpuResidentBinding_p.h"
 #include "kis_image_config.h"
 #include "KisCpuPageReplicaProvider.h"
 #include "KisImageEpochReferenceModel.h"
@@ -68,8 +69,6 @@
 
 namespace
 {
-
-
 // Synthetic oracle receiver. Its output storage is prepared before metadata
 // changes; commit observes the delivered span without allocating after accept.
 struct MetadataEffectReceiver {
@@ -1007,6 +1006,12 @@ private:
 
 class KisPageStoreReferenceTest : public QObject
 {
+    static bool freezeOriginalValue(KisPageMetadataCoordinator &metadata, KisPagePrivateWrite &value,
+        KisPageTransactionId transaction, quint64 issuer, bool complete = false)
+    {
+        KisPagePublicationChange row{KisPagePublicationChange::Replacement{&value}};
+        return metadata.freezePrivateValues({&row, 1}, transaction, issuer, complete);
+    }
     Q_OBJECT
 
     // The caller owns the original input through metadata acceptance. This test
@@ -1344,6 +1349,14 @@ private Q_SLOTS:
     void preparedMetadataClaimsDoNotLoseConcurrentReaders();
     void preparedPublicationMatchesFullReferenceTransitions();
     void nativeValueFrameLifetime();
+    void publicationResourceWindow_data()
+    {
+        QTest::addColumn<bool>("native"); QTest::addColumn<int>("pages"); QTest::addColumn<int>("outcome");
+        for (bool native : {false, true}) for (int pages : {1, 17}) for (int outcome = 0; outcome != 3; ++outcome)
+            QTest::newRow(qPrintable(QStringLiteral("native%1-pages%2-outcome%3").arg(native).arg(pages).arg(outcome)))
+                << native << pages << outcome;
+    }
+    void publicationResourceWindow();
     void editValuesGroupLifetimeAndPressure();
     void privatePreparedBackingReplacement_data();
     void privatePreparedBackingReplacement();
@@ -7141,7 +7154,7 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
                 QVERIFY(metadata->cancelPrivateResult(row.get()));
                 QVERIFY(!row->acceptedSlot().isValid());
             } else {
-                QVERIFY(metadata->sealPrivateValue(*row, tx.id, 1));
+                QVERIFY(freezeOriginalValue(*metadata, *row, tx.id, 1));
                 QVERIFY(metadata->ownsCpuValue(locator, 1));
                 QCOMPARE(row->value->native.exportedStamp, quint64(0));
                 KisPagePublicationChange birth{KisPagePublicationChange::Replacement(row.get())};
@@ -7183,6 +7196,105 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
         rows[0].reset(); rows[1].reset();
         QVERIFY(shard.expired());
     }
+}
+
+void KisPageStoreReferenceTest::publicationResourceWindow()
+{
+    QFETCH(bool, native); QFETCH(int, pages); QFETCH(int, outcome);
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    KisTiles3PageReplicaProvider provider;
+    const auto descriptor = allocationDescriptor();
+    QVERIFY(provider.configure({{81}, {1}, 4 * 1024 * 1024}, completions));
+    KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
+    QVERIFY(metadata.configure(4));
+    const auto source = completions->registerSource(KisCompletionDomain::HostLogical);
+    const auto ready = completions->allocatePending(source);
+    QVERIFY(completions->complete(ready, KisCompletionStatus::Succeeded));
+    QVERIFY(metadata.bindCpuProofIssuer(1, ready));
+    const KisPageTransaction tx{{74}, {1}};
+    KisPageEditValues edit;
+    std::vector<std::unique_ptr<KisPagePrivateWrite>> originals;
+    std::vector<KisPagePublicationChange> rows;
+    QVector<KisPageTransition> commits;
+    std::vector<std::shared_ptr<KisCpuResidentBinding>> bindings;
+    std::vector<KisPageViewTestAccess::ReadEdge> captures;
+    rows.reserve(size_t(pages));
+    for (int i = 0; i < pages; ++i) {
+        const auto base = pageVersion(i, 1), target = pageVersion(i, 2);
+        const auto allocated = provider.prepareWrite({quint64(1000 + i)}, target, descriptor,
+            KisPageAccessDomain::CpuRam, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+        QVERIFY(allocated.isValid());
+        auto binding = provider.cpuResidentBinding(allocated.replica); QVERIFY(binding);
+        // These are provider-created bindings and real allocation identities;
+        // no test writes the gate/retired state or manufactures a lock receipt.
+        QVERIFY(provider.prepareCpuPublication(allocated.replica, descriptor, binding));
+        bindings.push_back(binding);
+        auto page = initialPageState(base, replica(base, 1, 1, quint64(10000 + i)));
+        if (!native) {
+            page.versions.append({target, KisPagePublicationState::Prepared,
+                {{allocated.replica, KisReplicaValidity::Valid, {}, {}, 0, {}}}, allocated.replica, tx.id, {}});
+            page.nextGeneration = {3};
+        }
+        QVERIFY(view.registerPage(metadata, page));
+        KisPageTransition change;
+        change.kind = KisPageTransitionKind::CommitTransaction; change.version = target;
+        change.transaction = tx.id; change.imageEpoch = {2};
+        commits.append(change);
+        if (native) {
+            auto original = std::make_unique<KisPagePrivateWrite>(edit);
+            KisPageWriteInput write;
+            write.baseVersion = base; write.version = target; write.source = page.versions.first().authority;
+            write.transaction = tx.id; write.operation = {quint64(2000 + i)};
+            QVERIFY(metadata.preparePrivateValue(write, original.get(), nullptr));
+            QVERIFY(metadata.acceptPrivateTarget(write, write.source, allocated.replica, original.get(), 64));
+            original->binding() = binding;
+            QVERIFY(metadata.completePrivateWrite(original.get()));
+            rows.emplace_back(KisPagePublicationChange::Replacement{original.get()});
+            originals.push_back(std::move(original));
+        } else {
+            auto capture = KisPageViewTestAccess::readEdge(metadata, target); QVERIFY(capture);
+            captures.push_back(std::move(capture));
+            QCOMPARE(metadata.installCpuReadBinding(allocated.replica, binding).binding, binding);
+        }
+    }
+    if (native) {
+        QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
+        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(pages));
+        // Retrying the original Frame neither reseals nor exports new proofs.
+        QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
+        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(pages));
+    }
+    auto candidate = native ? metadata.prepareAcceptance(tx, {rows.data(), rows.size()})
+        : metadata.preparePublication(tx, view.root(), {2}, commits);
+    QVERIFY(candidate.isValid());
+    if (outcome == 1) bindings.back()->revoke(); // After preparation, before actual acceptance.
+    QSemaphore attempted, finished;
+    std::thread revoker;
+    const auto join = qScopeGuard([&] { if (revoker.joinable()) revoker.join(); });
+    bool entered = false, blocked = false, installed = false;
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    auto install = [&] {
+        entered = true;
+        if (outcome == 2) {
+            revoker = std::thread([&] { attempted.release(); bindings.back()->revoke(); finished.release(); });
+            const bool started = attempted.tryAcquire(1, 5000);
+            blocked = started && !finished.tryAcquire(1, 30);
+        }
+        installed = metadata.installAcceptance(std::move(candidate), tx, nullptr,
+            native ? KisImageEpochId{} : KisImageEpochId{2}, &cleanup);
+        return installed;
+    };
+    const bool accepted = candidate.acceptCpuResources(&install,
+        [](void *p) { return (*static_cast<decltype(install) *>(p))(); });
+    if (revoker.joinable()) revoker.join();
+    QCOMPARE(accepted, outcome != 1); QCOMPARE(entered, outcome != 1); QCOMPARE(installed, outcome != 1);
+    if (outcome == 2) QVERIFY(blocked); // Revoke cannot cross the installing cut.
+    if (native) {
+        if (installed) metadata.finishAcceptance({rows.data(), rows.size()});
+        else for (auto &row : originals) QVERIFY(metadata.cancelPrivateResult(row.get()));
+    }
+    // The provider destructor performs the real physical tail, including the
+    // deliberately revoked allocation; no fake retirement/refund is injected.
 }
 
 void KisPageStoreReferenceTest::editValuesGroupLifetimeAndPressure()
@@ -7447,7 +7559,7 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         KisPreparedPageProof proof;
         proof.authority = result.target(); proof.transaction = write.transaction;
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-        QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1));
+        QVERIFY(freezeOriginalValue(metadata, result, proof.transaction, 1));
         // Internal publication is valid before any public capability exists.
         // Guessing the future stamp cannot turn an unexported Value into one.
         const KisPagePublicationIdentity internal{result.version(), result.sealedBy(), 0, true, result.valueSlot()};
@@ -7519,12 +7631,13 @@ void KisPageStoreReferenceTest::privatePreparedBackingReplacement()
         proof.producerCompletion = completion; proof.providerValidationStamp = 1;
         // Completion capability must name the original registered result;
         // neither a copied result nor the ordinary seal may complete it.
-        QVERIFY(!metadata.sealPrivateValue(foreign, proof.transaction, 1, true));
+        QVERIFY(!freezeOriginalValue(metadata, foreign, proof.transaction, 1, true));
         QVERIFY(!result.completed);
-        QVERIFY(!metadata.sealPrivateValue(result, proof.transaction, 1));
-        QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1, true));
+        QVERIFY(!freezeOriginalValue(metadata, result, proof.transaction, 1));
+        QVERIFY(freezeOriginalValue(metadata, result, proof.transaction, 1, true));
         QVERIFY(result.completed);
-        QVERIFY(!metadata.sealPrivateValue(result, proof.transaction, 1, true));
+        // A frozen original row may be retried; it issues no new capability.
+        QVERIFY(freezeOriginalValue(metadata, result, proof.transaction, 1, true));
     }
     if (result.reserved) QVERIFY(metadata.cancelPrivateResult(&result));
 }
@@ -8827,7 +8940,7 @@ void KisPageStoreReferenceTest::finalAdoptionMatchesPrivateWriter()
     KisPreparedPageProof proof;
     proof.transaction = transaction; proof.authority = write.target;
     proof.producerCompletion = completion; proof.providerValidationStamp = 1;
-    QVERIFY(metadata.sealPrivateValue(result, proof.transaction, 1));
+    QVERIFY(freezeOriginalValue(metadata, result, proof.transaction, 1));
     auto commit = write; commit.kind = KisPageTransitionKind::CommitTransaction; commit.imageEpoch = {2};
     const KisPageTransaction tx{transaction, {1}};
     auto candidate = metadata.preparePublication(tx, metadataView.root(), {2}, QVector<KisPageTransition>{commit});
@@ -11638,7 +11751,7 @@ void KisPageStoreReferenceTest::mutationCapacityContinuationIsBound()
     const auto completion = registry.allocatePending(registry.registerSource(KisCompletionDomain::HostLogical));
     QVERIFY(registry.complete(completion, KisCompletionStatus::Succeeded));
     QVERIFY(coordinator->bindCpuProofIssuer(1, completion));
-    QVERIFY(coordinator->sealPrivateValue(native, tx.id, 1));
+    QVERIFY(freezeOriginalValue(*coordinator, native, tx.id, 1));
     KisPagePublicationChange birth;
     birth.replacement = KisPagePublicationChange::Replacement(&native);
     auto first = coordinator->prepareAcceptance(tx, {&birth, 1});

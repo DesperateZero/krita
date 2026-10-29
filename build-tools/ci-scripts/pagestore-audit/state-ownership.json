@@ -491,7 +491,8 @@
         "KisPageMutationSession::seal",
         "KisPageStore::stageSurfaceMetadata",
         "KisPageStore::stagePageRemoval",
-        "KisPagePublicationCoordinator::commitLocked prepared commit construction"
+        "KisPagePublicationCoordinator::commitLocked prepared commit construction",
+        "PreparedPublication::acceptCpuResources captures original final Value/replica/binding positions and sorts only the original candidate columns. Overlay, regular/canonical commit and restore use the same Resource guard; original Frame rows and deferred cold metadata cleanup retain column storage until all gates unlock. Final revocation/incarnation is checked under the gate through the actual fee/metadata/view cut. Preparation validates provider provenance/layout/custom policy without making a dynamic acceptance promise."
       ],
       "current-writers": [
         "KisPagePublicationCoordinator"
@@ -658,7 +659,7 @@
     {
       "creation-paths": [
         "KisPageOwnerLedger::registerBacking",
-        "KisPageOwnerLedger::acceptBackingChanges / acceptIdleCapacity / acceptRetirementDebt",
+        "KisPageOwnerLedger::acceptPreparedBackingChanges / acceptPreparedIdleCapacity / acceptRetirementDebt",
         "KisPageOwnerLedger::prepareBackingHandoff",
         "reserveBacking prepares the original charged retirement record and real physical endpoint before the fresh provider call; registration inserts original stable backing/membership nodes. Independent registration keeps its scoped domain marker through actual admission and revalidates observed footprint/revision after the unlocked provider call.",
         "Class acceptance is synchronous under the ledger gate: original publication scratch or one reusable retirement vector carries exact located rows through fee admission, preallocated metadata/root installation and commit/cancel. Retirement effects use one charged temporary resolved-location vector for deduplication; there is no mixed class/effect service or test-only production entry. No escaping class reservation, slot/generation/free list, borrowed activity count, per-row claim identity or selected-alias chain survives.",
@@ -671,7 +672,7 @@
       ],
       "fact": "exact backing registration, physical-once budget classification and funded handoff retirement headroom",
       "id": "BR1-OWN-BACKING-CLASSIFICATION",
-      "lock-or-claim": "Original Store/adapter admission -> ledger -> epoch/metadata installation; all class fee projection, admission, installation and settlement finish before ledger unlock. Installer must be preallocated and cannot call providers/users/reenter ledger. Handoff/domain claims may really escape; class scratch cannot. Physical delivery, provider work and last reference cleanup remain outside the acceptance gate.",
+      "lock-or-claim": "Store/adapter admission -> sorted deduplicated CPU Resource gates -> ledger -> epoch/metadata installation. synchronizeBackingDomains runs before Resource acquisition; no provider callback occurs under the Resource/ledger acceptance interval. All fee admission, preallocated metadata/root installation and settlement finish before ledger unlock. Physical/Idle delivery and final reference cleanup follow Resource unlock. Handoff/domain claims retain their genuine independent lifetime.",
       "read-only-observers": [
         "KisPageOwnerLedger::backingClass",
         "KisPageRetirementQueue",

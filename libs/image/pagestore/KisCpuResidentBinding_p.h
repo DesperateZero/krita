@@ -68,6 +68,7 @@ protected:
     virtual void finishStorageHandoff(bool writable) noexcept { Q_UNUSED(writable); }
 
 private:
+    friend class KisPageMetadataCoordinator;
     friend class KisCpuWriteBindingReservation;
     friend class KisCpuBackingHandoff;
     friend class KisTiles3PageReplicaProvider;

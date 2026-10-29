@@ -1265,6 +1265,14 @@ bool KisTiles3PageReplicaProvider::validateCpuBinding(const KisReplicaHandle &re
     const KisPageAllocationDescriptor &descriptor,
     const std::shared_ptr<KisCpuResidentBinding> &binding) const
 {
+    return prepareCpuPublication(replica, descriptor, binding)
+        && (!binding || binding->matchesHandle(replica));
+}
+
+bool KisTiles3PageReplicaProvider::prepareCpuPublication(const KisReplicaHandle &replica,
+    const KisPageAllocationDescriptor &descriptor,
+    const std::shared_ptr<KisCpuResidentBinding> &binding) const
+{
     if (!binding) return validate(replica, descriptor); // A real unbound/generic input.
     // The original provider-created binding owns the allocation. Retirement
     // revokes it before unlinking the provider index; handoff changes its
@@ -1273,8 +1281,7 @@ bool KisTiles3PageReplicaProvider::validateCpuBinding(const KisReplicaHandle &re
     // including two providers configured with identical numeric identities.
     const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding.get());
     return original && original->belongsTo(&d->handoffAdmission)
-        && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor)
-        && original->matchesHandle(replica);
+        && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor);
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::retire(

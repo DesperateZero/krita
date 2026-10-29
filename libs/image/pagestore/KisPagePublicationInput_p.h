@@ -142,6 +142,8 @@ struct KisPagePublicationChange {
         KisVersionSlotId replacementSlot;
         quint16 shardIndex = 0; // configure() permits at most 4096 shards.
     } metadataAcceptance;
+    // Sorted independently from metadata/fee columns; original rows stay put.
+    KisPageCpuPublicationResource resourceAcceptance;
     // Metadata borrows these original facts until preparation/acceptance
     // finishes. No independently owned detachment list or ordinal remap.
     bool hasMutation() const { return superseded.isValid() || replacement.native; }

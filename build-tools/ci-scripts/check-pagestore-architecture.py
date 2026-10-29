@@ -1205,7 +1205,8 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                          "KisMutationWorkspace workspace", "preparedCommit.prepareChanges",
                          "preparedCommit.beginBackingChanges", "preparedCommit.release",
                          "publicationBackingReader", "KisPagePreparedBackingChange", "preparedCommit.acceptFees",
-                         "Acceptance::FeesRefused", "Acceptance::InstallRejected", "acceptIdleCapacity"):
+                         "Acceptance::FeesRefused", "Acceptance::InstallRejected", "acceptPreparedIdleCapacity",
+                         "acceptCpuResources", "synchronizeBackingDomains"):
             if contract not in source_text:
                 errors.append(f"Publication synchronous workspace contract is missing: {contract}")
         for retired in ("KisPreparedMutationCommit::Data", "preparedCommit.data",
@@ -1215,14 +1216,15 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                 errors.append(f"Publication retains replaced storage protocol: {retired}")
         ledger_text = "\n".join(code_only((REPOSITORY_ROOT / "libs/image/pagestore" / name).read_text(encoding="utf-8"))
             for name in ("KisPageOwnerLedger.h", "KisPageOwnerLedger.cpp", "KisPageRetirementRecord_p.h"))
-        for contract in ("acceptProjectedChanges", "acceptRetirementDebt", "acceptBackingChanges",
+        for contract in ("acceptProjectedChanges", "acceptRetirementDebt", "acceptPreparedBackingChanges",
                          "InstallRejected", "classChanges", "HandoffClaim"):
             if contract not in ledger_text:
                 errors.append(f"Synchronous backing acceptance contract is missing: {contract}")
         for retired in ("KisBackingClassChangeReservation", "PreparedBackingChangeSlot", "prepareBackingChanges",
                         "commitBackingChanges", "prepareIdleCapacity", "activeBorrowedChanges", "freePreparedChanges",
                         "acceptsNewMember", "preservesCharge", "classClaim->claim", "claim->next",
-                        "acceptBackingChangesImpl", "acceptBackingChangesLocked", "acceptClassChanges"):
+                        "acceptBackingChangesImpl", "acceptBackingChangesLocked", "acceptClassChanges",
+                        "sealPrivateValue(", "validatePrivateWrites(", "acceptBackingChanges(", "acceptIdleCapacity("):
             if retired in ledger_text or retired in source_text:
                 errors.append(f"Backing acceptance retains replaced escaping fee protocol: {retired}")
         if "QObject" in header_text:
@@ -1636,7 +1638,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         owner_source = code_only((page_store_source.parent / "KisPageOwnerLedger.cpp").read_text())
         if "nextProviderInCut" in owner_source:
             errors.append("provider traversal restored one registration lookup per provider")
-        for required in ("activity.nativeWrite != &result", "(!result.completed && !complete)",
+        for required in ("freezePrivateValues", "activity.nativeWrite != &value", "(!value.completed && !complete)",
                          "activity.writerTransaction == transaction"):
             if required not in metadata_text:
                 errors.append("native validation no longer consumes the original result: " + required)

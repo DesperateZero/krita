@@ -57,7 +57,7 @@ bool validateOriginalWrite(KisPageOwnerLedger &owner, KisPagePrivateWrite &resul
                           KisPageTransactionId transaction, QString *error)
 {
     KisPagePublicationChange row{KisPagePublicationChange::Replacement{&result}};
-    return owner.validatePrivateWrites({&row, 1}, transaction, error);
+    return owner.preparePrivatePublication({&row, 1}, transaction, error);
 }
 
 // Faults are injected at the provider contract, never by editing owner state.

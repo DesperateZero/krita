@@ -299,7 +299,7 @@ private:
     // Original-result acceptance of an unlocked provider validation. The
     // retained location, registered writer and issuer are checked together;
     // no exported capability is produced or decoded by this internal handoff.
-    bool sealPrivateValue(KisPagePrivateWrite &, KisPageTransactionId,
+    bool freezePrivateValues(KisPagePublicationRows, KisPageTransactionId,
                           quint64 issuer, bool complete = false);
     bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
         KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
@@ -463,6 +463,11 @@ private:
         KisPageRetirementRecord *originalBacking(const KisPageVersion &) const;
         void forEachDetachedBacking(void *, void (*)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
         KisPagePublicationRows originalRows() const { return m_rows; }
+        // Caller holds Store/adapter admission. Only prepaid acceptance is
+        // invoked while sorted original CPU Resource gates are held. Original
+        // rows and DeferredPublicationCleanup keep candidate storage alive
+        // until this returns; physical delivery/cleanup follows gate release.
+        bool acceptCpuResources(void *, bool (*accept)(void *), QString *error = nullptr);
 
     private:
         class Data;

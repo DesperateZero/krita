@@ -40,14 +40,16 @@ public:
         KisPagePreparedBackingChange *rows, size_t capacity, Reader &reader,
         Install install, QString *error = nullptr)
     {
-        return owner.acceptBackingChanges(rows, capacity, &reader,
+        if (!owner.synchronizeBackingDomains(error)) return KisPageOwnerLedger::BackingAcceptance::FeesRefused;
+        return owner.acceptPreparedBackingChanges(rows, capacity, &reader,
             [](void *context, KisBackingClassChange *change) { return (*static_cast<Reader *>(context))(change); },
             &install, [](void *context) { return (*static_cast<Install *>(context))(); }, error);
     }
     static bool acceptIdle(KisPageOwnerLedger &owner, KisPagePublicationRows rows,
         quint64 allowance, QString *error = nullptr, bool commit = true)
     {
-        return owner.acceptIdleCapacity(rows, allowance, &commit,
+        if (!owner.synchronizeBackingDomains(error)) return false;
+        return owner.acceptPreparedIdleCapacity(rows, allowance, &commit,
             [](void *context) { return *static_cast<bool *>(context); }, error)
             == (commit ? Acceptance::Accepted : Acceptance::InstallRejected);
     }

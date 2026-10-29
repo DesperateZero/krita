@@ -3042,7 +3042,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         phase.next(Phase::MutationSealProofPrepare, quint64(overlayChangeCount - sealedRemovals));
         if (success && overlayChangeCount) {
             changes = d->writes.publicationRows();
-            success = owner->owner.validatePrivateWrites(changes, d->transaction.id, &failure, !sealedSources);
+            success = owner->owner.preparePrivatePublication(changes, d->transaction.id, &failure, !sealedSources);
         }
         for (auto slot = d->writes.firstEntry(); success && overlayChangeCount && slot.isValid(); slot = d->writes.nextEntry(slot)) {
             auto *entry = d->writes.at(slot.index);

@@ -197,6 +197,14 @@ struct KisPageValueState {
 
 struct KisPageValueCell : KisPageViewValue, KisPageValueState {};
 
+// Borrowed only for one synchronous acceptance under the Store owner gate.
+// Original Frame/root/candidate and deferred releases retain these objects.
+struct KisPageCpuPublicationResource {
+    KisCpuResidentBinding *binding = nullptr;
+    const KisPageValueCell *value = nullptr;
+    const KisPageReplicaState *replica = nullptr;
+};
+
 
 // The stable original edit row borrows its one final Value. It never owns a
 // second target/layout/binding/proof and cannot be copied into another writer.

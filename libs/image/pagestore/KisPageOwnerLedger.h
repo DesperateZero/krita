@@ -174,9 +174,9 @@ public:
     // independent capability lifetime and may coexist for the same version.
     bool bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion);
     // The caller freezes original rows through completion and acceptance.
-    // One issuance range and retained provider serve the actual batch; each
-    // original writer still validates its dynamic allocation and reservation.
-    bool validatePrivateWrites(KisPagePublicationRows rows, KisPageTransactionId transaction,
+    // Provenance/custom provider preparation precedes grouped Value freezing;
+    // actual dynamic CPU Resource gates cover the eventual acceptance cut.
+    bool preparePrivatePublication(KisPagePublicationRows rows, KisPageTransactionId transaction,
                                QString *error = nullptr, bool complete = false);
 
     // Caller protects the Prepared version/provider across validation (owner
@@ -200,19 +200,23 @@ private:
     // Publication retains the original transaction/key claims. These consume
     // its compact identity directly; exported capabilities keep their checks.
     bool validatePublicationIdentity(const KisPageMetadataCoordinator &, const KisPagePublicationIdentity &) const;
+    bool preparePublicationIdentity(const KisPageMetadataCoordinator &, const KisPagePublicationIdentity &) const;
+    bool inspectPublicationIdentity(const KisPageMetadataCoordinator &, const KisPagePublicationIdentity &, bool preparation) const;
     bool releasePublicationIdentity(const KisPagePublicationIdentity &);
     KisPageRetirementRecords takeShutdownRetirementRecords();
-    // One synchronous R -> epoch/V acceptance. Inputs and all installation
+    // Provider domain synchronization must finish BEFORE Resource gates.
+    // These prepared entries invoke no provider callback or physical I/O.
+    // One synchronous ledger -> epoch/V acceptance. Inputs and all installation
     // capacity are prepared before entry; install cannot call a provider,
     // reenter this ledger, or leave partial state on refusal. Final references
     // and physical delivery stay in the caller's unlocked cleanup.
     // Reader: 1 = change, 0 = end, -1 = invalid input. It consumes immutable
     // facts without acquiring another owner/metadata/provider gate.
-    BackingAcceptance acceptBackingChanges(
+    BackingAcceptance acceptPreparedBackingChanges(
         KisPagePreparedBackingChange *rows, size_t capacity, void *reader,
         int (*read)(void *, KisBackingClassChange *),
         void *context, bool (*install)(void *), QString *error = nullptr);
-    BackingAcceptance acceptIdleCapacity(
+    BackingAcceptance acceptPreparedIdleCapacity(
         KisPagePublicationRows rows, quint64 allowance,
         void *context, bool (*install)(void *), QString *error = nullptr);
     KisReplicaBackingFootprint observeBackingFootprint(

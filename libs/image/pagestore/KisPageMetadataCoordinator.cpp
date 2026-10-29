@@ -22,6 +22,7 @@
 #include <QScopeGuard>
 
 #include <algorithm>
+#include <boost/iterator/transform_iterator.hpp>
 #include <atomic>
 #include <bitset>
 #include <cstddef>
@@ -2563,6 +2564,7 @@ public:
         KisPageKey key() const { return version.key; }
     };
     struct Publication {
+        KisPageCpuPublicationResource resourceAcceptance;
         explicit Publication(KisPageWorkingStorage storage)
             : installRecords(decltype(installRecords)::allocator_type(storage)),
               deltas(decltype(deltas)::allocator_type(storage)) {}
@@ -2886,6 +2888,97 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
     }
     installed = true;
     owner.reset();
+}
+
+bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
+    void *context, bool (*accept)(void *), QString *error)
+{
+    if (!accept) return false;
+    using Resource = KisPageCpuPublicationResource;
+    const auto capture = [](const ShardRecordStore &records, const KisPageValueCell *value) {
+        Resource resource;
+        if (value && value->native.nativeBinding && value->native.nativeReplica == value->authorityReplica) {
+            const auto *replica = records.replica(value->native.nativeReplica);
+            if (replica) resource = {value->native.nativeBinding.get(), value, replica};
+        }
+        return resource;
+    };
+    // Store admission excludes authority/placement edits here. Original
+    // candidates retain the Values and any displaced references through the
+    // synchronous installer. Read pins only change the Resource gate state.
+    for (auto &row : m_rows) {
+        row.resourceAcceptance = {};
+        if (row.replacement.removal) continue;
+        if (const auto *native = row.replacement.native) {
+            // The private result already owns its final primary replica.
+            if (!native->hasValue()) return false;
+            if (native->binding()) row.resourceAcceptance = {
+                native->binding().get(), native->value, &native->value->primaryReplica};
+        } else {
+            auto &work = row.metadataAcceptance;
+            auto *shard = static_cast<MetadataShard *>(work.shard);
+            if (!shard) continue;
+            QMutexLocker lock(&shard->mutex);
+            row.resourceAcceptance = capture(shard->records, shard->records.version(work.replacementSlot));
+        }
+    }
+    if (data) for (size_t i = 0; i < data->publications.size(); ++i) {
+        auto &publication = data->publications[i];
+        const auto &entry = data->entries[i];
+        const KisPageVersion target{publication.next.key, publication.next.publishedGeneration,
+            publication.next.publishedDefaultPixelRevision};
+        QMutexLocker lock(&entry.shardOwner->mutex);
+        KisVersionSlotId slot;
+        publication.resourceAcceptance = capture(entry.shardOwner->records,
+            entry.shardOwner->records.findVersion(target, &slot) ? entry.shardOwner->records.version(slot) : nullptr);
+    }
+    using It = KisPublicationMemberIterator<Resource, &KisPagePublicationChange::resourceAcceptance>;
+    const auto before = [](const Resource &a, const Resource &b) {
+        return std::less<KisCpuResidentBinding *>{}(a.binding, b.binding);
+    };
+    It nativeBegin(m_rows.begin()), nativeEnd(m_rows.end());
+    std::sort(nativeBegin, nativeEnd, before);
+    auto *cold = data && !data->publications.empty() ? data->publications.begin() : nullptr;
+    const size_t coldCount = cold ? data->publications.size() : 0;
+    const auto column = +[](Data::Publication &row) -> Resource & { return row.resourceAcceptance; };
+    auto coldBegin = boost::make_transform_iterator(cold, column);
+    auto coldEnd = coldCount ? coldBegin + ptrdiff_t(coldCount) : coldBegin;
+    if (coldCount > 1) std::sort(coldBegin, coldEnd, before);
+
+    size_t nativeCount = 0, coldTaken = 0;
+    KisCpuResidentBinding *last = nullptr;
+    // Merge the two original columns, rather than allocating a third array
+    // or taking two differently ordered sets of Resource gates.
+    const auto unlock = qScopeGuard([&] {
+        KisCpuResidentBinding *released = nullptr;
+        while (nativeCount || coldTaken) {
+            const bool fromNative = !coldTaken || (nativeCount
+                && !before(nativeBegin[ptrdiff_t(nativeCount - 1)], coldBegin[ptrdiff_t(coldTaken - 1)]));
+            const auto &resource = fromNative ? *(nativeBegin + ptrdiff_t(--nativeCount))
+                : *(coldBegin + ptrdiff_t(--coldTaken));
+            if (resource.binding && resource.binding != released) {
+                resource.binding->m_mutex.unlock();
+                released = resource.binding;
+            }
+        }
+    });
+    while (nativeCount < m_rows.size() || coldTaken < coldCount) {
+        const bool fromNative = coldTaken == coldCount || (nativeCount < m_rows.size()
+            && !before(coldBegin[ptrdiff_t(coldTaken)], nativeBegin[ptrdiff_t(nativeCount)]));
+        const auto &resource = fromNative ? *(nativeBegin + ptrdiff_t(nativeCount++))
+            : *(coldBegin + ptrdiff_t(coldTaken++));
+        if (!resource.binding) continue;
+        if (resource.binding != last) {
+            resource.binding->m_mutex.lock();
+            last = resource.binding;
+        }
+        if (resource.binding->m_retired
+            || !(resource.binding->m_handle == resource.replica->handle(resource.value->version))) {
+            KisPageStoreDetail::setError(error, QStringLiteral("CPU Resource changed before publication acceptance"));
+            return false;
+        }
+    }
+    return accept(context);
 }
 
 // Cold accepted references that must leave after unlocking. Native values
@@ -5350,23 +5443,55 @@ bool KisPageMetadataCoordinator::cancelPrivateResult(KisPagePrivateWrite *native
     return true;
 }
 
-bool KisPageMetadataCoordinator::sealPrivateValue(KisPagePrivateWrite &result,
+bool KisPageMetadataCoordinator::freezePrivateValues(KisPagePublicationRows rows,
     KisPageTransactionId transaction, quint64 issuer, bool complete)
 {
-    auto *d = m_core.load(std::memory_order_acquire);
-    if (!d || !issuer || d->cpuProofIssuer.load() != issuer || !transaction.isValid()
-        || !result.reserved || !result.location.shard || !result.location.page) return false;
-    // Provider validation has completed. Only the noncopyable original row
-    // may seal this registered edit; no public stamp is issued on this path.
-    auto *shard = Private::registeredShard(d, result);
-    if (!shard) return false;
-    QMutexLocker lock(&shard->mutex);
-    const auto &activity = static_cast<MetadataPage *>(result.location.page)->activity;
-    if (activity.nativeWrite != &result || (!result.completed && !complete)
-        || result.isSealed() || !(activity.writerTransaction == transaction)) return false;
-    result.completed = true;
-    result.value->native.sealedBy = transaction;
-    ++shard->arenas.sealedCpuValues;
+    auto *core = m_core.load(std::memory_order_acquire);
+    if (!core || !issuer || core->cpuProofIssuer.load() != issuer || !transaction.isValid()
+        || (rows.size() && !rows)) return false;
+    size_t count = 0;
+    for (auto &row : rows) {
+        auto &work = row.metadataAcceptance;
+        work = {};
+        if (row.replacement.removal) continue;
+        auto *value = row.replacement.native;
+        auto *shard = value ? Private::registeredShard(core, *value) : nullptr;
+        if (!shard || !value->reserved || !value->location.page) return false;
+        work.input = &row;
+        work.shard = shard;
+        work.page = value->location.page;
+        work.shardIndex = quint16(value->location.shardIndex);
+        ++count;
+    }
+    using It = KisPublicationMemberIterator<KisPagePublicationChange::MetadataAcceptance,
+                                           &KisPagePublicationChange::metadataAcceptance>;
+    std::sort(It(rows.begin()), It(rows.end()), [](const auto &a, const auto &b) {
+        if (bool(a.input) != bool(b.input)) return bool(a.input);
+        return a.shardIndex < b.shardIndex;
+    });
+    for (size_t first = 0; first < count;) {
+        auto *shard = static_cast<MetadataShard *>(rows[first].metadataAcceptance.shard);
+        size_t end = first + 1;
+        while (end < count && end - first < 16 && rows[end].metadataAcceptance.shard == shard) ++end;
+        QMutexLocker lock(&shard->mutex);
+        for (size_t i = first; i < end; ++i) {
+            const auto &work = rows[i].metadataAcceptance;
+            auto &value = *work.input->replacement.native;
+            const auto &activity = static_cast<MetadataPage *>(work.page)->activity;
+            if (activity.nativeWrite != &value || (!value.completed && !complete)
+                || !(activity.writerTransaction == transaction)
+                || (value.isSealed() && !(value.sealedBy() == transaction))) return false;
+        }
+        for (size_t i = first; i < end; ++i) {
+            auto &value = *rows[i].metadataAcceptance.input->replacement.native;
+            value.completed = true;
+            if (!value.isSealed()) {
+                value.value->native.sealedBy = transaction;
+                ++shard->arenas.sealedCpuValues;
+            }
+        }
+        first = end;
+    }
     return true;
 }
 
