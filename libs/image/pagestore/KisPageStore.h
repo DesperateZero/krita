@@ -256,6 +256,7 @@ private:
     // Failed physical cancellation and abort remain on the same orphan link;
     // borrowed history transactions never acquire this responsibility.
     void takeTransactionOwnership();
+    KisPageTransaction transaction() const;
     bool ownsTransaction() const;
     bool finishOwnedTransaction(bool publish);
     // A shared legacy tile may perform its final unlock on a reader thread.

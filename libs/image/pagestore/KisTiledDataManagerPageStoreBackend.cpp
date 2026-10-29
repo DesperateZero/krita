@@ -275,6 +275,7 @@ public:
     StorageMap<const KisMemento *, KisPageStoreMemento> mementos;
     KisTiledDataManagerPageStoreLease *anonymousLeases = nullptr;
     StorageMap<Qt::HANDLE, std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>> cpuMutationBatches;
+    OperationFrame *operationFrames = nullptr; // Borrowed stack admission; no paid thread node.
     // Configuration is published once and the backend/store lifetime is
     // owned by KisTiledDataManager.  Tile lookup is a production hot path,
     // so readers must not serialize on the control-plane mutex merely to
@@ -290,7 +291,7 @@ public:
 class KisTiledDataManagerPageStoreWriteBatch::Private
 {
 public:
-    enum class Kind { Managed, Iterator, RawUnused, RawExposed };
+    enum class Kind { Explicit, Iterator, RawUnused, RawExposed };
     bool rawLease() const { return kind == Kind::RawUnused || kind == Kind::RawExposed; }
     ~Private()
     {
@@ -329,9 +330,8 @@ public:
     QMutex leaseMutex;
     KisTiledDataManagerPageStoreLease *leases = nullptr;
     KisTiledDataManagerPageStoreBackend *backend = nullptr;
-    KisPageTransaction transaction;
     bool failed = false;
-    Kind kind = Kind::Managed;
+    Kind kind = Kind::Explicit;
     bool hasWorkingAdapters = false;
     quint64 clients = 1;
     Qt::HANDLE thread = QThread::currentThreadId();
@@ -343,6 +343,112 @@ public:
     std::vector<KisTileHashTable::PreparedTile,
         KisMutationStorageAllocator<KisTileHashTable::PreparedTile>> adapterInsertions;
 };
+
+// Managed operations own the original Session directly. This borrowed stack
+// link expresses adapter nesting/barriers only; it is neither a write set nor
+// another cancellation owner. A real legacy pointer creates its extension on
+// demand and moves this SAME Session into it before exposing that pointer.
+class KisTiledDataManagerPageStoreBackend::OperationFrame
+{
+public:
+    explicit OperationFrame(KisTiledDataManagerPageStoreBackend &owner) : owner(owner) {}
+    OperationFrame(const OperationFrame &) = delete;
+    OperationFrame &operator=(const OperationFrame &) = delete;
+    ~OperationFrame()
+    {
+        if (legacyClient) legacy->finishClient(false);
+        leave();
+    }
+    void leave()
+    {
+        if (previous) {
+            QMutexLocker lock(&owner.d->mutex);
+            *previous = next;
+            if (next) next->previous = previous;
+            previous = nullptr;
+            next = nullptr;
+        }
+    }
+    bool begin(QString *error, KisPageMutationSession *reservation = nullptr,
+               KisPageMutationExecution *execution = nullptr)
+    {
+        {
+            QMutexLocker lock(&owner.d->mutex);
+            if (owner.currentOperationLocked()
+                || owner.d->cpuMutationBatches.count(thread)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("nested native CPU batch is not supported"));
+                return false;
+            }
+            next = owner.d->operationFrames;
+            previous = &owner.d->operationFrames;
+            if (next) next->previous = &this->next;
+            owner.d->operationFrames = this;
+        }
+        original = owner.beginFrameSession(error, false, reservation, execution);
+        return original.isActive();
+    }
+    KisPageMutationSession &session() { return legacy ? legacy->mutation : original; }
+    bool isPresent() const { return bool(original.d) || bool(legacy); }
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> promoteLegacy()
+    {
+        if (legacy) return legacy;
+        // A completed cut still owns delivery claims, but cannot be turned
+        // back into a mutable adapter client. Do not allocate for that refusal.
+        if (!original.isActive()) return {};
+        using Extension = KisTiledDataManagerPageStoreWriteBatch::Private;
+        auto prepared = std::allocate_shared<Extension>(KisMutationStorageAllocator<Extension>{});
+        StorageMap<Qt::HANDLE, std::weak_ptr<Extension>> index;
+        index.emplace(thread, prepared); // All fallible storage precedes transfer.
+        QMutexLocker lock(&owner.d->mutex);
+        if (!original.d || owner.d->cpuMutationBatches.count(thread)) return {};
+        const auto inserted = owner.d->cpuMutationBatches.insert(index.extract(index.begin()));
+        Q_ASSERT(inserted.inserted);
+        prepared->mutation = std::move(original);
+        prepared->backend = &owner;
+        legacy = std::move(prepared);
+        legacyClient = true;
+        return legacy;
+    }
+    bool finish(OperationDelivery *delivery, const AdapterCompletion &complete, QString *error)
+    {
+        const auto publish = [&](QString *failure) {
+            bool accepted;
+            if (legacy) {
+                if (!std::exchange(legacyClient, false)) return false;
+                accepted = legacy->finishClient(true, failure, true);
+            } else accepted = original.sealForAdapterDelivery(failure)
+                && owner.finishOwnedTransaction(original, true, failure);
+            // Publish ends thread-level operation discovery. Exact page
+            // claims stay with this same Frame through adapter delivery, so
+            // the completion callback can start a disjoint operation.
+            if (accepted) leave();
+            return accepted;
+        };
+        const bool accepted = complete ? complete(publish, error) : publish(error);
+        if (accepted && delivery) {
+            delivery->m_frame = std::move(original);
+            delivery->m_legacy = std::move(legacy);
+            legacyClient = false;
+        }
+        return accepted;
+    }
+    OperationFrame *next = nullptr;
+    OperationFrame **previous = nullptr;
+    const Qt::HANDLE thread = QThread::currentThreadId();
+private:
+    KisTiledDataManagerPageStoreBackend &owner;
+    KisPageMutationSession original;
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> legacy;
+    bool legacyClient = false;
+};
+
+KisTiledDataManagerPageStoreBackend::OperationFrame *
+KisTiledDataManagerPageStoreBackend::currentOperationLocked() const
+{
+    for (auto *frame = d->operationFrames; frame; frame = frame->next)
+        if (frame->thread == QThread::currentThreadId()) return frame;
+    return nullptr;
+}
 
 KisTiledDataManagerPageStoreLease::KisTiledDataManagerPageStoreLease(
     KisTiledDataManagerPageStoreBackend *backend, KisTileData *tile,
@@ -508,13 +614,6 @@ bool KisTiledDataManagerPageStoreWriteBatch::finish(QString *error,
     return completing->finishClient(true, error);
 }
 
-bool KisTiledDataManagerPageStoreWriteBatch::finishForAdapterDelivery(QString *error)
-{
-    if (m_clientFinished || !d) return false;
-    m_clientFinished = true;
-    return d->finishClient(true, error, true);
-}
-
 bool KisTiledDataManagerPageStoreWriteBatch::cancel()
 {
     if (m_clientFinished || !d) return false;
@@ -535,7 +634,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finishClient(
     bool clientSucceeded = false;
     {
         QMutexLocker lock(&owner->d->mutex);
-        if (retainAdmission && (clients != 1 || kind != Kind::Managed || leases)) {
+        if (retainAdmission && (clients != 1 || kind != Kind::Explicit || leases)) {
             // Managed cursor delivery cannot hand off a batch with escaped
             // legacy clients/leases. Their original final holder cancels it.
             succeeded = false;
@@ -556,14 +655,14 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::finish(QString *error, boo
     const KisPageMutationSession::AdapterInstallation &installAdapter)
 {
     if (!backend) return !failed;
-    if (!transaction.isValid()) return false;
+    if (!mutation.transaction().isValid()) return false;
     const bool mutationActive = mutation.isActive();
     if (!mutationActive && !failed) return false;
     if (failed) KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore private mutation batch cancelled"));
     const bool unused = kind == Kind::RawUnused;
     const bool releaseWorkingAdmission = hasWorkingAdapters && !retainAdmission;
     retainAdmission = retainAdmission || hasWorkingAdapters;
-    const bool sealed = mutationActive && !failed && !unused && (kind != Kind::Managed
+    const bool sealed = mutationActive && !failed && !unused && (kind != Kind::Explicit
         ? retainAdmission ? mutation.sealForLegacyAdapterDelivery(error) : mutation.sealForLegacyUnlock(error)
         : retainAdmission ? mutation.sealForAdapterDelivery(error, prepareAdapter) : mutation.seal(error));
     if (!sealed) {
@@ -672,7 +771,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::replaceFullTile(
     bool sparseDefault,
     QString *error) try
 {
-    if (!backend || !transaction.isValid() || failed) {
+    if (!backend || !mutation.transaction().isValid() || failed) {
         KisPageStoreDetail::setError(error, QStringLiteral(
             "tiles3 PageStore write batch is unavailable"));
         return false;
@@ -684,7 +783,7 @@ bool KisTiledDataManagerPageStoreWriteBatch::Private::replaceFullTile(
         const auto found = sources.find(tileData);
         auto source = found != sources.end() ? found->second : std::shared_ptr<const KisPageReplicaSource>{};
         if (!source) {
-            const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
+            const auto overlay = KisPageReadView::transactionOverlay(mutation.transaction().id);
             KisSurfaceEpochState state;
             if (backend->store()->resolveSurfaceState(key.surface, overlay, &state))
                 source = backend->d->provider->captureCompletedTileSource(state.allocationDescriptor(), tileData, error);
@@ -886,6 +985,7 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
     auto *manager = d->manager;
     if (!manager) return {};
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> shared;
+    OperationFrame *activeFrame = nullptr;
     {
         QMutexLocker lock(&d->mutex);
         const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
@@ -896,18 +996,22 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
                 return {};
             }
         }
+        if (!shared) activeFrame = currentOperationLocked();
     }
-    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+    if (activeFrame) {
+        shared = activeFrame->promoteLegacy();
+        if (!shared) return {};
+    }
+    OperationFrame frame(*this);
     if (!shared) {
-        batch = beginMutationBatch(error);
-        if (!batch) return {};
-        shared = batch->d;
+        if (!frame.begin(error)) return {};
     }
+    auto &mutation = shared ? shared->mutation : frame.session();
     // Admission precedes the presence decision and all adapter preparation.
     // Reuse private aliases/writes as well as the transaction's sealed pages.
     bool present = false;
-    if (!shared->mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return {};
-    const bool provisional = !batch && !present;
+    if (!mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return {};
+    const bool provisional = shared && !present;
     auto prepared = manager->m_hashTable->prepareTileUpdate(column, row,
         provisional ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present);
     if (!manager->m_extentManager.prepareTileRange(QRect(column, row, 1, 1))) {
@@ -923,13 +1027,24 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
     }
     KisTileData *defaultData = manager->m_hashTable->refAndFetchDefaultTileData();
     const auto releaseDefault = qScopeGuard([&] { if (defaultData) defaultData->deref(); });
-    if (!defaultData || (!present && !shared->replaceFullTile(column, row, defaultData, false, error))) return {};
-    if (batch && !batch->finishForAdapterDelivery(error)) return {};
+    if (!defaultData) return {};
+    if (!present) {
+        if (shared) {
+            if (!shared->replaceFullTile(column, row, defaultData, false, error)) return {};
+        } else {
+            KisSurfaceEpochState state;
+            if (!store()->resolveSurfaceState(surface(),
+                    KisPageReadView::transactionOverlay(mutation.transaction().id), &state)) return {};
+            auto source = d->provider->captureCompletedTileSource(state.allocationDescriptor(), defaultData, error);
+            if (!source || !mutation.aliasPage({surface(), {column, row}}, source, error)) return {};
+        }
+    }
+    if (!shared && !frame.finish(nullptr, {}, error)) return {};
     bool created = false;
     auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(column, row);
     if (!tile) tile = manager->m_hashTable->installPreparedTile(*installation, created);
     Q_ASSERT(tile);
-    if (!batch) shared->hasWorkingAdapters = true;
+    if (shared) shared->hasWorkingAdapters = true;
     tile->setPageStoreBridge(this, false);
     tile->invalidatePageStoreReadCache();
     if (created) manager->m_extentManager.notifyTileAdded(column, row);
@@ -963,43 +1078,41 @@ KisTiles3PayloadWork KisTiledDataManagerPageStoreBackend::payloadWork() const
         ? d->provider->payloadWork() : KisTiles3PayloadWork{};
 }
 
-std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle,
-    KisPageMutationSession *reservation, KisPageMutationExecution *execution)
+KisPageMutationSession KisTiledDataManagerPageStoreBackend::beginFrameSession(
+    QString *error, bool requireIdle, KisPageMutationSession *reservation, KisPageMutationExecution *execution)
 {
-    using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
-    auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
     bool owned = false;
-    batch->transaction = writableTransaction(&owned, error, requireIdle);
-    if (!batch->transaction.isValid()) return {};
-    batch->mutation = reservation
-        ? d->store->beginMutation(batch->transaction, std::move(*reservation), execution, error)
-        : d->store->beginMutation(batch->transaction, error);
-    if (!batch->mutation.isActive()) {
-        // A new private transaction has no accepted work or external reader.
-        // Failed scope preparation already released its session activity.
-        if (owned && !d->store->abort(batch->transaction))
+    const auto transaction = writableTransaction(&owned, error, requireIdle);
+    if (!transaction.isValid()) return {};
+    auto frame = reservation
+        ? d->store->beginMutation(transaction, std::move(*reservation), execution, error)
+        : d->store->beginMutation(transaction, error);
+    if (!frame.isActive()) {
+        if (owned && !d->store->abort(transaction))
             qFatal("Empty owned transaction could not be released");
         return {};
     }
-    if (owned) batch->mutation.takeTransactionOwnership();
+    if (owned) frame.takeTransactionOwnership();
+    return frame;
+}
+
+std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
+KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle)
+{
+    using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
+    auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
+    batch->mutation = beginFrameSession(error, requireIdle);
+    if (!batch->mutation.isActive()) return {};
     batch->backend = this;
     return batch;
 }
 
 std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
-KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle)
-{
-    return beginMutationBatchImpl(error, requireIdle, nullptr);
-}
-
-std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
-KisTiledDataManagerPageStoreBackend::beginMutationBatchImpl(QString *error, bool requireIdle,
-    KisPageMutationSession *reservation, KisPageMutationExecution *execution) try
+KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle) try
 {
     {
         QMutexLocker lock(&d->mutex);
-        if (d->cpuMutationBatches.find(QThread::currentThreadId()) != d->cpuMutationBatches.end()) {
+        if (currentOperationLocked() || d->cpuMutationBatches.find(QThread::currentThreadId()) != d->cpuMutationBatches.end()) {
             KisPageStoreDetail::setError(error, QStringLiteral("nested native CPU batch is not supported"));
             return {};
         }
@@ -1008,7 +1121,7 @@ KisTiledDataManagerPageStoreBackend::beginMutationBatchImpl(QString *error, bool
     preparedIndex.emplace(QThread::currentThreadId(), std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{});
     auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
         new KisTiledDataManagerPageStoreWriteBatch(std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{}));
-    batch->d = prepareMutationBatch(error, requireIdle, reservation, execution);
+    batch->d = prepareMutationBatch(error, requireIdle);
     if (!batch->d) return {};
     preparedIndex.begin()->second = batch->d;
     QMutexLocker lock(&d->mutex);
@@ -1137,6 +1250,10 @@ bool KisTiledDataManagerPageStoreBackend::cancelAnonymousLeasesForBarrier(
 {
     {
         QMutexLocker locker(&d->mutex);
+        if (d->operationFrames) {
+            KisPageStoreDetail::setError(error, QStringLiteral("clear requires managed operations to finish"));
+            return false;
+        }
         // clear is an externally sequenced operation, not permission to
         // cancel another running worker or a reentrant native operation.
         for (auto it = d->cpuMutationBatches.cbegin(); it != d->cpuMutationBatches.cend(); ++it) {
@@ -1582,12 +1699,19 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
 
     KisPageMutationSession *mutation = nullptr;
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch;
+    OperationFrame *activeFrame = nullptr;
     {
         QMutexLocker lock(&d->mutex);
         const auto slot = d->cpuMutationBatches.find(QThread::currentThreadId());
         batch = slot != d->cpuMutationBatches.end() ? slot->second.lock() : nullptr;
         if (batch && (batch->failed || batch->clients == 0)) return {};
         mutation = batch ? &batch->mutation : nullptr;
+        if (!batch) activeFrame = currentOperationLocked();
+    }
+    if (activeFrame) {
+        batch = activeFrame->promoteLegacy();
+        if (!batch) return {};
+        mutation = &batch->mutation;
     }
     if (access == Access::ReadCache) {
         // An idle wrapper is an expected-identity hint, not a fresh selector.
@@ -1681,7 +1805,7 @@ bool KisTiledDataManagerPageStoreBackend::beginHistoryMutation(
     QMutexLocker transactionLocker(&d->transactionMutex);
     QMutexLocker locker(&d->mutex);
     if (!owner || d->currentMemento != owner || !d->activeHistory.isValid() ||
-        !d->operational || !d->cpuMutationBatches.empty() || d->anonymousLeases) {
+        !d->operational || !d->cpuMutationBatches.empty() || d->operationFrames || d->anonymousLeases) {
         KisPageStoreDetail::setError(error, QStringLiteral("history mutation owner is unavailable"));
         return false;
     }
@@ -1978,8 +2102,8 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     // the original batch then owns both semantic and writable page claims.
     auto range = store()->reserveManagedRange(d->surface, targets, false, nullptr, error, false);
     if (!range.d) return false;
-    auto batch = beginMutationBatchImpl(error, false, &range);
-    if (!batch) return false;
+    OperationFrame frame(*this);
+    if (!frame.begin(error, &range)) return false;
     auto before = captureReadView(false, error);
     KisSurfaceEpochState surfaceState;
     if (!before.resolveSurfaceState(d->surface, &surfaceState) ||
@@ -2012,20 +2136,20 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
             }
             if (affected == pageRect) {
                 if (clearsToDefault) {
-                    if (!batch->replaceFullTile(key.page.column, key.page.row, nullptr, true, error)) return false;
+                    if (!frame.session().removePage(key, error)) return false;
                 } else {
                     if (!uniform) uniform = uniformSourceFor(surfaceState.allocationDescriptor(), pixel, error);
                     if (!uniform) return false;
                     auto read = before.readResidentPage(key);
                     if (d->provider->sourceMatchesReadGuard(uniform, read)) continue;
-                    if (!batch->d->mutation.reserveLegacyMutationPage(key, error) ||
-                        !batch->d->mutation.aliasPage(key, uniform, error)) return false;
+                    if (!frame.session().reserveLegacyMutationPage(key, error) ||
+                        !frame.session().aliasPage(key, uniform, error)) return false;
                 }
                 recordChange(key.page, !clearsToDefault);
                 continue;
             }
             const int x = affected.left() - pageRect.left(), y = affected.top() - pageRect.top();
-            auto execution = batch->d->mutation.borrowExecution(d->surface, {key.page}, error);
+            auto execution = frame.session().borrowExecution(d->surface, {key.page}, error);
             if (!execution.isActive() || !execution.writeFinalRect(key,
                 QRect(x, y, affected.width(), affected.height()),
                 {rowBytes.data(), 0, qsizetype(rowBytes.size())}, error)) return false;
@@ -2036,7 +2160,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     }
     before = {};
     if (changedPresence) changedPresence->resize(changed->size());
-    success = finishOperationBatch(batch, delivery, completeAdapter, error);
+    success = frame.finish(delivery, completeAdapter, error);
     return success;
 }
 catch (const std::bad_alloc &) {
@@ -2044,18 +2168,6 @@ catch (const std::bad_alloc &) {
     if (changedPresence) changedPresence->clear();
     KisPageStoreDetail::setError(error, QStringLiteral("fill storage preparation was refused"));
     return false;
-}
-
-bool KisTiledDataManagerPageStoreBackend::finishOperationBatch(
-    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> &batch,
-    OperationDelivery *delivery, const AdapterCompletion &completeAdapter, QString *error)
-{
-    const auto publish = [&](QString *failure) {
-        return delivery ? batch->finishForAdapterDelivery(failure) : batch->finish(failure);
-    };
-    const bool success = completeAdapter ? completeAdapter(publish, error) : publish(error);
-    if (success && delivery) delivery->m_batch = std::move(batch);
-    return success;
 }
 
 template<typename Operation>
@@ -2113,7 +2225,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         return Result::Failed;
     }
     phase.next(Phase::PixelOperationRangePrepare, quint64(targets.size()));
-    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+    OperationFrame frame(*this);
     KisPageMutationExecution execution;
     KisPageTransaction transaction;
     if (historyOwner) {
@@ -2134,9 +2246,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
                                                   &storeBorrowed, error, true);
         if (!range.d) return storeBorrowed ? Result::Borrowed : Result::Failed;
         phase.next(Phase::PixelOperationRangeReserved, quint64(targets.size()));
-        batch = beginMutationBatchImpl(error, false, &range, &execution);
-        if (!batch) return Result::Failed;
-        transaction = batch->d->transaction;
+        if (!frame.begin(error, &range, &execution)) return Result::Failed;
+        transaction = frame.session().transaction();
     }
     if (!execution.isActive()) return Result::Failed;
     const auto selection = KisPageReadView::transactionOverlay(transaction.id);
@@ -2190,7 +2301,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     if (historyOwner && completeAdapter && !completeAdapter([](QString *) { return true; }, error))
         return Result::Failed;
     if (!execution.finish(error)) return Result::Failed;
-    if (batch && !finishOperationBatch(batch, delivery, completeAdapter, error)) return Result::Failed;
+    if (frame.isPresent() && !frame.finish(delivery, completeAdapter, error)) return Result::Failed;
     phase.next(Phase::PixelOperationChangedDeliver, quint64(touched));
     phase.next(Phase::PixelOperationCleanup, quint64(touched));
     succeeded = true;
@@ -2419,8 +2530,8 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
         KisPageStoreDetail::setError(error, QStringLiteral("copy target bounds changed before admission"));
         return false;
     }
-    auto batch = beginMutationBatchImpl(error, false, &range);
-    if (!batch) return false;
+    OperationFrame frame(*this);
+    if (!frame.begin(error, &range)) return false;
     if (prepareAdapter && !prepareAdapter(sourceState.format.defaultPixel == targetState.format.defaultPixel, error)) return false;
     if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     const auto recordChange = [&](const KisLogicalPageId &page, bool present) {
@@ -2447,15 +2558,15 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
             if (affected == pageRect && sourceVersion.isDefaultPixel()) {
                 if (sourceState.format.defaultPixel == targetState.format.defaultPixel) {
                     if (targetVersion.isDefaultPixel()) continue;
-                    if (!batch->replaceFullTile(to.page.column, to.page.row, nullptr, true, error)) return false;
+                    if (!frame.session().removePage(to, error)) return false;
                 } else {
                     // Use the frozen default value directly; building a second
                     // shared default read buffer would duplicate initialization.
                     auto backing = uniformSourceFor(targetState.allocationDescriptor(), sourceState.format.defaultPixel.view(), error);
                     auto previous = targetView.readResidentPage(to);
                     if (backing && d->provider->sourceMatchesReadGuard(backing, previous)) continue;
-                    if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
-                        !batch->d->mutation.aliasPage(to, backing, error)) return false;
+                    if (!backing || !frame.session().reserveLegacyMutationPage(to, error) ||
+                        !frame.session().aliasPage(to, backing, error)) return false;
                 }
                 recordChange(to.page, sourceState.format.defaultPixel != targetState.format.defaultPixel);
                 continue;
@@ -2476,14 +2587,14 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
                     backing = d->provider->captureCompletedTileSource(targetState.allocationDescriptor(),
                         source.d->provider->tileDataForLease(input.genericLease()->leaseId()), error);
                 if (backing && d->provider->sourceMatchesReadGuard(backing, previous)) continue;
-                if (!backing || !batch->d->mutation.reserveLegacyMutationPage(to, error) ||
-                    !batch->d->mutation.aliasPage(to, backing, error)) return false;
+                if (!backing || !frame.session().reserveLegacyMutationPage(to, error) ||
+                    !frame.session().aliasPage(to, backing, error)) return false;
                 recordChange(to.page, true);
                 continue;
             }
             const qsizetype offset = (qsizetype(affected.top() - pageRect.top()) * KisTileData::WIDTH +
                                        affected.left() - pageRect.left()) * pixelSize;
-            auto execution = batch->d->mutation.borrowExecution(surface(), {to.page}, error);
+            auto execution = frame.session().borrowExecution(surface(), {to.page}, error);
             if (!execution.isActive() || !execution.writeFinalRect(to,
                 affected.translated(-pageRect.topLeft()),
                 {input.data() + offset, rowStride,
@@ -2496,7 +2607,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
     phase.next(KisPageStoreDiagnosticPhase::CopyFinish, 1);
     targetView = {};
     if (changedPresence) changedPresence->resize(changed->size());
-    success = finishOperationBatch(batch, delivery, completeAdapter, error);
+    success = frame.finish(delivery, completeAdapter, error);
     return success;
 }
 catch (const std::bad_alloc &) {
@@ -2598,14 +2709,15 @@ bool KisTiledDataManagerPageStoreBackend::removePages(
         KisPageStoreDetail::setError(error, {});
         return true;
     }
-    auto batch = beginMutationBatch(error);
-    if (!batch) return false;
+    OperationFrame frame(*this);
+    if (!frame.begin(error)) return false;
     for (const KisLogicalPageId &page : pages) {
-        if (!batch->d->replaceFullTile(page.column, page.row, nullptr, true, error))
+        if (!frame.session().reserveLegacyMutationPage({surface(), page}, error)
+            || !frame.session().removePage({surface(), page}, error))
             return false;
     }
     if (prepareAdapter && !prepareAdapter(error)) return false;
-    return finishOperationBatch(batch, delivery, completeAdapter, error);
+    return frame.finish(delivery, completeAdapter, error);
 }
 catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("removal storage preparation was refused"));
@@ -2630,14 +2742,14 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
     }
     // Trim still reconciles the whole index, including adapter-only remnants.
     // Completed native delivery owns its original claims even after leaving
-    // the thread/client registry. beginMutationBatch itself rejects nesting.
+    // the thread/client registry. Original Frame admission rejects nesting.
     if (d->store->sessionStats().activeCpuWritePages != 0) {
         KisPageStoreDetail::setError(error, QStringLiteral("trim requires adapter delivery to finish"));
         return false;
     }
-    auto batch = beginMutationBatch(error);
+    OperationFrame frame(*this);
     KisPageStore *pageStore = store();
-    if (!batch || !pageStore) return false;
+    if (!pageStore || !frame.begin(error)) return false;
 
     KisPageSnapshotArray<TrimPage> changes;
     const auto pages = allocatedPages();
@@ -2655,7 +2767,7 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         if (kept == extent) continue;
         changes.append({page, extent, kept});
     }
-    const auto transaction = batch->d->transaction;
+    const auto transaction = frame.session().transaction();
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
     KisSurfaceEpochState state;
     if (!pageStore->resolveSurfaceState(d->surface, overlay, &state) ||
@@ -2663,22 +2775,26 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
         KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim surface is unavailable or incompatible"));
         return false;
     }
+    // Complete actual claims precede adapter preparation and the first band.
+    for (const auto &change : changes)
+        if (!frame.session().reserveLegacyMutationPage({surface(), change.page}, error)) return false;
     // allocatedPages is ordered and unique; filtering preserves that order.
     if (prepareAdapter && !prepareAdapter(pages, error)) return false;
     const auto &pixel = state.format.defaultPixel;
     const qsizetype stride = qsizetype(KisTileData::WIDTH) * pixel.size();
     for (const auto &change : changes) {
         if (change.kept.isEmpty()) {
-            if (!batch->replaceFullTile(change.page.column, change.page.row, nullptr, true, error)) return false;
+            if (!frame.session().removePage({surface(), change.page}, error)) return false;
             continue;
         }
-        auto lease = acquireTile(change.page.column, change.page.row, Access::Write);
-        if (!lease || !lease->writable() || !lease->tileData()) {
+        auto execution = frame.session().borrowExecution(surface(), {change.page}, error);
+        auto guard = execution.beginWrite({surface(), change.page}, error);
+        if (!guard.isValid()) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page acquisition failed"));
             return false;
         }
-        quint8 *data = lease->tileData()->data();
-        if (!data || lease->tileData()->pixelSize() != pixel.size()) {
+        auto *data = static_cast<quint8 *>(guard.data());
+        if (!data || guard.rowStride() != stride) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page layout is invalid"));
             return false;
         }
@@ -2693,7 +2809,8 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
                 memcpy(target + i * pixel.size(), pixel.constData(), size_t(pixel.size()));
         };
         // All bands of one partial page share a single first-write backing.
-        // The lease protects bytes, not the compatibility hash or an old view.
+        // One original native guard protects all bands, with no generic lease
+        // record, tile wrapper or second target lookup.
         for (int row = 0; row < KisTileData::HEIGHT; ++row) {
             if (row < top || row >= bottom) fill(row, 0, KisTileData::WIDTH);
             else {
@@ -2701,13 +2818,13 @@ bool KisTiledDataManagerPageStoreBackend::trimToRect(
                 fill(row, right, KisTileData::WIDTH - right);
             }
         }
-        lease->markDirty();
-        if (!lease->finish()) {
+        guard = {};
+        if (execution.finishPreparedWrites(nullptr, error) < 0 || !execution.finish(error)) {
             KisPageStoreDetail::setError(error, QStringLiteral("tiles3 trim writable page release failed"));
             return false;
         }
     }
-    return finishOperationBatch(batch, delivery,
+    return frame.finish(delivery,
         [&](const auto &publish, QString *failure) {
             if (!publish(failure)) return false;
             if (completeAdapter) completeAdapter(changes.data(), changes.size());

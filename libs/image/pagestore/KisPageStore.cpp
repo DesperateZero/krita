@@ -2242,6 +2242,12 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
 
 KisPageMutationSession::~KisPageMutationSession() = default;
 
+KisPageTransaction KisPageMutationSession::transaction() const
+{
+    // Immutable while an original Frame/adapter capability retains this scope.
+    return d ? d->transaction : KisPageTransaction{};
+}
+
 void KisPageMutationSession::takeTransactionOwnership()
 {
     Q_ASSERT(d && d->transaction.isValid() && !d->ownsTransaction);

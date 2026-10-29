@@ -72,10 +72,6 @@ private:
     friend class KisTiledDataManagerIteratorWriteScope;
     explicit KisTiledDataManagerPageStoreWriteBatch(
         std::shared_ptr<Private> shared);
-    // Backend's managed operation only: retain the sealed session's original
-    // admission until this already-existing batch leaves the adapter caller.
-    bool finishForAdapterDelivery(QString *error);
-
     std::shared_ptr<Private> d;
     bool m_clientFinished = false;
 };
@@ -91,25 +87,28 @@ public:
     explicit KisTiledDataManagerPageStoreBackend(KisTiledDataManager *manager = nullptr);
     ~KisTiledDataManagerPageStoreBackend() override;
 
-    // A completed standalone operation's original batch. It carries no write
-    // access after completion; retaining it only retains the original page
-    // admission until operation-local adapter storage has been destroyed.
+    // The completed original Frame. Real escaped legacy adapters alone need
+    // their cold extension; ordinary managed delivery owns no batch facade.
     class KRITAIMAGE_EXPORT OperationDelivery
     {
     public:
         OperationDelivery() = default;
         OperationDelivery(OperationDelivery &&other) noexcept
-            : m_batch(std::exchange(other.m_batch, {})) {}
+            : m_frame(std::move(other.m_frame)), m_legacy(std::move(other.m_legacy)) {}
         OperationDelivery &operator=(OperationDelivery &&other) noexcept
         {
-            if (this != &other) m_batch = std::exchange(other.m_batch, {});
+            if (this != &other) {
+                m_frame = std::move(other.m_frame);
+                m_legacy = std::move(other.m_legacy);
+            }
             return *this;
         }
-        bool isEmpty() const { return !m_batch; }
+        bool isEmpty() const { return !m_frame.d && !m_legacy; }
 
     private:
         friend class KisTiledDataManagerPageStoreBackend;
-        std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> m_batch;
+        KisPageMutationSession m_frame;
+        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> m_legacy;
     };
 
     // The caller's existing adapter gate surrounds only the original publish
@@ -266,6 +265,8 @@ public:
     bool pageAllocated(qint32 column, qint32 row, bool oldData) const;
 
 private:
+    class OperationFrame;
+    OperationFrame *currentOperationLocked() const;
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;
@@ -297,19 +298,14 @@ private:
                                         quint8 *scratch, qsizetype capacity, QString *error = nullptr) const;
     KisPageTransaction writableTransaction(bool *owned,
                                            QString *error = nullptr, bool requireIdle = false);
-    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-    prepareMutationBatch(QString *error, bool requireIdle = false,
+    KisPageMutationSession beginFrameSession(QString *error, bool requireIdle = false,
         KisPageMutationSession *reservation = nullptr, KisPageMutationExecution *execution = nullptr);
-    std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> beginMutationBatchImpl(
-        QString *error, bool requireIdle, KisPageMutationSession *reservation,
-        KisPageMutationExecution *execution = nullptr);
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
+    prepareMutationBatch(QString *error, bool requireIdle = false);
     bool finishOwnedTransaction(KisPageMutationSession &mutation, bool publish,
                                 QString *error = nullptr);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
     void unregisterAnonymousLease(KisTiledDataManagerPageStoreLease *lease);
-    bool finishOperationBatch(std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> &batch,
-                              OperationDelivery *delivery, const AdapterCompletion &completeAdapter,
-                              QString *error);
     template<typename Operation>
     KisPageStoreWriteOperationResult runCpuMutationOperation(
         const KisPageSnapshotArray<KisLogicalPageId> &targets, bool legacyIntent, bool prepareWrites,

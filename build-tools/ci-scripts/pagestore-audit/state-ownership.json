@@ -27,26 +27,29 @@
     },
     {
       "creation-paths": [
-        "prepareMutationBatch and acquireTile join only the original explicit batch or create their own standalone operation"
+        "beginFrameSession creates/adopts the one original MutationSession for both managed operations and real legacy boundaries.",
+        "Managed pixel, fill/copy, remove/clear, trim and standalone writable-page operations keep that original Session directly. OperationFrame has a borrowed intrusive stack admission link; no ordinary shared legacy control, batch facade or paid thread node is created.",
+        "Only actual getTile/raw lease use within a managed operation promotes its SAME Session into the existing legacy lifetime extension. Storage is prepared before transfer, with no second scope/transaction. Explicit public batches, iterators and standalone raw leases retain their genuine client/pointer contract."
       ],
       "current-writers": [
-        "KisTiledDataManagerPageStoreWriteBatch::Private, with the original backend registry for its slot and raw leases"
+        "Original MutationSession owns pixels/claims/transaction/cancel/orphan/capacity. OperationFrame only owns stack adapter admission; WriteBatch::Private owns actual legacy clients/leases/provisional adapter tokens."
       ],
       "fact": "legacy adapter clients, raw-lease barrier membership and per-thread batch slot",
       "id": "BR1-OWN-COMPAT-TRANSACTION-GROUP",
-      "lock-or-claim": "backend transaction/registry gates and batch leaseMutex; original mutation claim is distinct from client count",
+      "lock-or-claim": "backend registry gate protects intrusive active operation links and real legacy thread slots; leaseMutex protects real legacy pointers/client return. Original Frame claim and cancellation are distinct from adapter client membership.",
       "read-only-observers": [
         "tile lock bridge",
         "writable iterator and operation scopes"
       ],
       "status": "canonical",
-      "target-authoritative-owner": "original WriteBatch::Private adapter lifetime",
+      "target-authoritative-owner": "Original Session with borrowed active admission and optional real legacy lifetime extension",
       "terminal-paths": [
-        "final client or guard completes only its original batch; finished facade drops the original reference",
-        "completeAdapters delivers cache invalidation/B rollback before manager responsibility leaves the batch",
-        "escaped native leases retain the original thread slot until their final release outside the tile barrier",
-        "cancelAnonymousLeasesForBarrier preflights same-thread ownership; late iterator clients cannot remove or publish a newer batch",
-        "successful prepared delivery retains original admission until local candidates are destroyed outside the manager gate"
+        "OperationDelivery directly moves the accepted original Session; real promoted legacy extensions alone retain their shared tail. Final delivery follows destruction of caller adapter candidates.",
+        "All actual adapters/clients consume the same original Session. No batch transaction copy survives; compatibility reads the immutable original Frame identity.",
+        "completeAdapters consumes original cache invalidation/provisional rollback before manager responsibility leaves the real legacy extension.",
+        "A failed managed operation with escaped legacy pointers retains the same Session and actual thread slot through final foreign-thread unlock; no new orphan queue or operation owner is created.",
+        "clear/history and nested native admission observe both borrowed live managed links and real legacy slots. Completed delivery retains the original page claims even after stack/legacy discovery ends.",
+        "trim uses one native guard for every partial page and finishes its original execution; generic lease bookkeeping, tile wrapper lookup and raw-markDirty return are deleted from this managed route."
       ]
     },
     {

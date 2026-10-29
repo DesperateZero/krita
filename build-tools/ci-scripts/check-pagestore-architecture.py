@@ -922,6 +922,20 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         backend_path.read_text(encoding="utf-8", errors="replace")
     ))
     frozen_backend_state = set(ratchet.get("backend_duplicate_state", []))
+    backend_text = code_only(backend_path.read_text(encoding="utf-8"))
+    backend_header = code_only(backend_path.with_suffix(".h").read_text(encoding="utf-8"))
+    for retired in ("beginMutationBatchImpl", "finishOperationBatch", "finishForAdapterDelivery"):
+        if retired in backend_text or retired in backend_header:
+            errors.append("managed adapter restored a superseded batch protocol: " + retired)
+    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationFrame *operationFrames",
+                     "original.sealForAdapterDelivery", "delivery->m_frame = std::move(original)",
+                     "prepared->mutation = std::move(original)", "currentOperationLocked()", "if (accepted) leave()"):
+        if required not in backend_text:
+            errors.append("managed adapter lost original Frame ownership/admission: " + required)
+    trim = backend_text[backend_text.find("bool KisTiledDataManagerPageStoreBackend::trimToRect("):]
+    trim = trim[:trim.find("KisTiledDataManagerPageStoreBackend::allocatedPages()")]
+    if "acquireTile(" in trim or "lease->markDirty" in trim:
+        errors.append("managed trim restored a generic lease around its original execution")
     for symbol in sorted(current_backend_state - frozen_backend_state):
         errors.append(f"new backend duplicate writer/admission state: {symbol}")
 

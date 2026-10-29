@@ -829,6 +829,14 @@ private Q_SLOTS:
     void abandonedCompatibilityBatch();
     void concurrentBatchAbandonment();
     void nestedCpuBatchDoesNotAbortOuter();
+    void managedFrameOwnsAdapterLifetime_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("original-frame") << 0;
+        QTest::newRow("real-legacy-extension") << 1;
+        QTest::newRow("escaped-legacy-cancel") << 2;
+    }
+    void managedFrameOwnsAdapterLifetime();
     void allocatedPagesMergesOverlay_data()
     {
         QTest::addColumn<int>("pages");
@@ -12249,6 +12257,71 @@ void KisPageStoreCpuMutationTest::nestedCpuBatchDoesNotAbortOuter()
     auto read = backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::ReadSelection); QVERIFY(read);
     QCOMPARE(read->tileData()->data()[0], quint8(0x71));
     QVERIFY(read->finish()); read.reset(); QVERIFY(backend.store()->closeSession());
+}
+
+void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
+{
+    QFETCH(int, mode);
+    KisTiledDataManagerPageStoreBackend backend; const quint8 blank = 0x2a;
+    QVERIFY(backend.configure(1, &blank));
+    QVERIFY(backend.fillRect(QRect(0, 0, 128, 64), QByteArray(1, char(0x31))));
+    auto *store = backend.store();
+    const auto before = store->mutationStatistics().operationSessionsCreated;
+    KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
+    std::unique_ptr<KisTilePageStoreLease> escaped;
+    bool entered = false, nestedRejected = false, barrierRejected = false, legacyReady = mode == 0;
+    bool completedCannotRevive = false;
+    quint64 scopesAtCut = 0;
+    QString error;
+    const bool accepted = backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
+        nullptr, &delivery, [&](bool, QString *) {
+            entered = true;
+            nestedRejected = !backend.beginMutationBatch();
+            barrierRejected = !backend.clearAll();
+            if (mode) {
+                escaped = backend.acquireTile(1, 0, KisTilePageStoreBridge::Access::Write);
+                legacyReady = escaped && escaped->writable() && escaped->tileData();
+                if (!legacyReady) return false;
+                escaped->tileData()->data()[0] = 0x72;
+                escaped->markDirty();
+                if (mode == 1) {
+                    legacyReady = escaped->finish(); escaped.reset();
+                }
+            }
+            return mode != 2 && legacyReady;
+        }, [&](const auto &publish, QString *failure) {
+            if (!publish(failure)) return false;
+            scopesAtCut = store->mutationStatistics().operationSessionsCreated - before;
+            completedCannotRevive = !backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write);
+            return completedCannotRevive;
+        });
+    QVERIFY(entered && nestedRejected && barrierRejected && legacyReady);
+    QCOMPARE(mode == 2 ? store->mutationStatistics().operationSessionsCreated - before : scopesAtCut, quint64(1));
+    QCOMPARE(accepted, mode != 2);
+    QCOMPARE(completedCannotRevive, mode != 2);
+    QCOMPARE(delivery.isEmpty(), mode == 2);
+    QVERIFY(!store->closeSession()); // Real Frame claim or escaped native guard remains.
+    if (mode == 2) {
+        // Its original compatibility slot survives stack admission removal.
+        QVERIFY(!backend.beginMutationBatch());
+        bool finished = false;
+        std::thread returning([&] { finished = escaped->finish(); escaped.reset(); });
+        returning.join(); QVERIFY(finished);
+    } else {
+        QVERIFY(store->sessionStats().activeCpuWritePages > 0);
+        delivery = {};
+    }
+    QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+    const auto pixel = [&](int page) {
+        auto lease = backend.acquireTile(page, 0, KisTilePageStoreBridge::Access::ReadSelection);
+        if (!lease || !lease->tileData()) return int(-1);
+        const int value = lease->tileData()->data()[0];
+        if (!lease->finish()) return int(-1);
+        return value;
+    };
+    QCOMPARE(pixel(0), mode == 2 ? 0x31 : 0x61);
+    QCOMPARE(pixel(1), mode == 1 ? 0x72 : 0x31);
+    QVERIFY(store->closeSession());
 }
 
 void KisPageStoreCpuMutationTest::concurrentBatchAbandonment()
