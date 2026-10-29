@@ -1434,7 +1434,7 @@ KisPageMutationSession::Private::prepareTarget(
     });
     if (!previous) {
         lock.unlock();
-        const bool prepared = owner->metadata.preparePrivateValue(acquire, page, error);
+        const bool prepared = owner->metadata.preparePrivateValue(*selected, page, error);
         lock.relock();
         if (!prepared) {
             if (storageRefused) *storageRefused = true;
@@ -1563,7 +1563,7 @@ KisPageMutationSession::Private::prepareTarget(
         if (previous) oldTarget.emplace(previous->target());
         if (!previous && !owner->writeCoordinator.validateWriteBase(acquire, true, error)) return {};
         accepted = previous ? owner->metadata.replacePrivateWrite(page, target, &binding)
-            : owner->metadata.acceptPrivateTarget(acquire, acquire.source, target, page,
+            : owner->metadata.acceptPrivateTarget(*selected, acquire.source, target, page,
                 owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias, &binding);
         if (!accepted) return {};
         page->backing = registeredBacking;

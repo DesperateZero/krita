@@ -4921,8 +4921,7 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
     write.baseVersion = base;
     write.version = target;
     write.baseWasPrepared = record && record->publication == KisPagePublicationState::Prepared;
-    write.baseSlot = selectedSlot;
-    write.baseLocation = {shard, &*page, shardIndex};
+    selection->base = {shard, &*page, shardIndex, selectedSlot};
     if (authority) {
         write.source = replicaHandle(*authority, base);
         if (!write.source.isValid())
@@ -5168,27 +5167,31 @@ KisPagePrivateWrite::~KisPagePrivateWrite()
     edit.release(&row, 1);
 }
 
-bool KisPageMetadataCoordinator::preparePrivateValue(const KisPageWriteInput &write,
+bool KisPageMetadataCoordinator::preparePrivateValue(const KisPageWriteSelection &selection,
     KisPagePrivateWrite *native, QString *error)
 try {
+    const auto &write = selection.write;
+    const auto &location = selection.base;
     auto *core = m_core.load(std::memory_order_acquire);
     if (!core || core->shards.empty() || !write.version.isValid() || !write.transaction.isValid()
-        || !native || native->reserved || native->location.value.isValid()) return false;
-    const size_t index = kisStablePageKeyHash(write.version.key) % core->shards.size();
+        || !native || native->reserved || native->location.value.isValid()
+        || !location.node || location.shardIndex >= core->shards.size()
+        || location.shard != core->shards[location.shardIndex].get()) return false;
+    const size_t index = location.shardIndex;
     auto *shard = core->shards[index].get();
     const auto storage = core->budgetAuthority->storage<char>();
     native->edit.retain(core->shards[index], storage);
     MetadataArenaGrowth growth(storage.borrowed());
     QMutexLocker lock(&shard->mutex);
-    const auto found = shard->pages.find(write.version.key);
-    if (found == shard->pages.end()) return false;
-    auto *page = &found->second;
+    auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
+    if (!(node->first == write.version.key) || !(write.baseVersion.key == write.version.key)) return false;
+    auto *page = &node->second;
     const auto valid = [&] {
-        KisVersionSlotId base;
+        const auto *base = shard->records.version(location.value);
         return page->revisionCanAdvance() && !page->activity.hasWriter()
             && !page->activity.publicationClaim && page->nextGeneration == write.version.generation
-            && ((!write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !write.source.isValid())
-                || shard->records.findVersion(write.baseVersion, &base));
+            && (base ? base->version == write.baseVersion
+                : !write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !write.source.isValid());
     };
     if (!valid()) return false;
     const MetadataArenaDemand demand{1, 0, 0};
@@ -5253,21 +5256,21 @@ void KisPageMetadataCoordinator::discardPrivateValue(KisPagePrivateWrite *native
     discardPrivateValueLocked(*shard, *native);
 }
 
-bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &write,
+bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection &selection,
     const KisReplicaHandle &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
     const std::shared_ptr<KisCpuResidentBinding> &before, bool complete,
     std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
+    const auto &write = selection.write;
     auto *core = m_core.load(std::memory_order_acquire);
     if (!core || !write.version.key.isValid() || core->shards.empty()) return false;
-    const auto &location = write.baseLocation;
-    const bool originalShard = location.node && location.shardIndex < core->shards.size()
-        && location.shard == core->shards[location.shardIndex].get();
+    const auto &location = selection.base;
     if (!native || !native->location.value.isValid()
-        || native->location.shardIndex >= core->shards.size()) return false;
-    size_t shardIndex = native->location.shardIndex;
+        || native->location.shardIndex >= core->shards.size()
+        || !location.node || location.shardIndex != native->location.shardIndex) return false;
+    const size_t shardIndex = native->location.shardIndex;
     auto *shard = core->shards[shardIndex].get();
-    if (native->location.shard != shard || native->reserved || !target.isValid()
+    if (native->location.shard != shard || location.shard != shard || native->reserved || !target.isValid()
         || !(write.baseVersion.key == write.version.key)
         || !(target.version == write.version) || !write.transaction.isValid()) return false;
     QMutexLocker lock(&shard->mutex);
@@ -5275,36 +5278,14 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
         ? shard->arenas.versions.get(native->location.value) : nullptr;
     if (!preparedValue || preparedValue != native->value || preparedValue->indexed
         || !(preparedValue->version == write.version)) return false;
-    KisVersionSlotId baseSlot = write.baseSlot;
+    const KisVersionSlotId baseSlot = location.value;
     auto *base = shard->records.version(baseSlot);
-    MetadataPage *page = nullptr;
     auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
     const bool originalSource = base ? base->version == write.baseVersion
         : !write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !source.isValid();
-    if (originalShard && originalSource && node->first == write.version.key
-        && &node->second == native->location.page) {
-        page = &node->second;
-    } else {
-        // Generic inputs and invalidated locators resolve the current page.
-        // An old slot never selects a different base or bypasses its checks.
-        const size_t actualShardIndex = originalShard
-            ? kisStablePageKeyHash(write.version.key) % core->shards.size() : shardIndex;
-        if (shardIndex != actualShardIndex) {
-            lock.unlock();
-            shardIndex = actualShardIndex;
-            shard = core->shards[shardIndex].get();
-            QMutexLocker rebound(&shard->mutex);
-            lock.swap(rebound);
-        }
-        const auto found = shard->pages.find(write.version.key);
-        if (found == shard->pages.end()) return false;
-        page = &found->second;
-        base = shard->records.version(baseSlot);
-        if (!base || !(base->version == write.baseVersion)) {
-            base = shard->records.findVersion(write.baseVersion, &baseSlot)
-                ? shard->records.version(baseSlot) : nullptr;
-        }
-    }
+    if (!originalSource || !(node->first == write.version.key)
+        || &node->second != native->location.page) return false;
+    auto *page = &node->second;
     KisPageVersion physicalOwner;
     if (!page->revisionCanAdvance()
         || page->activity.publicationClaim || page->activity.hasWriter()

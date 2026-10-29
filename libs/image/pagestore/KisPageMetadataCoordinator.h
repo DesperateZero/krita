@@ -309,7 +309,7 @@ private:
     // Allocate the final value before any provider may produce pixels. The
     // original edit retains its exact slot and both index admissions until
     // acceptance or cancellation; publication never replaces an old value.
-    bool preparePrivateValue(const KisPageWriteInput &, KisPagePrivateWrite *, QString *error);
+    bool preparePrivateValue(const KisPageWriteSelection &, KisPagePrivateWrite *, QString *error);
     void discardPrivateValue(KisPagePrivateWrite *);
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
@@ -317,7 +317,7 @@ private:
     // On success, an optional original target binding is exchanged into the
     // Value; the caller receives any displaced binding for release outside V.
     // Refusal leaves that input untouched.
-    bool acceptPrivateTarget(const KisPageWriteInput &, const KisReplicaHandle &source,
+    bool acceptPrivateTarget(const KisPageWriteSelection &, const KisReplicaHandle &source,
                              const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
         QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
         bool complete = false, std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);

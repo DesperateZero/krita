@@ -63,6 +63,7 @@ struct KisPageMutationBaseLocation {
     void *shard = nullptr;
     void *node = nullptr;
     size_t shardIndex = 0;
+    KisVersionSlotId value;
 };
 
 // One selected input, retained by the original operation through comparison,
@@ -73,11 +74,6 @@ struct KisPageMutationBaseLocation {
 // lease boundary projects the reference-model transition below.
 struct KisPageWriteInput {
     KisPageVersion baseVersion, version;
-    // The base query already resolves this generational location. It is a
-    // hint, not authority: acceptance checks the exact version under its
-    // shard gate after every unlocked provider/physical preparation window.
-    KisVersionSlotId baseSlot;
-    KisPageMutationBaseLocation baseLocation;
     // The accepted target belongs to the original private/request result.
     // Selection retains only the exact source, never another result copy.
     KisReplicaHandle source;
@@ -106,6 +102,7 @@ struct KisPageWriteInput {
 
 struct KisPageWriteSelection {
     KisPageWriteInput write;
+    KisPageMutationBaseLocation base;
     KisReplicaHandle recoverableBefore;
     std::shared_ptr<KisCpuResidentBinding> binding;
     std::shared_ptr<const KisPageAllocationDescriptor> layout;

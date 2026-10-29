@@ -7266,7 +7266,7 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
         KisPageWriteSelection selectedImplicit;
         QVERIFY2(publication->selectWriteBaseLocked(selectionTransaction, implicitIntent, &selectedImplicit, &f.error), qPrintable(f.error));
         QCOMPARE(selectedImplicit.write.baseVersion, implicit);
-        QVERIFY(!selectedImplicit.write.baseSlot.isValid() && !selectedImplicit.write.source.isValid());
+        QVERIFY(!selectedImplicit.base.value.isValid() && !selectedImplicit.write.source.isValid());
         QCOMPARE(selectedImplicit.descriptor(), descriptor);
         QVERIFY(!f.metadata.versionDescriptor(implicit));
         QCOMPARE(f.live(), f.limits.metadataArenaBytes);
@@ -9978,12 +9978,15 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         input.version = version; input.baseVersion = i ? targets[0].version : f.replica.version;
         input.source = i ? targets[0] : f.replica;
         input.transaction = tx.id; input.operation = f.owner.nextOperationId();
-        KisPageWriteInput writeInput(input);
-        writeInput.baseWasPrepared = i != 0;
-        if (!f.metadata.preparePrivateValue(writeInput, &value, &f.error)) return false;
+        KisPageWriteSelection selected;
+        if (f.metadata.selectMutationBase(input.baseVersion, false, &selected)
+            != KisPageMetadataCoordinator::MutationBaseSelection::Selected) return false;
+        selected.write = KisPageWriteInput(input);
+        selected.write.baseWasPrepared = i != 0;
+        if (!f.metadata.preparePrivateValue(selected, &value, &f.error)) return false;
         value.descriptor() = std::make_shared<KisPageAllocationDescriptor>(descriptor);
         value.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
-        const bool accepted = f.metadata.acceptPrivateTarget(writeInput, input.source, result.replica, &value, 64, &f.error)
+        const bool accepted = f.metadata.acceptPrivateTarget(selected, input.source, result.replica, &value, 64, &f.error)
             && f.metadata.completePrivateWrite(&value) && validateOriginalWrite(f.owner, value, tx.id, &f.error);
         return accepted && f.metadata.versionDescriptorMatches(version, descriptor)
             && f.metadata.borrowVersionDescriptor(version) == value.descriptor().get()
@@ -10115,11 +10118,15 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         acquire.writeMode = KisPageWriteMode::DiscardContents;
         KisPageEditValues nativeValues;
         KisPagePrivateWrite native(nativeValues);
-        QVERIFY(f.metadata.preparePrivateValue(KisPageWriteInput(acquire), &native, &f.error));
+        KisPageWriteSelection selected;
+        QCOMPARE(f.metadata.selectMutationBase(acquire.baseVersion, false, &selected),
+            KisPageMetadataCoordinator::MutationBaseSelection::Selected);
+        selected.write = KisPageWriteInput(acquire);
+        QVERIFY(f.metadata.preparePrivateValue(selected, &native, &f.error));
         native.descriptor() = std::allocate_shared<const KisPageAllocationDescriptor>(
             KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor());
         native.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
-        QVERIFY(f.metadata.acceptPrivateTarget(KisPageWriteInput(acquire), acquire.source, acquire.target, &native, 64, &f.error));
+        QVERIFY(f.metadata.acceptPrivateTarget(selected, acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
         QVERIFY(validateOriginalWrite(f.owner, native, tx.id, &f.error));
         // Accept through the original sealed Value and physical authority.
