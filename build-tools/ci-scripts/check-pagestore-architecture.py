@@ -1438,7 +1438,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
-            "static_assert(sizeof(MetadataPage) == 160)",
+            "static_assert(sizeof(MetadataPage) == 168)",
             "static_assert(sizeof(MetadataPageActivity) <= 104)",
             "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",

@@ -226,12 +226,13 @@ KisTileHashTableTraits<T>::getTileLazy(qint32 col, qint32 row,
 
 template<class T>
 typename KisTileHashTableTraits<T>::PreparedTile
-KisTileHashTableTraits<T>::prepareTileUpdate(qint32 col, qint32 row, Update update)
+KisTileHashTableTraits<T>::prepareTileUpdate(qint32 col, qint32 row, Update update, TileType **existingLocation)
 {
     PreparedTile prepared;
     {
         QReadLocker locker(&m_lock);
         auto *existing = borrowPreparedTileLocked(col, row, calculateHash(col, row));
+        if (existingLocation) *existingLocation = existing;
         if (existing && update == Update::Present) return {};
         prepared.m_tile = existing;
         if (!prepared.m_tile && update != Update::Absent)

@@ -4278,7 +4278,7 @@ void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
     auto footprint = coordinator.footprint();
     QCOMPARE(footprint.pages, quint64(1));
     QCOMPARE(footprint.pageActivities, quint64(0));
-    QCOMPARE(footprint.metadataPageBytes, quint64(160));
+    QCOMPARE(footprint.metadataPageBytes, quint64(168));
     QCOMPARE(footprint.metadataPageActivityBytes, quint64(0));
 
     KisPageTransition acquire;
@@ -4389,7 +4389,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         const quint64 records = quint64(sample.pages) * quint64(sample.history + 1);
         QCOMPARE(sample.footprint.pages, quint64(sample.pages));
         QCOMPARE(sample.footprint.pageActivities, quint64(0));
-        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(160));
+        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(168));
         QCOMPARE(sample.footprint.metadataPageActivityBytes, quint64(0));
         QCOMPARE(sample.footprint.versions, records);
         QCOMPARE(sample.footprint.replicas, records);

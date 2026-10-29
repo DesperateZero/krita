@@ -12361,7 +12361,7 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
     QVector<KisLogicalPageId> acceptedPages; bool allPresent = true;
     QString error;
     const bool accepted = backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
-        nullptr, &delivery, [&](bool, QString *) {
+        nullptr, &delivery, [&](bool, const auto &, QString *) {
             entered = true;
             nestedRejected = !backend.beginMutationBatch();
             barrierRejected = !backend.clearAll();
@@ -12432,7 +12432,7 @@ void KisPageStoreCpuMutationTest::managedFramesDiscoverTheirOwnThread()
         auto &result = results[i];
         KisTiledDataManagerPageStoreBackend::OperationDelivery delivery;
         result.accepted = backend.fillRect(QRect(i * 64, 0, 1, 1), QByteArray(1, char(0x61)), nullptr,
-            nullptr, &delivery, [&](bool, QString *) {
+            nullptr, &delivery, [&](bool, const auto &, QString *) {
                 result.entered = true;
                 entered.release();
                 result.resumed = resume.tryAcquire(1, 10000);

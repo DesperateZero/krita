@@ -231,7 +231,6 @@ public:
         // The candidate owns these facts through acceptance and delivery;
         // finishUnlocked is their last consumer. Order is surface/row/column;
         // keys are unique. This does not export storage.
-        bool forEachAdapterChange(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
         bool prepare(QString *error, bool *storageRefused = nullptr);
         // Keep the owner gate from the latest surface preparation through
         // acceptance. A late capacity conflict drops it for one conservative

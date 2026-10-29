@@ -263,15 +263,6 @@ qsizetype KisPagePublicationCoordinator::KisPreparedPagePublication::
     return isValid() ? data->mutationCount : 0;
 }
 
-bool KisPagePublicationCoordinator::KisPreparedPagePublication::forEachAdapterChange(
-    const void *visitor, bool (*visit)(const void *, const KisPageKey &, bool)) const
-{
-    Q_ASSERT(data);
-    for (const auto &change : data->changes)
-        if (!visit(visitor, change.replacement.key(), !change.replacement.removal)) return false;
-    return true;
-}
-
 bool KisPagePublicationCoordinator::KisPreparedPagePublication::acceptsCanonical() const
 {
     return isValid() && data->canonical;

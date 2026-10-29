@@ -398,7 +398,7 @@ void KisTiledDataManagerTest::testPageStoreKnownWriterRefusal()
     if (mode == 1) {
         QString error;
         QVERIFY2(backend->fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
-            nullptr, nullptr, [&](bool, QString *) { return probe(); }), qPrintable(error));
+            nullptr, nullptr, [&](bool, const auto &, QString *) { return probe(); }), qPrintable(error));
     } else probe();
     QVERIFY(refused); QVERIFY(noNewScope); QVERIFY(noExtension);
     QCOMPARE(dm.m_hashTable->numTiles(), 0);
@@ -2758,7 +2758,9 @@ void KisTiledDataManagerTest::testPreparedWarmBorrowBothTables()
             bool created = false;
             auto installed = table.installPreparedTile(cold, created);
             QVERIFY(installed && created);
-            QVERIFY(!table.prepareTileUpdate(col, 0));
+            KisTile *preparedLocation = nullptr;
+            QVERIFY(!table.prepareTileUpdate(col, 0, Table::Update::Present, &preparedLocation));
+            QCOMPARE(preparedLocation, installed.data());
             auto *borrowed = table.borrowTileForPreparedUpdate(col, 0);
             QCOMPARE(borrowed, installed.data());
             borrowed->invalidatePageStoreReadCache();
@@ -4057,6 +4059,7 @@ void KisTiledDataManagerTest::testPageStoreChangedStorage()
     });
     QString error; int bodies = 0;
     QVector<KisLogicalPageId> adapterChanges; bool adapterPresent = true;
+    int locationMarker = 0, preparedRows = 0; bool cleanLocations = true;
     const auto result = backend->writeOperation(targets, false, [&](KisPixelWriteCursor *cursor) {
         ++bodies;
         for (int pass = 0; pass < 3; ++pass) for (int i = pages - 1; i >= 0; --i) {
@@ -4067,16 +4070,25 @@ void KisTiledDataManagerTest::testPageStoreChangedStorage()
             std::memset(cursor->rawData(), 0x61 + pass, size_t(bpp));
         }
         return outcome != 3;
-    }, &changed, &error, owner, nullptr, {},
+    }, &changed, &error, owner, nullptr,
+        [&](const auto &admitted, QString *) {
+            return admitted.forEachLocated([&](const KisPageKey &, bool, void *&location) {
+                cleanLocations &= location == nullptr;
+                location = &locationMarker;
+                ++preparedRows;
+                return true;
+            });
+        },
         [&](const auto &publish, const auto &changes, QString *failure) {
             if (!publish(failure)) return false;
-            return changes.forEach([&](const KisPageKey &key, bool present) {
-                adapterPresent &= present && key.surface == backend->surface();
+            return changes.forEachLocated([&](const KisPageKey &key, bool present, void *&location) {
+                adapterPresent &= present && key.surface == backend->surface() && location == &locationMarker;
                 adapterChanges.append(key.page);
                 return true;
             });
         });
     QCOMPARE(bodies, 1); QCOMPARE(prepares, 1); QCOMPARE(ranges, 1);
+    QVERIFY(cleanLocations); QCOMPARE(preparedRows, pages);
     QCOMPARE(preparedBytes, quint64(0)); // output precedes the original execution/range storage
     QCOMPARE(result, outcome == 3 ? KisPageStoreWriteOperationResult::Failed : KisPageStoreWriteOperationResult::Succeeded);
     QCOMPARE(exports, outcome == 3 ? 0 : 1); QCOMPARE(deliveries, exports);
@@ -4347,12 +4359,12 @@ void KisTiledDataManagerTest::testPageStoreAdapterPreparationRefusal()
             if (phase == KisPageStoreDiagnosticPhase::CopySourcePage) pixels = true;
         });
         QVERIFY(!backend->copyFrom(*source.m_pageStoreBackend, view, area, area, false,
-                                  &error, &changed, nullptr, [&](bool, QString *failure) { return refuse(failure); }, {}, &present));
+                                  &error, &changed, nullptr, [&](bool, const auto &, QString *failure) { return refuse(failure); }, {}, &present));
         QVERIFY(present.isEmpty());
     } else {
         QCOMPARE(backend->writeOperation({{1, 0}}, false,
             [&](KisPixelWriteCursor *) { pixels = true; return true; }, &changed, &error, history,
-            nullptr, refuse), KisPageStoreWriteOperationResult::Failed);
+            nullptr, [&](const auto &, QString *failure) { return refuse(failure); }), KisPageStoreWriteOperationResult::Failed);
     }
     // Semantic copy has no explicit persistent-stroke owner. That existing
     // contract rejects it at transaction selection, before adapter preparation.

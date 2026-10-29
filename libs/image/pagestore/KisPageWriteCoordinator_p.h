@@ -65,6 +65,9 @@ struct KisPageWriteClaim {
     KisPageWriteClaim *previous = nullptr;
     KisPageWriteClaim *next = nullptr;
     Origin origin = Origin::NativeSession;
+    // Non-owning adapter fact under this original page claim. Unlink clears
+    // it before another Frame can acquire this PageControl. No second owner.
+    void *adapterLocation = nullptr;
 };
 
 enum class KisPageWriteInputKind : quint8 {
@@ -149,6 +152,11 @@ private:
     KisMutationPageEntryState state = KisMutationPageEntryState::IntentOnly;
     bool executionBorrowed = false;
 
+public:
+    // Reuse the original PageControl claim, avoiding growth of every Frame
+    // row and of the inline single-page Frame allocation.
+    void *&adapterLocation() const { Q_ASSERT(writeClaim && writeClaim->token); return writeClaim->adapterLocation; }
+private:
     quint32 slotIndex = 0;
     friend class KisPageWriteAdmission;
     friend class KisMutationWriteSet;

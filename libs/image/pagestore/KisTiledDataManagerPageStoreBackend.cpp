@@ -401,11 +401,13 @@ public:
     KisPageMutationSession &session() { return legacy ? legacy->mutation : original; }
     bool isPresent() const { return bool(original.d) || bool(legacy); }
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> legacyForPage(
-        const KisPageKey &key, QString *error, bool *present = nullptr)
+        const KisPageKey &key, QString *error, bool *present = nullptr, KisMutationPageEntry **admitted = nullptr)
     {
         // A real key must be admitted by this SAME Frame before funding a
         // compatibility client. Refusal neither promotes nor revives it.
-        if (!session().reserveLegacyMutationPage(key, error, present)) return {};
+        auto *entry = session().reserveLegacyMutationPage(key, error, present);
+        if (!entry) return {};
+        if (admitted) *admitted = entry;
         if (legacy) return legacy;
         using Extension = KisTiledDataManagerPageStoreWriteBatch::Private;
         auto prepared = Extension::create();
@@ -439,7 +441,7 @@ public:
         // The callback invokes publish before visiting this borrowed view.
         // Successful delivery keeps the original rows/claims alive; no key
         // or presence projection is needed for the manager's installation.
-        const auto changes = session().sealedAdapterChanges();
+        const auto changes = session().frozenAdapterChanges();
         const bool accepted = complete ? complete(publish, changes, error) : publish(error);
         if (accepted && delivery) {
             delivery->m_frame = std::move(original);
@@ -726,9 +728,11 @@ bool KisTiledDataManagerPageStoreBackend::completeAdapters(
     if (published && installAdapter) {
         // The caller prepared all final changes before acceptance. This one
         // install also invalidates raw partial-write caches; do not visit D twice.
-        installAdapter(batch.mutation.sealedAdapterChanges());
-    } else if (!batch.mutation.visitAdapterPages([&](const KisPageVersion &version) {
-        if (auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(version.key.page.column, version.key.page.row)) {
+        installAdapter(batch.mutation.frozenAdapterChanges());
+    } else if (!batch.mutation.visitAdapterPages([&](const KisPageVersion &version, void *location) {
+        auto *tile = location ? static_cast<KisTile *>(location)
+            : manager->m_hashTable->borrowTileForPreparedUpdate(version.key.page.column, version.key.page.row);
+        if (tile) {
             QMutexLocker lock(&tile->m_swapBarrierLock);
             // A successfully published raw cache already has this exact
             // identity. Keep it ready instead of forcing a new resolve/pin
@@ -998,6 +1002,7 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
     if (!manager) return {};
     const KisPageKey key{surface(), {column, row}};
     bool present = false;
+    KisMutationPageEntry *entry = nullptr;
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> shared;
     OperationFrame *activeFrame = nullptr;
     {
@@ -1013,7 +1018,7 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
         if (!shared) activeFrame = currentOperationLocked();
     }
     if (activeFrame) {
-        shared = activeFrame->legacyForPage(key, error, &present);
+        shared = activeFrame->legacyForPage(key, error, &present, &entry);
         if (!shared) return {};
     }
     OperationFrame frame(*this);
@@ -1024,10 +1029,12 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
     auto &mutation = shared ? shared->mutation : frame.session();
     // Admission precedes the presence decision and all adapter preparation.
     // Reuse private aliases/writes as well as the transaction's sealed pages.
-    if (!activeFrame && !mutation.reserveLegacyMutationPage(key, error, &present)) return {};
+    if (!activeFrame) entry = mutation.reserveLegacyMutationPage(key, error, &present);
+    if (!entry) return {};
     const bool provisional = shared && !present;
+    KisTile *existing = nullptr;
     auto prepared = manager->m_hashTable->prepareTileUpdate(column, row,
-        provisional ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present);
+        provisional ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present, &existing);
     if (!manager->m_extentManager.prepareTileRange(QRect(column, row, 1, 1))) {
         KisPageStoreDetail::setError(error, QStringLiteral("Extent storage preparation was rejected"));
         return {};
@@ -1055,10 +1062,10 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
     }
     if (!shared && !frame.finish(nullptr, {}, error)) return {};
     bool created = false;
-    auto tile = manager->m_hashTable->getExistingTileForPreparedUpdate(column, row);
+    KisTileSP tile = existing;
     if (!tile) tile = manager->m_hashTable->installPreparedTile(*installation, created);
     Q_ASSERT(tile);
-    if (shared) shared->hasWorkingAdapters = true;
+    if (shared) { shared->hasWorkingAdapters = true; entry->adapterLocation() = tile.data(); }
     tile->setPageStoreBridge(this, false);
     tile->invalidatePageStoreReadCache();
     if (created) manager->m_extentManager.notifyTileAdded(column, row);
@@ -2070,7 +2077,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
     const QByteArray &pixel,
     QString *error, QVector<KisLogicalPageId> *changed,
     OperationDelivery *delivery,
-    const std::function<bool(bool, QString *)> &prepareAdapter,
+    const std::function<bool(bool, const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter,
     const AdapterCompletion &completeAdapter,
     QVarLengthArray<quint8, 64> *changedPresence) try
 {
@@ -2121,7 +2128,7 @@ bool KisTiledDataManagerPageStoreBackend::fillRect(
         return false;
     }
     const bool clearsToDefault = pixel == surfaceState.format.defaultPixel;
-    if (prepareAdapter && !prepareAdapter(clearsToDefault, error)) return false;
+    if (prepareAdapter && !prepareAdapter(clearsToDefault, frame.session().admittedAdapterPages(), error)) return false;
     if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     std::vector<char, KisMutationStorageAllocator<char>> rowBytes(size_t(KisTileData::WIDTH * pixel.size()));
     for (int x = 0; x < KisTileData::WIDTH; ++x)
@@ -2185,7 +2192,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
     Operation &&operation,
     QVector<KisLogicalPageId> *changed, QString *error, const KisMementoSP &historyOwner,
     OperationDelivery *delivery,
-    const std::function<bool(QString *)> &prepareAdapter,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
     const AdapterCompletion &completeAdapter)
 {
     using Result = KisPageStoreWriteOperationResult;
@@ -2270,7 +2277,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::runCpuMuta
         phase.next(Phase::MutationAdapterPrepare, quint64(targets.size()));
         bool prepared = false;
         try {
-            prepared = prepareAdapter(error);
+            prepared = prepareAdapter(KisPageMutationSession::executionAdapterChanges(execution, false), error);
         } catch (const std::bad_alloc &) {
             KisPageStoreDetail::setError(error, QStringLiteral("adapter storage preparation is unavailable"));
         }
@@ -2322,7 +2329,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeOpera
     const QVector<KisLogicalPageId> &pages, bool legacyIntent, const KisPageStorePixelOperation &operation,
     QVector<KisLogicalPageId> *changed, QString *error, const KisMementoSP &historyOwner,
     OperationDelivery *delivery,
-    const std::function<bool(QString *)> &prepareAdapter,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
     const AdapterCompletion &completeAdapter) try
 {
     if (!operation) {
@@ -2401,7 +2408,7 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
     const quint8 *data, qint32 x, qint32 y, qint32 width, qint32 height,
     qint32 dataRowStride, bool legacyIntent, QVector<KisLogicalPageId> *changed, QString *error,
     OperationDelivery *delivery,
-    const std::function<bool(QString *)> &prepareAdapter,
+    const KisPageMutationSession::AdapterPreparation &prepareAdapter,
     const AdapterCompletion &completeAdapter) try
 {
     using Result = KisPageStoreWriteOperationResult;
@@ -2493,7 +2500,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
     const KisCapturedReadView &sourceView, const QRect &requestedRect,
     const QRect &rect, bool rough, QString *error, QVector<KisLogicalPageId> *changed,
     OperationDelivery *delivery,
-    const std::function<bool(bool, QString *)> &prepareAdapter,
+    const std::function<bool(bool, const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter,
     const AdapterCompletion &completeAdapter,
     QVarLengthArray<quint8, 64> *changedPresence) try
 {
@@ -2542,7 +2549,7 @@ bool KisTiledDataManagerPageStoreBackend::copyFrom(
     }
     OperationFrame frame(*this);
     if (!frame.begin(error, &range)) return false;
-    if (prepareAdapter && !prepareAdapter(sourceState.format.defaultPixel == targetState.format.defaultPixel, error)) return false;
+    if (prepareAdapter && !prepareAdapter(sourceState.format.defaultPixel == targetState.format.defaultPixel, frame.session().admittedAdapterPages(), error)) return false;
     if (changedPresence && !preparePagePresence(targets.size(), changedPresence, error)) return false;
     const auto recordChange = [&](const KisLogicalPageId &page, bool present) {
         if (!changed) return;

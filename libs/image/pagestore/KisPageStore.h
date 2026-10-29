@@ -20,6 +20,7 @@
 #include "KisPageStoreTypes.h"
 #include "KisMutationStorage_p.h"
 
+class KisMutationPageEntry;
 class KisPageStoreMementoManager;
 class KisImageEpochRootSnapshot;
 class KisBackingBudgetController;
@@ -186,17 +187,26 @@ public:
         template<class Visit>
         bool forEach(const Visit &visit) const
         {
-            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present) {
+            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present, void *&) {
                 return (*static_cast<const Visit *>(visitor))(key, present);
+            });
+        }
+        // The adapter may bind its non-owning location while the original
+        // row's admission protects it, then consume it during installation.
+        template<class Visit>
+        bool forEachLocated(const Visit &visit) const
+        {
+            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present, void *&location) {
+                return (*static_cast<const Visit *>(visitor))(key, present, location);
             });
         }
     private:
         friend class KisPageMutationSession;
         friend class KisTiledDataManagerPageStoreBackend;
-        using Visitor = bool (*)(const void *, const KisPageKey &, bool);
+        using Visitor = bool (*)(const void *, const KisPageKey &, bool, void *&);
         using ForEach = bool (*)(const void *, const void *, Visitor);
         AdapterChanges(const void *changes, ForEach forEach) : m_changes(changes), m_forEach(forEach) {}
-        bool forEachImpl(const void *, bool (*)(const void *, const KisPageKey &, bool)) const;
+        bool forEachImpl(const void *, Visitor) const;
         const void *m_changes; // Original owner stays private; this view retains nothing.
         ForEach m_forEach;
     };
@@ -272,8 +282,9 @@ private:
     // until this session is destroyed after adapter delivery. No writable
     // access survives seal, and the transaction activity still ends normally.
     bool sealForAdapterDelivery(QString *error = nullptr, const AdapterPreparation &prepareAdapter = {});
-    AdapterChanges sealedAdapterChanges() const;
-    static AdapterChanges executionAdapterChanges(const KisPageMutationExecution &);
+    AdapterChanges frozenAdapterChanges() const;
+    AdapterChanges admittedAdapterPages() const;
+    static AdapterChanges executionAdapterChanges(const KisPageMutationExecution &, bool changedOnly = true);
     enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
     bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
         const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
@@ -281,8 +292,8 @@ private:
     // The original final batch owns this quiescent segment exclusively.
     // Freeze failed input before invoking adapters outside every session/
     // Store gate. The original entries/claims remain until cancel or release.
-    bool visitAdapterPages(const std::function<void(const KisPageVersion &)> &visit);
-    bool reserveLegacyMutationPage(const KisPageKey &key, QString *error, bool *present = nullptr);
+    bool visitAdapterPages(const std::function<void(const KisPageVersion &, void *)> &visit);
+    KisMutationPageEntry *reserveLegacyMutationPage(const KisPageKey &key, QString *error, bool *present = nullptr);
     // Original parked target only; never selects current or prepares a page.
     KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
     KisCpuWriteGuard

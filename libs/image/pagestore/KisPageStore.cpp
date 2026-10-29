@@ -2595,17 +2595,17 @@ KisPageMutationSession KisPageStore::reserveLegacyPage(const KisPageKey &key, QS
     return {};
 }
 
-bool KisPageMutationSession::reserveLegacyMutationPage(
+KisMutationPageEntry *KisPageMutationSession::reserveLegacyMutationPage(
     const KisPageKey &key, QString *error, bool *present)
 {
     if (!d || !key.isValid()) {
         KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation page is invalid"));
-        return false;
+        return nullptr;
     }
     QMutexLocker scopeLock(&d->mutex);
     if (d->state != Private::State::Active || d->executions || d->thread != QThread::currentThreadId()) {
         KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation is unavailable"));
-        return false;
+        return nullptr;
     }
     QMutexLocker ownerLock(&d->owner->mutex);
     auto *entry = d->writes.find(key);
@@ -2626,18 +2626,18 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
     if (entry) {
         const bool held = d->owner->writeAdmission.ownsEntryLocked(d->admission, *entry);
         KisPageStoreDetail::setError(error, held ? QString{} : QStringLiteral("legacy mutation lost its page claim"));
-        return held && resolvePresence();
+        return held && resolvePresence() ? entry : nullptr;
     }
     // Tile/manager gates can already be held: inspect and reuse the original
     // position, then try the real claim after preparation; never wait here.
     const auto location = d->owner->writeAdmission.inspectLegacyClaimLocked(key, error);
-    if (!location) return false;
+    if (!location) return nullptr;
     KisPageWriteIntent intent;
     intent.key = key;
     intent.inputKind = KisPageWriteInputKind::Semantic;
     entry = d->claimEntryLocked(intent, ownerLock, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter,
         error, nullptr, &location);
-    return entry && resolvePresence();
+    return entry && resolvePresence() ? entry : nullptr;
 }
 
 KisPageVersion KisPageMutationSession::legacyMutationPageVersion(const KisPageKey &key) const
@@ -2872,7 +2872,7 @@ bool KisPageMutationSession::seal(QString *error)
 }
 
 bool KisPageMutationSession::AdapterChanges::forEachImpl(
-    const void *visitor, bool (*visit)(const void *, const KisPageKey &, bool)) const
+    const void *visitor, AdapterChanges::Visitor visit) const
 {
     return m_forEach(m_changes, visitor, visit);
 }
@@ -2890,7 +2890,7 @@ bool KisPageMutationSession::sealForLegacyAdapterDelivery(QString *error)
     return sealImpl(SealMode::LegacyAdapterDelivery, error);
 }
 
-bool KisPageMutationSession::visitAdapterPages(const std::function<void(const KisPageVersion &)> &visit)
+bool KisPageMutationSession::visitAdapterPages(const std::function<void(const KisPageVersion &, void *)> &visit)
 {
     if (!d) return true;
     QMutexLocker lock(&d->mutex);
@@ -2903,12 +2903,12 @@ bool KisPageMutationSession::visitAdapterPages(const std::function<void(const Ki
         const auto *entry = d->writes.at(slot);
         auto version = entry->preparedTargetVersion();
         version.key = entry->key(); // Intent-only entries still have a real key.
-        visit(version);
+        visit(version, entry->adapterLocation());
     }
     return true;
 }
 
-KisPageMutationSession::AdapterChanges KisPageMutationSession::sealedAdapterChanges() const
+KisPageMutationSession::AdapterChanges KisPageMutationSession::frozenAdapterChanges() const
 {
     // The borrowed view can be bound before publish: moving the same Session
     // into a legacy extension does not move this original scope. Consumption
@@ -2916,17 +2916,39 @@ KisPageMutationSession::AdapterChanges KisPageMutationSession::sealedAdapterChan
     Q_ASSERT(d);
     return AdapterChanges(d.get(), [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
         const auto *scope = static_cast<const Private *>(changes);
-        Q_ASSERT(scope->state == Private::State::Detached);
+        Q_ASSERT(scope->state == Private::State::Detached || scope->state == Private::State::Sealing);
         return scope->writes.visitPublishedEntries([&](const KisMutationPageEntry &entry) {
-            return visit(visitor, entry.key(), !entry.isRemoval());
+            return visit(visitor, entry.key(), !entry.isRemoval(), entry.adapterLocation());
         });
     });
 }
 
+KisPageMutationSession::AdapterChanges KisPageMutationSession::admittedAdapterPages() const
+{
+    Q_ASSERT(d && d->state == Private::State::Active);
+    return AdapterChanges(d.get(), [](const void *pages, const void *visitor, AdapterChanges::Visitor visit) {
+        const auto *scope = static_cast<const Private *>(pages);
+        for (auto slot = scope->writes.firstEntry(); slot.isValid(); slot = scope->writes.nextEntry(slot)) {
+            const auto *entry = scope->writes.at(slot);
+            if (!visit(visitor, entry->key(), true, entry->adapterLocation())) return false;
+        }
+        return true;
+    });
+}
+
 KisPageMutationSession::AdapterChanges KisPageMutationSession::executionAdapterChanges(
-    const KisPageMutationExecution &execution)
+    const KisPageMutationExecution &execution, bool changedOnly)
 {
     Q_ASSERT(execution.d && !execution.d->finished && !execution.d->counters.activePins);
+    if (!changedOnly) return AdapterChanges(execution.d.get(),
+        [](const void *pages, const void *visitor, AdapterChanges::Visitor visit) {
+            const auto *borrow = static_cast<const KisPageMutationExecution::Private *>(pages);
+            for (size_t i = 0; i < borrow->count; ++i) {
+                const auto *entry = borrow->entries()[i].entry;
+                if (!visit(visitor, entry->key(), true, entry->adapterLocation())) return false;
+            }
+            return true;
+        });
     return AdapterChanges(execution.d.get(), [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
         const auto *borrow = static_cast<const KisPageMutationExecution::Private *>(changes);
         // The caller retains this exclusive execution until its synchronous
@@ -2936,7 +2958,8 @@ KisPageMutationSession::AdapterChanges KisPageMutationSession::executionAdapterC
             while (bits) {
                 const size_t i = word * 64 + qCountTrailingZeroBits(bits);
                 bits &= bits - 1;
-                if (!visit(visitor, borrow->entries()[i].entry->key(), true)) return false;
+                const auto *entry = borrow->entries()[i].entry;
+                if (!visit(visitor, entry->key(), true, entry->adapterLocation())) return false;
             }
         }
         return true;
@@ -3164,11 +3187,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
         if (failure.isEmpty())
             failure = QStringLiteral("overlay metadata preparation was rejected");
     }
-    const AdapterChanges adapterChanges(&overlay,
-        [](const void *changes, const void *visitor, AdapterChanges::Visitor visit) {
-            return static_cast<const KisPagePublicationCoordinator::KisPreparedPagePublication *>(changes)
-                ->forEachAdapterChange(visitor, visit);
-        });
+    const auto adapterChanges = frozenAdapterChanges();
     if (success && hasOverlay && prepareAdapter) {
         phase.next(Phase::MutationAdapterPrepare, quint64(overlayChangeCount));
         try { success = prepareAdapter(adapterChanges, &failure); }

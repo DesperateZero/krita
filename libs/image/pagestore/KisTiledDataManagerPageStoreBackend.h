@@ -175,7 +175,7 @@ public:
         QVector<KisLogicalPageId> *changed, QString *error = nullptr,
         const KisMementoSP &historyOwner = {},
         OperationDelivery *delivery = nullptr,
-        const std::function<bool(QString *)> &prepareAdapter = {},
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
         const AdapterCompletion &completeAdapter = {});
     // Production packed read: one fixed view, at most one physical page pin
     // (or real control-path lease) at a time; no compatibility tile wrappers.
@@ -190,7 +190,7 @@ public:
         qint32 dataRowStride, bool legacyIntent, QVector<KisLogicalPageId> *changed,
         QString *error = nullptr,
         OperationDelivery *delivery = nullptr,
-        const std::function<bool(QString *)> &prepareAdapter = {},
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
         const AdapterCompletion &completeAdapter = {});
 
     KisMementoSP beginHistory(const quint8 *defaultPixel,
@@ -235,7 +235,7 @@ public:
                   const QByteArray &pixel,
                   QString *error = nullptr, QVector<KisLogicalPageId> *changed = nullptr,
                   OperationDelivery *delivery = nullptr,
-                  const std::function<bool(bool mayRemove, QString *)> &prepareAdapter = {},
+                  const std::function<bool(bool mayRemove, const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter = {},
                   const AdapterCompletion &completeAdapter = {},
                   QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Source pixels use the caller's fixed source selection. Destination
@@ -248,7 +248,7 @@ public:
                   const QRect &rect, bool rough, QString *error = nullptr,
                   QVector<KisLogicalPageId> *changed = nullptr,
                   OperationDelivery *delivery = nullptr,
-                  const std::function<bool(bool mayRemove, QString *)> &prepareAdapter = {},
+                  const std::function<bool(bool mayRemove, const KisPageMutationSession::AdapterChanges &, QString *)> &prepareAdapter = {},
                   const AdapterCompletion &completeAdapter = {},
                   QVarLengthArray<quint8, 64> *changedPresence = nullptr);
     // Borrowed backing: the caller must retain the exact read page throughout
@@ -314,7 +314,7 @@ private:
         QVector<KisLogicalPageId> *changed, QString *error,
         const KisMementoSP &historyOwner = {},
         OperationDelivery *delivery = nullptr,
-        const std::function<bool(QString *)> &prepareAdapter = {},
+        const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
         const AdapterCompletion &completeAdapter = {});
     std::shared_ptr<const KisPageReplicaSource> uniformSourceFor(
         const KisPageAllocationDescriptor &descriptor, const QByteArray &pixel, QString *error);

@@ -85,7 +85,7 @@ public:
     // prepares the original map key and GC action before publication.
     enum class Update { Present, MayRemove, Absent };
     class PreparedTile;
-    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
+    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present, TileType **existing = nullptr);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
     bool removePreparedTile(PreparedTile &prepared);
     // Original page admission must still exclude replacement/removal.
@@ -474,16 +474,20 @@ KisTileHashTableTraits2<T>::getExistingTileForPreparedUpdate(qint32 col, qint32 
 
 template <class T>
 typename KisTileHashTableTraits2<T>::PreparedTile
-KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update update)
+KisTileHashTableTraits2<T>::prepareTileUpdate(qint32 col, qint32 row, Update update, TileType **existing)
 {
     PreparedTile prepared;
     // An Absent candidate consumes only its key and retirement action. The
     // map reference passes to QSBR at removal, so no old tile lookup or extra
     // reference is needed here. Present/MayRemove still need their tile.
+    if (existing) *existing = nullptr;
     if (update == Update::Present) {
-        if (borrowTileForPreparedUpdate(col, row)) return {};
+        auto *tile = borrowTileForPreparedUpdate(col, row);
+        if (existing) *existing = tile;
+        if (tile) return {};
     } else if (update != Update::Absent) {
         prepared.m_tile = getExistingTileForPreparedUpdate(col, row);
+        if (existing) *existing = prepared.m_tile.data();
     }
     const quint32 idx = calculateHashSafe(col, row);
     if (!idx) throw std::bad_alloc();

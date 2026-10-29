@@ -542,7 +542,8 @@ struct MetadataPage {
     }
 };
 
-static_assert(sizeof(MetadataPage) == 160);
+// The original claim additionally lends one non-owning adapter location.
+static_assert(sizeof(MetadataPage) == 168);
 
 /**
  * Stack projection of original page facts and sparse generic payload. Public snapshots are never

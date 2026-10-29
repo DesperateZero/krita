@@ -87,7 +87,7 @@ public:
         // index. Even address reuse cannot attach this candidate to a new table.
         std::shared_ptr<const char> m_identity;
     };
-    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present);
+    PreparedTile prepareTileUpdate(qint32 col, qint32 row, Update update = Update::Present, TileType **existing = nullptr);
     TileTypeSP installPreparedTile(PreparedTile &prepared, bool &newTile);
     bool removePreparedTile(PreparedTile &prepared);
     // Original page admission must still exclude replacement/removal.
