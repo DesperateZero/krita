@@ -64,7 +64,7 @@ public:
         return value;
     }
     KisPageViewValue *prepareInitial(const KisPageVersion &version) override { return pin(version); }
-    void releaseRoots(KisPageViewValue *const *, size_t) noexcept override {}
+    void requestReclaim(KisPageViewValue *const *, size_t) noexcept override {}
 private:
     void releaseMemory(const KisPageKey &, KisVersionSlotId, KisPageViewValue *value) noexcept override
     {
@@ -163,7 +163,7 @@ public:
         KisPageViewValue *unrooted[16];
         size_t count = 0;
         deactivate(unrooted, count);
-        if (count) storage->values->releaseRoots(unrooted, count);
+        if (count) storage->values->requestReclaim(unrooted, count);
     }
 private:
     void deactivate(KisPageViewValue **unrooted, size_t &count) const noexcept
@@ -177,7 +177,7 @@ private:
         if (before == 1) {
             unrooted[count++] = value;
             if (count == 16) {
-                storage->values->releaseRoots(unrooted, count);
+                storage->values->requestReclaim(unrooted, count);
                 count = 0;
             }
         }

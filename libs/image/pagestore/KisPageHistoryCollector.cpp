@@ -56,7 +56,6 @@ KisPageHistoryCollector::KisPageHistoryCollector(
     , m_nextIdleDeadline(nextIdleDeadline)
     , m_collectIdleCapacity(collectIdleCapacity)
 {
-    static_assert(VersionScanBudget <= 32);
     Q_ASSERT(m_ownerContext);
     Q_ASSERT(m_releaseOwnerLifetime);
     Q_ASSERT(bool(m_hasAbandonedMutations) == bool(m_collectAbandonedMutations));
@@ -65,6 +64,8 @@ KisPageHistoryCollector::KisPageHistoryCollector(
 
 KisPageHistoryCollector::~KisPageHistoryCollector()
 {
+    // Fence producers before disconnecting the original notification owner.
+    m_metadata.setValueReclaimWake(nullptr, nullptr);
     if (m_wakeContext) {
         QMutexLocker lock(&m_wakeContext->mutex);
         Q_ASSERT(!m_wakeContext->jobScheduled);
@@ -73,128 +74,21 @@ KisPageHistoryCollector::~KisPageHistoryCollector()
     clearLocked();
 }
 
-void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key) noexcept
-{
-    requestKeyLocked(key, false);
-}
-
-void KisPageHistoryCollector::requestKeyLocked(const KisPageKey &key, bool historyAlreadyObserved) noexcept
-{
-    try {
-        auto entry = m_work.lower_bound(key);
-        const bool inserted = entry == m_work.end() || !(entry->key == key);
-        if (inserted) {
-            // A publication/release event need not have produced history.
-            // Do not fund a key/scan/retry just to discover an empty slice.
-            // The Store gate serializes producing history and requesting it;
-            // existing work retains its original scan/repeat responsibility.
-            if (!historyAlreadyObserved && !m_metadata.hasHistory(key)) return;
-            auto *work = m_workAllocator.allocate(1);
-            // The original key/cursor record needs no additional allocation.
-            new (work) Work(key);
-            entry = m_work.insert_before(entry, *work);
-        }
-        queueWorkLocked(*entry);
-    } catch (const std::bad_alloc &) {
-        // Metadata keeps every historical version until collection accepts
-        // its retirement. The original collector retains the missing-key scan,
-        // for both foreground and background entry points.
-        m_rescanRequested = true;
-        m_blocked = true;
-    }
-}
-
-void KisPageHistoryCollector::queueWorkLocked(Work &work) noexcept
-{
-    // Protection can disappear after this version cursor passed an old value.
-    if (work.after.isValid()) work.repeat = true;
-    if (!work.is_linked()) m_ready.push_back(work);
-}
-
-void KisPageHistoryCollector::disposeWork(Work *work) noexcept
-{
-    Q_ASSERT(!work->is_linked() && !work->indexHook.is_linked());
-    std::destroy_at(work);
-    m_workAllocator.deallocate(work, 1);
-}
-
-KisPageHistoryCollector::SliceResult KisPageHistoryCollector::collectSliceLocked(
-    Work &work, quint64 &visitedVersions)
-{
-    // A slice now completes in one Store admission window. Only its original
-    // per-key cursor persists; candidates and reachability are never cached.
-    alignas(KisPageVersion) std::array<std::byte, sizeof(KisPageVersion) * VersionScanBudget> storage;
-    KisMutationWorkspace::Array<KisPageVersion> candidates;
-    candidates.bind(reinterpret_cast<KisPageVersion *>(storage.data()), VersionScanBudget);
-    const auto slice = m_metadata.historySlice(work.key, work.after, candidates, VersionScanBudget);
-    visitedVersions += quint64(candidates.size());
-    qsizetype remaining = slice.total;
-    if (!candidates.empty()) {
-        ++m_versionSlices;
-        ++m_pagesVisited;
-        if (!kisOnPageStoreReclamationThread()) ++m_foregroundPagesVisited;
-        quint32 removed = 0;
-        if (!m_metadata.discardHistory(work.key, candidates.data(), qsizetype(candidates.size()), &removed))
-            return SliceResult::Blocked;
-        remaining -= qsizetype(qPopulationCount(removed));
-    }
-    work.after = slice.after;
-    if (!work.after.isValid()) {
-        if (remaining && work.repeat) {
-            work.repeat = false;
-        } else {
-            work.repeat = false;
-            m_ready.erase(m_ready.iterator_to(work));
-            if (!remaining) {
-                m_work.erase_and_dispose(m_work.iterator_to(work), [this](Work *value) { disposeWork(value); });
-                return SliceResult::Removed;
-            }
-        }
-    }
-    return SliceResult::Ready;
-}
-
 bool KisPageHistoryCollector::collectPassLocked()
 {
-    KisPageKey unrooted[PageAdmissionBudget];
-    const size_t unrootedCount = m_metadata.takeUnrootedKeys(unrooted, PageAdmissionBudget);
-    for (size_t i = 0; i < unrootedCount; ++i) requestKeyLocked(unrooted[i]);
-    if (m_rescanRequested) {
-        m_rescanRequested = false;
-        m_metadata.visitPageKeys(this, +[](void *p, const KisPageKey &key) {
-            static_cast<KisPageHistoryCollector *>(p)->requestKeyLocked(key, true);
-        }, true);
-    }
-    std::array<Work *, PageAdmissionBudget> keys{};
-    qsizetype count = 0;
-    for (auto &work : m_ready) {
-        keys[size_t(count++)] = &work;
-        if (count == PageAdmissionBudget) break;
-    }
-    quint64 versions = 0;
-    bool blocked = m_rescanRequested;
-    for (qsizetype i = 0; i < count; ++i) {
-        auto &work = *keys[size_t(i)];
-        SliceResult result = SliceResult::Ready;
-        try {
-            result = collectSliceLocked(work, versions);
-            blocked = (result == SliceResult::Blocked) || blocked;
-        }
-        catch (const std::bad_alloc &) { blocked = true; }
-        // The Store gate never left this pass. Only this slice can dispose its
-        // original Work; otherwise its pointer remains the round-robin link.
-        if (result != SliceResult::Removed && work.is_linked())
-            m_ready.splice(m_ready.end(), m_ready, m_ready.iterator_to(work));
-    }
-    m_maximumVersionsPerPass = std::max(m_maximumVersionsPerPass, versions);
-    m_maximumPagesPerPass = std::max(m_maximumPagesPerPass, quint64(count));
-    return blocked;
+    const auto work = m_metadata.collectHistoryValues();
+    ++m_collectionPasses;
+    m_valuesVisited += work.examined;
+    m_retiredValues += work.retired;
+    if (!kisOnPageStoreReclamationThread()) m_foregroundValuesVisited += work.examined;
+    m_maximumValuesPerPass = std::max(m_maximumValuesPerPass, quint64(work.examined));
+    return work.blocked;
 }
 
 void KisPageHistoryCollector::collectUnreachableLocked()
 {
     if (!m_backgroundReclamation || m_closing || m_automaticWakeupsStopped) {
-        while (!m_ready.empty() || m_rescanRequested || m_metadata.hasUnrootedValues()) {
+        while (m_metadata.pendingValueChecks()) {
             if (collectPassLocked()) {
                 m_blocked = true;
                 break;
@@ -206,7 +100,7 @@ void KisPageHistoryCollector::collectUnreachableLocked()
 
 bool KisPageHistoryCollector::hasSemanticWorkLocked() const
 {
-    return m_epochs.hasCollectionWork() || !m_ready.empty() || m_rescanRequested || m_metadata.hasUnrootedValues()
+    return m_epochs.hasCollectionWork() || m_metadata.pendingValueChecks()
         || (m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext));
 }
 
@@ -240,8 +134,6 @@ bool KisPageHistoryCollector::enqueueTask(KisPageHistoryWakeContext &context)
 void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
 {
     if (m_task) return;
-    Q_ASSERT(m_work.empty());
-    m_workAllocator = KisMutationStorageAllocator<Work>(&budget);
     auto context = std::allocate_shared<KisPageHistoryWakeContext>(
         KisMutationStorageAllocator<KisPageHistoryWakeContext>::retained(&budget));
     context->collector = this;
@@ -260,8 +152,8 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
                 if (hasSemanticWorkLocked() && (!m_blocked || (m_pressureDeadline && now >= m_pressureDeadline))) {
                     m_blocked = false;
                     m_pressureDeadline = 0;
-                    m_epochs.collectFinishedTransactions(VersionScanBudget);
-                    m_epochs.collectUnretainedRoots(VersionScanBudget);
+                    m_epochs.collectFinishedTransactions(EpochCollectionBudget);
+                    m_epochs.collectUnretainedRoots(EpochCollectionBudget);
                     m_blocked = collectPassLocked() || m_blocked;
                     collectAbandoned = m_hasAbandonedMutations && m_hasAbandonedMutations(m_ownerContext);
                     processRetirements = true;
@@ -310,6 +202,19 @@ void KisPageHistoryCollector::prepareTask(KisBackingBudgetController &budget)
     if (!context->retry.isValid()) throw std::bad_alloc();
     m_task = std::move(task);
     m_wakeContext = std::move(context);
+
+}
+
+void KisPageHistoryCollector::startLocked()
+{
+    Q_ASSERT(m_task && m_wakeContext);
+    m_metadata.setValueReclaimWake(this, +[](void *value) noexcept {
+        auto *collector = static_cast<KisPageHistoryCollector *>(value);
+        auto &state = *collector->m_wakeContext;
+        QMutexLocker notificationLock(&state.mutex);
+        if (state.collector == collector) collector->enqueueTask(state);
+    });
+    scheduleLocked();
 }
 
 void KisPageHistoryCollector::scheduleLocked()
@@ -407,31 +312,23 @@ void KisPageHistoryCollector::clearLocked()
         m_wakeContext->timerDeadline = 0;
     }
     m_pressureDeadline = 0;
-    KisPageKey unrooted[PageAdmissionBudget];
-    while (m_metadata.takeUnrootedKeys(unrooted, PageAdmissionBudget)) {}
-    m_ready.clear();
-    m_work.clear_and_dispose([this](Work *work) { disposeWork(work); });
-    m_rescanRequested = false;
+    m_metadata.clearValueChecks();
 }
 
 KisPageHistoryCollectorSnapshot KisPageHistoryCollector::snapshotLocked() const
 {
     KisPageHistoryCollectorSnapshot result;
-    result.pendingPages = qsizetype(m_ready.size());
-    result.deferredPages = qsizetype(m_work.size()) - result.pendingPages;
+    result.pendingValues = qsizetype(m_metadata.pendingValueChecks());
     if (m_wakeContext) {
         QMutexLocker notificationLock(&m_wakeContext->mutex);
         result.retryWakeups = m_wakeContext->retryWakeups;
         result.retryScheduled = m_wakeContext->timerDeadline != 0;
         result.jobScheduled = m_wakeContext->jobScheduled;
     }
-    for (const auto &work : m_work) {
-        result.activeScans += work.after.isValid();
-    }
-    result.pagesVisited = m_pagesVisited;
-    result.foregroundPagesVisited = m_foregroundPagesVisited;
-    result.maximumPagesPerPass = m_maximumPagesPerPass;
-    result.maximumVersionsPerPass = m_maximumVersionsPerPass;
-    result.versionSlices = m_versionSlices;
+    result.valuesVisited = m_valuesVisited;
+    result.foregroundValuesVisited = m_foregroundValuesVisited;
+    result.maximumValuesPerPass = m_maximumValuesPerPass;
+    result.collectionPasses = m_collectionPasses;
+    result.retiredValues = m_retiredValues;
     return result;
 }

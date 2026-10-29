@@ -682,24 +682,24 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("pages%1-exit%2").arg(pages).arg(exit))) << pages << exit;
     }
     void lastRootReleaseVisitsOnlyAffectedHistory();
-    void longHistoryUsesVersionBudget_data()
+    void longHistoryUsesValueBudget_data()
     {
         QTest::addColumn<int>("bpp"); QTest::addColumn<int>("history");
         for (int bpp : {1, 4, 8, 16}) for (int history : {65, 257})
             QTest::newRow(qPrintable(QStringLiteral("bpp%1-history%2").arg(bpp).arg(history))) << bpp << history;
     }
-    void longHistoryUsesVersionBudget();
-    void multiPageHistorySharesVersionBudget_data() { pixelRows(); }
-    void multiPageHistorySharesVersionBudget();
-    void historyVersionSlicePreservesChangedKey_data()
+    void longHistoryUsesValueBudget();
+    void multiPageHistorySharesValueBudget_data() { pixelRows(); }
+    void multiPageHistorySharesValueBudget();
+    void historyValueBatchesPreserveConcurrentPublication_data()
     {
         QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("changedKey");
         for (int bpp : {1, 4, 8, 16}) for (bool changed : {false, true})
             QTest::newRow(qPrintable(QStringLiteral("bpp%1-changed%2").arg(bpp).arg(changed))) << bpp << changed;
     }
-    void historyVersionSlicePreservesChangedKey();
-    void historySweepRevalidatesAndRevisits_data() { pixelRows(); }
-    void historySweepRevalidatesAndRevisits();
+    void historyValueBatchesPreserveConcurrentPublication();
+    void historyValueEventsSurviveRestoration_data() { pixelRows(); }
+    void historyValueEventsSurviveRestoration();
     void nativeMetadataWorkIgnoresRetainedHistory_data()
     {
         QTest::addColumn<int>("bpp"); QTest::addColumn<int>("history");
@@ -899,6 +899,12 @@ private Q_SLOTS:
     void ledgerBackingNodesRefusedBeforePhysicalResult();
     void backingStorageEndpoints_data();
     void backingStorageEndpoints();
+    void ledgerBackingRegistrationExcludesDomainMovement_data()
+    {
+        QTest::addColumn<bool>("firstCompletesFirst");
+        QTest::newRow("first-finishes-first") << true;
+        QTest::newRow("second-finishes-first") << false;
+    }
     void ledgerBackingRegistrationExcludesDomainMovement();
     void orphanRetirementFootprintRefusal();
     void originalRetirementSurvivesClassClaim_data()
@@ -934,11 +940,10 @@ private Q_SLOTS:
         QTest::newRow("orphan-footprint-refused-automatic") << true << true << false << true;
     }
     void retirementRecordTransfersAtCapacity();
-    void historyRefusalPreservesOriginalWork_data()
+    void historyRefusalPreservesOriginalValues_data()
     {
         QTest::addColumn<int>("refusal");
         QTest::addColumn<int>("expiryOrder");
-        QTest::newRow("work-storage") << 0 << 0;
         QTest::newRow("detach-debt") << 1 << 0;
         QTest::newRow("effect-transfer-at-capacity") << 2 << 0;
         QTest::newRow("effect-preparation-storage") << 3 << 0;
@@ -946,7 +951,7 @@ private Q_SLOTS:
         QTest::newRow("expiry-before-pressure-release") << 1 << 1;
         QTest::newRow("pressure-release-before-expiry") << 1 << 2;
     }
-    void historyRefusalPreservesOriginalWork();
+    void historyRefusalPreservesOriginalValues();
     void historyIdleSchedulingBounded();
     void historyTimerIsolationAndClose();
     void historyIdleWakeWhilePassFinishes();
@@ -1269,7 +1274,7 @@ private Q_SLOTS:
                     .arg(background).arg(commit).arg(protection))) << background << commit << protection;
     }
     void transactionExitReclaimsOutsideItsOwnDelta();
-    void snapshotReleaseScansOnlyAfterLastProtection_data()
+    void snapshotReleaseCollectsOnlyAfterLastProtection_data()
     {
         QTest::addColumn<bool>("background");
         QTest::addColumn<int>("protection");
@@ -1277,7 +1282,7 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("background%1-protection%2")
                 .arg(background).arg(protection))) << background << protection;
     }
-    void snapshotReleaseScansOnlyAfterLastProtection();
+    void snapshotReleaseCollectsOnlyAfterLastProtection();
     void restoreIgnoresDetachedRetirement_data();
     void restoreIgnoresDetachedRetirement();
     void concurrentDisjointCommitsKeepEveryPage();
@@ -2448,9 +2453,8 @@ void KisPageStoreCpuMutationTest::historyReachabilityIgnoresRetiredRootBacklog()
     f.provider->beforeRetire = {}; unblock.dismiss();
     QVERIFY(reclaimedWithRootBacklog.load());
     const auto after = f.store->readScopeStatistics();
-    const auto refreshes = after.historyVersionSlices - before.historyVersionSlices;
-    const quint64 slices = quint64((history + 31) / 32);
-    QVERIFY(refreshes >= slices && refreshes <= 2 * slices);
+    QCOMPARE(after.historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(history - keepOldest));
+    QVERIFY(after.maximumHistoryValuesPerPass <= 32);
     QCOMPARE(f.store->sessionStats().immutableRoots, qsizetype(keepOldest ? 2 : 1));
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(keepOldest ? 3 : 2));
     QCOMPARE(f.pixel(), QByteArray(bpp, char(0x71)));
@@ -2477,18 +2481,17 @@ void KisPageStoreCpuMutationTest::lastRootReleaseVisitsOnlyAffectedHistory()
     QVERIFY(fill(0, pages, 0x31));
     const auto unrelated = f.store->captureRetainedEpoch(); QVERIFY(unrelated.isValid());
     QVERIFY(fill(0, pages, 0x52)); QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(pages));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(pages));
     const auto snapshot = exit == 0 ? f.store->captureRetainedEpoch() : KisRetainedImageEpochSnapshot{};
     const auto base = (exit == 1 || exit == 2) ? f.store->beginCurrentTransaction() : KisPageTransaction{};
     auto captured = exit == 3 ? f.store->captureReadView() : KisCapturedReadView{};
     const auto sibling = f.store->captureRetainedEpoch(); QVERIFY(sibling.isValid());
     QVERIFY(fill(0, 1, 0x73)); QVERIFY(f.store->waitForRetirementIdle());
     const auto before = f.store->readScopeStatistics();
-    const auto metadataBefore = kisPageStoreMetadataMetrics(*f.store);
     // Another real protection on the same root means this exit changes no
     // Value root edge. It must not rescan even the affected page yet.
     QVERIFY(f.store->releaseSnapshot(sibling.token)); QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited, before.historicalGcPagesVisited);
+    QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited, before.historicalGcValuesVisited);
     if (exit == 0) QVERIFY(f.store->releaseSnapshot(snapshot.token));
     if (exit == 1) QVERIFY(f.store->abort(base));
     if (exit == 2) {
@@ -2504,23 +2507,20 @@ void KisPageStoreCpuMutationTest::lastRootReleaseVisitsOnlyAffectedHistory()
     if (exit == 3) captured = {};
     QVERIFY(f.store->waitForRetirementIdle());
     const auto after = f.store->readScopeStatistics();
-    const auto metadataAfter = kisPageStoreMetadataMetrics(*f.store);
     const quint64 defaultCleanup = exit == 2 ? 1 : 0;
-    QCOMPARE(after.historicalGcPagesVisited - before.historicalGcPagesVisited, quint64(1) + defaultCleanup);
-    QCOMPARE(metadataAfter.historySliceQueries - metadataBefore.historySliceQueries, quint64(1) + defaultCleanup);
-    QCOMPARE(metadataAfter.historySliceVersionInputs - metadataBefore.historySliceVersionInputs, quint64(2) + defaultCleanup);
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(pages));
+    QCOMPARE(after.historicalGcValuesVisited - before.historicalGcValuesVisited, quint64(1) + defaultCleanup);
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(pages));
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2 * pages + (exit == 2)));
     KisPageReadView old; old.kind = KisPageReadViewKind::CommittedEpoch; old.epoch = unrelated.snapshot.epoch; old.retention = unrelated.token;
     QCOMPARE(f.pixel(old, pages - 1), QByteArray(f.bpp, char(0x31)));
     QCOMPARE(f.pixel({}, 0), QByteArray(f.bpp, char(0x73)));
     QVERIFY(f.store->releaseSnapshot(unrelated.token)); QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(pages + (exit == 2)));
     QVERIFY(f.store->closeSession()); QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
-void KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget()
+void KisPageStoreCpuMutationTest::longHistoryUsesValueBudget()
 {
     QFETCH(int, bpp); QFETCH(int, history);
     Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x35));
@@ -2543,16 +2543,12 @@ void KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget()
     QVERIFY(f.store->waitForRetirementIdle());
     const auto retained = f.store->readScopeStatistics();
     const auto metadataRetained = kisPageStoreMetadataMetrics(*f.store);
-    const auto refreshes = retained.historyVersionSlices - before.historyVersionSlices;
-    const quint64 slices = quint64((history + 31) / 32);
-    QVERIFY(refreshes >= slices && refreshes <= 2 * slices);
-    // Each bounded candidate tests its original Value; retained root count
-    // no longer multiplies the version enumeration.
-    QCOMPARE(metadataRetained.historySliceVersionInputs - metadataBefore.historySliceVersionInputs,
-             quint64(history) * (refreshes / slices));
+    // Every old root is still admitted: creating history alone must not
+    // enqueue work or enumerate its protected versions.
+    QCOMPARE(retained.historicalGcValuesVisited, before.historicalGcValuesVisited);
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
     QCOMPARE(metadataRetained.fullSnapshotExports, metadataBefore.fullSnapshotExports);
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(history + 2));
-    QCOMPARE(f.store->sessionStats().activeHistoryScans, qsizetype(0));
     auto held = std::move(views[size_t(history / 2)]);
     views.clear(); QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(3));
@@ -2564,20 +2560,18 @@ void KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget()
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
     const auto after = f.store->readScopeStatistics();
     const auto metadataAfter = kisPageStoreMetadataMetrics(*f.store);
-    QVERIFY(after.maximumHistoryVersionsPerPass > 0 && after.maximumHistoryVersionsPerPass <= 512);
-    QVERIFY(metadataAfter.maximumHistorySliceVersionInputs > 0 && metadataAfter.maximumHistorySliceVersionInputs <= 32);
-    QCOMPARE(after.foregroundHistoricalGcPagesVisited, quint64(0));
+    QVERIFY(after.maximumHistoryValuesPerPass > 0 && after.maximumHistoryValuesPerPass <= 32);
+    QCOMPARE(after.foregroundHistoricalGcValuesVisited, quint64(0));
     QCOMPARE(metadataAfter.fullSnapshotExports, metadataBefore.fullSnapshotExports);
     QCOMPARE(metadataAfter.backgroundLocalVersionRemovals - metadataBefore.backgroundLocalVersionRemovals, quint64(history));
-    QCOMPARE(f.store->sessionStats().pendingHistoricalPages, qsizetype(0));
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(0));
-    qInfo() << "history budget" << history << "retained refreshes" << refreshes
-            << "slice maximum" << metadataAfter.maximumHistorySliceVersionInputs
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
+    qInfo() << "history Value budget" << history << "maximum" << after.maximumHistoryValuesPerPass
             << "removed" << metadataAfter.backgroundLocalVersionRemovals - metadataBefore.backgroundLocalVersionRemovals;
     QVERIFY(f.store->closeSession()); QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
-void KisPageStoreCpuMutationTest::multiPageHistorySharesVersionBudget()
+void KisPageStoreCpuMutationTest::multiPageHistorySharesValueBudget()
 {
     QFETCH(int, bpp);
     Fixture f; QVERIFY(f.init(bpp));
@@ -2599,27 +2593,26 @@ void KisPageStoreCpuMutationTest::multiPageHistorySharesVersionBudget()
     }
     resume.release(); unblock.dismiss(); QVERIFY(f.store->waitForRetirementIdle());
     const auto stats = f.store->readScopeStatistics();
-    QVERIFY(stats.maximumHistoryVersionsPerPass > 0 && stats.maximumHistoryVersionsPerPass <= 512);
+    QVERIFY(stats.maximumHistoryValuesPerPass > 0 && stats.maximumHistoryValuesPerPass <= 32);
     for (int column = 0; column < 8; ++column) {
         auto before = views.front().readResidentPage(key(column)); QVERIFY(before.isValid());
         QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x31));
         QCOMPARE(quint8(f.pixel({}, column)[0]), quint8(0x70));
     }
     views.clear(); QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->sessionStats().activeHistoryScans, qsizetype(0));
-    QCOMPARE(f.store->sessionStats().pendingHistoricalPages, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(8 * 64 * 64 * bpp));
     QVERIFY(f.store->closeSession());
 }
 
-void KisPageStoreCpuMutationTest::historyVersionSlicePreservesChangedKey()
+void KisPageStoreCpuMutationTest::historyValueBatchesPreserveConcurrentPublication()
 {
     QFETCH(int, bpp); QFETCH(bool, changedKey);
     Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x31));
-    QSemaphore entered, resume, firstSlice, continueScanning;
+    QSemaphore entered, resume, firstBatch, continueCollecting;
     kisSchedulePageStoreReclamation([&] { entered.release(); resume.acquire(); });
     auto unblock = qScopeGuard([&] {
-        resume.release(); continueScanning.release(); kisDrainPageStoreReclamation();
+        resume.release(); continueCollecting.release(); kisDrainPageStoreReclamation();
     });
     QVERIFY(entered.tryAcquire(1, 10000));
     const auto write = [&](int column, quint8 value) {
@@ -2633,25 +2626,26 @@ void KisPageStoreCpuMutationTest::historyVersionSlicePreservesChangedKey()
         views.push_back(f.store->captureReadView({})); QVERIFY(views.back().isValid());
         QVERIFY(write(0, quint8(0x40 + i)));
     }
-    // Publish between bounded version slices. No root-scan continuation
-    // exists; each subsequent slice consumes current original Value facts.
-    kisSchedulePageStoreReclamation([&] { firstSlice.release(); continueScanning.acquire(); });
-    resume.release(); QVERIFY(firstSlice.tryAcquire(1, 10000));
-    QVERIFY(f.store->sessionStats().activeHistoryScans > 0);
+    // Keep one real reader while releasing 64 original history Values.
+    // Publish between bounded batches; no cursor or re-enumeration is needed.
+    auto oldest = std::move(views.front()); views.clear();
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(64));
+    kisSchedulePageStoreReclamation([&] { firstBatch.release(); continueCollecting.acquire(); });
+    resume.release(); QVERIFY(firstBatch.tryAcquire(1, 10000));
+    QVERIFY(f.store->sessionStats().pendingHistoryValueChecks > 0);
     const auto before = f.store->readScopeStatistics();
     QVERIFY(write(changedKey ? 0 : 1, 0xc3));
-    continueScanning.release(); unblock.dismiss(); QVERIFY(f.store->waitForRetirementIdle());
+    continueCollecting.release(); unblock.dismiss(); QVERIFY(f.store->waitForRetirementIdle());
     const auto after = f.store->readScopeStatistics();
-    QVERIFY(after.historyVersionSlices > before.historyVersionSlices);
-    QVERIFY(after.maximumHistoryVersionsPerPass <= 512);
-    auto old = views.front().readResidentPage(key(0)); QVERIFY(old.isValid());
+    QVERIFY(after.historyCollectionPasses > before.historyCollectionPasses);
+    QVERIFY(after.maximumHistoryValuesPerPass <= 32);
+    auto old = oldest.readResidentPage(key(0)); QVERIFY(old.isValid());
     QCOMPARE(static_cast<const quint8 *>(old.data())[0], quint8(0x31));
-    old = {}; views.clear(); QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->sessionStats().activeHistoryScans, qsizetype(0));
+    old = {}; oldest = {}; QVERIFY(f.store->waitForRetirementIdle());
     QVERIFY(f.store->closeSession());
 }
 
-void KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits()
+void KisPageStoreCpuMutationTest::historyValueEventsSurviveRestoration()
 {
     QFETCH(int, bpp);
     Fixture f; QVERIFY(f.init(bpp)); QVERIFY(f.fill(0x35));
@@ -2673,10 +2667,10 @@ void KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits()
         QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
     }
     initialResume.release(); QVERIFY(retiring.tryAcquire(1, 10000));
-    QVERIFY(f.store->sessionStats().activeHistoryScans > 0);
-    // The history cursor has passed the oldest (protected) generation. Restore
-    // it and supersede it again while physical retirement is parked outside
-    // owner. This creates history BELOW the cursor and changes root reachability.
+    QVERIFY(f.store->sessionStats().pendingHistoryValueChecks > 0);
+    // The oldest Value was protected and never queued. Restore and supersede
+    // it while physical retirement is parked outside owner. Its new role and
+    // final root exit must deliver that same original identity independently.
     QVERIFY(f.store->restoreRetainedEpoch(oldest).isValid());
     const auto tx = f.store->beginCurrentTransaction(); auto mutation = f.begin(tx);
     auto write = mutation.beginWrite(key(0)); QVERIFY(write.isValid());
@@ -2687,10 +2681,9 @@ void KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits()
     continueRetiring.release(); QVERIFY(f.store->waitForRetirementIdle());
     f.provider->beforeRetire = {}; cleanup.dismiss();
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
-    QCOMPARE(f.store->sessionStats().activeHistoryScans, qsizetype(0));
-    QCOMPARE(f.store->sessionStats().pendingHistoricalPages, qsizetype(0));
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(0));
-    QVERIFY(f.store->readScopeStatistics().historyVersionSlices >= 2);
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
+    QVERIFY(f.store->readScopeStatistics().historyCollectionPasses >= 2);
     auto view = f.store->captureReadView({}); auto read = view.readResidentPage(key(0)); QVERIFY(read.isValid());
     QCOMPARE(QByteArray(static_cast<const char *>(read.data()), bpp), QByteArray(bpp, char(0xe7)));
     read = {}; view = {}; QVERIFY(f.store->closeSession());
@@ -2720,7 +2713,7 @@ void KisPageStoreCpuMutationTest::retainedHistoryReclaimsInBackground()
     }
     QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(pages));
-    QCOMPARE(f.store->sessionStats().pendingHistoricalPages, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
     auto view = f.store->captureReadView();
     QVERIFY(fill(0x77));
     auto old = view.readResidentPage(key(95));
@@ -2733,26 +2726,26 @@ void KisPageStoreCpuMutationTest::retainedHistoryReclaimsInBackground()
         QVERIFY(current.isValid());
     }
     QVERIFY(f.store->waitForRetirementIdle());
-    QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited, idle.historicalGcPagesVisited);
+    QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited, idle.historicalGcValuesVisited);
     // Rejected shutdown must unfreeze scheduling, including pending history.
     QVERIFY(!f.store->closeSession());
     old = {};
     const auto before = f.store->readScopeStatistics();
     view = {};
-    QCOMPARE(f.store->readScopeStatistics().foregroundHistoricalGcPagesVisited,
-             before.foregroundHistoricalGcPagesVisited);
+    QCOMPARE(f.store->readScopeStatistics().foregroundHistoricalGcValuesVisited,
+             before.foregroundHistoricalGcValuesVisited);
     QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(pages));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(pages * 64 * 64 * f.bpp));
     const auto stats = f.store->sessionStats();
-    QCOMPARE(stats.pendingHistoricalPages, qsizetype(0));
-    QCOMPARE(stats.deferredHistoricalPages, qsizetype(0));
+    QCOMPARE(stats.pendingHistoryValueChecks, qsizetype(0));
+    QCOMPARE(stats.historicalValues, qsizetype(0));
     QCOMPARE(stats.scheduledReclamationJobs, qsizetype(0));
     QVERIFY(stats.backgroundRetirementPasses > 0 && stats.maximumReplicasPerRetirementPass <= 32);
     const auto after = f.store->readScopeStatistics();
-    QVERIFY(after.historicalGcPagesVisited >= before.historicalGcPagesVisited + pages);
-    QVERIFY(after.maximumHistoryPagesPerPass > 0 && after.maximumHistoryPagesPerPass <= 16);
-    QCOMPARE(after.foregroundHistoricalGcPagesVisited, quint64(0));
+    QVERIFY(after.historicalGcValuesVisited >= before.historicalGcValuesVisited + pages);
+    QVERIFY(after.maximumHistoryValuesPerPass > 0 && after.maximumHistoryValuesPerPass <= 32);
+    QCOMPARE(after.foregroundHistoricalGcValuesVisited, quint64(0));
     QVERIFY(f.store->closeSession());
 }
 
@@ -3237,7 +3230,7 @@ void KisPageStoreCpuMutationTest::oldTransactionBaseReleaseReclaimsDeferredHisto
     QVERIFY(f.store->abort(oldTransaction));
     QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
-    QCOMPARE(f.store->sessionStats().deferredHistoricalPages, qsizetype(0));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(2 * 64 * 64 * f.bpp));
     QVERIFY(f.store->closeSession());
 }
@@ -5080,7 +5073,7 @@ void KisPageStoreCpuMutationTest::transactionExitReclaimsOutsideItsOwnDelta()
     QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
     QCOMPARE(f.pixel(KisPageReadView::transactionBase(old.id), 1), QByteArray(f.bpp, char(0x31)));
     QVERIFY(f.store->waitForRetirementIdle());
-    const auto scansBefore = f.store->readScopeStatistics().historicalGcPagesVisited;
+    const auto scansBefore = f.store->readScopeStatistics().historicalGcValuesVisited;
     if (commit) {
         QVERIFY(KisPageStoreCpuSurfaceOps::fillRect(f.store.get(), {1}, old,
             QRect(0, 0, 64, 64), QByteArray(f.bpp, char(0x55)), &f.error));
@@ -5092,8 +5085,8 @@ void KisPageStoreCpuMutationTest::transactionExitReclaimsOutsideItsOwnDelta()
     QVERIFY(f.store->waitForRetirementIdle());
     if (protection) {
         QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(commit ? 4 : 3) * pageBytes);
-        QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited - scansBefore,
-                 quint64(commit ? 1 : 0)); // Only the committed page 0 needs a new scan.
+        QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited - scansBefore,
+                 quint64(0)); // Both old pages remain protected; publication needs no history scan.
         // Only the actual last protection release may collect the old base.
         if (keeper.isValid()) QVERIFY(f.store->abort(keeper));
         else QVERIFY(f.store->releaseSnapshot(retained.token));
@@ -5107,7 +5100,7 @@ void KisPageStoreCpuMutationTest::transactionExitReclaimsOutsideItsOwnDelta()
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
-void KisPageStoreCpuMutationTest::snapshotReleaseScansOnlyAfterLastProtection()
+void KisPageStoreCpuMutationTest::snapshotReleaseCollectsOnlyAfterLastProtection()
 {
     QFETCH(bool, background); QFETCH(int, protection);
     Fixture f; f.provider->disableBackgroundRetirement = !background;
@@ -5123,12 +5116,12 @@ void KisPageStoreCpuMutationTest::snapshotReleaseScansOnlyAfterLastProtection()
     QVERIFY(f.store->commit(newer, f.store->preparedPages(newer)).isValid());
     QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
-    const auto scansBefore = f.store->readScopeStatistics().historicalGcPagesVisited;
+    const auto scansBefore = f.store->readScopeStatistics().historicalGcValuesVisited;
     QVERIFY(f.store->releaseSnapshot(retained.token));
     QVERIFY(f.store->waitForRetirementIdle());
     if (protection) {
         QCOMPARE(f.provider->memoryUsage().committedBytes, 3 * pageBytes);
-        QCOMPARE(f.store->readScopeStatistics().historicalGcPagesVisited, scansBefore);
+        QCOMPARE(f.store->readScopeStatistics().historicalGcValuesVisited, scansBefore);
         if (keeper.isValid()) QVERIFY(f.store->abort(keeper));
         else QVERIFY(f.store->releaseSnapshot(second.token));
         QVERIFY(f.store->waitForRetirementIdle());
@@ -6352,6 +6345,7 @@ void KisPageStoreCpuMutationTest::ledgerBackingNodesRefusedBeforePhysicalResult(
 
 void KisPageStoreCpuMutationTest::ledgerBackingRegistrationExcludesDomainMovement()
 {
+    QFETCH(bool, firstCompletesFirst);
     Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
     KisSurfaceEpochState surface; QVERIFY(f.store->resolveSurfaceState({1}, {}, &surface));
     const auto original = f.provider->lastTarget;
@@ -6377,35 +6371,56 @@ void KisPageStoreCpuMutationTest::ledgerBackingRegistrationExcludesDomainMovemen
         .buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam);
     void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
     const auto release = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
-    QSemaphore entered, resume;
+    QSemaphore entered[2], resume[2];
     std::atomic<int> footprints{0};
     f.provider->afterBackingFootprint = [&] {
-        if (footprints.fetch_add(1) == 1) { entered.release(); resume.acquire(); }
+        // Each call stops after its second observation, with its original
+        // registration marker alive and no ledger/provider gate held.
+        const int call = footprints.fetch_add(1);
+        if (call == 1 || call == 3) {
+            entered[call / 2].release(); resume[call / 2].acquire();
+        }
     };
-    bool accepted = false; QString registrationError;
-    std::thread registration([&] {
-        accepted = owner.registerBacking(original, reservation, KisBackingBudgetClass::Current,
-            &registrationError, &record);
-    });
+    bool accepted[2] = {false, false}; QString errors[2];
+    std::thread registrations[2];
     const auto join = qScopeGuard([&] {
-        resume.release(); if (registration.joinable()) registration.join();
+        for (int i = 0; i < 2; ++i) resume[i].release();
+        for (auto &thread : registrations) if (thread.joinable()) thread.join();
         f.provider->afterBackingFootprint = {};
     });
-    QVERIFY(entered.tryAcquire(1, 5000)); // Second observation: original scoped marker is active.
+    registrations[0] = std::thread([&] {
+        accepted[0] = owner.registerBacking(original, reservation, KisBackingBudgetClass::Current,
+            &errors[0], &record);
+    });
+    QVERIFY(entered[0].tryAcquire(1, 5000));
+    registrations[1] = std::thread([&] {
+        accepted[1] = owner.registerBacking(alias.replica, aliasReservation, KisBackingBudgetClass::Current,
+            &errors[1], &aliasRecord);
+    });
+    // Independent logical aliases may both register the same physical bytes.
+    // Their markers exclude a real residency change, not each other.
+    QVERIFY(entered[1].tryAcquire(1, 5000));
     QCOMPARE(owner.backingClass(original), KisBackingBudgetClass::Count);
+    QCOMPARE(owner.backingClass(alias.replica), KisBackingBudgetClass::Count);
     QVERIFY(!KisTileDataStore::instance()->trySwapTileData(tile)); QVERIFY(tile->isResident());
-    QVERIFY(!owner.registerBacking(alias.replica, aliasReservation, KisBackingBudgetClass::Current,
-        &f.error, &aliasRecord));
-    QVERIFY(f.error.contains(QStringLiteral("busy")));
-    QVERIFY(aliasReservation.isValid() && aliasRecord && !aliasRecord->backingNode.is_linked());
-    resume.release(); registration.join(); f.provider->afterBackingFootprint = {};
-    QVERIFY2(accepted, qPrintable(registrationError)); QVERIFY(!record);
+    const int first = firstCompletesFirst ? 0 : 1;
+    resume[first].release(); registrations[first].join();
+    QVERIFY2(accepted[first], qPrintable(errors[first]));
+    // Returning either marker must leave the other registration protected.
+    QVERIFY(!KisTileDataStore::instance()->trySwapTileData(tile)); QVERIFY(tile->isResident());
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
+             original.layout.byteSize);
+    resume[1 - first].release(); registrations[1 - first].join();
+    f.provider->afterBackingFootprint = {};
+    QVERIFY2(accepted[1 - first], qPrintable(errors[1 - first]));
+    QVERIFY(!record && !aliasRecord);
+    QVERIFY(!reservation.isValid() && !aliasReservation.isValid());
+    QCOMPARE(owner.backingClass(original), KisBackingBudgetClass::Current);
+    QCOMPARE(owner.backingClass(alias.replica), KisBackingBudgetClass::Current);
+    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::Current)].live.cpuRam,
+             original.layout.byteSize); // One physical charge, two real members.
     QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             limits.metadataArenaBytes);
-    QVERIFY2(owner.registerBacking(alias.replica, aliasReservation, KisBackingBudgetClass::Current,
-        &f.error, &aliasRecord), qPrintable(f.error)); // Marker returned; same physical result and nodes.
-    QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam,
-             limits.metadataArenaBytes); // Joining an existing physical group performs no storage admission.
+             limits.metadataArenaBytes); // Both registrations work at exact storage capacity.
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
     QVERIFY(KisTileDataStore::instance()->trySwapTileData(tile));
     QVERIFY(owner.synchronizeBackingDomains(&f.error));
@@ -7249,10 +7264,11 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QVERIFY(!removal.isValid());
     QCOMPARE(cleanupContext.calls, 0); // Mutation acceptance creates no deferred publication jobs.
     QCOMPARE(f.metadata.footprint().pageActivities, quint64(0));
-    QVERIFY(f.budget.usage().backpressureCount > beforeCollection);
-    // Compact original Work records fit in the preparation storage just
-    // released. Retirement Debt still refuses and retains both obligations.
-    QCOMPARE(f.history.snapshotLocked().pendingPages, qsizetype(2));
+    // Acceptance released its prepared storage. With no per-key Work charge,
+    // both actual Debt transfers fit in that real headroom at the original cap.
+    QCOMPARE(f.budget.usage().backpressureCount, beforeCollection);
+    QCOMPARE(f.history.snapshotLocked().pendingValues, qsizetype(0));
+    QCOMPARE(f.history.snapshotLocked().retiredValues, quint64(2));
     QVERIFY(state->proofs.empty());
     QCOMPARE(state->removals.size(), size_t(1));
     QVERIFY(state->removals.count(key()));
@@ -7261,11 +7277,12 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     for (const auto &proof : proofs) {
         KisPageMetadataCoordinator::VersionInfo historical;
         QVERIFY(f.metadata.versionSnapshot(proof.authority.version, &historical));
-        QCOMPARE(historical.publication, KisPagePublicationState::Historical);
+        QVERIFY(!historical.version.isValid());
     }
-    QCOMPARE(f.physical.provider->retireCalls.load(), 0);
+    // Accepted Debt may already dispatch its registered asynchronous provider.
+    // The final drain below must retire exactly these two original resources.
     freeFiller();
-    f.history.collectUnreachableLocked(); // Resume the original scan without replaying installation.
+    f.history.collectUnreachableLocked(); // No replay or second retirement of already transferred Values.
     lock.unlock();
     f.retirement.process(std::numeric_limits<qsizetype>::max());
     f.retirement.waitForIdle(); // Registered provider permission retains its original worker dispatch.
@@ -7290,7 +7307,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QCOMPARE(parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].reserved.cpuRam, quint64(0));
 }
 
-void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
+void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalValues()
 {
     QFETCH(int, refusal);
     QFETCH(int, expiryOrder);
@@ -7314,13 +7331,8 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     size_t fillerBytes = 0;
     KisBackingBudgetReservation blockingDebt;
     std::atomic<int> capabilityCalls{0};
-    if (refusal == 0 || refusal == 3 || refusal == 4) {
+    if (refusal == 3 || refusal == 4) {
         QMutexLocker lock(&f.mutex);
-        if (refusal != 0) {
-            const auto k = key();
-            f.history.requestKeyLocked(k); // Prepare Work before filling capacity.
-            f.history.collectUnreachableLocked();
-        }
         fillerBytes = size_t(f.limits.metadataArenaBytes - f.live())
             - (refusal == 4 ? sizeof(KisPageTransitionEffect) : 0);
         filler = allocateTestStoragePressure(&f.budget, fillerBytes, 1);
@@ -7355,7 +7367,7 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
             if (f.idleDeadline && now >= f.idleDeadline) { f.idleDeadline = 0; ++expired; }
         };
     }
-    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
+    { QMutexLocker lock(&f.mutex); f.history.collectUnreachableLocked(); }
     if (refusal != 2) QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
     else QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
     if (expiryOrder == 1) {
@@ -7374,18 +7386,18 @@ void KisPageStoreCpuMutationTest::historyRefusalPreservesOriginalWork()
     { QMutexLocker lock(&f.mutex); f.physical.provider->beforeCapabilities = {}; f.afterDebtCommit = {}; }
     freeTestStoragePressure(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
     // No new request, collect call, completion or explicit wake after capacity release.
-    QTRY_COMPARE_WITH_TIMEOUT(stats().pendingPages, qsizetype(0), 5000);
+    QTRY_COMPARE_WITH_TIMEOUT(stats().pendingValues, qsizetype(0), 5000);
     QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
     f.retirement.waitForIdle();
     { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
     QVERIFY(f.retirement.isDrained());
     QVERIFY(f.metadata.pageSnapshot(key(), &page));
     QVERIFY(!page.findVersion(f.replica.version));
-    QCOMPARE(stats().activeScans, qsizetype(0));
     if (expiryOrder) QTRY_COMPARE_WITH_TIMEOUT(expired.load(), 1, 5000);
     QVERIFY(!stats().retryScheduled);
+    QCOMPARE(stats().retiredValues, quint64(1));
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
-    QVERIFY(f.live() < before); // The real key/retirement/operation storage was freed.
+    QVERIFY(f.live() < before); // Actual version/retirement/operation storage was freed.
     QCOMPARE(f.references.loadAcquire(), 1);
 }
 
@@ -7580,15 +7592,13 @@ void KisPageStoreCpuMutationTest::readWithoutHistoryAvoidsReclamationAdmission()
     const auto reads = f.snapshot();
     QCOMPARE(reads.activeLeases, qsizetype(0));
     QMutexLocker lock(&f.mutex);
-    // The event can also arrive directly from publication/restore, rather
-    // than the read path's no-history hint. At the same real hard cap the
-    // collector itself must avoid funding empty work or a recovery request.
-    f.history.requestKeyLocked(key());
+    // At the same real hard cap an empty collector needs no funded Work
+    // or recovery request. Read return emitted no historical Value event.
     f.history.collectUnreachableLocked();
     QCOMPARE(f.budget.usage().backpressureCount, before);
     const auto history = f.history.snapshotLocked();
-    QCOMPARE(history.pendingPages, qsizetype(0));
-    QCOMPARE(history.pagesVisited, quint64(0));
+    QCOMPARE(history.pendingValues, qsizetype(0));
+    QCOMPARE(history.valuesVisited, quint64(0));
     QVERIFY(!history.retryScheduled);
 }
 
@@ -7665,7 +7675,7 @@ void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()
         QVERIFY(retained);
     }
     const auto stats = [&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked(); };
-    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
+    { QMutexLocker lock(&f.mutex); f.history.collectUnreachableLocked(); }
     QTRY_VERIFY_WITH_TIMEOUT(stats().retryWakeups >= 3, 5000);
     f.history.stopAutomaticWakeups();
     { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
@@ -7675,7 +7685,7 @@ void KisPageStoreCpuMutationTest::historyDetachRequiresRetirementOwner()
     QCOMPARE(f.physical.provider->retireCalls.load(), 0);
     QCOMPARE(f.owner.providerOperationCount(), qsizetype(0));
     QCOMPARE(f.retirement.snapshot().pendingReplicas, qsizetype(0));
-    QCOMPARE(stats().pendingPages, qsizetype(1));
+    QCOMPARE(stats().pendingValues, qsizetype(1));
 }
 
 void KisPageStoreCpuMutationTest::genericEffectsTransferAtCapacity()
@@ -8479,8 +8489,8 @@ void KisPageStoreCpuMutationTest::historyPreparationRevalidatesProtection()
         f.history.stopAutomaticWakeups();
         QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked();
     });
-    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
-    QTRY_VERIFY_WITH_TIMEOUT(([&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked().deferredPages == 1; }()), 5000);
+    { QMutexLocker lock(&f.mutex); f.history.collectUnreachableLocked(); }
+    QTRY_VERIFY_WITH_TIMEOUT(([&] { QMutexLocker lock(&f.mutex); return f.history.snapshotLocked().pendingValues == 0 && f.metadata.footprint().historicalValues == 1; }()), 5000);
     QVERIFY(installed);
     QCOMPARE(f.physical.provider->retireCalls.load(), 0);
     QCOMPARE(f.owner.backingClass(f.replica), KisBackingBudgetClass::RetainedHistory);
@@ -8491,7 +8501,7 @@ void KisPageStoreCpuMutationTest::historyPreparationRevalidatesProtection()
     read.kind = KisPageTransitionKind::ReleaseRead;
     { QMutexLocker lock(&f.mutex);
       QVERIFY(f.metadata.applyOwner(key(), read).accepted);
-      f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
+      f.history.collectUnreachableLocked(); }
     QTRY_COMPARE_WITH_TIMEOUT(f.physical.provider->retireCalls.load(), 1, 5000);
     f.retirement.waitForIdle();
     { QMutexLocker lock(&f.mutex); f.history.waitForIdleLocked(); }
@@ -8531,7 +8541,7 @@ void KisPageStoreCpuMutationTest::retirementResultBindsAtCapacity()
         f.physical.completions->complete(ticket, KisCompletionStatus::Succeeded);
         freeTestStoragePressure(&f.budget, filler, fillerBytes, 1);
     });
-    { QMutexLocker lock(&f.mutex); f.history.requestKeyLocked(key()); f.history.collectUnreachableLocked(); }
+    { QMutexLocker lock(&f.mutex); f.history.collectUnreachableLocked(); }
     QTRY_COMPARE_WITH_TIMEOUT(f.owner.providerOperationCount(), qsizetype(1), 5000);
     QTRY_VERIFY_WITH_TIMEOUT(f.retirement.snapshot().retryWakeups >= 3, 5000);
     f.retirement.waitForIdle();
@@ -9816,9 +9826,8 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
     if (protectedVersion) QVERIFY(capture.reset());
     KisPageReadCleanup cleanup(f.read); QMutexLocker gate(&f.mutex);
     // This fixture invokes metadata protection directly. Its real read owner
-    // also requests history when the last capture leaves; collection consumes
-    // those events rather than rescanning every registered page.
-    if (protectedVersion) f.history.requestKeyLocked(targets[0].version.key);
+    // returns the exact Value when the last capture leaves. Collection consumes
+    // that event without reconstructing the identity from its key.
     QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
     QVERIFY2(publication.abortLocked(tx, gate, cleanup), qPrintable(f.error));
     QCOMPARE(native[1].value->native.exportedStamp, quint64(0));
@@ -14316,12 +14325,20 @@ void KisPageStoreCpuMutationTest::staleFirstWriteKeepsCurrentDefault()
     Fixture f; QVERIFY(f.init());
     const auto tx = f.store->beginCurrentTransaction();
     QVERIFY(f.setDefault(0x57));
+    // No prior default-change worker may accidentally adopt the rejected
+    // writer's later history notification. Its own terminal must hand it off.
+    QVERIFY(f.store->waitForRetirementIdle());
     QCOMPARE(f.store->sessionStats().registeredPages, qsizetype(0));
     auto segment = route == 1 ? KisPageMutationSession{} : f.begin(tx);
     if (route == 1) {
         const auto request = f.store->acquireWrite(tx, key(), cpu, KisPageWriteMode::PreserveContents, KisPagePriority::Normal);
         QVERIFY(!request.isValid());
-        QVERIFY(request.error.contains(QStringLiteral("write base is not visible")));
+        QCOMPARE(request.status, KisPageRequestStatus::Failed);
+        QVERIFY2(!request.error.isEmpty(), "A refused stale-base write must explain its rejection");
+        // The optional old default can be collected during an unlocked
+        // preparation window. Check rejection and exact content below, not
+        // which internal stage first observes the missing/stale metadata.
+        qInfo() << "BR1_STALE_BASE_REJECTION" << request.error;
     } else if (route == 0) {
         QVERIFY(!segment.beginWrite(key()).isValid());
         QVERIFY(segment.cancel());
@@ -14337,13 +14354,20 @@ void KisPageStoreCpuMutationTest::staleFirstWriteKeepsCurrentDefault()
     }
     // A stale first writer obeys the same rejection as an already registered
     // page: its old default must not become Published to bypass the conflict.
-    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
     QCOMPARE(f.store->sessionStats().activeControlWritePages, qsizetype(0));
     QVERIFY(f.store->waitForRetirementIdle());
+    // Historical virtual defaults are reconstructible: only the current
+    // Published record remains. The exact old base still reads its own bytes.
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
+    QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));
+    QCOMPARE(f.pixel(KisPageReadView::transactionBase(tx.id)), QByteArray(f.bpp, char(0x2a)));
+    QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x57)));
     QVERIFY(f.store->abort(tx));
     QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x57)));
     QVERIFY2(f.store->closeSession(&f.error), qPrintable(f.error));
+    QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
 }
 
 void KisPageStoreCpuMutationTest::initialReplicaImportFailure_data()

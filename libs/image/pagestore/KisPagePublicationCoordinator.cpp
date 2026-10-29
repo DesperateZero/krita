@@ -611,7 +611,6 @@ void KisPagePublicationCoordinator::KisPreparedPagePublication::finishUnlocked(
             const bool revoked = owner.m_owner.releasePublicationIdentity(change.superseded);
             Q_ASSERT(revoked);
             Q_UNUSED(revoked);
-            owner.m_history.requestKeyLocked(change.replacement.key());
             historyRequested = true;
         }
         if (historyRequested)
@@ -1419,20 +1418,14 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             continue;
         }
 
-        // Acceptance consumes every proof at once. Keep the original input
-        // intact for history key delivery, then release storage outside the gate.
+        // Acceptance consumes every proof at once. Original metadata Values
+        // already own history delivery; release input storage outside the gate.
         // Abort instead erases each accepted revocation so refusal can resume.
         for (const auto &entry : owned.proofs) {
             if (!m_owner.releasePublicationIdentity(publicationProof(entry)))
                 qFatal("Owned committed proof changed before revocation");
         }
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
-        for (const auto &entry : owned.proofs) {
-            m_history.requestKeyLocked(publicationVersion(entry).key);
-        }
-        for (const PreparedDescriptorChange &change : std::as_const(preparedCommit.descriptorChanges)) {
-            m_history.requestKeyLocked(change.version.key);
-        }
         diagnostic.next(Phase::CommitHistoryCollect, quint64(owned.proofs.size() + descriptorChanges.size()));
         m_history.collectAfterEpochChangeLocked();
         diagnostic.next(Phase::CommitProviderRetire, 0);
@@ -1628,8 +1621,6 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         auto metadataCleanup = std::move(preparedCommit.metadataCleanup);
         if (installed) {
             completion = preparedCommit.completion;
-            for (const KisPageVersion &target : std::as_const(restoreTargets))
-                m_history.requestKeyLocked(target.key);
         }
         ownerLock.unlock();
         if (installed && completeAdapter)

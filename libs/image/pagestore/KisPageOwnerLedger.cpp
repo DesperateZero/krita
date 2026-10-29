@@ -918,10 +918,10 @@ public:
     {
         QMutexLocker locker(&m_mutex);
         if (!m_owner) return false;
-        for (auto *pending = m_pendingRegistrations; pending; pending = pending->next)
-            if (pending->physical == registration.physical) return false;
-        // The synchronous registering call owns this scoped marker until its
-        // scope exits. No result or physical responsibility is copied here.
+        // A marker excludes a residency change, not another logical alias.
+        // The ledger gate serializes membership and the one physical charge.
+        // Keep every registering call's own marker until its scope exits so
+        // returning one cannot expose a still active registration to a move.
         registration.next = m_pendingRegistrations;
         m_pendingRegistrations = &registration;
         return true;
@@ -1235,7 +1235,7 @@ try {
     KisPageOwnerDomainAdmission::Registration registration{registrationPhysical};
     if (!d->domainAdmission->beginRegistration(registration)) {
         KisPageStoreDetail::setError(
-            error, QStringLiteral("physical backing registration is busy"));
+            error, QStringLiteral("physical backing registration authority is detached"));
         return false;
     }
     const auto finishRegistration = qScopeGuard([&] {

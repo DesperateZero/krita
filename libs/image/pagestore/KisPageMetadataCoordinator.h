@@ -60,9 +60,6 @@ struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
 {
     bool accepted = false;
     bool storageRefused = false;
-    // Accepted removal of replica read/last-use protection found history on
-    // this page. The owner consumes this notification before releasing its gate.
-    bool historyNeedsRevisit = false;
     QString rejectionReason;
 };
 class KisPageStore;
@@ -99,9 +96,6 @@ struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
     quint64 publicationVersionInstalls = 0;
     quint64 publicationLookupVersionInputs = 0;
     quint64 publicationDirectoryHeaders = 0;
-    quint64 historySliceQueries = 0;
-    quint64 historySliceVersionInputs = 0;
-    quint64 maximumHistorySliceVersionInputs = 0;
     // Explicit whole-page snapshot work at the diagnostic/reference boundary.
     // Background is a subset, not additional work; local counters cannot
     // stand in for this debt.
@@ -200,6 +194,7 @@ struct KRITAIMAGE_EXPORT KisPageMetadataFootprint {
     quint64 metadataPageBytes = 0;
     quint64 metadataPageActivityBytes = 0;
     quint64 versions = 0;
+    quint64 historicalValues = 0;
     quint64 replicas = 0;
     quint64 readLeases = 0;
     quint64 pendingLastUses = 0;
@@ -363,35 +358,9 @@ private:
     // Paid directory identities, not a coherent epoch view. The owner's
     // registration revision and per-page candidate revisions still apply.
     PublicationHeads publicationHeads() const;
-    struct HistorySlice {
-        static constexpr qsizetype Limit = 32;
-        KisPageVersion after;
-        qsizetype total = 0;
-        bool exists = false;
-    };
-    // Versions are ordered by generation/default-pixel revision for this key.
-    // Value cursor, not a borrowed iterator. Removal cannot dangle it. A
-    // caller must rescan after semantic changes can insert before the cursor;
-    // this is enumeration, NOT root reachability or retirement authorization.
-    // Replaces values in the caller's original bounded capacity. No history
-    // array is materialized and copied between metadata and its consumer.
-    HistorySlice historySlice(const KisPageKey &key, const KisPageVersion &after,
-        KisMutationWorkspace::Array<KisPageVersion> &versions, qsizetype budget) const;
-    // Scheduling fact only. Reachability/protection and retirement admission
-    // remain dynamic and are checked when the collector processes the key.
-    bool hasHistory(const KisPageKey &key) const;
-    // Original Value root edges, explicit reads and last-use decide eligibility.
-    // Implicit default content is reproducible from the admitted surface; its
-    // optional materialization is not a root-owned Value. Prepare exact effects and
-    // Debt before removal. Replica effects require a configured Debt owner and
-    // their original registered retirement records. Refusal changes no record;
-    // success commits Debt and transfers effects to the configured receiver
-    // infallibly under the caller's owner gate, without invoking a provider.
-    bool discardHistory(const KisPageKey &key, const KisPageVersion *versions,
-                        qsizetype count, quint32 *removedMask);
-    // Callback runs under the shard gate and must not reenter metadata. The
-    // history-only census supplies the collector's already observed fact.
-    void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &), bool historicalOnly = false) const;
+    // Cold diagnostic enumeration; no reclamation fallback or history scan.
+    // Callback runs under V and cannot reenter metadata.
+    void visitPageKeys(void *context, void (*visit)(void *, const KisPageKey &)) const;
     KisPageMetadataTransitionResult applyOwner(const KisPageKey &key, const KisPageTransition &transition,
                                       KisPageMetadataReadCleanup *cleanup = nullptr);
     KisPageMetadataTransitionResult acknowledgeLastUse(const KisPageVersion &version,
@@ -427,7 +396,7 @@ private:
     size_t retainReadValues(KisPageViewValue *const *values, const quint32 *order,
         size_t &next, size_t count, KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
     size_t releaseReadValues(KisPageViewValue **values, const quint32 *order,
-        size_t &next, size_t count, KisPageKey *revisit);
+        size_t &next, size_t count);
     // Caller holds this original Value through a root or actual read edge.
     KisCpuReadBinding readValueBinding(const KisPageViewValue *value) const;
     void readValueBindings(KisPageViewValue *const *values, quint32 *indices,
@@ -436,8 +405,20 @@ private:
     friend class KisPageHistoryCollector;
     // Original Value notifications cross the epoch gate without invoking the
     // collector there. Consumer holds Store; neither call holds the V gate.
-    bool hasUnrootedValues() const;
-    size_t takeUnrootedKeys(KisPageKey *keys, size_t capacity);
+    struct HistoryCollection {
+        static constexpr size_t Limit = 32;
+        size_t examined = 0;
+        size_t retired = 0;
+        bool blocked = false;
+    };
+    size_t pendingValueChecks() const;
+    HistoryCollection collectHistoryValues();
+    void clearValueChecks();
+    // Notification gate only: the callback must not enter Store/V/budget or
+    // perform collection. Its owner disconnects before destroying the task.
+    void setValueReclaimWake(void *context, void (*wake)(void *) noexcept);
+    // Trusted original cells retained by one notification batch, all one key.
+    bool retireHistoryValues(KisPageViewValue *const *, size_t count, quint32 *removedMask);
     friend class KisPagePublicationCoordinator;
     friend class KisPageReadCoordinator;
     friend class KisPageRetirementQueue;

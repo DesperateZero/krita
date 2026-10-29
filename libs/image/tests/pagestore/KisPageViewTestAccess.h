@@ -75,8 +75,7 @@ private:
     {
         const quint32 end = std::numeric_limits<quint32>::max();
         size_t next = 0;
-        KisPageKey revisit;
-        const auto released = metadata.releaseReadValues(&value, &end, next, 1, &revisit);
+        const auto released = metadata.releaseReadValues(&value, &end, next, 1);
         Q_ASSERT(released == 1 && !value);
         Q_UNUSED(released);
     }

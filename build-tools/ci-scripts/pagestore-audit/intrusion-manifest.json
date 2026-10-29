@@ -335,8 +335,8 @@
         "history-reachability"
       ],
       "failure-tests": [
-        "KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget",
-        "KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits"
+        "KisPageStoreCpuMutationTest::longHistoryUsesValueBudget",
+        "KisPageStoreCpuMutationTest::historyValueEventsSurviveRestoration"
       ],
       "id": "BR1-PS-STORE-HISTORY-011",
       "path": "libs/image/pagestore/KisPageHistoryCollector.cpp",
@@ -475,7 +475,7 @@
       "failure-tests": [
         "KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline",
         "KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease",
-        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::originalHistoryValueBatches",
         "KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithinBudget"
       ],
       "id": "BR1-PS-METADATA-ARENA-021",

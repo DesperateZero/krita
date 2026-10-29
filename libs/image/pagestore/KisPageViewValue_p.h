@@ -29,10 +29,10 @@ struct KisPageViewValue {
     // retain identity memory as well as non-default pixel authority; mutable
     // placement snapshots never overwrite this count.
     quint32 readEdges = 0;
-    // Memory-only notification of a last semantic root edge. The storage
+    // Memory-only notification of a role/protection change. The storage
     // notification gate owns this link; self denotes the queued tail. It is
     // neither a content hold nor a second reachability/retirement decision.
-    KisPageViewValue *nextUnrooted = nullptr;
+    KisPageViewValue *nextReclaim = nullptr;
     void attachLifetime() noexcept
     { viewMemoryState.fetch_or(OriginalLifetime, std::memory_order_release); }
     bool detachLifetime() noexcept
@@ -54,9 +54,9 @@ public:
     // Initialization may precede backing registration. This prepares the same
     // final identity that registration must fill, with no replica or read grant.
     virtual KisPageViewValue *prepareInitial(const KisPageVersion &) = 0;
-    // Called under the epoch gate with original Values still held by their
-    // immutable nodes. Must not allocate or enter Store, V or budget gates.
-    virtual void releaseRoots(KisPageViewValue *const *, size_t count) noexcept = 0;
+    // Called under Epoch or V with original Values already alive. Notification
+    // never allocates business storage or enters Store, V or budget gates.
+    virtual void requestReclaim(KisPageViewValue *const *, size_t count) noexcept = 0;
     static void retain(KisPageViewValue *value) noexcept
     {
         // A retained pointer or the original shard gate already protects it.

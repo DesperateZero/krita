@@ -8840,9 +8840,8 @@ void KisTiledDataManagerTest::stressTest()
     QVERIFY(store->waitForRetirementIdle());
     const KisPageStoreSessionStats settled = store->sessionStats();
     QVERIFY(!settled.hasOutstandingCapabilities());
-    QCOMPARE(settled.pendingHistoricalPages, qsizetype(0));
-    QCOMPARE(settled.deferredHistoricalPages, qsizetype(0));
-    QCOMPARE(settled.activeHistoryScans, qsizetype(0));
+    QCOMPARE(settled.pendingHistoryValueChecks, qsizetype(0));
+    QCOMPARE(settled.historicalValues, qsizetype(0));
     QCOMPARE(settled.scheduledReclamationJobs, qsizetype(0));
 
     const KisPageBackingUsage usage = store->backingUsage();

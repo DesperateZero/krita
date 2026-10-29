@@ -345,14 +345,13 @@ private:
 struct KRITAIMAGE_EXPORT KisPageStoreReadScopeStatistics {
     quint64 capturedReadViewsCreated = 0;
     quint64 capturedReadViewReleases = 0;
-    quint64 historicalGcPagesVisited = 0;
-    quint64 foregroundHistoricalGcPagesVisited = 0;
-    quint64 maximumHistoryPagesPerPass = 0;
-    // One pass selects <=16 keys and <=32 historical versions per key.
+    quint64 historicalGcValuesVisited = 0;
+    quint64 foregroundHistoricalGcValuesVisited = 0;
+    // One pass examines at most 32 original Values, across all keys.
     // Replica retirement has separate work; root reachability is a local
     // Value fact, not a protected-root scan or retained cache.
-    quint64 maximumHistoryVersionsPerPass = 0;
-    quint64 historyVersionSlices = 0;
+    quint64 maximumHistoryValuesPerPass = 0;
+    quint64 historyCollectionPasses = 0;
 };
 
 /**

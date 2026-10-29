@@ -15,24 +15,20 @@
 #include <QMutex>
 #include "KisPageWaitCondition_p.h"
 
-#include <array>
-#include <boost/intrusive/set.hpp>
 
 struct KisPageHistoryWakeContext;
 
 struct KisPageHistoryCollectorSnapshot
 {
-    qsizetype pendingPages = 0;
-    qsizetype deferredPages = 0;
-    qsizetype activeScans = 0;
+    qsizetype pendingValues = 0;
     quint64 retryWakeups = 0;
     bool retryScheduled = false;
     bool jobScheduled = false;
-    quint64 pagesVisited = 0;
-    quint64 foregroundPagesVisited = 0;
-    quint64 maximumPagesPerPass = 0;
-    quint64 maximumVersionsPerPass = 0;
-    quint64 versionSlices = 0;
+    quint64 valuesVisited = 0;
+    quint64 foregroundValuesVisited = 0;
+    quint64 maximumValuesPerPass = 0;
+    quint64 collectionPasses = 0;
+    quint64 retiredValues = 0;
 };
 
 /**
@@ -47,8 +43,7 @@ struct KisPageHistoryCollectorSnapshot
 class KisPageHistoryCollector final
 {
 public:
-    static constexpr qsizetype PageAdmissionBudget = 16;
-    static constexpr qsizetype VersionScanBudget = 32;
+    static constexpr qsizetype EpochCollectionBudget = 32;
     static constexpr qsizetype IdleCapacityBudget = 16;
 
     using ReleaseOwnerLifetime = void (*)(void *context);
@@ -75,6 +70,8 @@ public:
                             CollectIdleCapacity collectIdleCapacity = nullptr);
     KRITAIMAGE_EXPORT ~KisPageHistoryCollector();
     KRITAIMAGE_EXPORT void prepareTask(KisBackingBudgetController &budget);
+    // Connect only after metadata configuration and successful Store adoption.
+    void startLocked();
 
     KisPageHistoryCollector(const KisPageHistoryCollector &) = delete;
     KisPageHistoryCollector &operator=(const KisPageHistoryCollector &) = delete;
@@ -82,10 +79,9 @@ public:
     KisPageHistoryCollector &operator=(KisPageHistoryCollector &&) = delete;
 
     KRITAIMAGE_EXPORT void collectUnreachableLocked();
-    // Changed keys and actual last-root-edge notifications share the same
-    // bounded collector. Neither publication nor base exit scans known keys.
+    // Role and protection events already carry the original Values. The
+    // owner only pumps this one bounded collector after changing epoch state.
     void collectAfterEpochChangeLocked();
-    KRITAIMAGE_EXPORT void requestKeyLocked(const KisPageKey &key) noexcept;
     KRITAIMAGE_EXPORT void scheduleLocked();
     KRITAIMAGE_EXPORT void waitForIdleLocked();
     KRITAIMAGE_EXPORT void stopAutomaticWakeups();
@@ -94,39 +90,7 @@ public:
     KRITAIMAGE_EXPORT KisPageHistoryCollectorSnapshot snapshotLocked() const;
 
 private:
-    // True consumes the original metadata census under its shard gate, or a
-    // successful read-protection result without releasing Store admission.
-    // It is only a scheduling fact; collection still checks live protection.
-    // Ordinary requests query only a new key's history.
-    void requestKeyLocked(const KisPageKey &, bool historyAlreadyObserved) noexcept;
-    friend class KisPageReadCoordinator;
-    struct Work : boost::intrusive::list_base_hook<>
-    {
-        explicit Work(const KisPageKey &value) noexcept : key(value) {}
-        boost::intrusive::set_member_hook<> indexHook;
-        KisPageKey key;
-        KisPageVersion after;
-        bool repeat = false;
-    };
-    struct KeyLess {
-        bool operator()(const KisPageKey &a, const KisPageKey &b) const {
-            if (a.surface.value != b.surface.value) return a.surface.value < b.surface.value;
-            if (a.page.row != b.page.row) return a.page.row < b.page.row;
-            return a.page.column < b.page.column;
-        }
-    };
-    struct WorkKey {
-        using type = KisPageKey;
-        const KisPageKey &operator()(const Work &work) const noexcept { return work.key; }
-    };
-    using WorkIndex = boost::intrusive::set<Work,
-        boost::intrusive::member_hook<Work, boost::intrusive::set_member_hook<>, &Work::indexHook>,
-        boost::intrusive::key_of_value<WorkKey>, boost::intrusive::compare<KeyLess>>;
-    enum class SliceResult { Ready, Blocked, Removed };
-    SliceResult collectSliceLocked(Work &work, quint64 &visitedVersions);
     bool collectPassLocked();
-    void queueWorkLocked(Work &work) noexcept;
-    void disposeWork(Work *work) noexcept;
     bool hasSemanticWorkLocked() const;
     // Requires the notification gate only. Both foreground and timer use
     // this one admission; neither can queue a second instance of the task.
@@ -147,10 +111,6 @@ private:
     NextIdleDeadline m_nextIdleDeadline = nullptr;
     CollectIdleCapacity m_collectIdleCapacity = nullptr;
 
-    KisMutationStorageAllocator<Work> m_workAllocator;
-    WorkIndex m_work;
-    boost::intrusive::list<Work> m_ready;
-    bool m_rescanRequested = false;
     KisPageReclamationJobPointer m_task;
     std::shared_ptr<KisPageHistoryWakeContext> m_wakeContext;
     qint64 m_pressureDeadline = 0;
@@ -158,11 +118,11 @@ private:
     bool m_automaticWakeupsStopped = false;
     int m_retryDelayMs = 1;
 
-    quint64 m_pagesVisited = 0;
-    quint64 m_foregroundPagesVisited = 0;
-    quint64 m_maximumPagesPerPass = 0;
-    quint64 m_maximumVersionsPerPass = 0;
-    quint64 m_versionSlices = 0;
+    quint64 m_valuesVisited = 0;
+    quint64 m_foregroundValuesVisited = 0;
+    quint64 m_maximumValuesPerPass = 0;
+    quint64 m_collectionPasses = 0;
+    quint64 m_retiredValues = 0;
 };
 
 #endif // KIS_PAGE_HISTORY_COLLECTOR_P_H

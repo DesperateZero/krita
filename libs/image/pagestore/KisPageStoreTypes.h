@@ -1200,12 +1200,10 @@ struct KRITAIMAGE_EXPORT KisPageStoreSessionStats
     qsizetype pendingRetiredReplicas = 0;
     qsizetype activeRetirementReplicas = 0;
     quint64 pendingRetiredBytes = 0;
-    // Reclamation work/debt, not reader/writer authority. Deferred history may
-    // still be logically reachable or pinned; it is not all immediately freeable.
-    qsizetype pendingHistoricalPages = 0;
-    qsizetype deferredHistoricalPages = 0;
-    // Original per-key version cursors between bounded slices.
-    qsizetype activeHistoryScans = 0;
+    // Pending original Value checks, not permission to retire their bytes.
+    qsizetype pendingHistoryValueChecks = 0;
+    // All actual Historical records, including protected/nonqueued content.
+    qsizetype historicalValues = 0;
     qsizetype scheduledReclamationJobs = 0;
     quint64 lastUseAcknowledgePasses = 0;
     quint64 maximumLastUsesPerPass = 0;

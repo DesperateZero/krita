@@ -339,6 +339,7 @@ public:
         if (includeMetadataFootprint) {
             const KisPageMetadataFootprint metadataFootprint = metadata.footprint();
             result.pageVersions = qsizetype(metadataFootprint.versions);
+            result.historicalValues = qsizetype(metadataFootprint.historicalValues);
             result.replicas = qsizetype(metadataFootprint.replicas);
         }
         result.immutableRoots = epochs.rootCount();
@@ -383,9 +384,7 @@ public:
         result.retirementRetryWakeups = retirementSnapshot.retryWakeups;
         result.maximumReplicasPerRetirementRetryWake = retirementSnapshot.maximumReplicasPerRetryWake;
         result.nextRetirementRetryDelayMs = retirementSnapshot.nextRetryDelayMs;
-        result.pendingHistoricalPages = historySnapshot.pendingPages;
-        result.deferredHistoricalPages = historySnapshot.deferredPages;
-        result.activeHistoryScans = historySnapshot.activeScans;
+        result.pendingHistoryValueChecks = historySnapshot.pendingValues;
         result.readRequestsCreated = readSnapshot.requestsCreated;
         result.writeRequestsCreated = writeRequestsCreated;
         const KisPageDefaultStorageSnapshot defaultSnapshot = defaultStorage.snapshotLocked();
@@ -1113,7 +1112,13 @@ public:
         Q_ASSERT(!terminalWithoutFacade || owner->facadeGone);
         const auto retire = qScopeGuard([&] {
             releaseStorageLocked(lock);
-            if (!terminalWithoutFacade) owner->processRetirementsLocked(lock);
+            if (!terminalWithoutFacade) {
+                // A failed base/default selection can have produced history
+                // without accepting any write. Its original Value notification
+                // is handed off only after this scope returns its claims.
+                owner->historyCollector.collectUnreachableLocked();
+                owner->processRetirementsLocked(lock);
+            }
         });
         // Without a facade no publication or explicit whole-owner drain can
         // consume these declarations. The provider remains the physical owner
@@ -3893,11 +3898,10 @@ KisPageStoreReadScopeStatistics KisPageStore::readScopeStatistics() const
     const auto read = d->readCoordinator.snapshotLocked();
     return {read.capturedViewsCreated,
             read.capturedViewReleases,
-            history.pagesVisited,
-            history.foregroundPagesVisited,
-            history.maximumPagesPerPass,
-            history.maximumVersionsPerPass,
-            history.versionSlices};
+            history.valuesVisited,
+            history.foregroundValuesVisited,
+            history.maximumValuesPerPass,
+            history.collectionPasses};
 }
 
 KisPageStoreRetirementProgress KisPageStore::processRetirements(qsizetype replicaBudget)
@@ -4456,6 +4460,7 @@ bool KisPageStore::finalizeInitialization(QString *error)
         }
     }
     d->operational = true;
+    d->historyCollector.startLocked();
     KisPageStoreDetail::setError(error, {});
     return true;
 }

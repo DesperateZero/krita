@@ -794,7 +794,6 @@ bool KisPageReadCoordinator::releaseReadLocked(
     release.lease = lease;
     release.completion = completion;
     const auto result = m_metadata.applyOwner(replica.version.key, release, &cleanup.m_storage);
-    if (result.historyNeedsRevisit) m_history.requestKeyLocked(replica.version.key, true);
     cleanup.retainLocked();
     return result.accepted;
 }
@@ -880,7 +879,6 @@ bool KisPageReadCoordinator::acknowledgeRecordLocked(
             record->replica.version, record->replica, completion, &cleanup.m_storage);
         cleanup.retainLocked();
         if (!result.accepted) return false;
-        if (result.historyNeedsRevisit) m_history.requestKeyLocked(record->replica.version.key, true);
     }
     record->metadataReleased = false;
     --m_pendingLastUses;
@@ -1083,13 +1081,10 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
         return false;
     };
     while (pending.retained) {
-        KisPageKey revisit[16];
         const auto released = m_metadata.releaseReadValues(pending.values.data(), pending.readOrder.data(),
-            pending.next, pending.retained, revisit);
+            pending.next, pending.retained);
         Q_ASSERT(released); // A retained edge only decreases; publication cannot refuse it.
         pending.retained -= released;
-        for (size_t i = 0; i < released; ++i)
-            if (revisit[i].isValid()) m_history.requestKeyLocked(revisit[i], true);
     }
     bool becameUnretained = false;
     if (pending.token.isValid()

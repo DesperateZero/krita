@@ -1064,13 +1064,15 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         ))
         required_contracts = (
             "class KisPageHistoryCollector final",
-            "PageAdmissionBudget = 16",
-            "VersionScanBudget = 32",
+            "EpochCollectionBudget = 32",
             "collectUnreachableLocked",
         )
         for contract in required_contracts:
             if contract not in header_text:
                 errors.append(f"R1 HistoryCollector contract is missing: {contract}")
+        for obsolete in ("struct Work", "WorkIndex", "requestKeyLocked", "m_rescanRequested", "VersionScanBudget"):
+            if obsolete in header_text:
+                errors.append(f"obsolete key/history scheduling protocol returned: {obsolete}")
         if "QObject" in header_text:
             errors.append("R1 HistoryCollector must not inherit or own QObject behavior")
     if page_store_source.is_file():
@@ -1319,7 +1321,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct KisPageValueCell : KisPageViewValue, KisPageValueState",
             "struct KisPageReplicaState",
             "struct KisMetadataOverflowNode",
-            "sizeof(KisPageValueCell) <= 328",
+            "sizeof(KisPageValueCell) <= 312",
             "sizeof(KisPageReplicaState) <= 128",
             "sizeof(KisMetadataOverflowNode) <= 64",
         ):
@@ -1361,6 +1363,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             errors.append(
                 "R2/M2 metadata coordinator does not include its compact record schema"
             )
+        for obsolete in ("historySlice", "linkHistory", "unlinkHistory", "firstHistory", "lastHistory", "takeUnrootedKeys"):
+            if obsolete in metadata_text:
+                errors.append(f"obsolete history projection/index returned: {obsolete}")
         for contract in (
             "using VersionArena = KisShardSlotArena<KisPageValueCell, 16 * 1024>",
             "using ReplicaArena = KisShardSlotArena<KisPageReplicaState, 32 * 1024>",
@@ -1373,7 +1378,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "KisShardSlotIndex<KisPageVersion, KisVersionSlotId>",
             "KisShardSlotIndex<PhysicalSlot, KisReplicaSlotId>",
             "KisVersionSlotId firstVersion",
-            "KisVersionSlotId firstHistory",
+            "void reconsiderHistory(KisPageValueCell *value)",
+            "KisPageViewValue *firstReclaim = nullptr",
+            "retireHistoryValues",
             "KisVersionSlotId firstMutable",
             "struct MetadataPageActivity",
             "preparedPublications",
@@ -1388,7 +1395,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
-            "static_assert(sizeof(MetadataPage) == 176)",
+            "static_assert(sizeof(MetadataPage) == 160)",
             "static_assert(sizeof(MetadataPageActivity) <= 104)",
             "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
@@ -1400,9 +1407,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "installReservedHeader",
             "projectReplica",
             "metadataPageActivityBytes",
-            "KisPageMetadataCoordinator::HistorySlice",
+            "KisPageMetadataCoordinator::HistoryCollection",
             "linkVersion",
-            "linkHistory",
+            "collectHistoryValues",
             "linkMutable",
             "arenas->versions.emplace",
             "arenas->replicas.emplace",

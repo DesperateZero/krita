@@ -208,7 +208,7 @@
       "representative-tests": [
         "KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline",
         "KisPageStoreReferenceTest::metadataSlotArenaGenerationAndRelease",
-        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::originalHistoryValueBatches",
         "KisPageStoreReferenceTest::metadataShardsSurviveConcurrentLeaseStressWithinBudget"
       ],
       "status": "instrumented"
@@ -245,7 +245,7 @@
           "KisPageMetadataFootprint.physicalSlotIndex"
         ],
         "peak": [
-          "KisPageMetadataMetrics.maximumHistorySliceVersionInputs",
+          "KisPageStoreReadScopeStatistics.maximumHistoryValuesPerPass",
           "KisPageMetadataFootprint.Index.highWaterEntries",
           "KisPageMetadataFootprint.Index.capacity"
         ],
@@ -266,7 +266,7 @@
         "KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip",
         "KisPageStoreReferenceTest::metadataShardSlotIndexReservations",
         "KisPageStoreReferenceTest::metadataShardIndexesEnforcePhysicalOwnership",
-        "KisPageStoreReferenceTest::indexedHistorySlices",
+        "KisPageStoreReferenceTest::originalHistoryValueBatches",
         "KisPageStoreReferenceTest::indexedMutationTransitions",
         "KisPageStoreReferenceTest::preparedMetadataRejectsReaderLastUseAbortAndCompletionChanges"
       ],
@@ -390,36 +390,35 @@
     {
       "dimensions": {
         "fallback": [
-          "KisPageStoreReadScopeStatistics.foregroundHistoricalGcPagesVisited"
+          "KisPageStoreReadScopeStatistics.foregroundHistoricalGcValuesVisited"
         ],
         "live": [
-          "KisPageStoreSessionStats.pendingHistoricalPages",
-          "KisPageStoreSessionStats.deferredHistoricalPages",
-          "KisPageStoreSessionStats.activeHistoryScans"
+          "KisPageStoreSessionStats.pendingHistoryValueChecks",
+          "KisPageStoreSessionStats.historicalValues"
         ],
         "operation": [
-          "KisPageStoreReadScopeStatistics.historyVersionSlices"
+          "KisPageStoreReadScopeStatistics.historyCollectionPasses"
         ],
         "page": [
-          "KisPageStoreReadScopeStatistics.historicalGcPagesVisited"
+          "KisPageStoreReadScopeStatistics.historicalGcValuesVisited"
         ],
         "peak": [
-          "KisPageStoreReadScopeStatistics.maximumHistoryPagesPerPass",
-          "KisPageStoreReadScopeStatistics.maximumHistoryVersionsPerPass"
+          "KisPageStoreReadScopeStatistics.maximumHistoryValuesPerPass"
         ],
         "terminal": [
           "KisPageStoreReadScopeStatistics.capturedReadViewReleases"
         ]
       },
-      "evidence": "Bounded historical-version slices test live root edges on the original Value; original key cursors publish operation/page/live/peak/fallback diagnostics independently of physical retirement.",
+      "evidence": "The original Value queue bounds collection to 32 actual identities per pass and retries only real retirement refusal. Role/protection events replace key Work and cursor scans. The page dimension counts examined Values (multiple versions may share a page), not distinct pages; live historicalValues counts actual records including protected content. These are independent of physical retirement.",
       "id": "history-collection",
       "manifest-entries": [
         "BR1-PS-STORE-HISTORY-011"
       ],
       "metrics-source": "KisPageStoreReadScopeStatistics and KisPageStoreSessionStats",
       "representative-tests": [
-        "KisPageStoreCpuMutationTest::longHistoryUsesVersionBudget",
-        "KisPageStoreCpuMutationTest::historySweepRevalidatesAndRevisits"
+        "KisPageStoreCpuMutationTest::longHistoryUsesValueBudget",
+        "KisPageStoreCpuMutationTest::historyValueEventsSurviveRestoration",
+        "KisPageStoreReferenceTest::originalHistoryValueBatches"
       ],
       "status": "existing"
     },

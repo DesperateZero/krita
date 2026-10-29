@@ -510,8 +510,6 @@ struct MetadataPage {
     bool hasMetadata() const { return publishedEpoch.isValid(); }
     KisVersionSlotId firstVersion;
     KisVersionSlotId lastVersion;
-    KisVersionSlotId firstHistory;
-    KisVersionSlotId lastHistory;
     KisVersionSlotId firstMutable;
     KisVersionSlotId lastMutable;
     // Before registration this is the initial root's memory-only identity.
@@ -532,7 +530,7 @@ struct MetadataPage {
     }
 };
 
-static_assert(sizeof(MetadataPage) == 176);
+static_assert(sizeof(MetadataPage) == 160);
 
 /**
  * Stack projection of original page facts and sparse generic payload. Public snapshots are never
@@ -622,8 +620,9 @@ struct ShardRecordStore {
     using PhysicalIndex = KisShardSlotIndex<PhysicalSlot, KisReplicaSlotId>;
     using HistoryPosition = std::pair<quint64, quint64>;
 
-    explicit ShardRecordStore(MetadataArenas *storage, KisMutationStorageAllocator<char> allocator)
-        : arenas(storage), exactVersions(allocator), physicalSlots(allocator)
+    explicit ShardRecordStore(MetadataArenas *storage, KisMutationStorageAllocator<char> allocator,
+                              KisPageViewValueStorage *notificationSource)
+        : arenas(storage), exactVersions(allocator), physicalSlots(allocator), notificationSource(notificationSource)
     {
         Q_ASSERT(arenas);
     }
@@ -631,6 +630,19 @@ struct ShardRecordStore {
     MetadataArenas *arenas = nullptr;
     ExactIndex exactVersions;
     PhysicalIndex physicalSlots;
+    // Borrowed only while this shard is admitted by its original facade.
+    // Detach clears it under V before an escaped shard can outlive the core.
+    KisPageViewValueStorage *notificationSource = nullptr;
+
+    void reconsiderHistory(KisPageValueCell *value)
+    {
+        if (!notificationSource || !value->indexed
+            || value->publication != KisPagePublicationState::Historical
+            || value->rootEdges.load(std::memory_order_acquire)
+            || (!value->version.isDefaultPixel() && value->readEdges)) return;
+        KisPageViewValue *original = value;
+        notificationSource->requestReclaim(&original, 1);
+    }
 
     struct ReservationSet {
         MetadataArenaReservations arenas;
@@ -825,66 +837,6 @@ struct ShardRecordStore {
         --page->versionCount;
     }
 
-    void linkHistory(MetadataPage *page, KisPageValueCell *record)
-    {
-        Q_ASSERT(page && record && record->publication == KisPagePublicationState::Historical);
-        KisVersionSlotId next;
-        if (page->lastHistory.isValid()) {
-            const KisPageValueCell *last = version(page->lastHistory);
-            Q_ASSERT(last);
-            if (!last || !(position(last->version) < position(record->version))) {
-                next = page->firstHistory;
-                while (next.isValid()) {
-                    const KisPageValueCell *candidate = version(next);
-                    Q_ASSERT(candidate);
-                    if (!candidate || !(position(candidate->version) < position(record->version)))
-                        break;
-                    next = candidate->nextHistory;
-                }
-            }
-        }
-        record->nextHistory = next;
-        if (next.isValid()) {
-            KisPageValueCell *nextRecord = version(next);
-            Q_ASSERT(nextRecord);
-            record->previousHistory = nextRecord->previousHistory;
-            nextRecord->previousHistory = record->slot;
-        } else {
-            record->previousHistory = page->lastHistory;
-            page->lastHistory = record->slot;
-        }
-        if (record->previousHistory.isValid()) {
-            KisPageValueCell *previous = version(record->previousHistory);
-            Q_ASSERT(previous);
-            previous->nextHistory = record->slot;
-        } else {
-            page->firstHistory = record->slot;
-        }
-        ++page->historyCount;
-    }
-
-    void unlinkHistory(MetadataPage *page, KisPageValueCell *record)
-    {
-        Q_ASSERT(page && record && page->historyCount > 0);
-        if (record->previousHistory.isValid()) {
-            KisPageValueCell *previous = version(record->previousHistory);
-            Q_ASSERT(previous);
-            previous->nextHistory = record->nextHistory;
-        } else {
-            page->firstHistory = record->nextHistory;
-        }
-        if (record->nextHistory.isValid()) {
-            KisPageValueCell *next = version(record->nextHistory);
-            Q_ASSERT(next);
-            next->previousHistory = record->previousHistory;
-        } else {
-            page->lastHistory = record->previousHistory;
-        }
-        record->previousHistory = {};
-        record->nextHistory = {};
-        --page->historyCount;
-    }
-
     void linkMutable(MetadataPage *page, KisPageValueCell *record)
     {
         Q_ASSERT(page && record);
@@ -930,7 +882,7 @@ struct ShardRecordStore {
     void indexPublication(MetadataPage *page, KisPageValueCell *record)
     {
         if (record->publication == KisPagePublicationState::Historical) {
-            linkHistory(page, record);
+            ++page->historyCount;
         }
         if (record->publication == KisPagePublicationState::Prepared
             || record->publication == KisPagePublicationState::Unpublished) {
@@ -941,7 +893,8 @@ struct ShardRecordStore {
     void unindexPublication(MetadataPage *page, KisPageValueCell *record)
     {
         if (record->publication == KisPagePublicationState::Historical) {
-            unlinkHistory(page, record);
+            Q_ASSERT(page->historyCount);
+            --page->historyCount;
         }
         if (record->publication == KisPagePublicationState::Prepared
             || record->publication == KisPagePublicationState::Unpublished) {
@@ -958,6 +911,7 @@ struct ShardRecordStore {
         record->publication = publication;
         record->preparedBy = preparedBy;
         indexPublication(page, record);
+        reconsiderHistory(record);
         return true;
     }
     bool setPublication(MetadataPage *page, const KisPageVersion &identity,
@@ -1075,8 +1029,6 @@ struct ShardRecordStore {
         if (!record->version.isValid()) record->readEdges = snapshot.readEdges;
         const KisVersionSlotId previousVersion = record->previousVersion;
         const KisVersionSlotId nextVersion = record->nextVersion;
-        const KisVersionSlotId previousHistory = record->previousHistory;
-        const KisVersionSlotId nextHistory = record->nextHistory;
         const KisVersionSlotId nextMutable = record->nextMutable;
         eraseChildren(record);
         auto retainedNative = std::move(record->native);
@@ -1092,8 +1044,6 @@ struct ShardRecordStore {
         if (!record->version.isValid()) record->version = snapshot.version;
         record->previousVersion = previousVersion;
         record->nextVersion = nextVersion;
-        record->previousHistory = previousHistory;
-        record->nextHistory = nextHistory;
         record->nextMutable = nextMutable;
         record->publication = snapshot.publication;
         record->preparedBy = snapshot.preparedBy;
@@ -1320,6 +1270,7 @@ struct ShardRecordStore {
                 }
             }
         }
+        if (!releaseRead || !transition.completion.isValid()) reconsiderHistory(version(versionSlot));
         return true;
     }
 
@@ -1537,6 +1488,7 @@ struct ShardRecordStore {
             Q_UNUSED(indexed);
             replicaSlot = stored->nextReplica;
         }
+        reconsiderHistory(installed);
         return true;
     }
 
@@ -1559,6 +1511,7 @@ struct ShardRecordStore {
         linkVersion(page, record);
         indexPublication(page, record);
         record->indexed = true; // Same cell; the original Frame keeps only memory.
+        reconsiderHistory(record);
         return slot;
     }
 
@@ -1637,6 +1590,15 @@ struct ShardRecordStore {
             return;
         KisPageValueCell *record = version(slot);
         Q_ASSERT(record && record->version == identity);
+        remove(page, record, releasedDescriptor, releasedBinding);
+    }
+
+    void remove(MetadataPage *page, KisPageValueCell *record,
+                std::shared_ptr<const KisPageAllocationDescriptor> *releasedDescriptor,
+                std::shared_ptr<KisCpuResidentBinding> *releasedBinding)
+    {
+        const auto slot = record->slot;
+        const auto identity = record->version;
         unindexPhysical(*record);
         unindexPublication(page, record);
         unlinkVersion(page, record);
@@ -1742,11 +1704,11 @@ struct MetadataAcceptanceReferences : MetadataReleasedReferences {
 
 struct MetadataShard : KisPageMetadataShardMetrics {
     explicit MetadataShard(std::shared_ptr<MetadataBudgetAuthority> authority,
-                           KisMutationStorageAllocator<char> storage)
+                           KisMutationStorageAllocator<char> storage, KisPageViewValueStorage *notificationSource)
         : budgetAuthority(std::move(authority))
         , budgetCharge(budgetAuthority, 0)
         , arenas(storage)
-        , records(&arenas, storage)
+        , records(&arenas, storage, notificationSource)
         , pages(MetadataKeyLess{}, decltype(pages)::allocator_type(storage.borrowed(), &mapAllocationBytes))
         , activities(MetadataKeyLess{}, decltype(activities)::allocator_type(storage.borrowed(), &mapAllocationBytes)) {}
 
@@ -1776,6 +1738,25 @@ struct MetadataShard : KisPageMetadataShardMetrics {
     {
         const auto found = pages.find(key);
         return found == pages.cend() || found->second.activity.isEmpty() ? nullptr : &found->second.activity;
+    }
+
+    // Original terminal memory responsibility, entered only under this V gate.
+    // Raw release resolves its generational slot first; a queued batch already
+    // holds the exact cell and drops its reference inside the same gate.
+    bool eraseReleasedValue(KisPageValueCell *value, MetadataReleasedReferences *released)
+    {
+        if (!value || value->indexed || value->frameHeld || value->readEdges
+            || value->viewMemoryState.load(std::memory_order_acquire)) return false;
+        if (value->initialIdentity) {
+            const auto page = pages.find(value->version.key);
+            if (page != pages.end() && !page->second.hasMetadata()
+                && page->second.publishedVersion == value->slot) page->second.publishedVersion = {};
+        }
+        released->descriptor.swap(value->native.descriptor);
+        released->binding.swap(value->native.nativeBinding);
+        const bool erased = arenas.versions.erase(value->slot);
+        Q_ASSERT(erased);
+        return erased;
     }
 
     bool canMutate(const KisPageKey &, const MetadataPage &page) const
@@ -2149,9 +2130,10 @@ public:
     KisPageViewValue *pin(const KisPageVersion &, KisVersionSlotId = {},
                          const KisPagePrivateWrite * = nullptr) override;
     KisPageViewValue *prepareInitial(const KisPageVersion &) override;
-    void releaseRoots(KisPageViewValue *const *, size_t count) noexcept override;
-    size_t takeUnrootedKeys(KisPageKey *, size_t capacity) noexcept;
-    void clearUnrooted() noexcept;
+    void requestReclaim(KisPageViewValue *const *, size_t count) noexcept override;
+    size_t takeReclaims(KisPageViewValue **, size_t capacity) noexcept;
+    void clearReclaims() noexcept;
+    void releaseReclaims(KisPageViewValue **, size_t count, bool retired = false) noexcept;
     void releaseMemory(const KisPageKey &, KisVersionSlotId, KisPageViewValue *) noexcept override;
     void detachLiveValues() noexcept;
 
@@ -2194,68 +2176,133 @@ public:
     std::atomic<quint64> cpuProofIssuer{0};
     KisCompletionTicket cpuCompletion;
     std::atomic<bool> attached{true};
-    QMutex unrootedMutex;
-    std::atomic<KisPageViewValue *> firstUnrooted{nullptr};
-    KisPageViewValue *lastUnrooted = nullptr;
+    QMutex reclaimMutex;
+    KisPageViewValue *firstReclaim = nullptr;
+    std::atomic<size_t> pendingReclaims{0};
+    KisPageViewValue *lastReclaim = nullptr;
+    void *reclaimWakeContext = nullptr;
+    void (*reclaimWake)(void *) noexcept = nullptr;
 };
 
-void KisPageMetadataCoordinator::Private::releaseRoots(
+void KisPageMetadataCoordinator::Private::requestReclaim(
     KisPageViewValue *const *values, size_t count) noexcept
 {
-    QMutexLocker lock(&unrootedMutex);
+    QMutexLocker lock(&reclaimMutex);
     if (!attached.load(std::memory_order_acquire)) return;
+    size_t added = 0;
     for (size_t i = 0; i < count; ++i) {
         auto *value = values[i];
-        if (value->nextUnrooted) continue;
+        if (value->nextReclaim) continue;
         retain(value);
-        value->nextUnrooted = value;
-        if (lastUnrooted) lastUnrooted->nextUnrooted = value;
-        else firstUnrooted.store(value, std::memory_order_release);
-        lastUnrooted = value;
+        value->nextReclaim = value;
+        if (lastReclaim) lastReclaim->nextReclaim = value;
+        else firstReclaim = value;
+        lastReclaim = value;
+        ++added;
     }
+    const auto previous = pendingReclaims.fetch_add(added, std::memory_order_release);
+    // The original empty -> nonempty transition owns automatic delivery.
+    // Holding this gate also fences callback disconnection during teardown.
+    if (added && !previous && reclaimWake) reclaimWake(reclaimWakeContext);
 }
 
-size_t KisPageMetadataCoordinator::Private::takeUnrootedKeys(
-    KisPageKey *keys, size_t capacity) noexcept
+size_t KisPageMetadataCoordinator::Private::takeReclaims(
+    KisPageViewValue **values, size_t capacity) noexcept
 {
-    if (!firstUnrooted.load(std::memory_order_acquire)) return 0;
-    KisPageViewValue *released[16];
+    if (!pendingReclaims.load(std::memory_order_acquire)) return 0;
+    QMutexLocker lock(&reclaimMutex);
     size_t count = 0;
-    {
-        QMutexLocker lock(&unrootedMutex);
-        auto *value = firstUnrooted.load(std::memory_order_relaxed);
-        while (value && count < std::min<size_t>(16, capacity)) {
-            auto *next = value->nextUnrooted;
-            keys[count] = value->version.key;
-            released[count++] = value;
-            value->nextUnrooted = nullptr;
-            value = next == value ? nullptr : next;
-        }
-        firstUnrooted.store(value, std::memory_order_release);
-        if (!value) lastUnrooted = nullptr;
+    while (firstReclaim && count < capacity) {
+        auto *value = firstReclaim;
+        auto *next = value->nextReclaim;
+        values[count++] = value;
+        value->nextReclaim = nullptr;
+        firstReclaim = next == value ? nullptr : next;
     }
-    // A notification can outlive indexed content. Its last memory release may
-    // enter V, so it must happen after the notification gate has been left.
-    for (size_t i = 0; i < count; ++i) release(released[i]);
+    if (!firstReclaim) lastReclaim = nullptr;
+    pendingReclaims.fetch_sub(count, std::memory_order_release);
+    // Each returned pointer owns the queue's original memory hold. A real
+    // new change may enqueue it again while this batch is being processed.
     return count;
 }
 
-void KisPageMetadataCoordinator::Private::clearUnrooted() noexcept
+void KisPageMetadataCoordinator::Private::clearReclaims() noexcept
 {
-    KisPageKey keys[16];
-    while (takeUnrootedKeys(keys, 16)) {}
+    KisPageViewValue *values[32];
+    while (const auto count = takeReclaims(values, 32)) releaseReclaims(values, count);
 }
 
-bool KisPageMetadataCoordinator::hasUnrootedValues() const
+void KisPageMetadataCoordinator::Private::releaseReclaims(
+    KisPageViewValue **values, size_t count, bool retired) noexcept
+{
+    size_t first = 0;
+    while (first < count) {
+        auto *shard = shardFor(this, values[first]->version.key);
+        MetadataReleasedReferences released;
+        MetadataArenas::ReleasedBlocks blocks;
+        QMutexLocker lock(&shard->mutex);
+        bool erased = false;
+        do {
+            auto *value = static_cast<KisPageValueCell *>(values[first++]);
+            const auto before = value->viewMemoryState.fetch_sub(1, std::memory_order_acq_rel);
+            Q_ASSERT(before & ~KisPageViewValue::OriginalLifetime);
+            if (before == 1) erased = shard->eraseReleasedValue(value, &released) || erased;
+            // The usual retired cell has already handed out its payload.
+            // A rare detached payload finishes this batch for out-of-V release.
+            if (released.descriptor || released.binding) break;
+        } while (first < count && shardFor(this, values[first]->version.key) == shard);
+        // Queue memory is gone before testing which blocks really became empty.
+        // This is the original arena policy, once per actual shard run.
+        if (retired || erased) blocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
+    }
+}
+
+size_t KisPageMetadataCoordinator::pendingValueChecks() const
 {
     const auto *core = m_core.load(std::memory_order_acquire);
-    return core && core->firstUnrooted.load(std::memory_order_acquire);
+    return core ? core->pendingReclaims.load(std::memory_order_acquire) : 0;
 }
 
-size_t KisPageMetadataCoordinator::takeUnrootedKeys(KisPageKey *keys, size_t capacity)
+void KisPageMetadataCoordinator::setValueReclaimWake(
+    void *context, void (*wake)(void *) noexcept)
 {
     auto *core = m_core.load(std::memory_order_acquire);
-    return core ? core->takeUnrootedKeys(keys, capacity) : 0;
+    if (!core) return;
+    QMutexLocker lock(&core->reclaimMutex);
+    core->reclaimWakeContext = context;
+    core->reclaimWake = wake;
+}
+
+void KisPageMetadataCoordinator::clearValueChecks()
+{
+    if (auto *core = m_core.load(std::memory_order_acquire)) core->clearReclaims();
+}
+
+KisPageMetadataCoordinator::HistoryCollection KisPageMetadataCoordinator::collectHistoryValues()
+{
+    HistoryCollection result;
+    auto *core = m_core.load(std::memory_order_acquire);
+    if (!core) return result;
+    KisPageViewValue *values[HistoryCollection::Limit];
+    result.examined = core->takeReclaims(values, HistoryCollection::Limit);
+    const auto release = qScopeGuard([&] {
+        core->releaseReclaims(values, result.examined, result.retired != 0);
+    });
+    for (size_t first = 0; first < result.examined;) {
+        size_t end = first + 1;
+        while (end < result.examined && values[end]->version.key == values[first]->version.key) ++end;
+        quint32 removed = 0;
+        bool accepted = false;
+        try { accepted = retireHistoryValues(values + first, end - first, &removed); }
+        catch (const std::bad_alloc &) {} // This same original obligation resumes.
+        if (!accepted) {
+            core->requestReclaim(values + first, end - first);
+            result.blocked = true;
+        }
+        result.retired += qPopulationCount(removed);
+        first = end;
+    }
+    return result;
 }
 
 KisPageViewValue *KisPageMetadataCoordinator::Private::pin(
@@ -2346,18 +2393,7 @@ void KisPageMetadataCoordinator::Private::releaseMemory(
     MetadataReleasedReferences released;
     auto *shard = shardFor(this, key);
     QMutexLocker lock(&shard->mutex);
-    auto *value = shard->arenas.versions.get(slot);
-    if (!value || value->indexed || value->frameHeld || value->readEdges
-        || value->viewMemoryState.load(std::memory_order_acquire)) return;
-    if (value->initialIdentity) {
-        const auto page = shard->pages.find(key);
-        if (page != shard->pages.end() && !page->second.hasMetadata()
-            && page->second.publishedVersion == slot) page->second.publishedVersion = {};
-    }
-    released.descriptor.swap(value->native.descriptor);
-    released.binding.swap(value->native.nativeBinding);
-    const bool erased = shard->arenas.versions.erase(slot);
-    Q_ASSERT(erased); Q_UNUSED(erased);
+    shard->eraseReleasedValue(shard->arenas.versions.get(slot), &released);
 }
 
 void KisPageMetadataCoordinator::Private::detachLiveValues() noexcept
@@ -4055,10 +4091,14 @@ KisPageMetadataCoordinator::~KisPageMetadataCoordinator()
         // Raw facade calls already require quiescence. Escaped immutable roots
         // retain memory only, so detach the live budget while it still exists.
         {
-            QMutexLocker notificationLock(&core->unrootedMutex);
+            QMutexLocker notificationLock(&core->reclaimMutex);
             core->attached.store(false, std::memory_order_release);
         }
-        core->clearUnrooted();
+        for (const auto &shard : core->shards) {
+            QMutexLocker lock(&shard->mutex);
+            shard->records.notificationSource = nullptr;
+        }
+        core->clearReclaims();
         if (m_coreMemory.use_count() > 1) core->detachLiveValues();
         core->budgetAuthority->detach();
     }
@@ -4265,11 +4305,11 @@ size_t KisPageMetadataCoordinator::retainReadValues(KisPageViewValue *const *val
 }
 
 size_t KisPageMetadataCoordinator::releaseReadValues(KisPageViewValue **values,
-    const quint32 *order, size_t &next, size_t count, KisPageKey *revisit)
+    const quint32 *order, size_t &next, size_t count)
 {
     auto *core = m_core.load(std::memory_order_acquire);
     if (!count) return 0;
-    Q_ASSERT(core && values && order && revisit && next != std::numeric_limits<quint32>::max());
+    Q_ASSERT(core && values && order && next != std::numeric_limits<quint32>::max());
     const auto shardOf = [&](const KisPageViewValue *value) {
         Q_ASSERT(value);
         return kisStablePageKeyHash(value->version.key) % core->shards.size();
@@ -4282,13 +4322,11 @@ size_t KisPageMetadataCoordinator::releaseReadValues(KisPageViewValue **values,
     for (; released < limit; ++released) {
         auto *value = static_cast<KisPageValueCell *>(values[next]);
         if (shardOf(value) != shardIndex) break;
-        revisit[released] = {};
         Q_ASSERT(value->readEdges && shard->arenas.versions.get(value->slot) == value);
         if (!--value->readEdges) {
-            const auto page = shard->pages.find(value->version.key);
-            if (page != shard->pages.end() && page->second.firstHistory.isValid())
-                revisit[released] = value->version.key;
+            shard->records.reconsiderHistory(value);
             if (!value->indexed && !value->frameHeld && value->detachLifetime()) {
+                const auto page = value->initialIdentity ? shard->pages.find(value->version.key) : shard->pages.end();
                 if (value->initialIdentity && page != shard->pages.end() && !page->second.hasMetadata()
                     && page->second.publishedVersion == value->slot) page->second.publishedVersion = {};
                 releasedReferences.descriptor.swap(value->native.descriptor);
@@ -4388,7 +4426,7 @@ bool KisPageMetadataCoordinator::configure(qsizetype shardCount, QString *error)
         candidate->shards.reserve(size_t(shardCount));
         for (qsizetype i = 0; i < shardCount; ++i) {
             candidate->shards.push_back(std::allocate_shared<MetadataShard>(
-                storage, candidate->budgetAuthority, storage));
+                storage, candidate->budgetAuthority, storage, candidate.get()));
         }
         candidate->publicationOwner = std::allocate_shared<const quint8>(storage, 0);
         // Publish the complete original core only after every allocation has
@@ -5359,86 +5397,23 @@ bool KisPageMetadataCoordinator::queryPublication(const KisPageKey &key,
     return true;
 }
 
-bool KisPageMetadataCoordinator::hasHistory(const KisPageKey &key) const
-{
-    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
-    if (!shard) return false;
-    QMutexLocker lock(&shard->mutex);
-    const auto page = shard->pages.find(key);
-    return page != shard->pages.cend() && page->second.historyCount != 0;
-}
-
-KisPageMetadataCoordinator::HistorySlice
-KisPageMetadataCoordinator::historySlice(const KisPageKey &key, const KisPageVersion &after,
-    KisMutationWorkspace::Array<KisPageVersion> &versions, qsizetype budget) const
-{
-    HistorySlice result;
-    versions.clear();
-    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
-    if (!shard || budget <= 0 || !versions.capacity() || (after.isValid() && !(after.key == key)))
-        return result;
-    QMutexLocker lock(&shard->mutex);
-    const auto page = shard->pages.find(key);
-    if (page == shard->pages.cend() || !page->second.hasMetadata())
-        return result;
-    result.exists = true;
-    result.total = qsizetype(page->second.historyCount);
-    KisVersionSlotId nextHint = page->second.firstHistory;
-    if (after.isValid()) {
-        bool resumedFromHint = false;
-        KisVersionSlotId afterSlot;
-        if (shard->records.findVersion(after, &afterSlot)) {
-            const KisPageValueCell *record = shard->records.version(afterSlot);
-            if (record && record->publication == KisPagePublicationState::Historical) {
-                nextHint = record->nextHistory;
-                resumedFromHint = true;
-            }
-        }
-        if (!resumedFromHint) {
-            while (nextHint.isValid()) {
-                const KisPageValueCell *record = shard->records.version(nextHint);
-                Q_ASSERT(record);
-                if (!record || ShardRecordStore::position(after) < ShardRecordStore::position(record->version))
-                    break;
-                nextHint = record->nextHistory;
-            }
-        }
-    }
-    const size_t limit = std::min(versions.capacity(), size_t(qMin(budget, HistorySlice::Limit)));
-    while (nextHint.isValid() && versions.size() < limit) {
-        const KisPageValueCell *record = shard->records.version(nextHint);
-        Q_ASSERT(record);
-        if (!record)
-            break;
-        versions.push_back(record->version);
-        result.after = record->version;
-        nextHint = record->nextHistory;
-    }
-    if (!nextHint.isValid()) result.after = {};
-    ++shard->historySliceQueries;
-    shard->historySliceVersionInputs += quint64(versions.size());
-    shard->maximumHistorySliceVersionInputs =
-        qMax(shard->maximumHistorySliceVersionInputs, quint64(versions.size()));
-    return result;
-}
-
-bool KisPageMetadataCoordinator::discardHistory(
-    const KisPageKey &key, const KisPageVersion *versions, qsizetype count,
-    quint32 *removedMask)
+bool KisPageMetadataCoordinator::retireHistoryValues(
+    KisPageViewValue *const *values, size_t count, quint32 *removedMask)
 {
     *removedMask = 0;
+    if (!count) return true;
+    Q_ASSERT(values && count <= HistoryCollection::Limit);
+    const auto key = values[0]->version.key;
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
-    if (!shard || count < 0 || count > HistorySlice::Limit) return false;
+    Q_ASSERT(shard);
     for (;;) {
         const auto storageOwner = shard->budgetAuthority->storage<char>();
         // Keep the common retirement span inline without imposing a large
-        // stack-probe call on every slice, including empty/protected inputs.
+        // stack-probe call on every batch, including empty/protected inputs.
         using Effects = KisPageWorkingArray<KisPageTransitionEffect, 8>;
         Effects prepared{Effects::allocator_type(storageOwner.borrowed())};
-        std::array<std::shared_ptr<const KisPageAllocationDescriptor>, HistorySlice::Limit> releasedDescriptors;
-        std::array<std::shared_ptr<KisCpuResidentBinding>, HistorySlice::Limit> releasedBindings;
-        std::array<KisVersionSlotId, HistorySlice::Limit> selectedSlots;
-        MetadataArenas::ReleasedBlocks released;
+        std::array<std::shared_ptr<const KisPageAllocationDescriptor>, HistoryCollection::Limit> releasedDescriptors;
+        std::array<std::shared_ptr<KisCpuResidentBinding>, HistoryCollection::Limit> releasedBindings;
         quint64 debtCookie = 0;
         bool debtPrepared = false;
         const auto cancelDebt = qScopeGuard([&] {
@@ -5446,15 +5421,14 @@ bool KisPageMetadataCoordinator::discardHistory(
         });
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
-        if (page == shard->pages.end() || !shard->canMutate(key, page->second)) return false;
+        if (page == shard->pages.end() || !page->second.hasMetadata()) return true;
         quint32 selected = 0;
         size_t replicaCount = 0;
-        for (qsizetype i = 0; i < count; ++i) {
-            if (!versions[i].isValid() || !(versions[i].key == key)) return false;
-            KisVersionSlotId slot;
-            if (!shard->records.findVersion(versions[i], &slot)) continue;
-            const auto *record = shard->records.version(slot);
-            if (record->publication != KisPagePublicationState::Historical
+        for (size_t i = 0; i < count; ++i) {
+            Q_ASSERT(values[i] && values[i]->version.key == key);
+            const auto *record = static_cast<const KisPageValueCell *>(values[i]);
+            Q_ASSERT(shard->arenas.versions.get(record->slot) == record);
+            if (!record->indexed || record->publication != KisPagePublicationState::Historical
                 || record->rootEdges.load(std::memory_order_acquire)
                 || (!record->version.isDefaultPixel() && record->readEdges)
                 || (!record->authorityReplica.isValid()
@@ -5469,18 +5443,15 @@ bool KisPageMetadataCoordinator::discardHistory(
                 r = replica->nextReplica;
             }
             if (!eligible) continue;
-            // Identity enumeration never duplicates a record.
-            for (qsizetype j = 0; j < i; ++j)
-                if (versions[j] == versions[i]) return false;
             selected |= quint32(1) << i;
-            selectedSlots[size_t(i)] = slot;
             replicaCount += record->replicaCount;
         }
         if (!selected) return true;
+        if (!shard->canMutate(key, page->second)) return false;
         prepared.reserve(replicaCount);
-        for (qsizetype i = 0; i < count; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             if (!(selected & (quint32(1) << i))) continue;
-            const auto *record = shard->records.version(selectedSlots[size_t(i)]);
+            const auto *record = static_cast<const KisPageValueCell *>(values[i]);
             for (auto r = record->firstReplica; r.isValid();) {
                 const auto *replica = shard->records.replica(r);
                 prepared.push_back({replicaHandle(*replica, record->version), {}});
@@ -5504,9 +5475,9 @@ bool KisPageMetadataCoordinator::discardHistory(
             // candidate reference is deliberately insufficient protection. Implicit
             // defaults remain reconstructible from the admitted surface revision.
             bool protectedAgain = false;
-            for (qsizetype i = 0; i < count; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 if ((selected & (quint32(1) << i))
-                    && shard->records.version(selectedSlots[size_t(i)])->rootEdges.load(std::memory_order_acquire)) {
+                    && values[i]->rootEdges.load(std::memory_order_acquire)) {
                     protectedAgain = true;
                     break;
                 }
@@ -5515,10 +5486,10 @@ bool KisPageMetadataCoordinator::discardHistory(
         }
         // All storage and claims exist. Removal only unlinks original records.
         quint64 removed = 0;
-        for (qsizetype i = 0; i < count; ++i) {
+        for (size_t i = 0; i < count; ++i) {
             if (!(selected & (quint32(1) << i))) continue;
-            shard->records.remove(&page->second, versions[i], &releasedDescriptors[size_t(i)],
-                                  &releasedBindings[size_t(i)], selectedSlots[size_t(i)]);
+            auto *value = static_cast<KisPageValueCell *>(values[i]);
+            shard->records.remove(&page->second, value, &releasedDescriptors[i], &releasedBindings[i]);
             ++removed;
         }
         ++page->second.revision;
@@ -5532,7 +5503,6 @@ bool KisPageMetadataCoordinator::discardHistory(
         }
         ++shard->acceptedTransitions;
         *removedMask = selected;
-        released = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
         if (debtPrepared) {
             m_commitRetirementDebt(m_retirementDebtContext, debtCookie,
@@ -5888,8 +5858,6 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     ++shard->acceptedTransitions;
     ++shard->readProtectionTransitions;
     result.accepted = true;
-    result.historyNeedsRevisit = page->second.historyCount != 0
-        && (!releaseRead || !transition.completion.isValid());
     return result;
 }
 
@@ -6129,7 +6097,7 @@ KisPageSnapshotArray<KisPageKey> KisPageMetadataCoordinator::pageKeys() const
 }
 
 void KisPageMetadataCoordinator::visitPageKeys(
-    void *context, void (*visit)(void *, const KisPageKey &), bool historicalOnly) const
+    void *context, void (*visit)(void *, const KisPageKey &)) const
 {
     QMutexLocker configurationLock(&m_configurationMutex);
     const auto *d = m_core.load(std::memory_order_acquire);
@@ -6137,7 +6105,7 @@ void KisPageMetadataCoordinator::visitPageKeys(
     for (const auto &shard : d->shards) {
         QMutexLocker shardLock(&shard->mutex);
         for (auto page = shard->pages.cbegin(); page != shard->pages.cend(); ++page)
-            if (page->second.hasMetadata() && (!historicalOnly || page->second.historyCount))
+            if (page->second.hasMetadata())
                 visit(context, page->first); // Under shard lock: consumer must not reenter metadata.
     }
 }
@@ -6292,10 +6260,6 @@ KisPageMetadataMetrics KisPageMetadataCoordinator::metrics() const
             metrics.metadataArenaGrowthConflicts += shard->metadataArenaGrowthConflicts;
             metrics.metadataArenaGrowthFailures += shard->metadataArenaGrowthFailures;
             metrics.cpuReadBindings += shard->arenas.cpuReadBindings;
-            metrics.historySliceQueries += shard->historySliceQueries;
-            metrics.historySliceVersionInputs += shard->historySliceVersionInputs;
-            metrics.maximumHistorySliceVersionInputs =
-                qMax(metrics.maximumHistorySliceVersionInputs, shard->maximumHistorySliceVersionInputs);
             metrics.fullSnapshotExports += shard->fullSnapshotExports;
             metrics.fullSnapshotVersionInputs += shard->fullSnapshotVersionInputs;
             metrics.backgroundSnapshotExports += shard->backgroundSnapshotExports;
@@ -6334,6 +6298,7 @@ KisPageMetadataFootprint KisPageMetadataCoordinator::footprint() const
         for (const auto &entry : std::as_const(shard->pages)) {
             const auto &page = entry.second;
             result.versions += page.versionCount;
+            result.historicalValues += page.historyCount;
             for (KisVersionSlotId versionSlot = page.firstVersion; versionSlot.isValid();) {
                 const KisPageValueCell *version = shard->records.version(versionSlot);
                 Q_ASSERT(version);
