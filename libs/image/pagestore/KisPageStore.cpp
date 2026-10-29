@@ -1200,7 +1200,8 @@ public:
     }
     KisMutationPageEntry *claimEntryLocked(const KisPageWriteIntent &intent, QMutexLocker<QMutex> &lock,
                           KisPageWriteAdmission::ClaimOrigin origin,
-                          QString *error = nullptr, KisMutationPageEntry *entry = nullptr) try
+                          QString *error = nullptr, KisMutationPageEntry *entry = nullptr,
+                          const KisPageWriteAdmission::LegacyInspection *location = nullptr) try
     {
         ++owner->activeProviderCalls;
         const auto preparation = qScopeGuard([&] {
@@ -1215,7 +1216,7 @@ public:
             lock.relock();
         }
         if (!admission.isValid()) admission = owner->writeAdmission.beginClaimSet(writes);
-        return owner->writeAdmission.claimOne(admission, writes.handleOf(*entry), lock, error, origin)
+        return owner->writeAdmission.claimOne(admission, writes.handleOf(*entry), lock, error, origin, location)
             ? entry : nullptr;
     } catch (const std::bad_alloc &) {
         KisPageStoreDetail::setError(error, QStringLiteral("mutation entry/admission storage is unavailable"));
@@ -2541,6 +2542,44 @@ KisPageMutationSession KisPageStore::reserveManagedRange(
     return {};
 }
 
+KisPageMutationSession KisPageStore::reserveLegacyPage(const KisPageKey &key, QString *error) try
+{
+    boost::intrusive_ptr<KisPageMutationSession::Private> range;
+    QMutexLocker lock(&d->mutex);
+    ++d->activeProviderCalls;
+    const auto preparation = qScopeGuard([&] {
+        if (range) {
+            if (lock.isLocked()) lock.unlock();
+            range.reset();
+        }
+        if (!lock.isLocked()) lock.relock();
+        --d->activeProviderCalls;
+    });
+    // Known contention has no transaction, Frame, legacy control or new
+    // PageControl allocation. Readers and non-conflicting pages still proceed.
+    const auto location = d->writeAdmission.inspectLegacyClaimLocked(key, error);
+    if (!location) return {};
+    lock.unlock();
+    range = KisPageMutationSession::Private::create(d.data());
+    KisPageWriteIntent intent;
+    intent.key = key;
+    intent.inputKind = KisPageWriteInputKind::Semantic;
+    auto &entry = range->writes.getOrCreate(intent);
+    lock.relock();
+    range->admission = d->writeAdmission.beginClaimSet(range->writes);
+    // Same original location, real post-allocation revalidation. A genuinely
+    // missing control uses the common cold path here; legacy NEVER waits.
+    if (!d->writeAdmission.claimOne(range->admission, range->writes.handleOf(entry), lock, error,
+            KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &location)) return {};
+    KisPageMutationSession session;
+    session.d = std::move(range);
+    KisPageStoreDetail::setError(error, {});
+    return session;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation storage is unavailable"));
+    return {};
+}
+
 bool KisPageMutationSession::reserveLegacyMutationPage(
     const KisPageKey &key, QString *error, bool *present)
 {
@@ -2570,35 +2609,19 @@ bool KisPageMutationSession::reserveLegacyMutationPage(
         return true;
     };
     if (entry) {
-        const bool held = d->owner->writeAdmission.ownsClaimLocked(d->admission, key);
+        const bool held = d->owner->writeAdmission.ownsEntryLocked(d->admission, *entry);
         KisPageStoreDetail::setError(error, held ? QString{} : QStringLiteral("legacy mutation lost its page claim"));
         return held && resolvePresence();
     }
-    if (d->owner->operational) {
-        const auto conflict = d->owner->writeAdmission.conflictLocked(
-            key, QThread::currentThreadId());
-        if (conflict != KisPageWriteAdmission::Conflict::None) {
-            // Legacy acquisition can hold the tile swap barrier and the
-            // manager gate. The current writer needs those gates to deliver
-            // its index/cache changes before dropping this same claim. Never
-            // wait here or expose cached bytes as writable on rejection.
-            const bool sameThread = conflict == KisPageWriteAdmission::Conflict::ManagedSameThread
-                || conflict == KisPageWriteAdmission::Conflict::LegacySameThread
-                || conflict == KisPageWriteAdmission::Conflict::WriterSameThread;
-            KisPageStoreDetail::setError(error, sameThread
-                ? QStringLiteral("legacy mutation cannot reenter its page")
-                : QStringLiteral("legacy mutation conflicts with an active page writer"));
-            return false;
-        }
-    }
-    if (!d->owner->operational) {
-        KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation store is unavailable"));
-        return false;
-    }
+    // Tile/manager gates can already be held: inspect and reuse the original
+    // position, then try the real claim after preparation; never wait here.
+    const auto location = d->owner->writeAdmission.inspectLegacyClaimLocked(key, error);
+    if (!location) return false;
     KisPageWriteIntent intent;
     intent.key = key;
     intent.inputKind = KisPageWriteInputKind::Semantic;
-    entry = d->claimEntryLocked(intent, ownerLock, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, error);
+    entry = d->claimEntryLocked(intent, ownerLock, KisPageWriteAdmission::ClaimOrigin::LegacyAdapter,
+        error, nullptr, &location);
     return entry && resolvePresence();
 }
 

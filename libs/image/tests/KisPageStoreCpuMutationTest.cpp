@@ -12271,7 +12271,6 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
     std::unique_ptr<KisTilePageStoreLease> escaped;
     bool entered = false, nestedRejected = false, barrierRejected = false, legacyReady = mode == 0;
     bool completedCannotRevive = false;
-    quint64 scopesAtCut = 0;
     QString error;
     const bool accepted = backend.fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
         nullptr, &delivery, [&](bool, QString *) {
@@ -12291,12 +12290,12 @@ void KisPageStoreCpuMutationTest::managedFrameOwnsAdapterLifetime()
             return mode != 2 && legacyReady;
         }, [&](const auto &publish, QString *failure) {
             if (!publish(failure)) return false;
-            scopesAtCut = store->mutationStatistics().operationSessionsCreated - before;
             completedCannotRevive = !backend.acquireTile(0, 0, KisTilePageStoreBridge::Access::Write);
             return completedCannotRevive;
         });
     QVERIFY(entered && nestedRejected && barrierRejected && legacyReady);
-    QCOMPARE(mode == 2 ? store->mutationStatistics().operationSessionsCreated - before : scopesAtCut, quint64(1));
+    // The rejected raw attempt after the cut must not create another Frame.
+    QCOMPARE(store->mutationStatistics().operationSessionsCreated - before, quint64(1));
     QCOMPARE(accepted, mode != 2);
     QCOMPARE(completedCannotRevive, mode != 2);
     QCOMPARE(delivery.isEmpty(), mode == 2);

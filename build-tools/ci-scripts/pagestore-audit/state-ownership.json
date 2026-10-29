@@ -29,7 +29,7 @@
       "creation-paths": [
         "beginFrameSession creates/adopts the one original MutationSession for both managed operations and real legacy boundaries.",
         "Managed pixel, fill/copy, remove/clear, trim and standalone writable-page operations keep that original Session directly. OperationFrame has a borrowed intrusive stack admission link; no ordinary shared legacy control, batch facade or paid thread node is created.",
-        "Only actual getTile/raw lease use within a managed operation promotes its SAME Session into the existing legacy lifetime extension. Storage is prepared before transfer, with no second scope/transaction. Explicit public batches, iterators and standalone raw leases retain their genuine client/pointer contract."
+        "Only a real legacy key admitted by the SAME original Session creates a legacy client extension and transfers that Session. Raw/getTile within managed operations checks its claim before allocating the shared control/thread index; standalone known-key raw and writable-page callers reserve the one inert Frame before transaction activation. Explicit unknown-key public batches and iterators retain their original transaction boundary."
       ],
       "current-writers": [
         "Original MutationSession owns pixels/claims/transaction/cancel/orphan/capacity. OperationFrame only owns stack adapter admission; WriteBatch::Private owns actual legacy clients/leases/provisional adapter tokens."
@@ -49,7 +49,8 @@
         "completeAdapters consumes original cache invalidation/provisional rollback before manager responsibility leaves the real legacy extension.",
         "A failed managed operation with escaped legacy pointers retains the same Session and actual thread slot through final foreign-thread unlock; no new orphan queue or operation owner is created.",
         "clear/history and nested native admission observe both borrowed live managed links and real legacy slots. Completed delivery retains the original page claims even after stack/legacy discovery ends.",
-        "trim uses one native guard for every partial page and finishes its original execution; generic lease bookkeeping, tile wrapper lookup and raw-markDirty return are deleted from this managed route."
+        "trim uses one native guard for every partial page and finishes its original execution; generic lease bookkeeping, tile wrapper lookup and raw-markDirty return are deleted from this managed route.",
+        "LegacyInspection borrows original owner/key/PageControl only through one synchronous admission; it is not authority. Final claim revalidates actual token after unlocked preparation, an existing original row consumes its stored claim, and terminal return walks only its original claim chain. No extra refusal transaction, scope or extension is created for a known conflicting key."
       ]
     },
     {

@@ -300,8 +300,6 @@ private:
                                            QString *error = nullptr, bool requireIdle = false);
     KisPageMutationSession beginFrameSession(QString *error, bool requireIdle = false,
         KisPageMutationSession *reservation = nullptr, KisPageMutationExecution *execution = nullptr);
-    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-    prepareMutationBatch(QString *error, bool requireIdle = false);
     bool finishOwnedTransaction(KisPageMutationSession &mutation, bool publish,
                                 QString *error = nullptr);
     void registerAnonymousLease(KisTiledDataManagerPageStoreLease *lease);

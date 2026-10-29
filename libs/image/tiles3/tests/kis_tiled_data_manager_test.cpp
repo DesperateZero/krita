@@ -359,6 +359,61 @@ void KisTiledDataManagerTest::testPageStoreWritablePresence()
     QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
 }
 
+void KisTiledDataManagerTest::testPageStoreKnownWriterRefusal_data()
+{
+    QTest::addColumn<int>("mode");
+    QTest::newRow("standalone") << 0;
+    QTest::newRow("original-managed-frame") << 1;
+    QTest::newRow("real-legacy-scope") << 2;
+}
+
+void KisTiledDataManagerTest::testPageStoreKnownWriterRefusal()
+{
+    QFETCH(int, mode);
+    const quint8 blank = 0x13;
+    KisTiledDataManager dm(1, &blank);
+    auto *backend = dm.m_pageStoreBackend; auto *store = backend->store();
+    const auto transaction = store->beginCurrentTransaction(); QVERIFY(transaction.isValid());
+    auto holder = store->beginMutation(transaction); QVERIFY(holder.isActive());
+    const KisPageKey key{backend->surface(), {1, 0}};
+    auto guard = holder.beginWrite(key); QVERIFY(guard.isValid()); guard = {};
+    // No manager wrapper exists for the native writer's key. Exercise the
+    // real getTile -> ensureWritablePage path as well as the raw lock ABI.
+    QCOMPARE(dm.m_hashTable->numTiles(), 0);
+    bool refused = false, noNewScope = false, noExtension = false;
+    const auto probe = [&] {
+        const auto scopes = store->mutationStatistics().operationSessionsCreated;
+        const auto usage = store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        const bool readCacheRefused = !backend->acquireTile(1, 0, KisTilePageStoreBridge::Access::ReadCache);
+        const bool rawRefused = !backend->acquireTile(1, 0, KisTilePageStoreBridge::Access::Write);
+        KisStrokeJobFailureContext failure(true);
+        auto tile = dm.getTile(1, 0, true);
+        refused = readCacheRefused && rawRefused && !tile && failure.failed();
+        noNewScope = store->mutationStatistics().operationSessionsCreated == scopes;
+        noExtension = store->backingUsage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam == usage;
+        return true; // A refused child must not poison the outer operation.
+    };
+    auto batch = mode == 2 ? backend->beginMutationBatch() : nullptr;
+    QVERIFY(mode != 2 || batch);
+    if (mode == 1) {
+        QString error;
+        QVERIFY2(backend->fillRect(QRect(0, 0, 64, 64), QByteArray(1, char(0x61)), &error,
+            nullptr, nullptr, [&](bool, QString *) { return probe(); }), qPrintable(error));
+    } else probe();
+    QVERIFY(refused); QVERIFY(noNewScope); QVERIFY(noExtension);
+    QCOMPARE(dm.m_hashTable->numTiles(), 0);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(1));
+    if (batch) { QVERIFY(batch->finish()); batch.reset(); }
+    QVERIFY(holder.cancel()); QVERIFY(store->abort(transaction));
+    // The rejected attempt left the actual writer intact and did not publish
+    // its pending bytes. Normal cold getTile must still succeed after return.
+    auto tile = dm.getTile(1, 0, true); QVERIFY(tile);
+    QVERIFY(tile->lockForRead()); QCOMPARE(tile->data()[0], blank); tile->unlockForRead();
+    tile = {};
+    QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+}
+
 void KisTiledDataManagerTest::testPageStoreWritablePresenceRefusal()
 {
     const quint8 blank = 0x13, color = 0x57;

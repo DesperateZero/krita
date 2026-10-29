@@ -291,6 +291,8 @@ public:
 class KisTiledDataManagerPageStoreWriteBatch::Private
 {
 public:
+    static std::shared_ptr<Private> create()
+    { return std::allocate_shared<Private>(KisMutationStorageAllocator<Private>{}); }
     enum class Kind { Explicit, Iterator, RawUnused, RawExposed };
     bool rawLease() const { return kind == Kind::RawUnused || kind == Kind::RawExposed; }
     ~Private()
@@ -389,14 +391,15 @@ public:
     }
     KisPageMutationSession &session() { return legacy ? legacy->mutation : original; }
     bool isPresent() const { return bool(original.d) || bool(legacy); }
-    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> promoteLegacy()
+    std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> legacyForPage(
+        const KisPageKey &key, QString *error, bool *present = nullptr)
     {
+        // A real key must be admitted by this SAME Frame before funding a
+        // compatibility client. Refusal neither promotes nor revives it.
+        if (!session().reserveLegacyMutationPage(key, error, present)) return {};
         if (legacy) return legacy;
-        // A completed cut still owns delivery claims, but cannot be turned
-        // back into a mutable adapter client. Do not allocate for that refusal.
-        if (!original.isActive()) return {};
         using Extension = KisTiledDataManagerPageStoreWriteBatch::Private;
-        auto prepared = std::allocate_shared<Extension>(KisMutationStorageAllocator<Extension>{});
+        auto prepared = Extension::create();
         StorageMap<Qt::HANDLE, std::weak_ptr<Extension>> index;
         index.emplace(thread, prepared); // All fallible storage precedes transfer.
         QMutexLocker lock(&owner.d->mutex);
@@ -984,6 +987,8 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
 {
     auto *manager = d->manager;
     if (!manager) return {};
+    const KisPageKey key{surface(), {column, row}};
+    bool present = false;
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> shared;
     OperationFrame *activeFrame = nullptr;
     {
@@ -999,18 +1004,18 @@ KisTileSP KisTiledDataManagerPageStoreBackend::ensureWritablePage(
         if (!shared) activeFrame = currentOperationLocked();
     }
     if (activeFrame) {
-        shared = activeFrame->promoteLegacy();
+        shared = activeFrame->legacyForPage(key, error, &present);
         if (!shared) return {};
     }
     OperationFrame frame(*this);
     if (!shared) {
-        if (!frame.begin(error)) return {};
+        auto range = store()->reserveLegacyPage(key, error);
+        if (!range.d || !frame.begin(error, &range)) return {};
     }
     auto &mutation = shared ? shared->mutation : frame.session();
     // Admission precedes the presence decision and all adapter preparation.
     // Reuse private aliases/writes as well as the transaction's sealed pages.
-    bool present = false;
-    if (!mutation.reserveLegacyMutationPage({surface(), {column, row}}, error, &present)) return {};
+    if (!activeFrame && !mutation.reserveLegacyMutationPage(key, error, &present)) return {};
     const bool provisional = shared && !present;
     auto prepared = manager->m_hashTable->prepareTileUpdate(column, row,
         provisional ? KisTileHashTable::Update::MayRemove : KisTileHashTable::Update::Present);
@@ -1096,17 +1101,6 @@ KisPageMutationSession KisTiledDataManagerPageStoreBackend::beginFrameSession(
     return frame;
 }
 
-std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>
-KisTiledDataManagerPageStoreBackend::prepareMutationBatch(QString *error, bool requireIdle)
-{
-    using Batch = KisTiledDataManagerPageStoreWriteBatch::Private;
-    auto batch = std::allocate_shared<Batch>(KisMutationStorageAllocator<Batch>{});
-    batch->mutation = beginFrameSession(error, requireIdle);
-    if (!batch->mutation.isActive()) return {};
-    batch->backend = this;
-    return batch;
-}
-
 std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>
 KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool requireIdle) try
 {
@@ -1121,8 +1115,10 @@ KisTiledDataManagerPageStoreBackend::beginMutationBatch(QString *error, bool req
     preparedIndex.emplace(QThread::currentThreadId(), std::weak_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{});
     auto batch = std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch>(
         new KisTiledDataManagerPageStoreWriteBatch(std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>{}));
-    batch->d = prepareMutationBatch(error, requireIdle);
-    if (!batch->d) return {};
+    batch->d = KisTiledDataManagerPageStoreWriteBatch::Private::create();
+    batch->d->mutation = beginFrameSession(error, requireIdle);
+    if (!batch->d->mutation.isActive()) return {};
+    batch->d->backend = this;
     preparedIndex.begin()->second = batch->d;
     QMutexLocker lock(&d->mutex);
     const auto inserted = d->cpuMutationBatches.insert(preparedIndex.extract(preparedIndex.begin()));
@@ -1698,6 +1694,7 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
     }
 
     KisPageMutationSession *mutation = nullptr;
+    QString transactionError;
     std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> batch;
     OperationFrame *activeFrame = nullptr;
     {
@@ -1708,11 +1705,6 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
         mutation = batch ? &batch->mutation : nullptr;
         if (!batch) activeFrame = currentOperationLocked();
     }
-    if (activeFrame) {
-        batch = activeFrame->promoteLegacy();
-        if (!batch) return {};
-        mutation = &batch->mutation;
-    }
     if (access == Access::ReadCache) {
         // An idle wrapper is an expected-identity hint, not a fresh selector.
         // Only the original live iterator segment may lend its parked target.
@@ -1721,10 +1713,14 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
             (*readCache)->readPinned() || !provider->readCacheMatchesVersion(
                 readCache->get(), mutation->legacyMutationPageVersion(key))) return {};
     }
+    if (activeFrame) {
+        batch = activeFrame->legacyForPage(key, &transactionError);
+        if (!batch) return {};
+        mutation = &batch->mutation;
+    }
 
     bool prepared = false;
     bool accepted = false;
-    QString transactionError;
     auto returnClient = qScopeGuard([&] {
         if (batch && prepared && !accepted) {
             QMutexLocker leaseLock(&batch->leaseMutex);
@@ -1733,12 +1729,16 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
         }
     });
     if (!mutation) {
-        batch = prepareMutationBatch(&transactionError);
-        if (!batch) return {};
+        auto range = pageStore->reserveLegacyPage(key, &transactionError);
+        if (!range.d) return {};
+        batch = KisTiledDataManagerPageStoreWriteBatch::Private::create();
+        batch->mutation = beginFrameSession(&transactionError, false, &range);
+        if (!batch->mutation.isActive()) return {};
+        batch->backend = this;
         batch->kind = KisTiledDataManagerPageStoreWriteBatch::Private::Kind::RawUnused;
         mutation = &batch->mutation;
-    }
-    if (access == Access::Write && !mutation->reserveLegacyMutationPage(key, &transactionError)) {
+    } else if (access == Access::Write && !activeFrame
+        && !mutation->reserveLegacyMutationPage(key, &transactionError)) {
         if (batch) qWarning() << "PageStore CPU mutation acquisition failed:" << transactionError;
         return {};
     }

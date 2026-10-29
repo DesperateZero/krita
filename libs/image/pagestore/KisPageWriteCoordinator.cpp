@@ -2950,6 +2950,27 @@ KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
     return found->thread == requester ? Conflict::WriterSameThread : Conflict::WriterOtherThread;
 }
 
+KisPageWriteAdmission::LegacyInspection KisPageWriteAdmission::inspectLegacyClaimLocked(
+    const KisPageKey &key, QString *error) const
+{
+    if (!key.isValid() || (m_operational && !*m_operational)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("legacy mutation store is unavailable"));
+        return {};
+    }
+    LegacyInspection result;
+    result.location = m_metadata->findWriteClaim(key);
+    if (result.location && result.location->token) {
+        KisPageStoreDetail::setError(error, result.location->thread == QThread::currentThreadId()
+            ? QStringLiteral("legacy mutation cannot reenter its page")
+            : QStringLiteral("legacy mutation conflicts with an active page writer"));
+        return {};
+    }
+    result.owner = this;
+    result.key = &key;
+    KisPageStoreDetail::setError(error, {});
+    return result;
+}
+
 KisPageWriteClaim *KisPageWriteAdmission::locate(const KisPageKey &key,
     QMutexLocker<QMutex> &lock, QString *error, bool *unlocked)
 {
@@ -3100,12 +3121,20 @@ KisPageWriteAdmission::Result KisPageWriteAdmission::claimEntries(
 }
 
 bool KisPageWriteAdmission::claimOne(ClaimSet &claims, KisMutationWriteSet::EntryHandle slot,
-    QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin)
+    QMutexLocker<QMutex> &lock, QString *error, ClaimOrigin origin, const LegacyInspection *inspection)
 {
     auto *entry = valid(claims) ? claims.writeSet->at(slot) : nullptr;
     if (!entry) {
         KisPageStoreDetail::setError(error, QStringLiteral("write admission entry is invalid"));
         return false;
+    }
+    if (inspection) {
+        if (inspection->owner != this || !inspection->key || !(*inspection->key == entry->key())
+            || (entry->writeClaim && entry->writeClaim != inspection->location)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("legacy inspection is foreign or names another entry"));
+            return false;
+        }
+        entry->writeClaim = inspection->location;
     }
     return claimEntries(claims, [&](auto &&consume) { consume(*entry); }, lock, error, origin) == Result::Acquired;
 }
@@ -3154,6 +3183,14 @@ bool KisPageWriteAdmission::ownsClaimLocked(const ClaimSet &claims, const KisPag
 {
     if (!claims.isValid() || claims.owner != this) return false;
     return owned(m_metadata->findWriteClaim(key), claims.token);
+}
+
+bool KisPageWriteAdmission::ownsEntryLocked(const ClaimSet &claims, const KisMutationPageEntry &entry) const
+{
+    // The caller obtained this original entry from claims.writeSet while
+    // holding its scope gate; its stable location is not an exported token.
+    return claims.isValid() && claims.writeSet && claims.owner == this
+        && claims.writeSet->claimMetadata == m_metadata && owned(entry.writeClaim, claims.token);
 }
 
 void KisPageWriteAdmission::release(ClaimSet &claims, bool lockOwner) noexcept

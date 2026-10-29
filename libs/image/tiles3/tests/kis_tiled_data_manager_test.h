@@ -38,6 +38,8 @@ private Q_SLOTS:
     void testPageStoreWritablePresence_data();
     void testPageStoreWritablePresence();
     void testPageStoreWritablePresenceRefusal();
+    void testPageStoreKnownWriterRefusal_data();
+    void testPageStoreKnownWriterRefusal();
     void testPageStoreCancelledIteratorAdapters_data();
     void testPageStoreCancelledIteratorAdapters();
     void testPageStoreOwnedCancellationUnderPressure_data();

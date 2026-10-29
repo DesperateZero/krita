@@ -231,6 +231,17 @@ public:
     };
     enum class Result : quint8 { Acquired, Contended, Failed };
 
+    class LegacyInspection final
+    {
+    public:
+        explicit operator bool() const { return owner; }
+    private:
+        const KisPageWriteAdmission *owner = nullptr;
+        const KisPageKey *key = nullptr; // Original caller input stays alive until claimOne.
+        KisPageWriteClaim *location = nullptr;
+        friend class KisPageWriteAdmission;
+    };
+
     class ClaimSet final
     {
     public:
@@ -265,6 +276,10 @@ public:
     qsizetype activeGenericClaimCountLocked() const;
     Conflict conflictLocked(const KisPageKey &, Qt::HANDLE requester) const;
     bool pageClaimedLocked(const KisPageKey &) const;
+    // One legacy entry inspection, before fallible operation preparation.
+    // A null location means a real first key, not authority to skip the
+    // final claim. Store admission and original metadata lifetime are held.
+    LegacyInspection inspectLegacyClaimLocked(const KisPageKey &, QString *error) const;
     // Growth temporarily releases ownerLock. The caller retains the original
     // owner/transaction and serializes its write set independently (session
     // mutex or a private range). Never pass a mutable unprotected write set.
@@ -272,7 +287,8 @@ public:
     void releaseDirectLocked(const KisPageKey &, quint64 ownerToken) noexcept;
     ClaimSet beginClaimSet(KisMutationWriteSet &);
     bool claimOne(ClaimSet &, KisMutationWriteSet::EntryHandle, QMutexLocker<QMutex> &, QString *error,
-                  ClaimOrigin origin = ClaimOrigin::NativeSession);
+                  ClaimOrigin origin = ClaimOrigin::NativeSession,
+                  const LegacyInspection *inspection = nullptr);
     bool releaseOneLocked(ClaimSet &, KisMutationWriteSet::EntryHandle) noexcept;
     // Contention observed across growth remains distinct from real storage
     // refusal, even if that writer releases while unused growth is freed.
@@ -287,6 +303,7 @@ public:
     bool claimRange(ClaimSet &, Rows, QMutexLocker<QMutex> &, QString *error);
     bool ownsClaimSetLocked(const ClaimSet &) const;
     bool ownsClaimLocked(const ClaimSet &, const KisPageKey &) const;
+    bool ownsEntryLocked(const ClaimSet &, const KisMutationPageEntry &) const;
 
 private:
     template<class Visit> Result claimEntries(ClaimSet &, Visit &&, QMutexLocker<QMutex> &,

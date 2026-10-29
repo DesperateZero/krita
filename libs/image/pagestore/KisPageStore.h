@@ -665,6 +665,7 @@ private:
     KisPageMutationSession reserveManagedRange(
         KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
         bool legacyIntent, bool *borrowed, QString *error, bool initialExecution);
+    KisPageMutationSession reserveLegacyPage(const KisPageKey &, QString *error);
     KisPageMutationSession beginMutation(const KisPageTransaction &,
         KisPageMutationSession reservation, KisPageMutationExecution *execution, QString *error);
     // Internal finite selection. It cannot be used as a whole-image snapshot.
