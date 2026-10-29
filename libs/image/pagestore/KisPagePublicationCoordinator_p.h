@@ -407,8 +407,6 @@ public:
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version,
         const KisPageAllocationDescriptor &descriptor, const KisPageVersion &base);
-    KRITAIMAGE_EXPORT bool descriptorPreparationCoversLocked(
-        const PreparedDescriptorChange *, size_t count, const PreparedDescriptors &) const;
     // A borrow lasts until its version's descriptor is replaced or removed.
     // The native page's original claim/session excludes both during its use.
     const KisPageAllocationDescriptor *descriptorLocked(

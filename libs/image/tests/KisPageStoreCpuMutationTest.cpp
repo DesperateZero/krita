@@ -546,6 +546,34 @@ class KisPageStoreCpuMutationTest : public QObject
     Q_OBJECT
 private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
+    void implicitDefaultsDoNotBuildPublicationValues()
+    {
+        Fixture f; QVERIFY(f.init());
+        auto retained = f.store->captureRetainedEpoch(); QVERIFY(retained.isValid());
+        const auto request = f.store->acquireRead(key(3), {}, cpu, KisPagePriority::Normal);
+        auto pinned = f.store->resolve(request, request.readiness); QVERIFY(pinned.isValid());
+        const auto release = qScopeGuard([&] { f.store->release(std::move(pinned)); });
+        QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
+        const auto before = kisPageStoreMetadataMetrics(*f.store);
+        for (quint8 byte : {quint8(0x41), quint8(0x51), quint8(0x61)}) {
+            QVERIFY(f.setDefault(byte));
+            QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
+            auto view = f.store->captureReadView(); QVERIFY(view.isValid());
+            auto read = view.readResidentPage(key(3)); QVERIFY(read.isValid());
+            QCOMPARE(static_cast<const quint8 *>(read.data())[0], byte);
+            QCOMPARE(static_cast<const quint8 *>(pinned.cpuData())[0], quint8(0x2a));
+        }
+        QVERIFY(f.store->restoreRetainedEpoch(retained).isValid());
+        QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
+        const auto after = kisPageStoreMetadataMetrics(*f.store);
+        QCOMPARE(after.publicationAdditionRecordsPrepared, before.publicationAdditionRecordsPrepared);
+        QCOMPARE(after.publicationAdditionRecordsTransferred, before.publicationAdditionRecordsTransferred);
+        f.store->release(std::move(pinned));
+        QVERIFY(f.store->releaseSnapshot(retained.token));
+        QVERIFY(f.store->closeSession());
+        QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
+    }
+
     void nativePreparationAdapterPreservesContract()
     {
         Fixture f; QVERIFY(f.init(4, 1));
@@ -635,8 +663,6 @@ private Q_SLOTS:
     }
     void epochNativeConfigurationResumes();
     void publicationDescriptorStorageAtCapacity();
-    void descriptorPreparationTracksOnlySkippedValues_data();
-    void descriptorPreparationTracksOnlySkippedValues();
     void overlayStorageAtCapacity_data()
     {
         QTest::addColumn<int>("refusal");
@@ -5360,7 +5386,7 @@ void KisPageStoreCpuMutationTest::defaultPublicationRevalidatesNewlyRegisteredPa
     QVERIFY(f.setDefault(0x55));
     QVERIFY(lateReader && lateReader->isValid());
     QCOMPARE(f.store->publicationStatistics().directoryRepreparations, quint64(1));
-    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
     QCOMPARE(static_cast<const quint8 *>(lateReader->cpuData())[0], quint8(0x2a));
     QCOMPARE(quint8(f.pixel({}, 3)[0]), quint8(0x55));
     f.store->release(std::move(*lateReader)); lateReader.reset();
@@ -5420,8 +5446,8 @@ void KisPageStoreCpuMutationTest::defaultPublicationRevalidatesDescriptorStorage
     QVERIFY(f.setDefault(0x55)); QCOMPARE(attempts, 1);
     const auto after = f.store->publicationStatistics();
     QCOMPARE(after.descriptorRepreparations - before.descriptorRepreparations, quint64(0));
-    QCOMPARE(after.descriptorCapacityPreparations - before.descriptorCapacityPreparations, quint64(1));
-    QCOMPARE(after.descriptorInstallations - before.descriptorInstallations, quint64(1));
+    QCOMPARE(after.descriptorCapacityPreparations - before.descriptorCapacityPreparations, quint64(0));
+    QCOMPARE(after.descriptorInstallations - before.descriptorInstallations, quint64(0));
     QCOMPARE(after.directoryRepreparations, before.directoryRepreparations);
     QCOMPARE(f.pixel({}, 3), QByteArray(f.bpp, char(0x55)));
     QCOMPARE(f.pixel(), QByteArray(f.bpp, char(0x31)));
@@ -5445,7 +5471,7 @@ void KisPageStoreCpuMutationTest::restorationRevalidatesNewlyRegisteredPage()
     QVERIFY(f.store->restoreRetainedEpoch(before).isValid());
     QVERIFY(lateReader && lateReader->isValid());
     QCOMPARE(f.store->publicationStatistics().restoreDirectoryRepreparations, quint64(1));
-    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(2));
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(1));
     QCOMPARE(static_cast<const quint8 *>(lateReader->cpuData())[0], quint8(0x55));
     QCOMPARE(quint8(f.pixel({}, 3)[0]), quint8(0x2a));
     f.store->release(std::move(*lateReader)); lateReader.reset();
@@ -7002,97 +7028,6 @@ void KisPageStoreCpuMutationTest::retirementRecordTransfersAtCapacity()
     kisDrainPageStoreReclamation();
     QCOMPARE(permissionQueries.load(), orphan ? 1 : 0);
     QCOMPARE(references.loadAcquire(), 1);
-}
-
-void KisPageStoreCpuMutationTest::descriptorPreparationTracksOnlySkippedValues_data()
-{
-    QTest::addColumn<int>("scenario");
-    const char *names[] = {"empty", "fully-prepared", "skipped-unrelated", "skipped-changed",
-        "mixed-covered-changed", "mixed-skipped-changed", "mixed-skipped-missing",
-        "duplicate-version-distinct-values", "duplicate-unrelated", "value-restored"};
-    for (int i = 0; i < 10; ++i) QTest::newRow(names[i]) << i;
-}
-
-void KisPageStoreCpuMutationTest::descriptorPreparationTracksOnlySkippedValues()
-{
-    QFETCH(int, scenario);
-    ReadTerminalFixture f(256 * 1024);
-    f.background = false; f.metadata.attachBackingBudget(f.budget);
-    QVERIFY2(f.init(), qPrintable(f.error));
-    KisPagePublicationCoordinator publication(f.epochs, f.metadata, f.owner, f.budget,
-        f.retirement, f.history, f.ready, f.activeCalls, f.operational, f.background, &f,
-        +[](void *, KisPageTransactionId) { return false; },
-        +[](void *, const KisPageKey &) { return false; },
-        +[](void *, KisPageTransactionId, QMutexLocker<QMutex> &, QString *) { return true; },
-        +[](void *, KisPageTransactionId) {},
-        +[](void *, KisPageMetadataCoordinator::DeferredPublicationCleanup) {},
-        +[](void *) { return true; },
-        +[](void *, KisPageTransactionId, KisPageReadCleanup &) { return true; });
-    KisSurfaceEpochState surface; QVERIFY(f.epochs.root({1}).surfaceState({1}, &surface));
-    const auto layout = surface.allocationDescriptor();
-    auto different = layout; ++different.layoutRevision;
-    std::array<KisPageVersion, 4> versions;
-    for (size_t i = 0; i < versions.size(); ++i) {
-        const KisPageVersion version{key(int(i + 1)), {1}, surface.defaultPixelRevision};
-        versions[i] = version;
-        KisPageVersionStateSnapshot state; state.version = version;
-        state.publication = KisPagePublicationState::Published;
-        KisPageStateSnapshot page; page.key = version.key;
-        page.publishedEpoch = f.epochs.captureCommittedRoot().epoch();
-        page.publishedGeneration = version.generation;
-        page.publishedDefaultPixelRevision = version.defaultPixelRevision;
-        page.nextGeneration = {2}; page.versions.append(state);
-        QVERIFY2(f.metadata.registerPage(page, &f.error), qPrintable(f.error));
-    }
-    using Change = KisPagePublicationCoordinator::PreparedDescriptorChange;
-    std::array<Change, 3> changes{{{versions[0], layout}, {versions[1], layout}, {versions[2], layout}}};
-    const size_t count = scenario ? changes.size() : 0;
-    QMutexLocker lock(&f.mutex);
-    if (scenario >= 2) for (size_t i = 0; i < 3; ++i) {
-        if (scenario >= 4 && scenario <= 6 && i == 1) continue;
-        auto initial = publication.prepareDescriptorLocked(versions[i], layout);
-        publication.installDescriptorAdditionsLocked(&initial);
-    }
-    if (scenario == 7 || scenario == 8) changes[1] = {versions[0], different};
-    auto candidate = publication.prepareDescriptorAdditionsLocked(changes.data(), count);
-    QCOMPARE(candidate.size(), size_t(scenario == 1 ? 3 : scenario >= 4 && scenario <= 8 ? 1 : 0));
-    auto replacement = publication.prepareDescriptorLocked(versions[3], different);
-    QVERIFY(!replacement.empty());
-    auto changedValue = replacement.front().second;
-    // Simulate the actual unlocked preparation boundary. Existing immutable
-    // candidate values retain their own lifetime; only skipped facts can expire.
-    lock.unlock();
-    const auto changedVersion = scenario == 4 ? versions[1]
-        : scenario == 2 || scenario == 8 || scenario == 0 ? versions[3]
-        : scenario == 5 ? versions[2] : versions[0];
-    if (scenario == 6) changedValue.reset();
-    QVERIFY(f.metadata.exchangeVersionDescriptor(changedVersion, &changedValue));
-    if (scenario == 9) QVERIFY(f.metadata.exchangeVersionDescriptor(changedVersion, &changedValue));
-    lock.relock();
-    const auto beforeCheck = f.live();
-    const auto fillerBytes = size_t(f.limits.metadataArenaBytes - beforeCheck);
-    void *filler = allocateTestStoragePressure(&f.budget, fillerBytes, 1);
-    const auto refund = qScopeGuard([&] { if (filler) freeTestStoragePressure(&f.budget, filler, fillerBytes, 1); });
-    QCOMPARE(f.live(), f.limits.metadataArenaBytes);
-    const bool covered = publication.descriptorPreparationCoversLocked(changes.data(), count, candidate);
-    const bool expected = scenario != 3 && scenario != 5 && scenario != 6 && scenario != 7;
-    QCOMPARE(covered, expected);
-    QCOMPARE(f.live(), f.limits.metadataArenaBytes); // Acceptance checks need no storage.
-    freeTestStoragePressure(&f.budget, std::exchange(filler, nullptr), fillerBytes, 1);
-    QCOMPARE(f.live(), beforeCheck);
-    // Distinct desired values for the same version probe only the alignment
-    // of skipped decisions. Real publication inputs do not request two
-    // contradictory final layouts; this does not invent install semantics.
-    if (scenario == 7 || scenario == 8) { lock.unlock(); return; }
-    if (!covered) {
-        candidate = publication.prepareDescriptorAdditionsLocked(changes.data(), count);
-        QVERIFY(publication.descriptorPreparationCoversLocked(changes.data(), count, candidate));
-    }
-    publication.installDescriptorAdditionsLocked(&candidate);
-    if (count) for (size_t i = 0; i < count; ++i) {
-        QVERIFY(f.metadata.versionDescriptorMatches(changes[i].version, changes[i].descriptor));
-    }
-    lock.unlock();
 }
 
 void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
@@ -10780,7 +10715,7 @@ void KisPageStoreCpuMutationTest::restorationDefaultIsCandidateOnly()
     auto current = f.store->captureReadView({}); QVERIFY(current.isValid());
     // A native default reader uses the surface's shared fill buffer, not the
     // optional metadata materialization. Pin that actual cache through its
-    // generic lease when asserting two live entities. No-reader reclamation
+    // generic lease while verifying no second entity is built. No-reader reclamation
     // and rematerialization have separate coverage.
     const auto oldRequest = f.store->acquireReadInView(key(3), current, cpu, KisPagePriority::Normal);
     auto oldLease = f.store->resolve(oldRequest, oldRequest.readiness); QVERIFY(oldLease.isValid());
@@ -10801,7 +10736,7 @@ void KisPageStoreCpuMutationTest::restorationDefaultIsCandidateOnly()
         QCOMPARE(f.store->sessionStats().pageVersions, versions);
         const auto rejected = kisPageStoreMetadataMetrics(*f.store);
         QCOMPARE(rejected.publicationVersionInstalls, metrics.publicationVersionInstalls);
-        QCOMPARE(rejected.publicationAdditionRecordsPrepared - metrics.publicationAdditionRecordsPrepared, quint64(1));
+        QCOMPARE(rejected.publicationAdditionRecordsPrepared - metrics.publicationAdditionRecordsPrepared, quint64(0));
         QCOMPARE(rejected.publicationAdditionRecordsTransferred, metrics.publicationAdditionRecordsTransferred);
         QVERIFY(f.store->abort(interfering));
         metrics = kisPageStoreMetadataMetrics(*f.store);
@@ -10810,16 +10745,16 @@ void KisPageStoreCpuMutationTest::restorationDefaultIsCandidateOnly()
     QVERIFY(f.store->restoreRetainedEpoch(initial).isValid()); QCOMPARE(attempts, rejectFirst ? 2 : 1);
     const auto restored = kisPageStoreMetadataMetrics(*f.store);
     QCOMPARE(restored.publicationVersionInputs - metrics.publicationVersionInputs, quint64(1));
-    QCOMPARE(restored.publicationVersionInstalls - metrics.publicationVersionInstalls, quint64(1));
-    QCOMPARE(restored.publicationAdditionRecordsPrepared - metrics.publicationAdditionRecordsPrepared, quint64(1));
-    QCOMPARE(restored.publicationAdditionRecordsTransferred - metrics.publicationAdditionRecordsTransferred, quint64(1));
+    QCOMPARE(restored.publicationVersionInstalls - metrics.publicationVersionInstalls, quint64(0));
+    QCOMPARE(restored.publicationAdditionRecordsPrepared - metrics.publicationAdditionRecordsPrepared, quint64(0));
+    QCOMPARE(restored.publicationAdditionRecordsTransferred - metrics.publicationAdditionRecordsTransferred, quint64(0));
     const auto published = f.store->publicationStatistics();
-    QCOMPARE(published.descriptorCapacityPreparations - publication.descriptorCapacityPreparations, quint64(1));
-    QCOMPARE(published.descriptorInstallations - publication.descriptorInstallations, quint64(1));
+    QCOMPARE(published.descriptorCapacityPreparations - publication.descriptorCapacityPreparations, quint64(0));
+    QCOMPARE(published.descriptorInstallations - publication.descriptorInstallations, quint64(0));
     QCOMPARE(restored.fullSnapshotExports - restored.backgroundSnapshotExports,
              metrics.fullSnapshotExports - metrics.backgroundSnapshotExports);
-    QCOMPARE(f.store->sessionStats().pageVersions, versions + 1);
-    QCOMPARE(f.pixel({}, 3), QByteArray(bpp, char(0x2a))); // descriptor installed before new root is exposed
+    QCOMPARE(f.store->sessionStats().pageVersions, versions);
+    QCOMPARE(f.pixel({}, 3), QByteArray(bpp, char(0x2a))); // selected surface supplies exact bytes without a new Value
     QCOMPARE(QByteArray(static_cast<const char *>(oldLease.cpuData()), bpp), QByteArray(bpp, char(0x55)));
     f.store->release(std::move(oldLease));
     auto old = current.readResidentPage(key(3)); QVERIFY(old.isValid());
@@ -14753,10 +14688,9 @@ void KisPageStoreCpuMutationTest::staleFirstWriteKeepsCurrentDefault()
     // page: its old default must not become Published to bypass the conflict.
     QCOMPARE(f.store->sessionStats().activeControlWritePages, qsizetype(0));
     QVERIFY(f.store->waitForRetirementIdle());
-    // Selection creates no default Value. A surface cut after the control
-    // exists still installs its current default through cold publication;
-    // that separate real cut is not the stale writer's source/cache.
-    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(duringProvider ? 1 : 0));
+    // Neither selection nor the concurrent surface cut creates a default
+    // Value. The stale writer still rejects and its actual target is retired.
+    QCOMPARE(f.store->sessionStats().pageVersions, qsizetype(0));
     QCOMPARE(f.store->sessionStats().historicalValues, qsizetype(0));
     QCOMPARE(f.provider->memoryUsage().committedBytes, quint64(0));
     QCOMPARE(f.store->sessionStats().pendingHistoryValueChecks, qsizetype(0));

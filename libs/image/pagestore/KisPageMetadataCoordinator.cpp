@@ -4215,10 +4215,17 @@ try {
                 }
             }
             if (step.next.versions.size() > inputCount) {
-                // Transfer the appended values and their paid storage; old
-                // replica/protection values can be destroyed during prepare.
+                // A pure view cut can synthesize a default for policy checks.
+                // Its selected surface already owns that value: only actual
+                // materialization/import creates a persistent cache identity.
+                // Existing replicas and protection remain in their old rows.
+                // A noncanonical default generation is an explicit identity;
+                // a surface alone cannot express it, so retain that Value.
                 auto &records = step.next.versions;
                 records.erase(records.begin(), records.begin() + inputCount);
+                records.erase(std::remove_if(records.begin(), records.end(), [](const auto &record) {
+                    return record.isVirtualDefault() && record.version.generation.value == 1;
+                }), records.end());
                 publication.installRecords = std::move(records);
             }
         }

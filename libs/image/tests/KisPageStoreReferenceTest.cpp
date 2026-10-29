@@ -4242,12 +4242,12 @@ void KisPageStoreReferenceTest::originalHistoryValueBatches()
     batch = coordinator.prepareRestoration(coordinatorView.root(), {3}, {restore}); QVERIFY(batch.isValid());
     QVERIFY(coordinator.installPublication(std::move(batch), {}, {3}));
     QVERIFY(coordinatorView.accept(coordinator, {3}, restore.version));
-    // Both obsolete choices plus the newly constructed optional default
-    // entered reclamation before the fixture activated its new root.
-    QCOMPARE(coordinator.pendingValueChecks(), size_t(3));
-    QCOMPARE(coordinator.footprint().committedValues, quint64(3));
+    // Only the original content value loses its root edge. Both new default
+    // selections live in surface state and create no reclamation entities.
+    QCOMPARE(coordinator.pendingValueChecks(), size_t(1));
+    QCOMPARE(coordinator.footprint().committedValues, quint64(1));
     const auto changed = coordinator.collectHistoryValues();
-    QCOMPARE(changed.examined, size_t(3)); QCOMPARE(changed.retired, size_t(2)); QVERIFY(!changed.blocked);
+    QCOMPARE(changed.examined, size_t(1)); QCOMPARE(changed.retired, size_t(1)); QVERIFY(!changed.blocked);
     QCOMPARE(coordinator.pendingValueChecks(), size_t(0));
     QCOMPARE(coordinator.collectHistoryValues().examined, size_t(0));
     QVERIFY(coordinator.pageSnapshot(expected.key, coordinatorView.root(), &actual)); QCOMPARE(actual.versions.size(), qsizetype(1));
@@ -5764,7 +5764,7 @@ void KisPageStoreReferenceTest::metadataConfigurationLateCandidate()
     auto candidate = mutation ? mutationInput.prepare(*metadata, transaction, &target.version, 1)
                              : metadata->preparePublication(transaction, metadataView.root(), {2}, {transition});
     QVERIFY(candidate.isValid());
-    if (!mutation) QVERIFY(metadata->footprint().versionArena.directoryEntries > directoryEntries);
+    if (!mutation) QCOMPARE(metadata->footprint().versionArena.directoryEntries, directoryEntries);
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (install) QVERIFY(mutation ? metadata->installAcceptance(std::move(candidate), transaction)
                                  : metadata->installPublication(std::move(candidate), transaction, {2}, nullptr, &cleanup));
@@ -7894,12 +7894,14 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
             previous.insert(version.version, version.publication);
         for (const auto &version : std::as_const(expected.next.versions)) {
             const auto old = previous.constFind(version.version);
-            if (old == previous.cend())
+            const bool implicit = version.isVirtualDefault() && version.version.generation.value == 1;
+            if (old == previous.cend() && !implicit)
                 ++additionRecords;
             if ((version.publication == KisPagePublicationState::Historical
                  || version.publication == KisPagePublicationState::Published)
-                && (old == previous.cend() || (old.value() != KisPagePublicationState::Historical
-                    && old.value() != KisPagePublicationState::Published)))
+                && ((old == previous.cend() && !implicit)
+                    || (old != previous.cend() && old.value() != KisPagePublicationState::Historical
+                        && old.value() != KisPagePublicationState::Published)))
                 ++committedChanges;
         }
     }
@@ -8091,13 +8093,13 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     const auto reservedFootprint = coordinator->footprint();
     QCOMPARE(reservedFootprint.pageActivities, synthesizedDefault ? quint64(pages) : quint64(0));
     if (pages && !mutation && synthesizedDefault) {
-        QVERIFY(reservedFootprint.versionArena.outstandingReservations > 0);
-        QVERIFY(reservedFootprint.exactVersionIndex.outstandingReservations > 0);
+        QCOMPARE(reservedFootprint.versionArena.outstandingReservations, quint64(0));
+        QCOMPARE(reservedFootprint.exactVersionIndex.outstandingReservations, quint64(0));
     }
     const auto prepared = coordinator->metrics();
-    QCOMPARE(prepared.publicationCommittedValuesPrepared, kind == 0 || kind == 1 ? quint64(0) : quint64(pages));
+    QCOMPARE(prepared.publicationCommittedValuesPrepared, kind == 2 ? quint64(pages) : quint64(0));
     QCOMPARE(prepared.publicationCommittedValuesInstalled, quint64(0));
-    QCOMPARE(prepared.publicationAdditionRecordsPrepared, quint64(synthesizedDefault ? pages : 0));
+    QCOMPARE(prepared.publicationAdditionRecordsPrepared, quint64(0));
     QCOMPARE(prepared.publicationAdditionRecordsTransferred, quint64(0));
     for (int x = 0; x < pages; ++x) {
         KisPageStateSnapshot actual;
@@ -8171,7 +8173,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
     const auto installed = coordinator->metrics();
     QCOMPARE(installed.publicationCommittedValuesPrepared, prepared.publicationCommittedValuesPrepared);
     QCOMPARE(installed.publicationCommittedValuesInstalled,
-             success ? quint64(pages) : quint64(0));
+             success && !synthesizedDefault ? quint64(pages) : quint64(0));
     QCOMPARE(installed.publicationAdditionRecordsPrepared, prepared.publicationAdditionRecordsPrepared);
     QCOMPARE(installed.publicationAdditionRecordsTransferred,
              success ? prepared.publicationAdditionRecordsPrepared : quint64(0));

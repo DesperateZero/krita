@@ -39,17 +39,17 @@ public:
     }
     bool accept(KisPageMetadataCoordinator &metadata, KisImageEpochId epoch, const KisPageVersion &version)
     {
-        select(version); expected.epoch = epoch;
+        select(version, true); expected.epoch = epoch;
         return rebuild(metadata, nullptr);
     }
     template<class Changes>
     bool accept(KisPageMetadataCoordinator &metadata, KisImageEpochId epoch, const Changes &changes)
     {
-        for (const auto &change : changes) select(change.version);
+        for (const auto &change : changes) select(change.version, true);
         expected.epoch = epoch;
         return rebuild(metadata, nullptr);
     }
-    void reset() { epochs.reset(); expected.manifest.clear(); }
+    void reset() { epochs.reset(); expected.manifest.clear(); expected.surfaces.clear(); }
     KisImageEpochReferenceModel &model() { Q_ASSERT(epochs); return *epochs; }
     KisImageEpochRootSnapshot root() const
     {
@@ -60,8 +60,36 @@ public:
         return empty.captureCommittedRoot();
     }
 private:
-    void select(const KisPageVersion &version)
+    void select(const KisPageVersion &version, bool accepted = false)
     {
+        if (accepted && version.isDefaultPixel() && version.generation.value == 1) {
+            // A view cut selects the surface default; it does not import a
+            // new explicit metadata Value. Build this selection from fixture
+            // input, independently of whether a physical cache exists.
+            expected.manifest.erase(std::remove_if(expected.manifest.begin(), expected.manifest.end(),
+                [&](const auto &old) { return old.key == version.key; }), expected.manifest.end());
+            auto surface = std::find_if(expected.surfaces.begin(), expected.surfaces.end(),
+                [&](const auto &s) { return s.surface == version.key.surface; });
+            if (surface == expected.surfaces.end()) {
+                KisSurfaceEpochState state;
+                state.surface = version.key.surface;
+                state.logicalPageExtent = QSize(64, 64);
+                state.layoutRevision = state.extentRevision = 1;
+                state.format.formatId = 1;
+                state.format.colorModelId = "ALPHA"; state.format.colorDepthId = "U8";
+                state.format.profileFingerprint = "metadata-view-fixture";
+                state.format.channelOrder = "A"; state.format.packing = "interleaved";
+                state.format.defaultPixel = QByteArray(1, 0);
+                state.format.channelCount = state.format.pixelStride = state.format.pixelAlignment = 1;
+                state.format.alphaSemantic = KisSurfaceAlphaSemantic::SelectionMask;
+                state.format.endianness = KisSurfaceEndianness::NativeEndian;
+                state.format.codecVersion = 1;
+                expected.surfaces.append(state);
+                surface = expected.surfaces.end() - 1;
+            }
+            surface->defaultPixelRevision = version.defaultPixelRevision;
+            return;
+        }
         const auto it = std::find_if(expected.manifest.begin(), expected.manifest.end(),
             [&](const auto &old) { return old.key == version.key; });
         if (it == expected.manifest.end()) expected.manifest.append(version);

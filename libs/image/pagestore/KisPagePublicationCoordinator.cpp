@@ -141,7 +141,7 @@ auto publicationBackingReader(const PreparedPublication &publication,
 } // namespace
 
 // Synchronous commit state never escapes this call. Independent metadata,
-// root and descriptor outputs retain their own original lifetime owners.
+// root outputs retain their own original lifetime owners.
 class KisPagePublicationCoordinator::KisPreparedMutationCommit final
 {
 public:
@@ -163,12 +163,11 @@ public:
         restoreTargets = decltype(restoreTargets){restoreTargets.get_allocator()};
         workspace.reset();
     }
-    void prepareChanges(size_t descriptors, size_t changes, size_t feeChanges = 0)
+    void prepareChanges(size_t semanticCount, size_t changes, size_t feeChanges = 0)
     {
-        Q_ASSERT(descriptorChanges.empty()
-            && publicationChanges.empty());
-        workspace.reserve(layout(descriptors, changes, feeChanges ? feeChanges : changes));
-        descriptorChanges.bind(workspace.at<PreparedDescriptorChange>(0), descriptors);
+        Q_ASSERT(semanticTargets.empty() && publicationChanges.empty());
+        workspace.reserve(layout(semanticCount, changes, feeChanges ? feeChanges : changes));
+        semanticTargets.bind(workspace.at<KisPageVersion>(0), semanticCount);
         publicationChanges.bind(workspace.at<PublicationChange>(phaseOffset), changes);
     }
     void beginBackingChanges()
@@ -191,20 +190,19 @@ public:
     KisImageEpochReferenceModel::PreparedRootReservation restoreEpoch;
     // Views are destroyed before their one physical allocation.
     KisMutationWorkspace workspace;
-    KisMutationWorkspace::Array<PreparedDescriptorChange> descriptorChanges;
+    KisMutationWorkspace::Array<KisPageVersion> semanticTargets;
     KisMutationWorkspace::Array<PublicationChange> publicationChanges;
-    PreparedDescriptors descriptorNodes;
     KisPageMetadataCoordinator::RegisteredKeys directoryKeys;
     std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> restoreTargets;
     KisCompletionTicket completion;
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     KisImageEpochCommitResult result;
 private:
-    size_t layout(size_t descriptors, size_t changes, size_t feeChanges)
+    size_t layout(size_t semanticCount, size_t changes, size_t feeChanges)
     {
         if (feeChanges > std::numeric_limits<size_t>::max() / 2) throw std::bad_alloc();
         size_t bytes = 0;
-        KisMutationWorkspace::append<PreparedDescriptorChange>(bytes, descriptors);
+        KisMutationWorkspace::append<KisPageVersion>(bytes, semanticCount);
         phaseOffset = KisMutationWorkspace::append<std::max_align_t>(bytes, 0);
         size_t publicationBytes = bytes, backingBytes = bytes;
         KisMutationWorkspace::append<PublicationChange>(publicationBytes, changes);
@@ -585,8 +583,6 @@ bool KisPagePublicationCoordinator::KisPreparedMutationCommit::installRoot(KisRe
                                                        &prepared.metadataCleanup)) {
             return false;
         }
-        coordinator.installDescriptorAdditionsLocked(&prepared.descriptorNodes);
-        coordinator.m_statistics.descriptorInstallations += quint64(prepared.descriptorChanges.size());
         return true;
     };
     candidate.result = candidate.restoreEpoch.isValid()
@@ -620,9 +616,8 @@ void KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept
     epoch = {};
     restoreEpoch = {};
     metadataCleanup = {};
-    descriptorChanges.clear();
+    semanticTargets.clear();
     publicationChanges.clear();
-    descriptorNodes.reset();
     directoryKeys.clear();
     restoreTargets.clear();
     transaction = {};
@@ -1139,7 +1134,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             preparedCommit.clear();
             ownerLock.relock();
         });
-        auto &descriptorChanges = preparedCommit.descriptorChanges;
+        auto &semanticTargets = preparedCommit.semanticTargets;
         const KisImageEpochRootSnapshot currentRoot = m_epochs.captureCommittedRoot();
         if (!currentRoot.isValid() || currentRoot.epoch().value == std::numeric_limits<quint64>::max()) {
             return {};
@@ -1162,8 +1157,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             return currentRoot.resolve(key, &page) && replacesDefault(page);
         });
         try {
-            const size_t descriptorCount = size_t(replacements) + owned.removals.size();
-            preparedCommit.prepareChanges(descriptorCount, descriptorCount, owned.proofs.size() + descriptorCount);
+            const size_t semanticCount = size_t(replacements) + owned.removals.size();
+            preparedCommit.prepareChanges(semanticCount, semanticCount, owned.proofs.size() + semanticCount);
         }
         catch (const std::bad_alloc &) { return {}; }
         for (const KisPageKey &key : registeredPages) {
@@ -1172,16 +1167,15 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             const KisSurfaceEpochChange &change = *surfaceChangeFor(page.key.surface);
             const KisPageVersion currentVersion = page;
 
-            PreparedDescriptorChange replacement;
-            replacement.version = {page.key, page.generation, change.after.defaultPixelRevision};
-            replacement.descriptor = change.after.allocationDescriptor();
+            const KisPageVersion replacement{page.key, page.generation, change.after.defaultPixelRevision};
+            const auto descriptor = change.after.allocationDescriptor();
             KisPageMetadataCoordinator::PublicationInfo inputs;
-            if (!m_metadata.queryPublication(currentVersion, replacement.version, &inputs)) {
+            if (!m_metadata.queryPublication(currentVersion, replacement, &inputs)) {
                 return {};
             }
             const auto &published = inputs.current;
             if (!(published.version == currentVersion) || (!published.authority.isValid() && !published.isVirtualDefault())
-                || !replacement.descriptor.isValid()) {
+                || !descriptor.isValid()) {
                 return {};
             }
             const auto &existingReplacement = inputs.target;
@@ -1190,15 +1184,15 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                 KisPageAllocationDescriptor existingDescriptor;
                 if (existingReplacement.publication != KisPagePublicationState::Historical
                     || (!existingReplacement.authority.isValid() && !existingReplacement.isVirtualDefault())
-                    || !descriptorLocked(replacement.version, &existingDescriptor)
-                    || !(existingDescriptor == replacement.descriptor)) {
+                    || (existingReplacement.authority.isValid()
+                        && (!descriptorLocked(replacement, &existingDescriptor) || !(existingDescriptor == descriptor)))) {
                     return {};
                 }
                 replacementReplica = existingReplacement.authority;
             }
 
-            publicationChanges.push_back({KisPageTransitionKind::ReplaceDefaultPixel, replacement.version, replacementReplica});
-            descriptorChanges.push_back(replacement);
+            publicationChanges.push_back({KisPageTransitionKind::ReplaceDefaultPixel, replacement, replacementReplica});
+            semanticTargets.push_back(replacement);
         }
 
         const auto transactionView = KisPageReadView::transactionOverlay(transaction.id);
@@ -1221,13 +1215,11 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             if (!descriptor.isValid())
                 return {};
             publicationChanges.push_back({KisPageTransitionKind::RestoreCommittedVersion, target, {}});
-            descriptorChanges.push_back({target, descriptor});
+            semanticTargets.push_back(target);
         }
 
         diagnostic.next(Phase::CommitTransitionInputs,
                         quint64(owned.proofs.size() + publicationChanges.size()));
-        try { preparedCommit.descriptorNodes = prepareDescriptorAdditionsLocked(descriptorChanges.data(), descriptorChanges.size()); }
-        catch (const std::bad_alloc &) { return {}; }
         ownerLock.unlock();
         registeredPages = decltype(preparedCommit.directoryKeys){registeredPages.get_allocator()};
         const quint64 publicationTransitionCount = quint64(owned.proofs.size() + publicationChanges.size());
@@ -1268,13 +1260,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         diagnostic.next(Phase::CommitPublicationRevalidate, pageWork);
         const bool rootChanged = !(m_epochs.captureCommittedRoot().epoch() == currentRoot.epoch());
         const bool directoryChanged = changesSurfaceDefault && m_metadata.pageRegistrationCount() != directoryRevision;
-        const bool descriptorChanged = descriptorChanges.size() != preparedCommit.descriptorNodes.size()
-            && !descriptorPreparationCoversLocked(
-            descriptorChanges.data(), descriptorChanges.size(), preparedCommit.descriptorNodes);
-        if (rootChanged || directoryChanged || descriptorChanged || publication.needsReprepare()) {
+        if (rootChanged || directoryChanged || publication.needsReprepare()) {
             m_statistics.rootRebases += rootChanged;
             m_statistics.directoryRepreparations += directoryChanged;
-            m_statistics.descriptorRepreparations += descriptorChanged;
             m_statistics.metadataRepreparations += publication.needsReprepare();
             continue;
         }
@@ -1297,7 +1285,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         using Acceptance = KisPageOwnerLedger::BackingAcceptance;
         const auto acceptFees = [&](bool cacheDetached) {
             auto nextTarget = [proof = owned.proofs.begin(), proofEnd = owned.proofs.end(),
-                               descriptor = descriptorChanges.begin(), descriptorEnd = descriptorChanges.end()]
+                               semantic = semanticTargets.begin(), semanticEnd = semanticTargets.end()]
                               (KisPageVersion *target, KisBackingBudgetClass *before) mutable {
                 if (proof != proofEnd) {
                     *target = publicationVersion(*proof);
@@ -1305,8 +1293,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                     *before = KisBackingBudgetClass::ActivePending;
                     return true;
                 }
-                if (descriptor == descriptorEnd) return false;
-                *target = (descriptor++)->version;
+                if (semantic == semanticEnd) return false;
+                *target = *semantic++;
                 *before = KisBackingBudgetClass::RetainedHistory;
                 return true;
             };
@@ -1370,7 +1358,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
                 qFatal("Owned committed proof changed before revocation");
         }
         auto releasedOverlay = m_preparedTransactions.extract(transaction.id.value);
-        diagnostic.next(Phase::CommitHistoryCollect, quint64(owned.proofs.size() + descriptorChanges.size()));
+        diagnostic.next(Phase::CommitHistoryCollect, quint64(owned.proofs.size() + semanticTargets.size()));
         m_history.collectAfterEpochChangeLocked();
         diagnostic.next(Phase::CommitProviderRetire, 0);
         processRetirementsUnlocked(ownerLock);
@@ -1447,7 +1435,6 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         });
         auto &restoreTargets = preparedCommit.restoreTargets;
         auto &registeredPages = preparedCommit.directoryKeys;
-        auto &restoredDefaultVersions = preparedCommit.descriptorChanges;
         try {
             if (!retainedRoot.appendRestoreTargets(currentRoot, &restoreTargets)) return {};
             if (changesDefaults) {
@@ -1475,7 +1462,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                 }
             }
 
-            preparedCommit.prepareChanges(restoreTargets.size(), restoreTargets.size());
+            preparedCommit.prepareChanges(0, restoreTargets.size());
             for (const KisPageVersion &version : std::as_const(restoreTargets)) {
                 KisPageMetadataCoordinator::PublicationInfo page;
                 KisPageVersion current;
@@ -1490,13 +1477,9 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                         || !surface.allocationDescriptor().isValid()) {
                         return {};
                     }
-                    restoredDefaultVersions.push_back({version, surface.allocationDescriptor()});
                 }
             }
         } catch (const std::bad_alloc &) { return {}; }
-
-        try { preparedCommit.descriptorNodes = prepareDescriptorAdditionsLocked(restoredDefaultVersions.data(), restoredDefaultVersions.size()); }
-        catch (const std::bad_alloc &) { return {}; }
 
         ownerLock.unlock();
         registeredPages = decltype(preparedCommit.directoryKeys){registeredPages.get_allocator()};
@@ -1527,10 +1510,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         }
         const bool directoryChanged = changesDefaults
             && m_metadata.pageRegistrationCount() != directoryRevision;
-        const bool descriptorChanged = restoredDefaultVersions.size() != preparedCommit.descriptorNodes.size()
-            && !descriptorPreparationCoversLocked(
-            restoredDefaultVersions.data(), restoredDefaultVersions.size(), preparedCommit.descriptorNodes);
-        if (publication.needsReprepare() || directoryChanged || descriptorChanged) {
+        if (publication.needsReprepare() || directoryChanged) {
             m_statistics.restoreMetadataRepreparations += publication.needsReprepare();
             m_statistics.restoreDirectoryRepreparations += directoryChanged;
             continue;
@@ -2149,30 +2129,6 @@ KisPagePublicationCoordinator::prepareDescriptorLocked(const KisPageVersion &ver
     const PreparedDescriptorChange change{version, descriptor};
     const auto shared = base.isValid() ? m_metadata.versionDescriptor(base) : nullptr;
     return prepareDescriptorAdditionsLocked(&change, 1, shared ? &shared : nullptr);
-}
-
-bool KisPagePublicationCoordinator::descriptorPreparationCoversLocked(
-    const PreparedDescriptorChange *changes, size_t count, const PreparedDescriptors &nodes) const
-{
-    // Prepared immutable values already cover their targets, irrespective of
-    // unrelated descriptor changes. Only decisions that skipped storage by
-    // observing an identical current value can expire in the unlocked window.
-    // This includes the ordinary no-descriptor path without scanning or locks.
-    if (nodes.size() == count) return true;
-    auto prepared = nodes.cbegin();
-    for (size_t i = 0; i < count; ++i) {
-        // Preparation retains the original order, including duplicate keys.
-        // Compare the desired value as well: a later occurrence of the same
-        // version may require a different descriptor.
-        if (prepared != nodes.cend() && prepared->first == changes[i].version
-            && *prepared->second == changes[i].descriptor) {
-            ++prepared;
-        } else if (!m_metadata.versionDescriptorMatches(changes[i].version, changes[i].descriptor)) {
-            return false;
-        }
-    }
-    Q_ASSERT(prepared == nodes.cend());
-    return true;
 }
 
 const KisPageAllocationDescriptor *KisPagePublicationCoordinator::descriptorLocked(
