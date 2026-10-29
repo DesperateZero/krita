@@ -48,6 +48,7 @@ private Q_SLOTS:
     void testPageStoreFinishedFacadeWithNativeLease();
     void testPageStoreFinalRawUnlockAllowsAdapter_data();
     void testPageStoreFinalRawUnlockAllowsAdapter();
+    void testPageStoreFinalAdapterCannotRevive();
     void testPageStoreUnscopedLeaseCompletion_data();
     void testPageStoreUnscopedLeaseCompletion();
     void testPageStoreDisjointOwnerPublication_data();

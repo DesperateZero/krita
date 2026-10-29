@@ -159,33 +159,35 @@
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManagerPageStoreBackend::Private RAII batch registry",
+      "current-owner": "original operation node borrows the managed Frame or retained adapter body; canonical page admission remains in the original Session",
       "facts-owned": [
         "transaction-lifetime"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent",
-        "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims"
+        "KisPageStoreCpuMutationTest::concurrentWritePreparationClaims",
+        "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ADMISSION-005",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "R4/M8 explicit operation scopes cover compatibility callers",
-      "replacement-type": "adapter RAII operation handle",
+      "remove-after": "Discovery remains while public adapter nesting/barrier consumers exist; retired weak registry has no remaining consumers.",
+      "replacement-type": "one intrusive operation index with same-node promotion and nonzero retained acquisition",
       "runtime-counter": "existing:KisPageStoreSessionStats writePageClaimChecks/writePageClaimConflicts/activeCpuWritePages",
       "static-callers": [
-        "reserveWritablePage",
-        "reserveMutationPage",
-        "finishOwnedTransaction"
+        "OperationFrame::begin",
+        "OperationFrame::legacyForPage",
+        "beginMutationBatch",
+        "detachFromBackend"
       ],
       "status": "callers-migrated",
       "symbols": [
-        "cpuMutationBatches"
+        "operations"
       ],
-      "target-owner": "explicit adapter operation scope"
+      "target-owner": "original operation, with no paid weak registry node or second transaction"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "original per-operation WriteBatch::Private clients and raw-lease registry; original mutation owns its standalone transaction",
+      "current-owner": "original adapter body retained by actual clients/leases; anonymous raw lease registry only for barrier membership",
       "facts-owned": [
         "legacy-client-lifetime",
         "legacy-unlock",
@@ -195,12 +197,13 @@
         "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
         "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
         "KisTiledDataManagerTest::testPageStoreOwnedCancellationUnderPressure",
-        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease"
+        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease",
+        "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ANON-006",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
       "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
-      "replacement-type": "original batch adapter lifetime plus original mutation owned-transaction terminal",
+      "replacement-type": "original body reference returned after tile barrier; original Session owns terminal cancellation",
       "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/activeCpuWritePages/committedTransactions",
       "static-callers": [
         "writableTransaction",
@@ -210,25 +213,26 @@
       "status": "callers-migrated",
       "symbols": [
         "anonymousLeases",
-        "cpuMutationBatches",
+        "operations",
         "KisTiledDataManagerPageStoreLease"
       ],
       "target-owner": "original batch and mutation scope, each for its own lifetime fact"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManagerPageStoreWriteBatch::Private shared iterator clients",
+      "current-owner": "original adapter body with live iterator clients and embedded references, discovered through the single operation index",
       "facts-owned": [
         "iterator-write-scope"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testIteratorNestedWriteScope",
-        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility"
+        "KisTiledDataManagerTest::testPageStoreIteratorLiveWriteCompatibility",
+        "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ITERATOR-007",
       "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
       "remove-after": "R4/M8 iterator adapter migrated",
-      "replacement-type": "canonical shared mutation client scope",
+      "replacement-type": "same original mutation client scope; non-owning discovery cannot revive terminal bodies",
       "runtime-counter": "existing:KisPageMutationStatistics sessionsCreated/pagesSealed plus nested iterator scope tests",
       "static-callers": [
         "KisTiledDataManager::beginIteratorWriteScope",
@@ -236,7 +240,7 @@
       ],
       "status": "callers-migrated",
       "symbols": [
-        "cpuMutationBatches",
+        "operations",
         "clients",
         "beginIteratorMutationScope"
       ],

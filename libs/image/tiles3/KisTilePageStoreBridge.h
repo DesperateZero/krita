@@ -13,6 +13,9 @@
 
 class KisTileData;
 using TileLease = std::unique_ptr<class KisTilePageStoreLease>;
+// Move one existing reference past the tile barrier. The deleter returns that
+// reference; this carrier allocates no control block and cannot be copied.
+using TileLeaseRelease = std::unique_ptr<void, void (*)(void *)>;
 
 class KisTilePageStoreLease
 {
@@ -26,7 +29,7 @@ public:
     // A Tile supplies an empty local to release the original batch's last
     // reference after its swap barrier, while returning the real pin now.
     // Other callers finish synchronously; no new lifetime owner is created.
-    virtual bool finish(std::shared_ptr<void> *afterUnlock = nullptr) = 0;
+    virtual bool finish(TileLeaseRelease *afterUnlock = nullptr) = 0;
     // A dormant cache is only an expected-identity candidate. Each outer
     // read must acquire a fresh physical pin before returning tileData().
     virtual bool reusableReadCache() const { return false; }

@@ -107,7 +107,7 @@ void KisTile::replacePageStoreReadCacheLocked(KisTileData *replacement) const
     previous->release();
 }
 
-bool KisTile::releasePageStoreLeasesLocked(std::shared_ptr<void> &afterUnlock) const
+bool KisTile::releasePageStoreLeasesLocked(TileLeaseRelease &afterUnlock) const
 {
     if (!hasPageStoreLeases()) return false;
     Q_ASSERT(m_lockCounter > 0);
@@ -545,7 +545,7 @@ void KisTile::unlockForWrite()
 {
     // Only one borrowed mutable guard can exist for this Tile. A batch read
     // is moved into WriteLease before writable exposure, never duplicated.
-    std::shared_ptr<void> afterUnlock;
+    TileLeaseRelease afterUnlock{nullptr, nullptr};
 #ifdef DEAD_TILES_SANITY_CHECK
     m_sanityLockedForWrite.deref();
     KIS_ASSERT(m_sanityLockedForWrite.loadAcquire() >= 0);
@@ -567,7 +567,7 @@ void KisTile::unlockForWrite()
 
 void KisTile::unlockForRead() const
 {
-    std::shared_ptr<void> afterUnlock;
+    TileLeaseRelease afterUnlock{nullptr, nullptr};
 #ifdef DEAD_TILES_SANITY_CHECK
     m_sanityLockedForRead.deref();
     KIS_ASSERT(m_sanityLockedForRead.loadAcquire() >= 0);

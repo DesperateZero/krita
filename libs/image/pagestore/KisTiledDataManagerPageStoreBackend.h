@@ -8,6 +8,7 @@
 #define KIS_TILED_DATA_MANAGER_PAGE_STORE_BACKEND_H
 
 #include <memory>
+#include <boost/intrusive_ptr.hpp>
 #include <QVarLengthArray>
 #include <QHash>
 #include <QMutex>
@@ -62,17 +63,19 @@ public:
         const KisPageMutationSession::AdapterPreparation &prepareAdapter = {},
         const KisPageMutationSession::AdapterInstallation &installAdapter = {});
     // Cancel this operation. If borrowed guards are still live, destruction of
-    // their final shared control block completes the cancellation.
+    // their final reference to the original body completes the cancellation.
     bool cancel();
 
 private:
     class Private;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
+    friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
     friend class KisTiledDataManagerPageStoreBackend;
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerIteratorWriteScope;
     explicit KisTiledDataManagerPageStoreWriteBatch(
-        std::shared_ptr<Private> shared);
-    std::shared_ptr<Private> d;
+        boost::intrusive_ptr<Private> shared);
+    boost::intrusive_ptr<Private> d;
     bool m_clientFinished = false;
 };
 
@@ -108,7 +111,7 @@ public:
     private:
         friend class KisTiledDataManagerPageStoreBackend;
         KisPageMutationSession m_frame;
-        std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> m_legacy;
+        boost::intrusive_ptr<KisTiledDataManagerPageStoreWriteBatch::Private> m_legacy;
     };
 
     // The caller's existing adapter gate surrounds only the original publish
@@ -269,7 +272,6 @@ public:
 
 private:
     class OperationFrame;
-    OperationFrame *currentOperationLocked() const;
     friend class KisTiledDataManagerPageStoreLease;
     friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisTiledDataManager;

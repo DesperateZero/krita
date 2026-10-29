@@ -727,6 +727,59 @@ void KisTiledDataManagerTest::testPageStoreFinalRawUnlockAllowsAdapter()
     dm.readBytes(actual, 128, 0, 1, 1); QCOMPARE(actual[0], color);
 }
 
+void KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive()
+{
+    const quint8 blank = 0x13, initial = 0x31;
+    KisTiledDataManager dm(1, &blank);
+    dm.writeBytes(&initial, 0, 0, 1, 1);
+    auto *backend = dm.m_pageStoreBackend;
+    auto *store = backend->store();
+    auto scope = dm.beginIteratorWriteScope(); QVERIFY(scope);
+    auto tile = dm.getTile(0, 0, true); QVERIFY(tile && tile->lockForWrite());
+    tile->data()[0] = 0x71;
+    scope.reset(); // Only the tile's real lease retains the cancelled body.
+    const auto sessions = store->mutationStatistics().operationSessionsCreated;
+    QSemaphore entered, resume;
+    bool observed = false;
+    std::thread last([&] {
+        KisPageStoreDiagnosticRecorder recorder(true, store);
+        recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
+            if (phase != KisPageStoreDiagnosticPhase::MutationAdapterInstall || observed) return;
+            observed = true;
+            // The original body's last reference is now gone, but its
+            // terminal adapter delivery has not removed the discovery node.
+            entered.release();
+            resume.acquire();
+        });
+        tile->unlockForWrite();
+    });
+    const auto join = qScopeGuard([&] { resume.release(); if (last.joinable()) last.join(); });
+    QVERIFY(entered.tryAcquire(1, 5000));
+    QVERIFY(!backend->hasCurrentThreadIteratorWrites());
+    QVERIFY(!backend->beginMutationBatch());
+    QVERIFY(!dm.beginIteratorWriteScope());
+    {
+        KisStrokeJobFailureContext failure(true);
+        QVERIFY(!dm.getTile(1, 0, true)); QVERIFY(failure.failed());
+    }
+    QVERIFY(!backend->acquireTile(1, 0, KisTilePageStoreBridge::Access::Write));
+    QCOMPARE(backend->writeBytes(&initial, 64, 0, 1, 1, 1, false, nullptr),
+             KisPageStoreWriteOperationResult::Failed);
+    QVERIFY(!backend->clearAll());
+    QCOMPARE(store->mutationStatistics().operationSessionsCreated, sessions);
+    resume.release(); last.join();
+    QVERIFY(observed);
+    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
+    quint8 actual = 0;
+    dm.readBytes(&actual, 0, 0, 1, 1); QCOMPARE(actual, initial);
+    auto next = dm.beginIteratorWriteScope(); QVERIFY(next);
+    auto retry = dm.getTile(0, 0, true); QVERIFY(retry && retry->lockForWrite());
+    retry->data()[0] = 0x57;
+    retry->unlockForWrite(); QVERIFY(next->finish()); next.reset();
+    dm.readBytes(&actual, 0, 0, 1, 1); QCOMPARE(actual, quint8(0x57));
+}
+
 void KisTiledDataManagerTest::testPageStoreUnscopedLeaseCompletion_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("history"); QTest::addColumn<bool>("dirty");

@@ -925,13 +925,17 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
     backend_text = code_only(backend_path.read_text(encoding="utf-8"))
     backend_header = code_only(backend_path.with_suffix(".h").read_text(encoding="utf-8"))
     for retired in ("beginMutationBatchImpl", "finishOperationBatch", "finishForAdapterDelivery",
-                    "prepareMutationBatch", "promoteLegacy"):
+                    "prepareMutationBatch", "promoteLegacy", "cpuMutationBatches", "operationFrames",
+                    "currentOperationLocked", "std::shared_ptr<Private>",
+                    "std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>"):
         if retired in backend_text or retired in backend_header:
             errors.append("managed adapter restored a superseded batch protocol: " + retired)
-    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationIndex operationFrames",
-                     "operationFrames.find(QThread::currentThreadId())", "constant_time_size<false>",
+    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationIndex operations",
+                     "operations.find(QThread::currentThreadId())", "constant_time_size<false>",
                      "original.sealForAdapterDelivery", "delivery->m_frame = std::move(original)",
-                     "prepared->mutation = std::move(original)", "currentOperationLocked()", "if (accepted) leave()",
+                     "prepared->mutation = std::move(original)", "currentOperation()", "if (accepted) leave()",
+                     "operations.replace_node(", "while (count && !body->references.compare_exchange_weak(",
+                     "TileLeaseRelease(batch.detach()",
                      "session().reserveLegacyMutationPage(key, error, present)", "reserveLegacyPage(key,",
                      "activeFrame->legacyForPage("):
         if required not in backend_text:
