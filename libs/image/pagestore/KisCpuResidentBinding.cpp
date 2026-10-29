@@ -18,45 +18,53 @@ KisCpuResidentBinding::~KisCpuResidentBinding()
 bool KisCpuResidentBinding::matchesHandle(const KisReplicaHandle &expected) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return !m_retired && m_handle == expected;
+    return !m_retired && matchesHandleLocked(expected);
+}
+
+KisReplicaHandle KisCpuResidentBinding::projectHandle(
+    const KisPageVersion &version, quint64 incarnation) const
+{
+    // Only immutable physical fields are read; the caller supplies its own
+    // issued logical facts. Projection neither observes nor authorizes access.
+    return {m_slot.provider, m_slot.providerEpoch, {m_slot.slot, incarnation}, version, m_domain, m_layout};
 }
 
 bool KisCpuResidentBinding::matchesAllocation(KisReplicaAllocationToken expected) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return !m_retired && m_handle.allocation == expected;
+    return !m_retired && m_slot.slot == expected.slot && m_incarnation == expected.generation;
 }
 
 bool KisCpuResidentBinding::matchesReadIdentity(
     const KisReplicaAllocationIdentity &expected, const KisPageVersion &version) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return !m_retired && m_handle.allocationIdentity() == expected && m_handle.version == version;
+    return !m_retired && allocationIdentityLocked() == expected && m_version == version;
 }
 
 bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
-    KisReplicaHandle *result) const
+    quint64 *incarnation) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
     // Advisory rejection only: readers may arrive after this mutex is released,
     // so tryClaimHandoff must still perform the final physical exclusion.
-    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !(m_handle == source) ||
+    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !matchesHandleLocked(source) ||
         m_readers || m_writeState != WriteState::Idle ||
         source.domain != KisPageAccessDomain::CpuRam || !source.layout.matches(descriptor) ||
         !target.isValid() || !(target.key == source.version.key) ||
         target.generation.value <= source.version.generation.value ||
         source.allocation.generation == std::numeric_limits<quint64>::max()) return false;
-    *result = source;
-    result->version = target;
-    ++result->allocation.generation;
+    *incarnation = m_incarnation;
     return true;
 }
 
-bool KisCpuResidentBinding::tryClaimHandoff(const KisReplicaHandle &source)
+bool KisCpuResidentBinding::tryClaimHandoff(quint64 incarnation)
 {
     std::unique_lock<QMutex> lock(m_mutex, std::try_to_lock);
-    if (!lock.owns_lock() || m_storageBusy || m_retired || !(m_handle == source)
+    // Preparation checked the complete external source. Stable physical facts
+    // cannot change; every version advance also advances this incarnation.
+    if (!lock.owns_lock() || m_storageBusy || m_retired || m_incarnation != incarnation
         || m_readers || m_writeState != WriteState::Idle) return false;
     startStorageTransition();
     lock.unlock();
@@ -76,16 +84,16 @@ bool KisCpuResidentBinding::tryClaimHandoff(const KisReplicaHandle &source)
     return data != nullptr;
 }
 
-void KisCpuResidentBinding::finishHandoff(const KisReplicaHandle *target) noexcept
+void KisCpuResidentBinding::finishHandoff(const KisPageVersion *target) noexcept
 {
     std::unique_lock<QMutex> lock(m_mutex);
     Q_ASSERT(m_writeState == WriteState::Handoff && m_data && !m_storageBusy);
     if (target) {
         // Complete the already issued exclusive capability. Revoke closes
         // future access but cannot steal this in-flight physical obligation.
-        Q_ASSERT(target->allocation.slot == m_handle.allocation.slot);
-        m_handle.version = target->version;
-        m_handle.allocation.generation = target->allocation.generation;
+        Q_ASSERT(m_incarnation != std::numeric_limits<quint64>::max());
+        m_version = *target;
+        ++m_incarnation;
     }
     startStorageTransition();
     lock.unlock();
@@ -99,13 +107,14 @@ void KisCpuResidentBinding::finishHandoff(const KisReplicaHandle *target) noexce
 KisCpuBackingHandoff::~KisCpuBackingHandoff() { reset(); }
 KisCpuBackingHandoff::KisCpuBackingHandoff(KisCpuBackingHandoff &&other) noexcept
     : m_provider(std::move(other.m_provider)), m_binding(std::move(other.m_binding)),
-      m_source(other.m_source), m_target(other.m_target), m_claimed(std::exchange(other.m_claimed, false)) {}
+      m_incarnation(other.m_incarnation), m_targetVersion(other.m_targetVersion),
+      m_claimed(std::exchange(other.m_claimed, false)) {}
 KisCpuBackingHandoff &KisCpuBackingHandoff::operator=(KisCpuBackingHandoff &&other) noexcept
 {
     if (this != &other) {
         reset();
         m_provider = std::move(other.m_provider); m_binding = std::move(other.m_binding);
-        m_source = other.m_source; m_target = other.m_target;
+        m_incarnation = other.m_incarnation; m_targetVersion = other.m_targetVersion;
         m_claimed = std::exchange(other.m_claimed, false);
     }
     return *this;
@@ -118,23 +127,27 @@ KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
     KisCpuBackingHandoff result;
     if (!provider) return result;
     if (!binding) binding = provider->cpuResidentBinding(source);
-    if (!binding || !binding->prepareHandoff(source, target, descriptor, &result.m_target)) return result;
+    if (!binding || !binding->prepareHandoff(source, target, descriptor, &result.m_incarnation)) return result;
     result.m_provider = provider;
     result.m_binding = std::move(binding);
-    result.m_source = source;
+    result.m_targetVersion = target;
     return result;
+}
+KisReplicaHandle KisCpuBackingHandoff::target() const
+{
+    return m_binding ? m_binding->projectHandle(m_targetVersion, m_incarnation + 1) : KisReplicaHandle{};
 }
 bool KisCpuBackingHandoff::tryClaim()
 {
     if (!m_binding || m_claimed) return false;
-    m_claimed = m_binding->tryClaimHandoff(m_source);
+    m_claimed = m_binding->tryClaimHandoff(m_incarnation);
     return m_claimed;
 }
 KisCpuWriteBindingReservation KisCpuBackingHandoff::commit() noexcept
 {
     KisCpuWriteBindingReservation result;
     if (!m_binding || !m_claimed) return result;
-    m_binding->finishHandoff(&m_target);
+    m_binding->finishHandoff(&m_targetVersion);
     result.m_binding = std::move(m_binding);
     m_claimed = false;
     return result;
@@ -145,7 +158,7 @@ void KisCpuBackingHandoff::reset() noexcept
     m_claimed = false;
     m_binding.reset();
     m_provider.reset();
-    m_source = {}; m_target = {};
+    m_incarnation = 0; m_targetVersion = {};
 }
 
 bool KisCpuResidentProviderState::configure(
@@ -257,7 +270,7 @@ const void *KisCpuResidentBinding::acquireRead(const KisReplicaAllocationIdentit
         if (!lock.try_lock()) return nullptr;
     } else lock.lock();
     if (!awaitStorage(lock, !residentOnly || waitForLocalGate)) return nullptr;
-    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected)) {
+    if (!expected.isValid() || !(allocationIdentityLocked() == expected)) {
         if (status) *status = KisCpuResidentReadStatus::InvalidIdentity;
         return nullptr;
     }
@@ -298,7 +311,7 @@ void *KisCpuResidentBinding::acquireWrite(const KisReplicaAllocationIdentity &ex
 {
     std::unique_lock<QMutex> lock(m_mutex);
     awaitStorage(lock, true);
-    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) ||
+    if (!expected.isValid() || !(allocationIdentityLocked() == expected) ||
         m_retired || m_writeState != WriteState::Idle || m_readers) return nullptr;
     void *data = pinStorageUnlocked(lock, false, false, nullptr);
     if (data) {
@@ -342,7 +355,7 @@ KisPageReadinessStatus KisCpuResidentBinding::watchRetirementReadiness(
     std::shared_ptr<KisPageReadinessSignal> preparedSignal;
     KisPageReadinessSubscription prepared;
     std::unique_lock<QMutex> lock(m_mutex);
-    if (m_retired || !(expected == m_handle.allocationIdentity()) || m_writeState == WriteState::Handoff)
+    if (m_retired || !(expected == allocationIdentityLocked()) || m_writeState == WriteState::Handoff)
         return KisPageReadinessStatus::Unavailable;
     if (!m_storageBusy && !m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
     preparedSignal = m_retirementReadiness;
@@ -354,7 +367,7 @@ KisPageReadinessStatus KisCpuResidentBinding::watchRetirementReadiness(
             KisMutationStorageAllocator<KisPageReadinessSignal>(storage), storage);
     } catch (const std::bad_alloc &) { return KisPageReadinessStatus::Unavailable; }
     lock.lock();
-    if (m_retired || !(expected == m_handle.allocationIdentity()) || m_writeState == WriteState::Handoff)
+    if (m_retired || !(expected == allocationIdentityLocked()) || m_writeState == WriteState::Handoff)
         return KisPageReadinessStatus::Unavailable;
     if (!m_storageBusy && !m_readers && m_writeState == WriteState::Idle) return KisPageReadinessStatus::Ready;
     if (!m_retirementReadiness) {
@@ -390,7 +403,7 @@ KisReplicaAccess KisCpuResidentBinding::acquireAccess(
 bool KisCpuResidentBinding::reserveWrite(const KisReplicaAllocationIdentity &expected)
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) ||
+    if (!expected.isValid() || !(allocationIdentityLocked() == expected) ||
         m_retired || m_storageBusy || m_writeState != WriteState::Idle || m_readers) return false;
     m_writeState = WriteState::Reserved;
     return true;
@@ -467,7 +480,7 @@ void KisCpuWriteBindingReservation::reset()
 bool KisCpuResidentBinding::retire(const KisReplicaAllocationIdentity &expected)
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    if (!expected.isValid() || !(m_handle.allocationIdentity() == expected) || m_storageBusy ||
+    if (!expected.isValid() || !(allocationIdentityLocked() == expected) || m_storageBusy ||
         m_readers || m_writeState != WriteState::Idle || m_retired) return false;
     m_retired = true;
     startStorageTransition();
@@ -478,8 +491,8 @@ bool KisCpuResidentBinding::retire(const KisReplicaAllocationIdentity &expected)
 KisReplicaAllocationIdentity KisCpuResidentBinding::readIdentity(const KisPageVersion &version) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return m_readers && !m_retired && m_handle.version == version
-        ? m_handle.allocationIdentity() : KisReplicaAllocationIdentity{};
+    return m_readers && !m_retired && m_version == version
+        ? allocationIdentityLocked() : KisReplicaAllocationIdentity{};
 }
 
 void KisCpuResidentBinding::revoke()

@@ -3341,6 +3341,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     // fallible storage. This observes eligibility but acquires no write claim.
     physical = KisCpuBackingHandoff::prepare(provider, reuseCapacity ? spare : write.source, write.version, descriptor, reuseCapacity ? std::move(capacity.binding) : selection.binding);
     if (!physical.isValid()) return false;
+    const auto targetReplica = physical.target();
     prepared.emplace();
     // The caller already retains this exact source provider across the plan
     // and its cleanup. Only an independent provider needs another ledger owner.
@@ -3365,10 +3366,10 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     // may differ for recovery; the target is owned by physical until accepted.
     const auto &acceptedSource = reuseCapacity ? write.source : before;
     prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source,
-        physical.target(), nullptr, reuseCapacity ? capacity.original : nullptr);
+        targetReplica, nullptr, reuseCapacity ? capacity.original : nullptr);
     if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
-        auto lease = write.leaseTransition(physical.target(), reuseCapacity
+        auto lease = write.leaseTransition(targetReplica, reuseCapacity
             ? KisPageTransitionKind::AcquireWrite : KisPageTransitionKind::AcquireRecoverableWrite);
         lease.source = acceptedSource;
         publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, lease)
@@ -3386,7 +3387,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     if (!validateWriteBase(write, bool(native))) return false;
     if (!physical.tryClaim()) return false;
     const bool installed = native
-        ? metadata->acceptPrivateTarget(write, acceptedSource, physical.target(), native, transientLimit, nullptr,
+        ? metadata->acceptPrivateTarget(write, acceptedSource, targetReplica, native, transientLimit, nullptr,
               reuseCapacity ? std::shared_ptr<KisCpuResidentBinding>{} : prepared->beforeBinding)
         : reuseCapacity
         ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)
@@ -3412,7 +3413,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         Q_ASSERT(bytes);
         const auto rowBytes = descriptor.minimumRowBytes();
         for (int y = 0; y < descriptor.pageExtent.height(); ++y)
-            std::memcpy(bytes + quint64(y) * physical.target().layout.rowStride,
+            std::memcpy(bytes + quint64(y) * targetReplica.layout.rowStride,
                 static_cast<const quint8 *>(prepared->sourceBytes) + quint64(y) * write.source.layout.rowStride,
                 size_t(rowBytes));
         locker.relock();
@@ -3421,7 +3422,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         locker.unlock();
         auto *bytes = static_cast<quint8 *>(writable.pinResident());
         Q_ASSERT(bytes);
-        const auto &layout = physical.target().layout;
+        const auto &layout = targetReplica.layout;
         const auto &pixel = descriptor.format.defaultPixel;
         for (int y = 0; y < layout.pageExtent.height(); ++y)
             for (int x = 0; x < layout.pageExtent.width(); ++x)
@@ -3430,10 +3431,10 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         locker.relock();
     }
     if (native) {
-        Q_ASSERT(!target && native->target() == physical.target());
+        Q_ASSERT(!target && native->target() == targetReplica);
     } else {
         Q_ASSERT(target);
-        *target = physical.target(); // Original preallocated request is the owner.
+        *target = targetReplica; // Original preallocated request is the owner.
     }
     if (!reuseCapacity) write.source = before;
     return true;

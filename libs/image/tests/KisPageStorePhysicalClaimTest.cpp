@@ -422,10 +422,11 @@ void KisPageStorePhysicalClaimTest::handoffDebtFollowsTerminal()
     // limit, not demand another retirement or pending reservation.
     for (quint64 generation : {2u, 3u}) {
         auto physical = KisCpuBackingHandoff::prepare(f.provider, target, {key(0), {generation}}, f.desc);
-        auto accounting = ledger.prepareBackingHandoff(target, physical.target(), &f.error);
+        const auto targetReplica = physical.target();
+        auto accounting = ledger.prepareBackingHandoff(target, targetReplica, &f.error);
         QVERIFY2(accounting.isValid(), qPrintable(f.error)); QVERIFY(physical.tryClaim());
         auto writer = physical.commit(); QVERIFY(writer.isValid());
-        QVERIFY(ledger.commitBackingHandoff(std::move(accounting))); target = physical.target();
+        QVERIFY(ledger.commitBackingHandoff(std::move(accounting))); target = targetReplica;
         auto *data = static_cast<quint8 *>(writer.pinResident()); QVERIFY(data); data[0] = 0x75; writer.reset();
     }
     const size_t debt = size_t(KisBackingBudgetClass::RetirementDebt);
@@ -552,7 +553,8 @@ void KisPageStorePhysicalClaimTest::sharedHandoffDebt()
     KisBackingBudgetDelta initial; initial.bucket(size_t(KisBackingBudgetClass::Current)).cpuRam = bytes;
     auto reservation = budget.reserve(initial, &f.error); QVERIFY(ledger.registerBacking(f.replica, reservation, KisBackingBudgetClass::Current));
     auto physical = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
-    const auto target = physical.target(); auto accounting = ledger.prepareBackingHandoff(f.replica, target, &f.error);
+    const auto targetReplica = physical.target();
+    const auto target = targetReplica; auto accounting = ledger.prepareBackingHandoff(f.replica, target, &f.error);
     QVERIFY(accounting.isValid()); QVERIFY(physical.tryClaim()); auto writer = physical.commit(); QVERIFY(writer.isValid());
     QVERIFY(ledger.commitBackingHandoff(std::move(accounting))); writer.reset(); physical.reset();
     auto source = f.provider->captureCompletedTileSource(f.desc, f.tile); QVERIFY(source);
@@ -1077,8 +1079,9 @@ void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
     for (quint64 generation = 2; generation <= 17; ++generation) {
         const auto old = current;
         auto physical = KisCpuBackingHandoff::prepare(f.provider, old, {key(0), {generation}}, f.desc);
+        const auto targetReplica = physical.target();
         QVERIFY(physical.isValid());
-        auto prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+        auto prepared = ledger.prepareBackingHandoff(old, targetReplica, &f.error);
         QVERIFY2(prepared.isValid(), qPrintable(f.error));
         QCOMPARE(live(cache), bytes); QCOMPARE(live(pending), quint64(0));
         QCOMPARE(sharedPayload(), originalParent); // Negative parent fee is not yet consumed.
@@ -1088,7 +1091,7 @@ void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
             QCOMPARE(ledger.backingClass(old), cache);
             QCOMPARE(budget.usage().buckets[size_t(pending)].reserved.cpuRam, quint64(0));
             QVERIFY(f.provider->validate(old, f.desc));
-            prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+            prepared = ledger.prepareBackingHandoff(old, targetReplica, &f.error);
             QVERIFY2(prepared.isValid(), qPrintable(f.error));
         }
         if (outcome == 2) {
@@ -1101,7 +1104,7 @@ void KisPageStorePhysicalClaimTest::optionalCapacityCheckout()
         QVERIFY(physical.tryClaim());
         auto writer = physical.commit(); QVERIFY(writer.isValid());
         QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
-        current = physical.target();
+        current = targetReplica;
         QVERIFY(current.physicalSlotIdentity() == physicalIdentity);
         QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::Count);
         QVERIFY(!f.provider->validate(old, f.desc));
@@ -1187,7 +1190,8 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccounting()
     QVERIFY(ledger.registerBacking(f.replica, backing, initialClass, &f.error, &terminal));
     QVERIFY(!original->backingNode.second.nativeBinding); // Generic registration owns no CPU capability yet.
     auto physical = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
-    QVERIFY(physical.isValid()); const auto target = physical.target();
+    const auto targetReplica = physical.target();
+    QVERIFY(physical.isValid()); const auto target = targetReplica;
     {
         auto cancelled = ledger.prepareBackingHandoff(f.replica, target, &f.error);
         QVERIFY2(cancelled.isValid(), qPrintable(f.error));
@@ -1299,8 +1303,9 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards()
         QVERIFY(budgetBlocker.isValid());
     }
     auto physical = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
+    const auto targetReplica = physical.target();
     QVERIFY(physical.isValid());
-    auto source = f.replica; auto target = physical.target();
+    auto source = f.replica; auto target = targetReplica;
     switch (guard) {
     case 0: ++target.provider.value; break;
     case 1: ++target.providerEpoch.value; break;
@@ -1330,7 +1335,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards()
     QVERIFY(!ledger.prepareBackingHandoff(source, target, &f.error).isValid());
     QVERIFY(!f.error.isEmpty());
     QCOMPARE(ledger.backingClass(f.replica), initialClass);
-    QCOMPARE(ledger.backingClass(physical.target()), KisBackingBudgetClass::Count);
+    QCOMPARE(ledger.backingClass(targetReplica), KisBackingBudgetClass::Count);
     existingHandoff.release();
     if (alias.isValid()) {
         QVERIFY(ledger.reclassifyBacking(alias.replica, KisBackingBudgetClass::RetirementDebt));
@@ -1344,7 +1349,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingGuards()
     if (guard == 10) QVERIFY(ledger.reclassifyBacking(f.replica, KisBackingBudgetClass::Current));
     budgetBlocker.release();
     // Every rejection leaves reusable claims and budget; no half rekey.
-    auto retry = ledger.prepareBackingHandoff(f.replica, physical.target(), &f.error);
+    auto retry = ledger.prepareBackingHandoff(f.replica, targetReplica, &f.error);
     QVERIFY2(retry.isValid(), qPrintable(f.error)); retry.release();
     for (const auto &bucket : budget.usage().buckets) QCOMPARE(bucket.reserved.cpuRam, 0u);
     QVERIFY(ledger.reclassifyBacking(f.replica, KisBackingBudgetClass::RetirementDebt));
@@ -1370,7 +1375,8 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
     int nextKey = 1;
     for (int generation = 2; generation <= 4; ++generation) {
         auto physical = KisCpuBackingHandoff::prepare(f.provider, old, {key(0), {quint64(generation)}}, f.desc);
-        auto prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+        const auto targetReplica = physical.target();
+        auto prepared = ledger.prepareBackingHandoff(old, targetReplica, &f.error);
         QVERIFY2(prepared.isValid(), qPrintable(f.error));
         if (generation > 2) {
             // Original headroom makes this an identity-only claim. Releasing
@@ -1378,7 +1384,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
             const auto reserved = budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam;
             prepared.release();
             QCOMPARE(budget.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam, reserved);
-            prepared = ledger.prepareBackingHandoff(old, physical.target(), &f.error);
+            prepared = ledger.prepareBackingHandoff(old, targetReplica, &f.error);
             QVERIFY2(prepared.isValid(), qPrintable(f.error));
         }
         // Other map insertions preserve the claimed source node. Removing
@@ -1398,7 +1404,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffAccountingAcrossIndexGrowth()
         QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
         QVERIFY(!ledger.commitBackingHandoff(std::move(prepared)));
         QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::Count);
-        old = physical.target();
+        old = targetReplica;
         writer.reset();
         QCOMPARE(ledger.backingClass(old), KisBackingBudgetClass::ActivePending);
     }
@@ -1450,6 +1456,7 @@ void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
             QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::IdleCapacity);
         }
         auto physical = KisCpuBackingHandoff::prepare(f.provider, source, {key(0), {generation}}, f.desc);
+        const auto targetReplica = physical.target();
         QVERIFY(physical.isValid());
         KisBackingBudgetReservation pressure;
         if (generation > 2) {
@@ -1469,24 +1476,24 @@ void KisPageStorePhysicalClaimTest::backingHandoffReusesFundedPreparation()
         }
         KisBackingHandoffReservation prepared;
         try {
-            prepared = ledger.prepareBackingHandoff(source, physical.target(), &f.error);
+            prepared = ledger.prepareBackingHandoff(source, targetReplica, &f.error);
         } catch (const std::bad_alloc &) {
             QFAIL("funded handoff preparation requested additional metadata storage");
         }
         QVERIFY2(prepared.isValid(), qPrintable(f.error));
-        QVERIFY(!ledger.prepareBackingHandoff(source, physical.target(), &f.error).isValid());
+        QVERIFY(!ledger.prepareBackingHandoff(source, targetReplica, &f.error).isValid());
         if (generation == 3) {
             // Cancellation releases the new claim. A retry must neither keep
             // the detached old key live nor skip the new class/physical claim.
             prepared.release();
-            prepared = ledger.prepareBackingHandoff(source, physical.target(), &f.error);
+            prepared = ledger.prepareBackingHandoff(source, targetReplica, &f.error);
             QVERIFY2(prepared.isValid(), qPrintable(f.error));
         }
         QVERIFY(physical.tryClaim());
         auto writer = physical.commit(); QVERIFY(writer.isValid());
         QVERIFY(ledger.commitBackingHandoff(std::move(prepared)));
         QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::Count);
-        source = physical.target();
+        source = targetReplica;
         QCOMPARE(ledger.backingClass(source), KisBackingBudgetClass::ActivePending);
         writer.reset();
         pressure.release();
@@ -1875,7 +1882,7 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffLifecycle()
     QVERIFY(first.isValid()); QVERIFY(first.tryClaim()); QVERIFY(!first.tryClaim());
     QVERIFY(!stale.tryClaim());
     auto claimed = std::move(first); QVERIFY(!first.isValid()); QVERIFY(!first.isClaimed());
-    QVERIFY(!first.commit().isValid());
+    QVERIFY(!first.commit().isValid()); QVERIFY(!first.target().isValid());
     KisCpuResidentReadStatus status;
     QVERIFY(!f.binding->acquireRead(f.replica.allocationIdentity(), true, &status));
     QCOMPARE(status, KisCpuResidentReadStatus::Busy);
@@ -1887,7 +1894,7 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffLifecycle()
                                                    KisPagePriority::Normal).isValid());
     QVERIFY(!f.provider->retire({73}, f.replica, {}).isValid());
     if (outcome == 0) {
-        claimed.reset();
+        claimed.reset(); QVERIFY(!claimed.target().isValid());
         QVERIFY(f.provider->validate(f.replica, f.desc));
         QVERIFY(stale.tryClaim()); stale.reset();
         const auto *bytes = static_cast<const quint8 *>(f.binding->acquireRead(f.replica.allocationIdentity(), true));
@@ -1907,6 +1914,7 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffLifecycle()
     const auto target = claimed.target();
     auto writer = claimed.commit(); QVERIFY(writer.isValid());
     QVERIFY(!claimed.isValid()); QVERIFY(!claimed.isClaimed()); QVERIFY(!claimed.commit().isValid());
+    QVERIFY(!claimed.target().isValid()); QVERIFY(stale.target() == target);
     QVERIFY(!stale.tryClaim()); stale.reset();
     QVERIFY(!f.provider->validate(f.replica, f.desc));
     QVERIFY(!f.provider->cpuResidentBinding(f.replica));
@@ -1994,7 +2002,7 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffRetainsProvider()
 void KisPageStorePhysicalClaimTest::physicalBackingHandoffRejectsWrongIdentity_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<int>("mismatch");
-    for (int bpp : {1, 4, 8, 16}) for (int mismatch = 0; mismatch < 11; ++mismatch)
+    for (int bpp : {1, 4, 8, 16}) for (int mismatch = 0; mismatch < 18; ++mismatch)
         QTest::newRow(qPrintable(QString("bpp%1-mismatch%2").arg(bpp).arg(mismatch))) << bpp << mismatch;
 }
 void KisPageStorePhysicalClaimTest::physicalBackingHandoffRejectsWrongIdentity()
@@ -2014,9 +2022,21 @@ void KisPageStorePhysicalClaimTest::physicalBackingHandoffRejectsWrongIdentity()
     case 8: target = source.version; break;
     case 9: target.key = key(1); break;
     case 10: ++desc.format.formatId; break;
+    case 11: ++source.layout.layoutRevision; break;
+    case 12: source.layout.pageExtent.setWidth(63); break;
+    case 13: source.layout.validRect.setWidth(63); break;
+    case 14: ++source.layout.rowStride; break;
+    case 15: ++source.layout.byteSize; break;
+    case 16: ++source.version.defaultPixelRevision; break;
+    case 17: source.version.key = key(1); break;
     }
     auto rejected = KisCpuBackingHandoff::prepare(f.provider, source, target, desc);
     QVERIFY(!rejected.isValid()); QVERIFY(!rejected.tryClaim()); QVERIFY(!rejected.commit().isValid());
+    // Native consumers already hold a binding and bypass the provider index.
+    // That direct path must still reject every forged stable/logical field.
+    rejected = KisCpuBackingHandoff::prepare(f.provider, source, target, desc, f.binding);
+    QVERIFY(!rejected.isValid()); QVERIFY(!rejected.target().isValid());
+    QVERIFY(!rejected.tryClaim()); QVERIFY(!rejected.commit().isValid());
     auto valid = KisCpuBackingHandoff::prepare(f.provider, f.replica, {key(0), {2}}, f.desc);
     QVERIFY(valid.tryClaim()); valid.reset();
     QVERIFY(f.provider->retire({95}, f.replica, {}).isValid());

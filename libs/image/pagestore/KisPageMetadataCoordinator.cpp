@@ -2973,7 +2973,7 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
             last = resource.binding;
         }
         if (resource.binding->m_retired
-            || !(resource.binding->m_handle == resource.replica->handle(resource.value->version))) {
+            || !resource.binding->matchesHandleLocked(resource.replica->handle(resource.value->version))) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU Resource changed before publication acceptance"));
             return false;
         }

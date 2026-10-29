@@ -55,7 +55,9 @@ public:
 
 protected:
     explicit KisCpuResidentBinding(const KisReplicaHandle &handle)
-        : m_handle(handle) { Q_ASSERT(handle.isValid()); }
+        : m_slot(handle.physicalSlotIdentity()), m_incarnation(handle.allocation.generation),
+          m_version(handle.version), m_domain(handle.domain), m_layout(handle.layout)
+    { Q_ASSERT(handle.isValid()); }
     virtual void *pinStorage(bool residentOnly, KisCpuResidentReadStatus *status) = 0;
     virtual void *pinResidentStorageAfterGateWait(KisCpuResidentReadStatus *status)
     { return pinStorage(true, status); }
@@ -76,10 +78,18 @@ private:
     // Only exported through an already active owner-issued read guard.
     KisReplicaAllocationIdentity readIdentity(const KisPageVersion &version) const;
     enum class WriteState : quint8 { Idle, Active, Reserved, Handoff };
+    KisReplicaAllocationIdentity allocationIdentityLocked() const
+    { return {m_slot.provider, m_slot.providerEpoch, {m_slot.slot, m_incarnation}}; }
+    bool matchesHandleLocked(const KisReplicaHandle &expected) const
+    {
+        return allocationIdentityLocked() == expected.allocationIdentity()
+            && m_version == expected.version && m_domain == expected.domain && m_layout == expected.layout;
+    }
+    KisReplicaHandle projectHandle(const KisPageVersion &version, quint64 incarnation) const;
     bool prepareHandoff(const KisReplicaHandle &source, const KisPageVersion &target,
-                         const KisPageAllocationDescriptor &descriptor, KisReplicaHandle *result) const;
-    bool tryClaimHandoff(const KisReplicaHandle &source);
-    void finishHandoff(const KisReplicaHandle *target) noexcept;
+                         const KisPageAllocationDescriptor &descriptor, quint64 *incarnation) const;
+    bool tryClaimHandoff(quint64 incarnation);
+    void finishHandoff(const KisPageVersion *target) noexcept;
     bool reserveWrite(const KisReplicaAllocationIdentity &expected);
     void releaseWriter(WriteState state);
     void *pinReservedWrite(bool residentOnly, KisCpuResidentReadStatus *status);
@@ -102,10 +112,14 @@ private:
     WriteState m_writeState = WriteState::Idle;
     bool m_retired = false;
     void *m_data = nullptr;
-    // Keep the hot gate/pin state next to the provider-minted identity at the
-    // start of the handle. The stable binding is the single allocation record;
-    // slot indices retain only it, so retag has no second handle to update.
-    KisReplicaHandle m_handle;
+    // Physical facts never change during this binding's lifetime. Only the
+    // logical incarnation/version advance, together under the original gate.
+    // External handles are projections, never another mutable resource record.
+    const KisReplicaPhysicalSlotIdentity m_slot;
+    quint64 m_incarnation;
+    KisPageVersion m_version;
+    const KisPageAccessDomain m_domain;
+    const KisReplicaLayout m_layout;
     std::shared_ptr<KisPageReadinessSignal> m_retirementReadiness;
 };
 
@@ -191,7 +205,7 @@ struct KisCpuResidentAllocationIndex : KisCpuResidentProviderState
     struct SlotKey {
         using type = quint64;
         const quint64 &operator()(const Binding &binding) const noexcept
-        { return binding.m_handle.allocation.slot; }
+        { return binding.m_slot.slot; }
     };
     using AllocationIndex = boost::intrusive::set<Binding, boost::intrusive::key_of_value<SlotKey>>;
     using Iterator = typename AllocationIndex::iterator;
@@ -384,15 +398,17 @@ public:
                                         std::shared_ptr<KisCpuResidentBinding> binding = {});
     bool isValid() const { return bool(m_binding); }
     bool isClaimed() const { return m_claimed; }
-    const KisReplicaHandle &target() const { return m_target; }
+    // Project for external metadata/ledger consumers before consuming this
+    // capability. A moved, reset or committed token has no target authority.
+    KisReplicaHandle target() const;
     bool tryClaim();
     KisCpuWriteBindingReservation commit() noexcept;
     void reset() noexcept;
 private:
     std::shared_ptr<KisPageReplicaProvider> m_provider;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
-    KisReplicaHandle m_source;
-    KisReplicaHandle m_target;
+    quint64 m_incarnation = 0;
+    KisPageVersion m_targetVersion;
     bool m_claimed = false;
 };
 
