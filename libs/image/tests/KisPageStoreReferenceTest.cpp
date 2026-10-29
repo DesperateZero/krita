@@ -1353,14 +1353,14 @@ private Q_SLOTS:
     {
         QTest::addColumn<bool>("native"); QTest::addColumn<int>("pages"); QTest::addColumn<int>("outcome");
         QTest::addColumn<int>("shape");
-        for (bool native : {false, true}) for (int pages : {1, 17}) for (int outcome = 0; outcome != 3; ++outcome)
+        for (bool native : {false, true}) for (int pages : {1, 17}) for (int outcome = 0; outcome != 4; ++outcome)
             QTest::newRow(qPrintable(QStringLiteral("native%1-pages%2-outcome%3").arg(native).arg(pages).arg(outcome)))
                 << native << pages << outcome << 0;
         for (bool native : {false, true}) for (int shape : {1, 2, 3})
-            for (int outcome = 0; outcome != (shape == 3 ? 1 : 3); ++outcome)
+            for (int outcome = 0; outcome != (shape == 3 ? 1 : 4); ++outcome)
                 QTest::newRow(qPrintable(QStringLiteral("native%1-shape%2-outcome%3").arg(native).arg(shape).arg(outcome)))
                     << native << 17 << outcome << shape;
-        for (int outcome = 0; outcome != 3; ++outcome)
+        for (int outcome = 0; outcome != 4; ++outcome)
             QTest::newRow(qPrintable(QStringLiteral("mixed-outcome%1").arg(outcome)))
                 << true << 17 << outcome << 4;
     }
@@ -7128,6 +7128,10 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
     // consumer. Replacement can retire the old value while delivery still
     // holds the original row; destroying the facade cannot dangle that row.
     for (bool cancel : {false, true}) {
+        auto physicalCompletions = std::make_shared<KisCompletionRegistry>();
+        auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
+        QVERIFY(provider->configure({{81}, {1}, 4 * 1024 * 1024}, physicalCompletions));
+        std::weak_ptr<KisCpuResidentBinding> firstBinding;
         auto metadata = std::make_unique<KisPageMetadataCoordinator>();
         QVERIFY(metadata->configure(1));
         const auto base = pageVersion(0, 1);
@@ -7144,8 +7148,10 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             KisPageTransition input;
             input.baseVersion = pageVersion(0, quint64(1 + i));
             input.version = pageVersion(0, quint64(2 + i));
-            input.source = replica(input.baseVersion, 1, 1, quint64(1 + i));
-            input.target = replica(input.version, 1, 1, quint64(2 + i));
+            input.source = i ? rows[0]->target() : replica(input.baseVersion, 1, 1, 1);
+            const auto allocated = provider->prepareWrite({quint64(100 + i)}, input.version, allocationDescriptor(),
+                KisPageAccessDomain::CpuRam, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+            QVERIFY(allocated.isValid()); input.target = allocated.replica;
             input.transaction = tx.id; input.operation = {quint64(19 + i)};
             auto &row = rows[size_t(i)];
             row = std::make_unique<KisPagePrivateWrite>(editValues);
@@ -7156,6 +7162,9 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             shard = editValues.m_shards->front();
             QCOMPARE(editValues.m_shards->size(), size_t(1));
             QVERIFY(metadata->acceptPrivateTarget(write, input.source, input.target, row.get(), 64));
+            auto binding = provider->cpuResidentBinding(input.target); QVERIFY(binding);
+            if (!i) firstBinding = binding;
+            row->exchangeBinding(std::move(binding), input.target);
             const KisPagePublicationIdentity locator{row->version(), tx.id, 0, true, row->valueSlot()};
             QVERIFY(!metadata->ownsCpuValue(locator, 1)); // Memory/writer ownership is not a seal.
             QVERIFY(metadata->completePrivateWrite(row.get()));
@@ -7199,6 +7208,12 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
         QCOMPARE(metadata->selectMutationBase(rows[0]->version(), false, &stale,
             nullptr, &rows[0]->location.value), KisPageMetadataCoordinator::MutationBaseSelection::Absent);
         const auto firstTarget = rows[0]->target();
+        // Consume the installer's original displaced reference outside V;
+        // the old Frame itself must not retain that Resource afterward.
+        if (!cancel) rows[1]->releasedBinding.reset();
+        provider.reset();
+        if (!cancel) QVERIFY(firstBinding.expired()); // The old Frame keeps identity, not the Resource.
+        QCOMPARE(rows[0]->target(), firstTarget);
         metadata.reset();
         QVERIFY(!shard.expired());
         QCOMPARE(rows[0]->target(), firstTarget);
@@ -7211,9 +7226,9 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
 {
     QFETCH(bool, native); QFETCH(int, pages); QFETCH(int, outcome); QFETCH(int, shape);
     auto completions = std::make_shared<KisCompletionRegistry>();
-    KisTiles3PageReplicaProvider provider;
+    auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
     const auto descriptor = allocationDescriptor();
-    QVERIFY(provider.configure({{81}, {1}, 4 * 1024 * 1024}, completions));
+    QVERIFY(provider->configure({{81}, {1}, 4 * 1024 * 1024}, completions));
     KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
     QVERIFY(metadata.configure(4));
     const auto source = completions->registerSource(KisCompletionDomain::HostLogical);
@@ -7227,6 +7242,7 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
     QVector<KisPageTransition> commits;
     std::vector<KisPageMetadataCoordinator::PublicationChange> generic;
     std::vector<std::shared_ptr<KisCpuResidentBinding>> bindings;
+    KisReplicaHandle lastBound;
     std::vector<KisPageViewTestAccess::ReadEdge> captures;
     rows.reserve(size_t(pages));
     for (int i = 0; i < pages; ++i) {
@@ -7234,14 +7250,14 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
         const bool bound = shape != 3 && (shape != 2 || i % 3 != 1);
         const bool nativePage = native && (shape != 4 || i % 2 == 0);
         const auto base = pageVersion(column, 1), target = pageVersion(column, 2);
-        const auto allocated = provider.prepareWrite({quint64(1000 + i)}, target, descriptor,
+        const auto allocated = provider->prepareWrite({quint64(1000 + i)}, target, descriptor,
             KisPageAccessDomain::CpuRam, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
         QVERIFY(allocated.isValid());
-        auto binding = provider.cpuResidentBinding(allocated.replica); QVERIFY(binding);
+        auto binding = provider->cpuResidentBinding(allocated.replica); QVERIFY(binding);
         // These are provider-created bindings and real allocation identities;
         // no test writes the gate/retired state or manufactures a lock receipt.
-        QVERIFY(provider.prepareCpuPublication(allocated.replica, descriptor, binding));
-        if (bound) bindings.push_back(binding);
+        QVERIFY(provider->prepareCpuPublication(allocated.replica, descriptor, binding));
+        if (bound) { bindings.push_back(binding); lastBound = allocated.replica; }
         auto page = initialPageState(base, replica(base, 1, 1, quint64(10000 + i)));
         if (!nativePage) {
             page.versions.append({target, KisPagePublicationState::Prepared,
@@ -7260,7 +7276,7 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
             write.transaction = tx.id; write.operation = {quint64(2000 + i)};
             QVERIFY(metadata.preparePrivateValue(write, original.get(), nullptr));
             QVERIFY(metadata.acceptPrivateTarget(write, write.source, allocated.replica, original.get(), 64));
-            if (bound) original->binding() = binding;
+            if (bound) original->exchangeBinding(binding, allocated.replica);
             QVERIFY(metadata.completePrivateWrite(original.get()));
             rows.emplace_back(KisPagePublicationChange::Replacement{original.get()});
             originals.push_back(std::move(original));
@@ -7293,6 +7309,19 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
     }));
     QVERIFY(declined);
     if (outcome == 1) bindings.back()->revoke(); // After preparation, before actual acceptance.
+    if (outcome == 3) {
+        auto next = lastBound.version; ++next.generation.value;
+        auto handoff = KisCpuBackingHandoff::prepare(provider, lastBound, next, descriptor, bindings.back());
+        QVERIFY(handoff.isValid()); QVERIFY(handoff.tryClaim());
+        auto writer = handoff.commit(); QVERIFY(writer.isValid()); writer.reset();
+        // A real physical generation advance must not rewrite the old Value's
+        // expected identity through its borrowed Resource. Final acceptance
+        // below must still reject the stale generation, including after retry.
+        if (native) {
+            for (const auto &row : originals)
+                if (row->version() == lastBound.version) QCOMPARE(row->target(), lastBound);
+        } else QCOMPARE(metadata.cpuReadReplica(lastBound.version), lastBound);
+    }
     QSemaphore attempted, finished;
     std::thread revoker;
     const auto join = qScopeGuard([&] { if (revoker.joinable()) revoker.join(); });
@@ -7312,7 +7341,8 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
     const bool accepted = candidate.acceptCpuResources(&install,
         [](void *p) { return (*static_cast<decltype(install) *>(p))(); });
     if (revoker.joinable()) revoker.join();
-    QCOMPARE(accepted, outcome != 1); QCOMPARE(entered, outcome != 1); QCOMPARE(installed, outcome != 1);
+    const bool expected = outcome == 0 || outcome == 2;
+    QCOMPARE(accepted, expected); QCOMPARE(entered, expected); QCOMPARE(installed, expected);
     if (outcome == 2) QVERIFY(blocked); // Revoke cannot cross the installing cut.
     if (native) {
         if (installed) metadata.finishAcceptance({rows.data(), rows.size()});

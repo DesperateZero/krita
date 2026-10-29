@@ -1562,11 +1562,10 @@ KisPageMutationSession::Private::prepareTarget(
         std::optional<KisReplicaHandle> oldTarget;
         if (previous) oldTarget.emplace(previous->target());
         if (!previous && !owner->writeCoordinator.validateWriteBase(acquire, true, error)) return {};
-        accepted = previous ? owner->metadata.replacePrivateWrite(page, target)
+        accepted = previous ? owner->metadata.replacePrivateWrite(page, target, &binding)
             : owner->metadata.acceptPrivateTarget(acquire, acquire.source, target, page,
-                owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias);
+                owner->backingBudget.maxTransientVersionsPerPage(), error, {}, alias, &binding);
         if (!accepted) return {};
-        page->binding() = std::move(binding);
         page->backing = registeredBacking;
         if (previous) {
             page->writable.reset();
@@ -1579,7 +1578,7 @@ KisPageMutationSession::Private::prepareTarget(
     Q_ASSERT(page->descriptor());
     if (!previous) {
         page->writable = std::move(writable);
-        if (!page->binding()) page->binding() = page->writable.binding();
+        if (!page->binding()) page->exchangeBinding(page->writable.binding(), page->target());
         owner->writeCoordinator.recordTarget(*entry, intent, acquire, alias
             ? KisMutationPageEntryState::AliasAccepted
             : finalAccepted ? KisMutationPageEntryState::PrivatePrepared : KisMutationPageEntryState::MutableReady);

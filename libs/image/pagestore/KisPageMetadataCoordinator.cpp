@@ -33,6 +33,15 @@
 #include <utility>
 #include <vector>
 
+std::shared_ptr<KisCpuResidentBinding> KisPagePrivateWrite::exchangeBinding(
+    std::shared_ptr<KisCpuResidentBinding> next, const KisReplicaHandle &target)
+{
+    Q_ASSERT(value);
+    next.swap(value->native.nativeBinding);
+    value->primaryReplica.setHandle(target, value->native.nativeBinding.get());
+    return next;
+}
+
 namespace KisPageStoreDetail {
 class MetadataBudgetAuthority final
 {
@@ -1035,7 +1044,7 @@ struct ShardRecordStore {
         Q_ASSERT(record && reservation);
         auto *native = &record->native;
         const auto *selected = replica(native->nativeReplica);
-        const auto selectedIdentity = selected ? selected->identity : KisReplicaAllocationIdentity{};
+        const auto selectedIdentity = selected ? selected->identity() : KisReplicaAllocationIdentity{};
         native->nativeReplica = {};
         // Cold import may seed the independent oracle count. Existing Values
         // own their live read edges; a prepared snapshot cannot restore an
@@ -1066,23 +1075,17 @@ struct ShardRecordStore {
         KisReplicaSlotId replicaTail;
         for (const auto &source : snapshot.replicas) {
             KisPageReplicaState next;
-            next.identity = source.replica.allocationIdentity();
-            next.layoutRevision = source.replica.layout.layoutRevision;
-            next.formatId = source.replica.layout.formatId;
-            next.byteSize = source.replica.layout.byteSize;
+            const bool selectedResource = native->nativeBinding && source.replica.allocationIdentity() == selectedIdentity;
+            next.setHandle(source.replica, selectedResource ? native->nativeBinding.get() : nullptr);
             next.ownerVersion = record->slot;
             next.activeOperation = source.activeOperation;
-            next.validRect = source.replica.layout.validRect;
-            next.pageExtent = source.replica.layout.pageExtent;
-            next.rowStride = source.replica.layout.rowStride;
             next.pinCount = source.pinCount;
-            next.domain = source.replica.domain;
             next.validity = source.validity;
             const KisReplicaSlotId replicaSlot = replicaTail.isValid()
                 ? arenas->replicas.emplaceReserved(&reservation->replicas, next) : kisInlineReplicaSlot(record->slot);
             if (!replicaTail.isValid()) record->primaryReplica = next;
             Q_ASSERT(replicaSlot.isValid());
-            if (native->nativeBinding && next.identity == selectedIdentity)
+            if (selectedResource)
                 native->nativeReplica = replicaSlot;
             KisPageReplicaState *inserted = replica(replicaSlot);
             Q_ASSERT(inserted);
@@ -1555,7 +1558,7 @@ struct ShardRecordStore {
         const bool accepted = record->publication == KisPagePublicationState::Historical
             || (record->publication == KisPagePublicationState::Prepared && facts->sealedBy.isValid());
         return accepted && !record->readEdges
-            && record->replicaCount == 1 && cpu && cpu->domain == KisPageAccessDomain::CpuRam
+            && record->replicaCount == 1 && cpu && cpu->domain() == KisPageAccessDomain::CpuRam
             && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
             && !cpu->overflow.isValid() && !cpu->activeOperation.isValid() ? record : nullptr;
     }
@@ -1642,7 +1645,8 @@ struct ShardRecordStore {
         unindexPhysical(*record);
         unindexPublication(page, record);
         unlinkVersion(page, record);
-        const auto primary = record->primaryReplica;
+        auto primary = record->primaryReplica;
+        if (record->frameHeld) primary.detachResource(record->version);
         eraseChildren(record);
         if (record->frameHeld) record->primaryReplica = primary;
         const bool indexErased = exactVersions.eraseExact(identity, slot);
@@ -2168,7 +2172,7 @@ auto readableVersion(Shard &shard, const KisPageVersion &identity)
 bool cpuReadableReplica(const KisPageReplicaState &state, const KisPageVersion &version)
 {
     return state.validity == KisReplicaValidity::Valid && replicaHandle(state, version).isValid()
-        && (state.domain == KisPageAccessDomain::CpuRam || state.domain == KisPageAccessDomain::UmaShared);
+        && (state.domain() == KisPageAccessDomain::CpuRam || state.domain() == KisPageAccessDomain::UmaShared);
 }
 
 } // namespace
@@ -4383,9 +4387,13 @@ KisPageMetadataCoordinator::installCpuReadBinding(const KisReplicaHandle &replic
         || !cpuReadableReplica(*shard->records.replica(slot), replica.version))
         return {};
     auto *facts = &version->native;
+    if (facts->nativeBinding && (facts->nativeBinding.get() != binding.get() || !(facts->nativeReplica == slot))) {
+        if (auto *old = shard->records.replica(facts->nativeReplica)) old->detachResource(version->version);
+    }
     if (!facts->nativeBinding) ++shard->arenas.cpuReadBindings;
     facts->nativeBinding.swap(binding);
     facts->nativeReplica = slot;
+    shard->records.replica(slot)->setHandle(replica, facts->nativeBinding.get());
     KisCpuReadBinding result{replica, facts->nativeBinding};
     locker.unlock(); // The replaced physical object may be destroyed here.
     return result;
@@ -4445,9 +4453,10 @@ void takeCpuReadBindingLocked(MetadataShard &shard, KisPageValueCell &version,
     std::shared_ptr<KisCpuResidentBinding> *released)
 {
     auto *facts = &version.native;
-    const auto *selected = shard.records.replica(facts->nativeReplica);
+    auto *selected = shard.records.replica(facts->nativeReplica);
     if (facts->nativeBinding && (!selected || replicaHandle(*selected, replica.version) == replica)
         && (!expected || facts->nativeBinding.get() == expected)) {
+        if (selected) selected->detachResource(version.version);
         released->swap(facts->nativeBinding);
         facts->nativeReplica = {};
         --shard.arenas.cpuReadBindings;
@@ -4928,20 +4937,20 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
         && !authority->activeOperation.isValid() && !authority->pinCount
         && !authority->overflow.isValid()) {
         const auto &layout = write.source.layout;
+        const auto sourceIdentity = authority->identity();
         for (auto slot = record->firstReplica; slot.isValid();) {
             const auto *replica = shard->records.replica(slot);
             // Compare the original record. Only the chosen before-image
             // needs a full handle for the later real physical acquisition.
             if (replica->validity == KisReplicaValidity::Valid && !replica->activeOperation.isValid()
-                && replica->domain == KisPageAccessDomain::CpuRam
-                && replica->layoutRevision == layout.layoutRevision && replica->formatId == layout.formatId
-                && replica->pageExtent == layout.pageExtent && replica->validRect == layout.validRect
-                && replica->rowStride == layout.rowStride && replica->byteSize == layout.byteSize
-                && !(replica->identity.provider == authority->identity.provider
-                    && replica->identity.providerEpoch == authority->identity.providerEpoch
-                    && replica->identity.allocation.slot == authority->identity.allocation.slot)) {
-                selection->recoverableBefore = replicaHandle(*replica, base);
-                break;
+                && replica->domain() == KisPageAccessDomain::CpuRam && replica->layout() == layout) {
+                const auto candidateIdentity = replica->identity();
+                if (!(candidateIdentity.provider == sourceIdentity.provider
+                    && candidateIdentity.providerEpoch == sourceIdentity.providerEpoch
+                    && candidateIdentity.allocation.slot == sourceIdentity.allocation.slot)) {
+                    selection->recoverableBefore = replicaHandle(*replica, base);
+                    break;
+                }
             }
             slot = replica->nextReplica;
         }
@@ -5121,9 +5130,11 @@ void KisPageEditValues::release(KisPagePrivateWrite **rows, size_t count) noexce
                     shard->records.physicalSlots.cancelReservation(&row.location.physical);
                     value->frameHeld = false;
                     if (!value->indexed) {
+                        const bool last = !value->readEdges && value->detachLifetime();
+                        if (!last) value->primaryReplica.detachResource(value->version);
                         released[end].descriptor.swap(value->native.descriptor);
                         released[end].binding.swap(value->native.nativeBinding);
-                        if (!value->readEdges && value->detachLifetime()) {
+                        if (last) {
                             const bool erased = shard->arenas.versions.erase(row.location.value);
                             Q_ASSERT(erased); Q_UNUSED(erased);
                         }
@@ -5243,7 +5254,8 @@ void KisPageMetadataCoordinator::discardPrivateValue(KisPagePrivateWrite *native
 
 bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &write,
     const KisReplicaHandle &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
-    const std::shared_ptr<KisCpuResidentBinding> &before, bool complete)
+    const std::shared_ptr<KisCpuResidentBinding> &before, bool complete,
+    std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
     auto *core = m_core.load(std::memory_order_acquire);
     if (!core || !write.version.key.isValid() || core->shards.empty()) return false;
@@ -5357,9 +5369,13 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
         base->authorityReplica = sourceSlot;
         auto *facts = &base->native;
         shard->arenas.cpuReadBindings -= bool(facts->nativeBinding);
-        native->binding().swap(facts->nativeBinding); // Original result releases/reuses the old binding outside this gate.
+        // The surviving source may have been the old cached placement. It
+        // must stop borrowing that binding before the original owner moves.
+        shard->records.replica(sourceSlot)->detachResource(base->version);
+        facts->nativeBinding = native->exchangeBinding(std::move(facts->nativeBinding), target);
         facts->nativeBinding = before;
         facts->nativeReplica = sourceSlot;
+        shard->records.replica(sourceSlot)->setHandle(source, before.get());
         ++shard->arenas.cpuReadBindings;
         ++shard->publicationVersionInstalls;
     } else {
@@ -5372,7 +5388,8 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteInput &wr
     auto &activity = page->activity;
     activity.nativeWrite = native;
     activity.writerTransaction = write.transaction;
-    native->value->primaryReplica.setHandle(target);
+    if (targetBinding) *targetBinding = native->exchangeBinding(std::move(*targetBinding), target);
+    else native->value->primaryReplica.setHandle(target, native->binding().get());
     native->source = source;
     native->reserved = true;
     native->completed = complete;
@@ -5419,7 +5436,7 @@ bool KisPageMetadataCoordinator::completePrivateWrite(KisPagePrivateWrite *nativ
 }
 
 bool KisPageMetadataCoordinator::replacePrivateWrite(KisPagePrivateWrite *result,
-    const KisReplicaHandle &target)
+    const KisReplicaHandle &target, std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
     if (!result || !result->hasValue() || !target.isValid() || !(target.version == result->version())) return false;
     auto *shard = Private::registeredShard(m_core.load(std::memory_order_acquire), *result);
@@ -5432,7 +5449,8 @@ bool KisPageMetadataCoordinator::replacePrivateWrite(KisPagePrivateWrite *result
         || activity->publicationClaim || result->isSealed()
         || target.physicalSlotIdentity() == result->target().physicalSlotIdentity()
         || shard->records.physicalOwner(target.physicalSlotIdentity(), &physicalOwner)) return false;
-    result->value->primaryReplica.setHandle(target);
+    if (targetBinding) *targetBinding = result->exchangeBinding(std::move(*targetBinding), target);
+    else result->value->primaryReplica.setHandle(target, result->binding().get());
     result->completed = true;
     ++page->revision;
     return true;

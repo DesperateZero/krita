@@ -7,6 +7,7 @@
 #ifndef KIS_PAGE_METADATA_COORDINATOR_P_H
 #define KIS_PAGE_METADATA_COORDINATOR_P_H
 
+#include "KisCpuResidentBinding_p.h"
 #include "KisPageMetadataArena_p.h"
 #include "KisPageMetadataIndex_p.h"
 #include "KisPageStateMachine.h"
@@ -114,38 +115,89 @@ struct KisPageWriteSelection {
 };
 
 struct KisPageReplicaState {
-    KisReplicaAllocationIdentity identity;
-    quint64 layoutRevision = 0;
-    quint64 formatId = 0;
-    quint64 byteSize = 0;
     KisVersionSlotId ownerVersion;
     KisReplicaSlotId nextReplica;
     KisMetadataOverflowSlotId overflow;
     KisPageOperationId activeOperation;
-    QRect validRect;
-    QSize pageExtent;
-    quint32 rowStride = 0;
     quint32 pinCount = 0;
-    KisPageAccessDomain domain = KisPageAccessDomain::Unknown;
     KisReplicaValidity validity = KisReplicaValidity::Allocated;
-    KisReplicaHandle handle(const KisPageVersion &version) const
+
+    // A value-initialized arena record must not zero the inactive external
+    // snapshot. Copy/reset likewise touches only its actually active member.
+    KisPageReplicaState() noexcept {}
+    KisPageReplicaState(const KisPageReplicaState &other) noexcept { *this = other; }
+    KisPageReplicaState &operator=(const KisPageReplicaState &other) noexcept
     {
-        KisReplicaHandle result;
-        result.provider = identity.provider; result.providerEpoch = identity.providerEpoch;
-        result.allocation = identity.allocation; result.version = version; result.domain = domain;
-        result.layout.layoutRevision = layoutRevision; result.layout.formatId = formatId;
-        result.layout.byteSize = byteSize; result.layout.validRect = validRect;
-        result.layout.pageExtent = pageExtent; result.layout.rowStride = rowStride;
-        return result;
+        if (this == &other) return *this;
+        ownerVersion = other.ownerVersion; nextReplica = other.nextReplica;
+        overflow = other.overflow; activeOperation = other.activeOperation;
+        pinCount = other.pinCount; validity = other.validity;
+        m_domain = other.m_domain; m_kind = other.m_kind;
+        if (m_kind == Kind::Resource) new (&m_physical.resource) Resource(other.m_physical.resource);
+        else if (m_kind == Kind::External) new (&m_physical.external) External(other.m_physical.external);
+        return *this;
     }
-    void setHandle(const KisReplicaHandle &handle)
+    KisReplicaAllocationIdentity identity() const
     {
-        identity = handle.allocationIdentity(); domain = handle.domain;
-        layoutRevision = handle.layout.layoutRevision; formatId = handle.layout.formatId;
-        byteSize = handle.layout.byteSize; validRect = handle.layout.validRect;
-        pageExtent = handle.layout.pageExtent; rowStride = handle.layout.rowStride;
+        if (m_kind == Kind::Resource) {
+            const auto &r = m_physical.resource;
+            const auto &slot = r.binding->m_slot;
+            return {slot.provider, slot.providerEpoch, {slot.slot, r.incarnation}};
+        }
+        return m_kind == Kind::External ? m_physical.external.identity : KisReplicaAllocationIdentity{};
     }
 
+    KisPageAccessDomain domain() const
+    {
+        return m_kind == Kind::Resource ? m_physical.resource.binding->m_domain : m_domain;
+    }
+
+    const KisReplicaLayout &layout() const
+    {
+        static const KisReplicaLayout empty;
+        if (m_kind == Kind::Resource) return m_physical.resource.binding->m_layout;
+        return m_kind == Kind::External ? m_physical.external.layout : empty;
+    }
+
+    KisReplicaHandle handle(const KisPageVersion &version) const
+    {
+        const auto allocation = identity();
+        return {allocation.provider, allocation.providerEpoch, allocation.allocation, version, domain(), layout()};
+    }
+
+    void setHandle(const KisReplicaHandle &handle, const KisCpuResidentBinding *resource = nullptr)
+    {
+        // Only immutable facts are consumed here, under metadata admission, never
+        // by acquiring R under V. The expected incarnation belongs to this Value;
+        // a later handoff cannot silently change an old Value's public identity.
+        if (resource && resource->m_key == handle.version.key
+            && resource->m_slot == handle.physicalSlotIdentity()
+            && resource->m_domain == handle.domain && resource->m_layout == handle.layout) {
+            new (&m_physical.resource) Resource{resource, handle.allocation.generation};
+            m_kind = Kind::Resource;
+        } else {
+            new (&m_physical.external) External{handle.allocationIdentity(), handle.layout};
+            m_domain = handle.domain;
+            m_kind = Kind::External;
+        }
+    }
+
+    void detachResource(const KisPageVersion &version)
+    {
+        if (m_kind == Kind::Resource) setHandle(handle(version));
+    }
+
+private:
+    enum class Kind : quint8 { Empty, External, Resource };
+    Kind m_kind = Kind::Empty;
+    KisPageAccessDomain m_domain = KisPageAccessDomain::Unknown;
+    struct External { KisReplicaAllocationIdentity identity; KisReplicaLayout layout; };
+    struct Resource { const KisCpuResidentBinding *binding; quint64 incarnation; };
+    union Physical {
+        Physical() {} // Empty/native records do not initialize an external snapshot.
+        External external;
+        Resource resource;
+    } m_physical;
 };
 // Arena generations occupy 16 bits. The high bit identifies the primary
 // replica stored in its Value, without a second allocation or slot lifetime.
@@ -164,6 +216,9 @@ inline KisVersionSlotId kisInlineReplicaOwner(KisReplicaSlotId replica)
  * The original edit and accepted views share this same generational Value.
  */
 struct KisPageValueState {
+    // Explicit default initialization preserves the inactive replica storage
+    // when resetting this mutable part of an already retained Value.
+    KisPageValueState() noexcept {}
     KisPageReplicaState primaryReplica;
     KisVersionSlotId previousVersion;
     KisVersionSlotId nextVersion;
@@ -195,7 +250,9 @@ struct KisPageValueState {
     } native;
 };
 
-struct KisPageValueCell : KisPageViewValue, KisPageValueState {};
+struct KisPageValueCell : KisPageViewValue, KisPageValueState {
+    KisPageValueCell() noexcept {} // Arena value initialization must also skip inactive storage.
+};
 
 // Borrowed only for one synchronous acceptance under the Store owner gate.
 // Original Frame/root/candidate and deferred releases retain these objects.
@@ -222,8 +279,9 @@ struct KisPagePrivateWrite {
     KisReplicaHandle target() const { return value ? value->primaryReplica.handle(value->version) : KisReplicaHandle{}; }
     auto &descriptor() { Q_ASSERT(value); return value->native.descriptor; }
     const auto &descriptor() const { Q_ASSERT(value); return value->native.descriptor; }
-    auto &binding() { Q_ASSERT(value); return value->native.nativeBinding; }
     const auto &binding() const { Q_ASSERT(value); return value->native.nativeBinding; }
+    KRITAIMAGE_EXPORT std::shared_ptr<KisCpuResidentBinding> exchangeBinding(
+        std::shared_ptr<KisCpuResidentBinding> next, const KisReplicaHandle &target);
     bool isSealed() const { return value && value->native.sealedBy.isValid(); }
     KisPageTransactionId sealedBy() const { return value ? value->native.sealedBy : KisPageTransactionId{}; }
     KisVersionSlotId valueSlot() const { return value ? value->slot : KisVersionSlotId{}; }

@@ -314,12 +314,16 @@ private:
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
     // physical slot; the final value already exists and no lease is invented.
+    // On success, an optional original target binding is exchanged into the
+    // Value; the caller receives any displaced binding for release outside V.
+    // Refusal leaves that input untouched.
     bool acceptPrivateTarget(const KisPageWriteInput &, const KisReplicaHandle &source,
                              const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
         QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
-        bool complete = false);
+        bool complete = false, std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);
     bool completePrivateWrite(KisPagePrivateWrite *);
-    bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &);
+    bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &,
+                             std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);
     bool cancelPrivateResult(KisPagePrivateWrite *);
     KisPagePrivateWrite *nativeWrite(const KisPageVersion &) const;
     KisPagePrivateWrite *nativeWriteForProof(const KisPreparedPageProof &) const;

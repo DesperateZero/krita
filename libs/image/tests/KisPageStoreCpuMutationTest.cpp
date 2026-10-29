@@ -9897,7 +9897,7 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         writeInput.baseWasPrepared = i != 0;
         if (!f.metadata.preparePrivateValue(writeInput, &value, &f.error)) return false;
         value.descriptor() = std::make_shared<KisPageAllocationDescriptor>(descriptor);
-        value.binding() = f.physical.provider->cpuResidentBinding(result.replica);
+        value.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
         const bool accepted = f.metadata.acceptPrivateTarget(writeInput, input.source, result.replica, &value, 64, &f.error)
             && f.metadata.completePrivateWrite(&value) && validateOriginalWrite(f.owner, value, tx.id, &f.error);
         return accepted && f.metadata.versionDescriptorMatches(version, descriptor)
@@ -10033,7 +10033,7 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
         QVERIFY(f.metadata.preparePrivateValue(KisPageWriteInput(acquire), &native, &f.error));
         native.descriptor() = std::allocate_shared<const KisPageAllocationDescriptor>(
             KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor());
-        native.binding() = f.physical.provider->cpuResidentBinding(result.replica);
+        native.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
         QVERIFY(f.metadata.acceptPrivateTarget(KisPageWriteInput(acquire), acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
         QVERIFY(validateOriginalWrite(f.owner, native, tx.id, &f.error));
