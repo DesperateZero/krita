@@ -358,17 +358,18 @@ public:
     }
 
     // Under the ledger gate, an independent new member may coexist with a
-    // prepared change only if it preserves both fee endpoints. Selected rows,
-    // their credit and the admitted delta then stay valid on commit or cancel.
+    // prepared reference-only change without fixing its old physical charge.
+    // A real prepared fee change still requires both endpoints to stay fixed.
     bool acceptsNewMember(const PhysicalBackingRecord &physical,
                           KisBackingBudgetClass budgetClass) const noexcept
     {
         const auto *claim = physical.classClaim;
         if (!claim) return true;
-        if (claim == HandoffClaim
-            || !KisPageClassCounts::preservesCharge(budgetClass, physical.chargedClass)) return false;
+        if (claim == HandoffClaim) return false;
         while (claim->next) claim = claim->next;
-        return KisPageClassCounts::preservesCharge(budgetClass, claim->chargedAfter);
+        return claim->changedCharge == KisBackingBudgetClass::Count
+            || (KisPageClassCounts::preservesCharge(budgetClass, physical.chargedClass)
+                && KisPageClassCounts::preservesCharge(budgetClass, claim->changedCharge));
     }
 
     // Caller owns the original record and holds mutex. Deferred storage and
@@ -435,7 +436,8 @@ public:
                                KisBackingBudgetClass after, BackingRecord *credit, QString *error)
     {
         auto &source = *last.physical;
-        last.chargedAfter = after;
+        if (source.chargedClass == after) return true;
+        last.changedCharge = after;
         if (source.chargedClass != KisBackingBudgetClass::RetirementDebt
             && after == KisBackingBudgetClass::RetirementDebt && credit) {
             // The existing headroom pays this exact physical transition. Do
@@ -555,7 +557,7 @@ public:
         if (shared) for (size_t first = 0; first < projected.size();) {
             auto *source = projected[first].physical;
             // Sorting moved row addresses, including already projected sole rows.
-            if (projected[first].chargedAfter != KisBackingBudgetClass::Count) {
+            if (projected[first].changedCharge != KisBackingBudgetClass::Count) {
                 source->classClaim = &projected[first++];
                 continue;
             }
@@ -718,11 +720,10 @@ public:
         const bool changed = physical->changeClass(before, change.after);
         Q_ASSERT(changed);
         Q_UNUSED(changed);
-        // The claim fixes selected members and both fee endpoints. Independent
-        // additions preserve these endpoints; only the final selected row
-        // installs the admitted charge, without intermediate fee transactions.
-        if (change.chargedAfter != KisBackingBudgetClass::Count)
-            physical->chargedClass = change.chargedAfter;
+        // Only a real prepared fee change installs a charge. A reference-only
+        // group must not overwrite an independent member's admitted charge.
+        if (change.changedCharge != KisBackingBudgetClass::Count)
+            physical->chargedClass = change.changedCharge;
         found->second.budgetClass = change.after;
         if (change.idleResult) {
             Q_ASSERT(change.after == KisBackingBudgetClass::IdleCapacity);

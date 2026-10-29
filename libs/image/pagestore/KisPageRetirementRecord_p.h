@@ -271,7 +271,9 @@ struct KisPagePreparedBackingChange
     KisPagePhysicalBackingRecord *physical = nullptr;
     size_t order = 0;
     KisBackingBudgetClass after = KisBackingBudgetClass::Count;
-    KisBackingBudgetClass chargedAfter = KisBackingBudgetClass::Count;
+    // Count means this row does not change the physical fee. In particular,
+    // a reference-only group's final row must not freeze its former charge.
+    KisBackingBudgetClass changedCharge = KisBackingBudgetClass::Count;
     KisPageRetirementRecord **idleResult = nullptr;
     const void *claim = nullptr;
     const KisPagePreparedBackingChange *next = nullptr;

@@ -10799,9 +10799,9 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge_data(
     using Class = KisBackingBudgetClass;
     QTest::addColumn<int>("beforeClass"); QTest::addColumn<int>("afterClass");
     QTest::addColumn<int>("newClass"); QTest::addColumn<int>("members");
-    QTest::addColumn<int>("selected"); QTest::addColumn<bool>("neutral");
+    QTest::addColumn<int>("selected"); QTest::addColumn<bool>("compatible");
     QTest::addColumn<bool>("commit"); QTest::addColumn<bool>("borrowed");
-    struct Case { Class before, after, added; int members, selected; bool neutral; };
+    struct Case { Class before, after, added; int members, selected; bool compatible; };
     const Case cases[] = {
         {Class::Current, Class::RetainedHistory, Class::ActivePending, 1, 1, false},
         {Class::ActivePending, Class::Current, Class::Current, 1, 1, false},
@@ -10811,7 +10811,8 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge_data(
         {Class::Current, Class::RetainedHistory, Class::ActivePending, 2, 2, false},
         {Class::Current, Class::RetainedHistory, Class::IdleCapacity, 2, 2, true},
         {Class::Current, Class::RetainedHistory, Class::ActivePending, 255, 2, true},
-        {Class::Current, Class::RetainedHistory, Class::Current, 2, 1, true}
+        {Class::Current, Class::RetainedHistory, Class::Current, 2, 1, true},
+        {Class::RetainedHistory, Class::RetirementDebt, Class::ActivePending, 49, 1, true}
     };
     for (size_t i = 0; i < std::size(cases); ++i)
         for (bool commit : {false, true}) for (bool borrowed : {false, true}) {
@@ -10819,17 +10820,20 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge_data(
             QTest::newRow(qPrintable(QStringLiteral("case%1-commit%2-borrowed%3")
                 .arg(i).arg(commit).arg(borrowed)))
                 << int(c.before) << int(c.after) << int(c.added) << c.members
-                << c.selected << c.neutral << commit << borrowed;
+                << c.selected << c.compatible << commit << borrowed;
         }
 }
 
 void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge()
 {
     QFETCH(int, beforeClass); QFETCH(int, afterClass); QFETCH(int, newClass);
-    QFETCH(int, members); QFETCH(int, selected); QFETCH(bool, neutral);
+    QFETCH(int, members); QFETCH(int, selected); QFETCH(bool, compatible);
     QFETCH(bool, commit); QFETCH(bool, borrowed);
     using Class = KisBackingBudgetClass;
     const auto before = Class(beforeClass), after = Class(afterClass), added = Class(newClass);
+    const Class priority[] = {Class::Current, Class::ActivePending, Class::InFlight,
+        Class::RetainedHistory, Class::OptionalCache, Class::IdleCapacity,
+        Class::MetadataArena, Class::RetirementDebt};
     KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
     KisBackingBudgetController budget(limits);
     KisPageOwnerLedger owner; owner.attachBackingBudget(budget);
@@ -10887,7 +10891,7 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge()
     void *filler = allocateTestStoragePressure(&budget, fillerBytes, 1);
     const auto releaseFiller = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, fillerBytes, 1); });
     QCOMPARE(metadata(), limits.metadataArenaBytes);
-    // Repeated identity remains invalid, even when its fee would be neutral.
+    // Repeated identity remains invalid, even when its fee would be compatible.
     QVERIFY(!owner.registerBacking(handles[0], reservation, added, &error, &record));
     QVERIFY(record && reservation.isValid());
     bool accepted = owner.registerBacking(alias, reservation, added, &error, &record);
@@ -10900,29 +10904,32 @@ void KisPageStoreReferenceTest::backingRegistrationPreservesPreparedCharge()
         accepted = owner.registerBacking(alias, reservation, added, &error, &record);
         QCOMPARE(metadata(), oldMetadata + quint64(80));
     }
-    QCOMPARE(accepted, neutral);
+    QCOMPARE(accepted, compatible);
     for (const auto &handle : handles) QCOMPARE(owner.backingClass(handle), before);
-    QCOMPARE(bool(record), !neutral);
-    QCOMPARE(reservation.isValid(), !neutral);
-    if (neutral) {
+    QCOMPARE(bool(record), !compatible);
+    QCOMPARE(reservation.isValid(), !compatible);
+    if (compatible) {
         QCOMPARE(owner.backingClass(alias), added);
-        QCOMPARE(budget.usage().buckets[size_t(before)].live.cpuRam, quint64(4096));
+        Class currentCharge = Class::Count;
+        for (auto kind : priority) if (kind == before || kind == added) { currentCharge = kind; break; }
+        for (auto kind : priority) {
+            if (kind == Class::MetadataArena) continue;
+            QCOMPARE(budget.usage().buckets[size_t(kind)].live.cpuRam,
+                     kind == currentCharge ? quint64(4096) : quint64(0));
+        }
     } else QCOMPARE(owner.backingClass(alias), Class::Count);
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
     if (commit) owner.commitBackingChanges(std::move(claim));
     else claim.release();
     for (int i = 0; i < members; ++i)
         QCOMPARE(owner.backingClass(handles[i]), commit && i < selected ? after : before);
-    if (!neutral) {
+    if (!compatible) {
         // Refusal retained the original inputs; ending the real dependency
         // permits the same registration without rebuilding its responsibility.
         QVERIFY2(owner.registerBacking(alias, reservation, added, &error, &record), qPrintable(error));
     }
     QVERIFY(!record && !reservation.isValid());
     handles.push_back(alias);
-    const Class priority[] = {Class::Current, Class::ActivePending, Class::InFlight,
-        Class::RetainedHistory, Class::OptionalCache, Class::IdleCapacity,
-        Class::MetadataArena, Class::RetirementDebt};
     Class charge = Class::Count;
     for (auto kind : priority) {
         if (kind == added || (kind == before && (!commit || selected < members))
