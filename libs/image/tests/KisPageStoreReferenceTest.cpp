@@ -1352,9 +1352,17 @@ private Q_SLOTS:
     void publicationResourceWindow_data()
     {
         QTest::addColumn<bool>("native"); QTest::addColumn<int>("pages"); QTest::addColumn<int>("outcome");
+        QTest::addColumn<int>("shape");
         for (bool native : {false, true}) for (int pages : {1, 17}) for (int outcome = 0; outcome != 3; ++outcome)
             QTest::newRow(qPrintable(QStringLiteral("native%1-pages%2-outcome%3").arg(native).arg(pages).arg(outcome)))
-                << native << pages << outcome;
+                << native << pages << outcome << 0;
+        for (bool native : {false, true}) for (int shape : {1, 2, 3})
+            for (int outcome = 0; outcome != (shape == 3 ? 1 : 3); ++outcome)
+                QTest::newRow(qPrintable(QStringLiteral("native%1-shape%2-outcome%3").arg(native).arg(shape).arg(outcome)))
+                    << native << 17 << outcome << shape;
+        for (int outcome = 0; outcome != 3; ++outcome)
+            QTest::newRow(qPrintable(QStringLiteral("mixed-outcome%1").arg(outcome)))
+                << true << 17 << outcome << 4;
     }
     void publicationResourceWindow();
     void editValuesGroupLifetimeAndPressure();
@@ -7201,7 +7209,7 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
 
 void KisPageStoreReferenceTest::publicationResourceWindow()
 {
-    QFETCH(bool, native); QFETCH(int, pages); QFETCH(int, outcome);
+    QFETCH(bool, native); QFETCH(int, pages); QFETCH(int, outcome); QFETCH(int, shape);
     auto completions = std::make_shared<KisCompletionRegistry>();
     KisTiles3PageReplicaProvider provider;
     const auto descriptor = allocationDescriptor();
@@ -7217,11 +7225,15 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
     std::vector<std::unique_ptr<KisPagePrivateWrite>> originals;
     std::vector<KisPagePublicationChange> rows;
     QVector<KisPageTransition> commits;
+    std::vector<KisPageMetadataCoordinator::PublicationChange> generic;
     std::vector<std::shared_ptr<KisCpuResidentBinding>> bindings;
     std::vector<KisPageViewTestAccess::ReadEdge> captures;
     rows.reserve(size_t(pages));
     for (int i = 0; i < pages; ++i) {
-        const auto base = pageVersion(i, 1), target = pageVersion(i, 2);
+        const int column = shape == 1 ? pages - 1 - i : i;
+        const bool bound = shape != 3 && (shape != 2 || i % 3 != 1);
+        const bool nativePage = native && (shape != 4 || i % 2 == 0);
+        const auto base = pageVersion(column, 1), target = pageVersion(column, 2);
         const auto allocated = provider.prepareWrite({quint64(1000 + i)}, target, descriptor,
             KisPageAccessDomain::CpuRam, KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
         QVERIFY(allocated.isValid());
@@ -7229,9 +7241,9 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
         // These are provider-created bindings and real allocation identities;
         // no test writes the gate/retired state or manufactures a lock receipt.
         QVERIFY(provider.prepareCpuPublication(allocated.replica, descriptor, binding));
-        bindings.push_back(binding);
+        if (bound) bindings.push_back(binding);
         auto page = initialPageState(base, replica(base, 1, 1, quint64(10000 + i)));
-        if (!native) {
+        if (!nativePage) {
             page.versions.append({target, KisPagePublicationState::Prepared,
                 {{allocated.replica, KisReplicaValidity::Valid, {}, {}, 0, {}}}, allocated.replica, tx.id, {}});
             page.nextGeneration = {3};
@@ -7241,33 +7253,45 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
         change.kind = KisPageTransitionKind::CommitTransaction; change.version = target;
         change.transaction = tx.id; change.imageEpoch = {2};
         commits.append(change);
-        if (native) {
+        if (nativePage) {
             auto original = std::make_unique<KisPagePrivateWrite>(edit);
             KisPageWriteInput write;
             write.baseVersion = base; write.version = target; write.source = page.versions.first().authority;
             write.transaction = tx.id; write.operation = {quint64(2000 + i)};
             QVERIFY(metadata.preparePrivateValue(write, original.get(), nullptr));
             QVERIFY(metadata.acceptPrivateTarget(write, write.source, allocated.replica, original.get(), 64));
-            original->binding() = binding;
+            if (bound) original->binding() = binding;
             QVERIFY(metadata.completePrivateWrite(original.get()));
             rows.emplace_back(KisPagePublicationChange::Replacement{original.get()});
             originals.push_back(std::move(original));
         } else {
+            generic.push_back({change.kind, change.version, change.target});
             auto capture = KisPageViewTestAccess::readEdge(metadata, target); QVERIFY(capture);
             captures.push_back(std::move(capture));
-            QCOMPARE(metadata.installCpuReadBinding(allocated.replica, binding).binding, binding);
+            if (bound) QCOMPARE(metadata.installCpuReadBinding(allocated.replica, binding).binding, binding);
         }
     }
     if (native) {
         QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
-        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(pages));
+        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(originals.size()));
         // Retrying the original Frame neither reseals nor exports new proofs.
         QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
-        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(pages));
+        QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(originals.size()));
     }
-    auto candidate = native ? metadata.prepareAcceptance(tx, {rows.data(), rows.size()})
+    const auto root = view.root();
+    auto candidate = shape == 4
+        ? metadata.prepareAcceptance(tx, {rows.data(), rows.size()}, nullptr, {2}, false,
+            generic.data(), qsizetype(generic.size()), &root)
+        : native ? metadata.prepareAcceptance(tx, {rows.data(), rows.size()})
         : metadata.preparePublication(tx, view.root(), {2}, commits);
     QVERIFY(candidate.isValid());
+    // A rejected installer must release every actual Resource, and retry
+    // must recapture from the input rather than reuse the reordered scratch.
+    bool declined = false;
+    QVERIFY(!candidate.acceptCpuResources(&declined, [](void *p) {
+        *static_cast<bool *>(p) = true; return false;
+    }));
+    QVERIFY(declined);
     if (outcome == 1) bindings.back()->revoke(); // After preparation, before actual acceptance.
     QSemaphore attempted, finished;
     std::thread revoker;
@@ -7282,7 +7306,7 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
             blocked = started && !finished.tryAcquire(1, 30);
         }
         installed = metadata.installAcceptance(std::move(candidate), tx, nullptr,
-            native ? KisImageEpochId{} : KisImageEpochId{2}, &cleanup);
+            native && shape != 4 ? KisImageEpochId{} : KisImageEpochId{2}, &cleanup);
         return installed;
     };
     const bool accepted = candidate.acceptCpuResources(&install,

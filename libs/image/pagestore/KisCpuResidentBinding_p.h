@@ -57,7 +57,9 @@ public:
 protected:
     explicit KisCpuResidentBinding(const KisReplicaHandle &handle)
         : m_slot(handle.physicalSlotIdentity()), m_incarnation(handle.allocation.generation),
-          m_version(handle.version), m_domain(handle.domain), m_layout(handle.layout)
+          m_key(handle.version.key), m_generation(handle.version.generation),
+          m_defaultPixelRevision(handle.version.defaultPixelRevision),
+          m_domain(handle.domain), m_layout(handle.layout)
     { Q_ASSERT(handle.isValid()); }
     virtual void *pinStorage(bool residentOnly, KisCpuResidentReadStatus *status) = 0;
     virtual void *pinResidentStorageAfterGateWait(KisCpuResidentReadStatus *status)
@@ -82,10 +84,15 @@ private:
     enum class WriteState : quint8 { Idle, Active, Reserved, Handoff };
     KisReplicaAllocationIdentity allocationIdentityLocked() const
     { return {m_slot.provider, m_slot.providerEpoch, {m_slot.slot, m_incarnation}}; }
+    bool matchesVersionLocked(const KisPageVersion &version) const
+    {
+        return m_key == version.key && m_generation == version.generation
+            && m_defaultPixelRevision == version.defaultPixelRevision;
+    }
     bool matchesHandleLocked(const KisReplicaHandle &expected) const
     {
         return allocationIdentityLocked() == expected.allocationIdentity()
-            && m_version == expected.version && m_domain == expected.domain && m_layout == expected.layout;
+            && matchesVersionLocked(expected.version) && m_domain == expected.domain && m_layout == expected.layout;
     }
     KisReplicaHandle projectHandle(const KisPageVersion &version, quint64 incarnation) const;
     bool prepareHandoff(const KisReplicaHandle &source, const KisPageVersion &target,
@@ -114,12 +121,16 @@ private:
     WriteState m_writeState = WriteState::Idle;
     bool m_retired = false;
     void *m_data = nullptr;
-    // Physical facts never change during this binding's lifetime. Only the
-    // logical incarnation/version advance, together under the original gate.
+    // Physical facts and logical page never change during this lifetime.
+    // The immutable key also orders multi-Resource acceptance gates without
+    // reading mutable version state. Only incarnation/generation/default
+    // revision advance, together under the original gate.
     // External handles are projections, never another mutable resource record.
     const KisReplicaPhysicalSlotIdentity m_slot;
     quint64 m_incarnation;
-    KisPageVersion m_version;
+    const KisPageKey m_key;
+    KisPageGeneration m_generation;
+    quint64 m_defaultPixelRevision;
     const KisPageAccessDomain m_domain;
     const KisReplicaLayout m_layout;
     std::shared_ptr<KisPageReadinessSignal> m_retirementReadiness;

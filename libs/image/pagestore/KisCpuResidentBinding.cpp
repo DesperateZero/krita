@@ -39,7 +39,7 @@ bool KisCpuResidentBinding::matchesReadIdentity(
     const KisReplicaAllocationIdentity &expected, const KisPageVersion &version) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return !m_retired && allocationIdentityLocked() == expected && m_version == version;
+    return !m_retired && allocationIdentityLocked() == expected && matchesVersionLocked(version);
 }
 
 bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
@@ -92,7 +92,9 @@ void KisCpuResidentBinding::finishHandoff(const KisPageVersion *target) noexcept
         // Complete the already issued exclusive capability. Revoke closes
         // future access but cannot steal this in-flight physical obligation.
         Q_ASSERT(m_incarnation != std::numeric_limits<quint64>::max());
-        m_version = *target;
+        Q_ASSERT(target->key == m_key);
+        m_generation = target->generation;
+        m_defaultPixelRevision = target->defaultPixelRevision;
         ++m_incarnation;
     }
     startStorageTransition();
@@ -491,7 +493,7 @@ bool KisCpuResidentBinding::retire(const KisReplicaAllocationIdentity &expected)
 KisReplicaAllocationIdentity KisCpuResidentBinding::readIdentity(const KisPageVersion &version) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
-    return m_readers && !m_retired && m_version == version
+    return m_readers && !m_retired && matchesVersionLocked(version)
         ? allocationIdentityLocked() : KisReplicaAllocationIdentity{};
 }
 

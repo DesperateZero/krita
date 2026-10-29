@@ -2895,6 +2895,28 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
 {
     if (!accept) return false;
     using Resource = KisPageCpuPublicationResource;
+    // Every binding keeps its logical key for its whole physical lifetime.
+    // The address only breaks ties between distinct gates for the same key;
+    // equal exported identities do not imply the same actual Resource.
+    const auto before = [](const Resource &a, const Resource &b) {
+        const auto &ka = a.binding->m_key, &kb = b.binding->m_key;
+        if (ka.surface.value != kb.surface.value) return ka.surface.value < kb.surface.value;
+        if (ka.page.row != kb.page.row) return ka.page.row < kb.page.row;
+        if (ka.page.column != kb.page.column) return ka.page.column < kb.page.column;
+        return std::less<KisCpuResidentBinding *>{}(a.binding, b.binding);
+    };
+    using It = KisPublicationMemberIterator<Resource, &KisPagePublicationChange::resourceAcceptance>;
+    It nativeBegin(m_rows.begin());
+    auto *cold = data && !data->publications.empty() ? data->publications.begin() : nullptr;
+    const auto column = +[](Data::Publication &row) -> Resource & { return row.resourceAcceptance; };
+    auto coldBegin = boost::make_transform_iterator(cold, column);
+    size_t nativeTotal = 0, coldTotal = 0;
+    bool nativeOrdered = true, coldOrdered = true;
+    const auto append = [&](Resource resource, auto begin, size_t &count, bool &ordered) {
+        if (!resource.binding) return;
+        if (ordered && count && before(resource, begin[ptrdiff_t(count - 1)])) ordered = false;
+        begin[ptrdiff_t(count++)] = resource;
+    };
     const auto capture = [](const ShardRecordStore &records, const KisPageValueCell *value) {
         Resource resource;
         if (value && value->native.nativeBinding && value->native.nativeReplica == value->authorityReplica) {
@@ -2906,21 +2928,24 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
     // Store admission excludes authority/placement edits here. Original
     // candidates retain the Values and any displaced references through the
     // synchronous installer. Read pins only change the Resource gate state.
+    // Compact only actual Resources into the original borrowed columns. The
+    // replacement/metadata inputs are untouched; unused tails are not read.
     for (auto &row : m_rows) {
-        row.resourceAcceptance = {};
         if (row.replacement.removal) continue;
+        Resource resource;
         if (const auto *native = row.replacement.native) {
             // The private result already owns its final primary replica.
             if (!native->hasValue()) return false;
-            if (native->binding()) row.resourceAcceptance = {
+            if (native->binding()) resource = {
                 native->binding().get(), native->value, &native->value->primaryReplica};
         } else {
             auto &work = row.metadataAcceptance;
             auto *shard = static_cast<MetadataShard *>(work.shard);
             if (!shard) continue;
             QMutexLocker lock(&shard->mutex);
-            row.resourceAcceptance = capture(shard->records, shard->records.version(work.replacementSlot));
+            resource = capture(shard->records, shard->records.version(work.replacementSlot));
         }
+        append(resource, nativeBegin, nativeTotal, nativeOrdered);
     }
     if (data) for (size_t i = 0; i < data->publications.size(); ++i) {
         auto &publication = data->publications[i];
@@ -2929,21 +2954,15 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
             publication.next.publishedDefaultPixelRevision};
         QMutexLocker lock(&entry.shardOwner->mutex);
         KisVersionSlotId slot;
-        publication.resourceAcceptance = capture(entry.shardOwner->records,
-            entry.shardOwner->records.findVersion(target, &slot) ? entry.shardOwner->records.version(slot) : nullptr);
+        append(capture(entry.shardOwner->records,
+            entry.shardOwner->records.findVersion(target, &slot) ? entry.shardOwner->records.version(slot) : nullptr),
+            coldBegin, coldTotal, coldOrdered);
     }
-    using It = KisPublicationMemberIterator<Resource, &KisPagePublicationChange::resourceAcceptance>;
-    const auto before = [](const Resource &a, const Resource &b) {
-        return std::less<KisCpuResidentBinding *>{}(a.binding, b.binding);
-    };
-    It nativeBegin(m_rows.begin()), nativeEnd(m_rows.end());
-    std::sort(nativeBegin, nativeEnd, before);
-    auto *cold = data && !data->publications.empty() ? data->publications.begin() : nullptr;
-    const size_t coldCount = cold ? data->publications.size() : 0;
-    const auto column = +[](Data::Publication &row) -> Resource & { return row.resourceAcceptance; };
-    auto coldBegin = boost::make_transform_iterator(cold, column);
-    auto coldEnd = coldCount ? coldBegin + ptrdiff_t(coldCount) : coldBegin;
-    if (coldCount > 1) std::sort(coldBegin, coldEnd, before);
+    // Canonical rows already have key order. Arbitrary cold/public inputs
+    // retain a bounded sort, with the SAME global order as native acceptance.
+    if (!nativeOrdered) std::sort(nativeBegin, nativeBegin + ptrdiff_t(nativeTotal), before);
+    if (!coldOrdered) std::sort(coldBegin, coldBegin + ptrdiff_t(coldTotal), before);
+    if (!nativeTotal && !coldTotal) return accept(context);
 
     size_t nativeCount = 0, coldTaken = 0;
     KisCpuResidentBinding *last = nullptr;
@@ -2956,18 +2975,17 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
                 && !before(nativeBegin[ptrdiff_t(nativeCount - 1)], coldBegin[ptrdiff_t(coldTaken - 1)]));
             const auto &resource = fromNative ? *(nativeBegin + ptrdiff_t(--nativeCount))
                 : *(coldBegin + ptrdiff_t(--coldTaken));
-            if (resource.binding && resource.binding != released) {
+            if (resource.binding != released) {
                 resource.binding->m_mutex.unlock();
                 released = resource.binding;
             }
         }
     });
-    while (nativeCount < m_rows.size() || coldTaken < coldCount) {
-        const bool fromNative = coldTaken == coldCount || (nativeCount < m_rows.size()
+    while (nativeCount < nativeTotal || coldTaken < coldTotal) {
+        const bool fromNative = coldTaken == coldTotal || (nativeCount < nativeTotal
             && !before(coldBegin[ptrdiff_t(coldTaken)], nativeBegin[ptrdiff_t(nativeCount)]));
         const auto &resource = fromNative ? *(nativeBegin + ptrdiff_t(nativeCount++))
             : *(coldBegin + ptrdiff_t(coldTaken++));
-        if (!resource.binding) continue;
         if (resource.binding != last) {
             resource.binding->m_mutex.lock();
             last = resource.binding;
