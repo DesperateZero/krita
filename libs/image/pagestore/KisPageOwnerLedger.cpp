@@ -357,6 +357,20 @@ public:
         return false;
     }
 
+    // Under the ledger gate, an independent new member may coexist with a
+    // prepared change only if it preserves both fee endpoints. Selected rows,
+    // their credit and the admitted delta then stay valid on commit or cancel.
+    bool acceptsNewMember(const PhysicalBackingRecord &physical,
+                          KisBackingBudgetClass budgetClass) const noexcept
+    {
+        const auto *claim = physical.classClaim;
+        if (!claim) return true;
+        if (claim == HandoffClaim
+            || !KisPageClassCounts::preservesCharge(budgetClass, physical.chargedClass)) return false;
+        while (claim->next) claim = claim->next;
+        return KisPageClassCounts::preservesCharge(budgetClass, claim->chargedAfter);
+    }
+
     // Caller owns the original record and holds mutex. Deferred storage and
     // headroom destruction belong to its lock-free exit, including claim waits.
     bool settleBacking(KisPageRetirementRecord &original,
@@ -704,9 +718,9 @@ public:
         const bool changed = physical->changeClass(before, change.after);
         Q_ASSERT(changed);
         Q_UNUSED(changed);
-        // The claim froze the complete physical group at preparation. Only
-        // its final row installs the already admitted charge; intermediate
-        // alias classes are not another budget transaction.
+        // The claim fixes selected members and both fee endpoints. Independent
+        // additions preserve these endpoints; only the final selected row
+        // installs the admitted charge, without intermediate fee transactions.
         if (change.chargedAfter != KisBackingBudgetClass::Count)
             physical->chargedClass = change.chargedAfter;
         found->second.budgetClass = change.after;
@@ -1286,7 +1300,7 @@ try {
             physical = installed.first;
             node.release(); // The original physical index owns this endpoint.
         } else {
-            if (physical->domainClaim || physical->classClaim) {
+            if (physical->domainClaim || !d->acceptsNewMember(*physical, budgetClass)) {
                 KisPageStoreDetail::setError(
                     error, QStringLiteral("shared physical backing transition is active"));
                 return false;
