@@ -9901,6 +9901,17 @@ void KisPageStoreReferenceTest::mutationStorageGrowthIsStableAndCharged()
         cold.erase(0);
         QVERIFY(!cold.at(0));
         QVERIFY(live() > 0); // Retained capacity remains charged after erasure.
+        const auto old = cold.first();
+        const auto bytes = cold.storageBytes();
+        const auto charged = live();
+        for (int phase = 0; phase < 4; ++phase) {
+            cold.clearValues();
+            QCOMPARE(cold.size(), size_t(0)); QVERIFY(!cold.at(old));
+            QCOMPARE(cold.storageBytes(), bytes); QCOMPARE(live(), charged);
+            cold.emplace_back(std::make_unique<int>(phase));
+            QCOMPARE(**cold.at(cold.first()), phase);
+            QCOMPARE(cold.storageBytes(), bytes); QCOMPARE(live(), charged);
+        }
     }
     QCOMPARE(live(), controlBytes);
 }
@@ -9940,6 +9951,23 @@ void KisPageStoreReferenceTest::mutationWriteSetRetainsCapacityWithoutPermission
     QVERIFY(!writes.at(old)); QVERIFY(!writes.find(pageKey(0)));
     QVERIFY(!(writes.handleOf(*writes.find(pageKey(31))) == old));
     QCOMPARE(budget.usage().backpressureCount, pressure);
+    // Large -> small -> larger phases reuse the SAME funded directory and
+    // original slot capacity under a completely full hard budget. Resetting
+    // logical size must not force another temporary hash allocation.
+    int base = 64;
+    for (int count : {1, 9, 3, 16}) {
+        writes.clearValues();
+        for (int i = count - 1; i >= 0; --i) {
+            intent.key = pageKey(base + i); writes.getOrCreate(intent);
+        }
+        const auto rows = writes.publicationRows();
+        QCOMPARE(rows.size(), size_t(removals ? count : 0));
+        QCOMPARE(writes.size(), count); QCOMPARE(writes.storageBytes(), capacity);
+        for (int i = 0; i < count; ++i) QVERIFY(writes.find(pageKey(base + i)));
+        QVERIFY(!writes.at(old)); QVERIFY(!writes.find(pageKey(0)));
+        QCOMPARE(budget.usage().backpressureCount, pressure);
+        base += 32;
+    }
 }
 
 void KisPageStoreReferenceTest::mutationStorageReclaimsBlocksAndRejectsABA()

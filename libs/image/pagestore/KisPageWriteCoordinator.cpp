@@ -2630,9 +2630,8 @@ KisMutationPageEntry &KisMutationWriteSet::getOrCreate(const KisPageWriteIntent 
     // expected-constant lookup during mutable input; never shift an unbounded
     // sorted suffix for each arriving key. Freeze later sorts pointers once.
     if ((!hashed && size() >= 8) || (hashed && size_t(size()) + 1 > index->size() / 2)) {
-        auto prepared = prepareDirectory(size() + 1);
-        position = directoryBucket(prepared, intent.key);
-        index.emplace(std::move(prepared));
+        growDirectory(size() + 1);
+        position = directoryBucket(*index, intent.key);
         hashed = true;
     } else if (!hashed && index->size() == index->capacity()) {
         index->reserve(index->size() + std::max(size_t(1), size_t(index->size())));
@@ -2659,7 +2658,8 @@ KisPagePublicationRows KisMutationWriteSet::publicationRows()
         // Reuse the same directory allocation. No page/permission entry moves
         // and no second D index or key/proof snapshot is built.
         size_t used = 0;
-        for (auto *source : *index) if (source) (*index)[used++] = source;
+        for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot))
+            (*index)[used++] = at(slot);
         index->resize(used);
         const auto active = [](const auto *row) {
             const auto *entry = static_cast<const KisMutationPageEntry *>(row);
@@ -2793,7 +2793,7 @@ void KisMutationWriteSet::reserveKnownTargetCount(qsizetype count)
         overflow.reserveTogether(size_t(count - inlineCapacity));
     Q_ASSERT(index && !publishedCount);
     if (count > 8 && (!directoryHashed() || size_t(count) > index->size() / 2))
-        index.emplace(prepareDirectory(count));
+        growDirectory(count);
     else if (!directoryHashed()) index->reserve(size_t(count));
 }
 
@@ -2810,16 +2810,9 @@ void KisMutationWriteSet::clearValues() noexcept
     if (semanticRows) semanticRows->clear();
     publishedCount.reset();
     Q_ASSERT(index);
-    // Frozen D resized this same allocation to its live population. Restore
-    // the largest power-of-two directory that already fits; no growth is
-    // needed merely to start the next logical phase.
-    const size_t capacity = index->capacity();
+    // Retain physical capacity, not the preceding phase's logical bucket
+    // population. A new small operation starts small in this same allocation.
     index->clear();
-    if (capacity >= 16) {
-        size_t buckets = 16;
-        while (buckets <= capacity / 2) buckets *= 2;
-        index->resize(buckets, nullptr);
-    }
 }
 
 size_t KisMutationWriteSet::storageBytes() const noexcept
@@ -2848,7 +2841,7 @@ size_t KisMutationWriteSet::directoryBucket(const Index &table, const KisPageKey
     return position;
 }
 
-KisMutationWriteSet::Index KisMutationWriteSet::prepareDirectory(qsizetype count) const
+void KisMutationWriteSet::growDirectory(qsizetype count)
 {
     size_t buckets = 32;
     while (buckets / 2 < size_t(count)) {
@@ -2856,13 +2849,17 @@ KisMutationWriteSet::Index KisMutationWriteSet::prepareDirectory(qsizetype count
             throw std::bad_alloc();
         buckets *= 2;
     }
-    Index result(index->get_allocator());
-    result.resize(buckets, nullptr);
-    for (auto *source : *index) if (source) {
-        const auto *entry = static_cast<const KisMutationPageEntry *>(source);
-        result[directoryBucket(result, entry->key())] = source;
+    const size_t previous = index->size();
+    Q_ASSERT(previous <= buckets);
+    // Pointer growth has the strong failure guarantee. Only after it succeeds
+    // rebuild from the original live rows, independent of directory contents.
+    // Reuse already funded capacity and initialize only today's logical range.
+    index->resize(buckets, nullptr);
+    std::fill_n(index->begin(), previous, nullptr);
+    for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot)) {
+        auto *entry = at(slot);
+        (*index)[directoryBucket(*index, entry->key())] = entry;
     }
-    return result;
 }
 
 qsizetype KisMutationWriteSet::size() const

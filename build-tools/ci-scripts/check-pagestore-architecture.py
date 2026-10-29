@@ -1700,8 +1700,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             errors.append("fresh final payload restored premature metadata completion")
         page_begin = store_text.find("class KisPageMutationSession::Private")
         page_end = store_text.find("struct ColdPageSet", page_begin)
-        for contract in ("kisAllocateMutationStorage(budget, bytes, alignof(Block))",
-                         "kisFreeMutationStorage(budget, block, bytes, alignof(Block))",
+        for contract in ("kisAllocateMutationStorage(&scope->owner->backingBudget, bytes, alignof(Block))",
+                         "kisFreeMutationStorage(&scope->owner->backingBudget, block, bytes, alignof(Block))",
+                         "scope->releaseRowResults()",
                          "slot->page.reset()", "coldPages.takeReleasedBlocks()", "entry.setColdPage(page)"):
             if contract not in store_text:
                 errors.append(f"mutation D lost original budgeted workspace/cleanup: {contract}")

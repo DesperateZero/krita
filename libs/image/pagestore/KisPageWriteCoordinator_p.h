@@ -195,7 +195,7 @@ private:
     void rebindInline(const KisMutationPageEntry *old) noexcept;
     size_t directoryPosition(const KisPageKey &) const;
     size_t directoryBucket(const Index &, const KisPageKey &) const noexcept;
-    Index prepareDirectory(qsizetype count) const;
+    void growDirectory(qsizetype count);
     bool directoryHashed() const { return index && !publishedCount && index->size() > size_t(size()); }
 
     KisPageMetadataCoordinator *claimMetadata = nullptr;

@@ -649,7 +649,7 @@ class KisPageMutationSession::Private : public KisReusableMutationStorage
 {
 public:
     explicit Private(KisPageStore::Private *owner)
-        : writes(&owner->backingBudget), coldPages(owner) {}
+        : owner(owner), writes(&owner->backingBudget), coldPages(this) {}
     struct PageSlot;
     struct Page : KisPagePrivateWrite {
         explicit Page(KisPageEditValues &edit)
@@ -676,20 +676,24 @@ public:
             PageSlot *slots() { return reinterpret_cast<PageSlot *>(this + 1); }
             size_t bytes() const { return sizeof(Block) + count * sizeof(PageSlot); }
         };
-        KisBackingBudgetController *budget = nullptr;
+        // Borrow the containing original Frame instead of a second live-row
+        // chain. This replaces the former budget pointer; no scope growth.
+        Private *scope;
         KisPageEditValues values;
         Block *blocks = nullptr;
         PageSlot *free = nullptr;
         PageSlot *released = nullptr;
         size_t live = 0;
         size_t capacityBytes = 0;
-        explicit ColdPageSet(KisPageStore::Private *owner = nullptr)
-            : budget(owner ? &owner->backingBudget : nullptr) {}
-        ColdPageSet(ColdPageSet &&other) noexcept { *this = std::move(other); }
+        explicit ColdPageSet(Private *scope) : scope(scope) {}
+        ColdPageSet(ColdPageSet &&other) = delete;
         ColdPageSet &operator=(ColdPageSet &&other) noexcept {
             if (this != &other) {
-                clear(); budget = other.budget;
+                clear();
+                Q_ASSERT(scope->owner == other.scope->owner);
                 Q_ASSERT(!other.live);
+                // Capacity moves; the destination's original row owner does
+                // not. An old facade can still name the source tombstone.
                 values = std::move(other.values);
                 blocks = std::exchange(other.blocks, nullptr);
                 free = std::exchange(other.free, nullptr);
@@ -707,21 +711,8 @@ public:
         }
         void clearValues() noexcept {
             if (!live && !released) return;
-            free = released = nullptr;
-            live = 0;
-            for (auto *block = blocks; block; block = block->next) {
-                KisPagePrivateWrite *rows[KisPageEditValues::ReleaseBatch];
-                size_t count = 0;
-                for (size_t i = 0; i < block->count; ++i)
-                    if (block->slots()[i].page) rows[count++] = &*block->slots()[i].page;
-                values.release(rows, count);
-                for (size_t i = block->count; i > 0; --i) {
-                    auto *slot = block->slots() + i - 1;
-                    slot->page.reset();
-                    slot->next = free;
-                    free = slot;
-                }
-            }
+            scope->releaseRowResults();
+            Q_ASSERT(!live && !released);
         }
         void clear() noexcept {
             clearValues();
@@ -731,7 +722,7 @@ public:
                 const size_t bytes = block->bytes();
                 std::destroy_n(block->slots(), block->count);
                 block->~Block();
-                kisFreeMutationStorage(budget, block, bytes, alignof(Block));
+                kisFreeMutationStorage(&scope->owner->backingBudget, block, bytes, alignof(Block));
             }
             free = released = nullptr;
             live = 0;
@@ -747,6 +738,8 @@ public:
             void reset() noexcept {
                 // The scope gate excludes reuse until this unlocked cleanup
                 // returns. No provider/binding destructor runs under its gate.
+                auto *returned = head;
+                PageSlot *last = nullptr;
                 while (head) {
                     KisPagePrivateWrite *rows[KisPageEditValues::ReleaseBatch];
                     size_t count = 0;
@@ -760,10 +753,13 @@ public:
                         auto *slot = head;
                         head = slot->next;
                         slot->page.reset();
-                        slot->next = owner->free;
-                        owner->free = slot;
-                        --owner->live;
+                        last = slot;
                     }
+                    owner->live -= count;
+                }
+                if (last) {
+                    last->next = owner->free;
+                    owner->free = returned;
                 }
             }
         };
@@ -776,7 +772,7 @@ public:
                 // block; their addresses never move during acceptance/retry.
                 const size_t count = blocks ? std::min(KisPageEditValues::ReleaseBatch, std::max(size_t(2), admitted > live ? admitted - live : 0)) : 2;
                 const size_t bytes = sizeof(Block) + count * sizeof(PageSlot);
-                auto *block = new (kisAllocateMutationStorage(budget, bytes, alignof(Block))) Block;
+                auto *block = new (kisAllocateMutationStorage(&scope->owner->backingBudget, bytes, alignof(Block))) Block;
                 capacityBytes += kisPageStorageBytes(block, alignof(Block));
                 block->count = count;
                 // Empty optionals need no initialization of the absent Page.
@@ -997,8 +993,9 @@ public:
     void discardCapacityUnlocked()
     {
         Q_ASSERT(!admission.isValid() || admission.isTerminal());
+        // Cold results consume the original rows before their storage ends.
+        coldPages = ColdPageSet(this);
         writes = KisMutationWriteSet(&owner->backingBudget);
-        coldPages = ColdPageSet(owner);
         if (executionStorage) {
             kisFreeMutationStorage(&owner->backingBudget, executionStorage, 0, alignof(std::max_align_t));
             executionStorage = nullptr;
@@ -1189,14 +1186,14 @@ public:
             lock.relock();
         }
     }
-    void clearPublishedRows()
+    void releaseRowResults()
     {
         for (auto slot = writes.firstEntry(); slot.isValid(); slot = writes.nextEntry(slot)) {
             auto *entry = writes.at(slot);
             entry->setInitializationSource({});
-            entry->setColdPage(nullptr);
-            entry->publicationRow = nullptr;
+            erasePage(*entry);
         }
+        coldPages.takeReleasedBlocks().reset();
     }
     KisMutationPageEntry *claimEntryLocked(const KisPageWriteIntent &intent, QMutexLocker<QMutex> &lock,
                           KisPageWriteAdmission::ClaimOrigin origin,
@@ -1767,7 +1764,6 @@ KisPageMutationSession::Private::create(KisPageStore::Private *owner, size_t ini
         if (raw) kisFreeMutationStorage(&owner->backingBudget, raw, 0, alignof(Private));
         throw;
     }
-    scope->owner = owner;
     scope->allocationBytes = kisPageStorageBytes(scope, alignof(Private));
     scope->initialExecutionStorage = extra ? scope + 1 : nullptr;
     scope->initialExecutionCount = extra ? initialCount : 0;
@@ -3197,8 +3193,7 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     }
     phase.next(Phase::MutationSealCleanup, pageWork);
     overlay.finishUnlocked(lock);
-    d->clearPublishedRows();
-    d->coldPages.clearValues();
+    d->releaseRowResults();
     owner->retirementQueue.processAcceptedEffects(owner->backgroundReclamation);
     phase.next(Phase::MutationSealOwnerWait, pageWork);
     lock.relock();

@@ -718,19 +718,29 @@ public:
     void clearValues() noexcept
     {
         m_released.reset();
-        m_liveHead = m_liveTail = m_freeHead = m_freeTail = Invalid;
-        m_size = 0;
-        for (size_t b = 0; b < m_blocks.size(); ++b) {
-            auto &block = m_blocks[b].block;
-            if (!block) continue;
-            block->live = 0;
-            for (size_t i = 0; i < BlockElements; ++i) {
-                auto &slot = block->slots[i];
-                slot.value.reset();
-                slot.incarnation = 0;
-                appendLink(quint32(b * BlockElements + i), m_freeHead, m_freeTail);
-            }
+        // Empty funded slots already have their original free links. Return
+        // only this phase's live population; neither a large old directory
+        // nor unused reserve slots are logical work of the next phase.
+        for (auto index = m_liveHead; index != Invalid;) {
+            auto *slot = slotAt(index);
+            const auto next = slot->next;
+            slot->value.reset();
+            slot->incarnation = 0;
+            // Every live member of this phase is ending. No intermediate
+            // per-slot decrement is needed for the original block count.
+            m_blocks[index / BlockElements].block->live = 0;
+            index = next;
         }
+        // These same links already describe the complete returned set. Join
+        // the chains once, rather than unlinking/reinserting every live slot.
+        if (m_liveHead != Invalid) {
+            slotAt(m_liveTail)->next = m_freeHead;
+            if (m_freeHead != Invalid) slotAt(m_freeHead)->previous = m_liveTail;
+            else m_freeTail = m_liveTail;
+            m_freeHead = m_liveHead;
+        }
+        m_liveHead = m_liveTail = Invalid;
+        m_size = 0;
     }
     size_t storageBytes() const noexcept
     {
