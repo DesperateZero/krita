@@ -168,8 +168,8 @@ private Q_SLOTS:
     void testPageStoreImportRetention();
     void testPageStoreImportAdmission_data();
     void testPageStoreImportAdmission();
-    void testPageStoreImportPublicationRefusal_data();
-    void testPageStoreImportPublicationRefusal();
+    void testPageStoreImportPublicationCapacity_data();
+    void testPageStoreImportPublicationCapacity();
     void testPageStoreImportStreaming_data();
     void testPageStoreImportStreaming();
     void testPageStoreAdapterAfterAbort_data();

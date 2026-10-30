@@ -1453,31 +1453,6 @@ bool KisTiledDataManagerPageStoreBackend::preparePagePresence(
     return true;
 }
 
-bool KisTiledDataManagerPageStoreBackend::resolveCurrentPagePresenceInto(
-    const QVector<KisLogicalPageId> &pages, quint8 *scratch, qsizetype capacity, QString *error) const
-{
-    KisPageStoreDiagnosticTimer phase(store(), KisPageStoreDiagnosticPhase::MutationPresencePreflight,
-                                      quint64(pages.size()));
-    phase.next(KisPageStoreDiagnosticPhase::MutationPresenceResolve, quint64(pages.size()));
-    // Keep an overlay selector alive through metadata resolution, without
-    // retaining/freeze-copying that overlay or acquiring a physical read pin.
-    QReadLocker publicationLocker(&d->publicationLock);
-    KisPageReadView selector;
-    {
-        QMutexLocker lock(&d->mutex);
-        if (!d->operational) {
-            KisPageStoreDetail::setError(error, QStringLiteral("tiles3 PageStore is unavailable"));
-            return false;
-        }
-        selector = d->selectReadViewLocked(false);
-    }
-    const bool resolved = d->store->resolvePagePresenceInto(d->surface, pages, selector, scratch, capacity);
-    publicationLocker.unlock();
-    phase.next(KisPageStoreDiagnosticPhase::MutationPresenceResolved, quint64(pages.size()));
-    KisPageStoreDetail::setError(error, resolved ? QString{} : QStringLiteral("tiles3 page presence is unavailable"));
-    return resolved;
-}
-
 bool KisTiledDataManagerPageStoreBackend::hasCurrentThreadIteratorWrites() const
 {
     // The explicit iterator mutation scope is also the single same-thread
@@ -1722,6 +1697,18 @@ KisTiledDataManagerPageStoreBackend::acquireTile(
 
     const KisPageKey key{d->surface, {column, row}};
     if (selection) {
+        // Publication invalidates selection, not the original binding hint.
+        // Reuse it only after selecting the current Value and successfully
+        // pinning the exact allocation incarnation. A concurrent retag or a
+        // different Value falls through to the ordinary captured selection.
+        if (readCache && *readCache && !(*readCache)->readPinned()) {
+            KisPageVersion version;
+            KisSurfaceEpochState state;
+            if (pageStore->resolveTileReadIdentity(key, readView, &version, &state) &&
+                provider->readCacheMatchesVersion(readCache->get(), version) &&
+                (*readCache)->repinRead() == KisTilePageStoreLease::ReadPinResult::Ready)
+                return std::move(*readCache);
+        }
         auto view = pageStore->captureReadView(readView);
         publicationLocker.unlock();
         KisPageStoreReadPage read(pageStore, view, key, nullptr,

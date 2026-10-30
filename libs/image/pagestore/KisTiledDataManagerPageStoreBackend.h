@@ -294,10 +294,6 @@ private:
                                               KisSharedPtr<KisTile> candidate, bool *present);
 
     bool preparePagePresence(qsizetype count, QVarLengthArray<quint8, 64> *scratch, QString *error) const;
-    // Operation-private output storage; valid only after whole-query success.
-    // Caller prepares capacity before pixels; no allocation or retained view.
-    bool resolveCurrentPagePresenceInto(const QVector<KisLogicalPageId> &pages,
-                                        quint8 *scratch, qsizetype capacity, QString *error = nullptr) const;
     KisPageTransaction writableTransaction(bool *owned,
                                            QString *error = nullptr, bool requireIdle = false);
     KisPageMutationSession beginFrameSession(QString *error, bool requireIdle = false,
