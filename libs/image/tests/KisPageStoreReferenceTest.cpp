@@ -1211,6 +1211,41 @@ private Q_SLOTS:
             QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(count).arg(QString::fromLatin1(names[change])))) << count << change;
     }
     void viewCandidatesTrackActualDependencies();
+    void leaseCandidatesTrackActualDependencies_data()
+    {
+        QTest::addColumn<bool>("recoverable"); QTest::addColumn<bool>("preparedBase"); QTest::addColumn<int>("change");
+        const char *names[] = {"before-reader", "history-reader", "before-release", "before-last-use",
+            "independent-history", "authority-reader", "authority-changed", "generation-consumed",
+            "foreign-physical", "writer", "base-removed", "pin-headroom"};
+        for (bool recovery : {false, true}) for (bool prepared : {false, true}) for (int change = 0; change < 12; ++change) {
+            if ((recovery && (change == 8 || change == 11)) || (!prepared && change == 10)) continue;
+            QTest::newRow(qPrintable(QStringLiteral("recovery%1-prepared%2-%3").arg(recovery).arg(prepared)
+                .arg(QString::fromLatin1(names[change])))) << recovery << prepared << change;
+        }
+    }
+    void leaseCandidatesTrackActualDependencies();
+    void discardLeaseTracksDefaultMaterialization_data()
+    {
+        QTest::addColumn<bool>("indexed"); QTest::addColumn<bool>("materialize");
+        for (bool indexed : {false, true}) for (bool materialize : {false, true})
+            QTest::newRow(qPrintable(QStringLiteral("indexed%1-materialize%2").arg(indexed).arg(materialize))) << indexed << materialize;
+    }
+    void discardLeaseTracksDefaultMaterialization();
+    void logicalDefaultViewRejectsUnconsumedTarget_data()
+    {
+        QTest::addColumn<int>("mode");
+        QTest::newRow("restore-self") << 0;
+        QTest::newRow("replace-self") << 1;
+        QTest::newRow("replace-self-with-physical") << 2;
+    }
+    void logicalDefaultViewRejectsUnconsumedTarget();
+    void coldPublicationRequiresRegisteredPage_data()
+    {
+        QTest::addColumn<bool>("initialCell");
+        QTest::newRow("implicit-control") << false;
+        QTest::newRow("manifest-memory") << true;
+    }
+    void coldPublicationRequiresRegisteredPage();
     void localMutationRechecksPhysicalOwnershipAtAcceptance();
     void recoveryKeepsCachedBeforeIndependent();
     void publicationDirectoryStorageLifetime();
@@ -8178,6 +8213,218 @@ void KisPageStoreReferenceTest::viewCandidatesTrackActualDependencies()
     QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
 }
 
+void KisPageStoreReferenceTest::leaseCandidatesTrackActualDependencies()
+{
+    QFETCH(bool, recoverable); QFETCH(bool, preparedBase); QFETCH(int, change);
+    const KisPageTransaction tx{{74}, {1}};
+    auto page = pageWithHistory(3);
+    auto &base = preparedBase ? page.versions.last() : page.versions.first();
+    if (preparedBase) { base.publication = KisPagePublicationState::Prepared; base.preparedBy = tx.id; }
+    auto alternate = base.authority; alternate.allocation.slot = 10000;
+    base.replicas.append({alternate, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    const auto before = recoverable ? alternate : base.authority;
+    auto &beforeState = base.replicas[recoverable ? 1 : 0];
+    KisCompletionRegistry completions;
+    const auto ticket = completions.allocatePending(completions.registerSource(KisCompletionDomain::CpuJob));
+    if (change == 2) beforeState.readLeases.append({71});
+    if (change == 3) beforeState.pendingLastUses.append(ticket);
+    if (change == 11) beforeState.pinCount = std::numeric_limits<quint32>::max() - 1;
+    KisPageTransition write;
+    write.kind = recoverable ? KisPageTransitionKind::AcquireRecoverableWrite : KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = base.version; write.version = {page.key, page.nextGeneration};
+    write.source = before; write.target = recoverable ? base.authority : replica(write.version, 1, 1, 10001);
+    write.target.version = write.version;
+    if (recoverable) ++write.target.allocation.generation;
+    write.transaction = tx.id; write.operation = {75}; write.writer = {76};
+    const auto baseAuthority = base.authority;
+    KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
+    MetadataEffectReceiver receiver; attachEffects(metadata, receiver);
+    QVERIFY(metadata.configure(1)); QVERIFY(view.registerPage(metadata, page));
+    auto other = initialPageState(pageVersion(9, 1), replica(pageVersion(9, 1), 1, 1, 20000));
+    if (change == 8) QVERIFY(view.registerPage(metadata, other));
+    auto candidate = recoverable ? metadata.prepareRecoverableWrite(tx, write) : metadata.prepareLeaseWrite(tx, write);
+    QVERIFY(candidate.isValid());
+    const auto preparations = metadata.metrics().preparedMutationPages;
+    KisPageStateMachine oracle;
+    const auto apply = [&](const KisPageTransition &t, KisPageStateSnapshot &state) {
+        const auto expected = oracle.apply(state, t);
+        if (!expected.accepted) return false;
+        const auto actual = t.kind == KisPageTransitionKind::AcknowledgeLastUse
+            ? metadata.acknowledgeLastUse(t.version, t.target, completions.verifyTerminal(ticket))
+            : metadata.applyOwner(state.key, t);
+        if (!actual.accepted) return false;
+        state = expected.next; return true;
+    };
+    KisPageTransition t;
+    t.version = write.baseVersion; t.target = before; t.transaction = tx.id;
+    switch (change) {
+    case 0: case 1: case 5:
+        t.kind = KisPageTransitionKind::AcquireRead; t.lease = {72};
+        if (change == 1) { t.version = page.versions[1].version; t.target = page.versions[1].authority; }
+        if (change == 5) t.target = baseAuthority;
+        QVERIFY(apply(t, page)); break;
+    case 2:
+        t.kind = KisPageTransitionKind::ReleaseRead; t.lease = {71}; QVERIFY(apply(t, page)); break;
+    case 3:
+        t.kind = KisPageTransitionKind::AcknowledgeLastUse; t.completion = ticket;
+        QVERIFY(completions.complete(ticket, KisCompletionStatus::Succeeded)); QVERIFY(apply(t, page)); break;
+    case 4:
+        t.kind = KisPageTransitionKind::AttachHistoricalDefault; t.version = {page.key, {1}, 3};
+        t.target = replica(t.version, 1, 1, 10002); t.transaction = {}; QVERIFY(apply(t, page)); break;
+    case 6: case 11:
+        t.kind = KisPageTransitionKind::BeginAuthorityHandoff; t.source = baseAuthority; t.target = alternate;
+        t.operation = {77}; QVERIFY(apply(t, page));
+        if (change == 6) { t.kind = KisPageTransitionKind::CommitAuthorityHandoff; QVERIFY(apply(t, page)); }
+        break;
+    case 7: case 9:
+        t = write; t.kind = KisPageTransitionKind::AcquireWrite; t.source = baseAuthority;
+        t.target = replica(t.version, 1, 1, 10003); t.operation = {78}; t.writer = {79};
+        QVERIFY(apply(t, page));
+        if (change == 7) { t.kind = KisPageTransitionKind::CancelWrite; QVERIFY(apply(t, page)); }
+        break;
+    case 8:
+        t.kind = KisPageTransitionKind::AttachHistoricalDefault; t.version = {other.key, {1}, 2};
+        t.target = write.target; t.target.version = t.version; t.transaction = {}; QVERIFY(apply(t, other)); break;
+    case 10:
+        t.kind = KisPageTransitionKind::AbortPreparedVersion; t.target = {}; QVERIFY(apply(t, page)); break;
+    }
+    const bool reusable = change < 5 || (change == 5 && !recoverable);
+    // Cross-page occupancy is intentionally independent of the page stamp.
+    QCOMPARE(candidate.genericInputsChanged(), !reusable && change != 8);
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    const bool accepted = recoverable ? metadata.installRecoverableWrite(std::move(candidate), tx, nullptr, &cleanup)
+        : metadata.installLeaseWrite(std::move(candidate), tx, nullptr, &cleanup);
+    QCOMPARE(accepted, reusable);
+    QCOMPARE(metadata.metrics().preparedMutationPages, preparations);
+    if (accepted) {
+        auto next = oracle.apply(page, write); QVERIFY(next.accepted);
+        auto ready = write; ready.kind = KisPageTransitionKind::PrepareWrite;
+        next = oracle.apply(next.next, ready); QVERIFY(next.accepted); page = next.next;
+    }
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, view.root(), &actual));
+    comparePageRecords(actual, page);
+    if (change == 8) { QVERIFY(metadata.pageSnapshot(other.key, view.root(), &actual)); comparePageRecords(actual, other); }
+    while (!cleanup.isEmpty()) cleanup.clearBatch(1);
+    QCOMPARE(metadata.footprint().versionArena.outstandingReservations, quint64(0));
+    QCOMPARE(metadata.footprint().physicalSlotIndex.outstandingReservations, quint64(0));
+    QCOMPARE(metadata.footprint().overflowArena.outstandingReservations, quint64(0));
+}
+
+void KisPageStoreReferenceTest::discardLeaseTracksDefaultMaterialization()
+{
+    QFETCH(bool, indexed); QFETCH(bool, materialize);
+    const KisPageTransaction tx{{74}, {1}};
+    auto page = pageWithHistory(0); auto &base = page.versions.first();
+    base.version.defaultPixelRevision = 1; base.authority = {}; base.replicas.clear(); page.publishedDefaultPixelRevision = 1;
+    const auto identity = base.version;
+    KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
+    QVERIFY(metadata.configure(1));
+    KisImageEpochReferenceModel implicit;
+    if (indexed) QVERIFY(view.registerPage(metadata, page));
+    else {
+        KisImageEpochSnapshot initial; initial.epoch = {1};
+        initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+        initial.surfaces.append(surfaceEpochState());
+        QVERIFY(KisPageViewTestAccess::initialize(implicit, metadata, initial, nullptr));
+        QVERIFY(metadata.registerImplicitPage(identity));
+    }
+    const auto root = indexed ? view.root() : implicit.captureCommittedRoot();
+    KisPageTransition write; write.kind = KisPageTransitionKind::AcquireWrite;
+    write.baseVersion = identity; write.version = {page.key, page.nextGeneration};
+    write.target = replica(write.version, 1, 1, 10001); write.writeMode = KisPageWriteMode::DiscardContents;
+    write.transaction = tx.id; write.operation = {75}; write.writer = {76};
+    auto candidate = metadata.prepareLeaseWrite(tx, write); QVERIFY(candidate.isValid());
+    KisPageTransition t; t.kind = materialize ? KisPageTransitionKind::MaterializeDefault : KisPageTransitionKind::AttachHistoricalDefault;
+    t.version = materialize ? identity : KisPageVersion{page.key, {1}, 2};
+    t.target = replica(t.version, 1, 1, 10002);
+    KisPageStateMachine oracle;
+    auto next = oracle.apply(page, t); QVERIFY(next.accepted); page = next.next;
+    if (materialize && !indexed) t.kind = KisPageTransitionKind::AttachHistoricalDefault;
+    QVERIFY(metadata.applyOwner(page.key, t).accepted);
+    QCOMPARE(candidate.genericInputsChanged(), materialize);
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    QCOMPARE(metadata.installLeaseWrite(std::move(candidate), tx, nullptr, &cleanup), !materialize);
+    if (!materialize) {
+        next = oracle.apply(page, write); QVERIFY(next.accepted);
+        auto ready = write; ready.kind = KisPageTransitionKind::PrepareWrite;
+        next = oracle.apply(next.next, ready); QVERIFY(next.accepted); page = next.next;
+    }
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, root, &actual));
+    // An implicit current default is appended after actual records in this
+    // diagnostic. Version-set order is not part of the write/retention contract.
+    const auto less = [](const auto &a, const auto &b) {
+        return std::tie(a.version.generation.value, a.version.defaultPixelRevision)
+            < std::tie(b.version.generation.value, b.version.defaultPixelRevision);
+    };
+    std::sort(actual.versions.begin(), actual.versions.end(), less);
+    std::sort(page.versions.begin(), page.versions.end(), less);
+    comparePageRecords(actual, page);
+    while (!cleanup.isEmpty()) cleanup.clearBatch(1);
+    QCOMPARE(metadata.footprint().versionArena.outstandingReservations, quint64(0));
+}
+
+void KisPageStoreReferenceTest::logicalDefaultViewRejectsUnconsumedTarget()
+{
+    QFETCH(int, mode);
+    auto page = pageWithHistory(0); auto &base = page.versions.first();
+    base.version.defaultPixelRevision = 1; base.authority = {}; base.replicas.clear(); page.publishedDefaultPixelRevision = 1;
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    KisImageEpochReferenceModel model; KisImageEpochSnapshot initial; initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.surfaces.append(surfaceEpochState());
+    QVERIFY(KisPageViewTestAccess::initialize(model, metadata, initial, nullptr));
+    QVERIFY(metadata.registerImplicitPage(base.version));
+    KisPageTransition change; change.kind = mode ? KisPageTransitionKind::ReplaceDefaultPixel
+                                               : KisPageTransitionKind::RestoreCommittedVersion;
+    change.version = base.version; change.imageEpoch = {2};
+    if (mode == 2) change.target = replica(change.version, 1, 1, 10001);
+    const auto expected = KisPageStateMachine().apply(page, change);
+    QCOMPARE(expected.accepted, mode == 0);
+    const KisPageTransaction tx{{74}, {1}};
+    auto candidate = metadata.preparePublication(tx, model.captureCommittedRoot(), {2}, {change});
+    QCOMPARE(candidate.isValid(), expected.accepted);
+    if (candidate.isValid()) QVERIFY(metadata.installPublication(std::move(candidate), tx, {2}));
+    // Standalone metadata acceptance does not publish a new root. Neither
+    // branch may invent a physical cell or alter the original logical default.
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, model.captureCommittedRoot(), &actual));
+    comparePageRecords(actual, page);
+    QCOMPARE(metadata.metrics().publicationAdditionRecordsPrepared, quint64(0));
+}
+
+void KisPageStoreReferenceTest::coldPublicationRequiresRegisteredPage()
+{
+    QFETCH(bool, initialCell);
+    auto page = pageWithHistory(0); const KisPageVersion version{page.key, {initialCell ? 2u : 1u}, 1};
+    page.versions.first().version = version; page.versions.first().authority = {}; page.versions.first().replicas.clear();
+    page.publishedGeneration = version.generation; page.publishedDefaultPixelRevision = 1;
+    page.nextGeneration = {version.generation.value + 1};
+    KisPageMetadataCoordinator metadata; QVERIFY(metadata.configure(1));
+    KisImageEpochReferenceModel model; KisImageEpochSnapshot initial; initial.epoch = {1};
+    initial.graphRevision = initial.defaultPixelRevision = initial.extentRevision = initial.propertyRevision = 1;
+    initial.surfaces.append(surfaceEpochState());
+    if (initialCell) initial.manifest.append(version);
+    QVERIFY(KisPageViewTestAccess::initialize(model, metadata, initial, nullptr));
+    if (!initialCell) QVERIFY(metadata.prepareWriteClaim(version.key, nullptr));
+    const auto root = model.captureCommittedRoot();
+    auto *identity = initialCell ? root.selectedValue(version.key) : nullptr;
+    if (initialCell) QVERIFY(identity);
+    QCOMPARE(metadata.pageCount(), qsizetype(0));
+    auto pending = metadata.prepareRestoration(root, {2}, &version, 1);
+    QVERIFY(!pending.isValid()); QCOMPARE(metadata.pageCount(), qsizetype(0));
+    if (initialCell) {
+        QCOMPARE(root.selectedValue(version.key), identity);
+        QVERIFY(metadata.registerPage(page));
+        QCOMPARE(root.selectedValue(version.key), identity);
+    } else QVERIFY(metadata.registerImplicitPage(version));
+    QCOMPARE(metadata.pageCount(), qsizetype(1));
+    auto ready = metadata.prepareRestoration(root, {2}, &version, 1); QVERIFY(ready.isValid());
+    KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
+    QVERIFY(metadata.installPublication(std::move(ready), {}, {2}, nullptr, &cleanup));
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, root, &actual)); comparePageRecords(actual, page);
+    while (!cleanup.isEmpty()) cleanup.clearBatch(1);
+    QCOMPARE(metadata.footprint().versionArena.outstandingReservations, quint64(0));
+}
+
 void KisPageStoreReferenceTest::coldPublicationTargetsStayAtomic()
 {
     for (bool repeatedBatch : {false, true}) {
@@ -9537,9 +9784,9 @@ void KisPageStoreReferenceTest::preparedPrivateWritePreservesProtection()
         QVERIFY(changed.accepted);
         QVERIFY(metadata.applyOwner(page.key, read).accepted);
         expected = changed.next;
-        QVERIFY(!metadata.installLeaseWrite(std::move(candidate), tx, nullptr, nullptr));
-        candidate = metadata.prepareLeaseWrite(tx, write);
-        QVERIFY(candidate.isValid());
+        // Current protections remain original; no whole-candidate rebuild is
+        // needed merely because a reader joined the stable before-image.
+        QVERIFY(!candidate.genericInputsChanged());
     }
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (outcome == 3) candidate = {};
@@ -9683,7 +9930,7 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
         QVERIFY(!prepared.isValid());
         return;
     }
-    const bool success = outcome == 0 || outcome == 1 || outcome == 7 || outcome == 8;
+    const bool success = outcome == 0 || outcome == 1 || outcome == 6 || outcome == 7 || outcome == 8 || outcome == 10;
     KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
     if (outcome == 2) prepared = {};
     else if (outcome == 3) QVERIFY(!foreign.installRecoverableWrite(std::move(prepared), tx));
@@ -9748,8 +9995,9 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     comparePageRecords(actual, expected);
     QCOMPARE(actual.findVersion(baseVersion)->authority, before);
     QCOMPARE(actual.findVersion(baseVersion)->findReplica(before)->pinCount, quint32(2));
-    QCOMPARE(actual.findVersion(baseVersion)->readEdges, quint32(outcome == 7 ? 0 : 1));
-    QCOMPARE(actual.findVersion(baseVersion)->findReplica(before)->readLeases, QVector<KisPageLeaseId>{{4}});
+    QCOMPARE(actual.findVersion(baseVersion)->readEdges, quint32(outcome == 7 ? 0 : outcome == 10 ? 2 : 1));
+    const QVector<KisPageLeaseId> retained = outcome == 6 ? QVector<KisPageLeaseId>{{4}, {21}} : QVector<KisPageLeaseId>{{4}};
+    QCOMPARE(actual.findVersion(baseVersion)->findReplica(before)->readLeases, retained);
     QCOMPARE(actual.findVersion(baseVersion)->findReplica(before)->pendingLastUses, QVector<KisCompletionTicket>{lastUse});
 }
 

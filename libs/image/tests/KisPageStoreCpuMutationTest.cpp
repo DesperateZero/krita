@@ -15612,10 +15612,10 @@ void KisPageStoreCpuMutationTest::productionHandoffConcurrentConsumers()
     }
     recorder.setPhaseObserver({});
     QVERIFY(observed); QVERIFY(consumerReady); QVERIFY(workerOk.load());
-    // Native acceptance checks current blockers, not an obsolete whole-page revision.
-    // A completed generic read changes the revision but leaves no live protection.
+    // Both acceptance paths check current blockers. A completed generic read
+    // changes the revision but leaves no live old-target protection.
     const bool handoff = afterInstall || consumer == 4 || consumer == 6 || consumer == 7
-        || (!generic && consumer == 2);
+        || consumer == 2;
     QCOMPARE(installed, handoff ? 1 : 0);
     void *bytes = generic ? writeLease->cpuData() : guard.data();
     // The pre-prepare swap releases the old pixel buffer. A fresh allocation

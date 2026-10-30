@@ -1529,7 +1529,13 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             errors.append("pure view publication restored generic activity reservation")
         for contract in ("std::variant<std::monostate, Selection, Lease> dependency",
                          "bool KisPageMetadataCoordinator::PreparedPublication::Data::inputsValid(size_t i)",
-                         "if (kind != PreparationKind::Publication || page.activity.hasWriter() || page.mutableCount)",
+                         "bool KisPageMetadataCoordinator::PreparedPublication::Data::leaseInputsValid(",
+                         "bool KisPageMetadataCoordinator::PreparedPublication::Data::targetAvailable(",
+                         "!leaseInputsValid(i, input.source, input.target)",
+                         "!leaseInputsValid(i, authority(publication.beforeAuthority), authority(publication.targetAuthority))",
+                         "publication.addition && !targetAvailable(i, authority(publication.targetAuthority))",
+                         "!old->pinCount && !old->overflow.isValid()",
+                         "!pageIt->second.hasMetadata() || !pageIt->second.revisionCanAdvance()",
                          "if (!inputsValid(i)) break;", "if (!data->inputsValid(i)) return true;",
                          "if (!data->inputsValid(i)) return false;", "const bool stillValid = data->inputsValid(i)"):
             if contract not in metadata_text:
