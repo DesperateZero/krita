@@ -282,6 +282,9 @@ struct KisPagePrivateWrite {
     bool hasValue() const { return value != nullptr; }
     const KisPageVersion &version() const { Q_ASSERT(value); return value->version; }
     KisReplicaHandle target() const { return value ? value->primaryReplica.handle(value->version) : KisReplicaHandle{}; }
+    // Layout is borrowed from the original physical state. Internal pixel
+    // access does not need to materialize a complete public identity handle.
+    const KisReplicaLayout &targetLayout() const { Q_ASSERT(value); return value->primaryReplica.layout(); }
     auto &descriptor() { Q_ASSERT(value); return value->native.descriptor; }
     const auto &descriptor() const { Q_ASSERT(value); return value->native.descriptor; }
     const auto &binding() const { Q_ASSERT(value); return value->native.nativeBinding; }

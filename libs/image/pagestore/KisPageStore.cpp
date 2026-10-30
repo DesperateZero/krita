@@ -2241,11 +2241,13 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         d->counters.maximumPins = qMax(d->counters.maximumPins, d->counters.activePins + 1);
         if (!initialized) {
             diagnostic.next(KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto rowBytes = quint64(affected.width()) * page->descriptor()->format.pixelStride;
+            const auto pixelStride = page->descriptor()->format.pixelStride;
+            const auto targetRowStride = page->targetLayout().rowStride;
+            const auto rowBytes = quint64(affected.width()) * pixelStride;
             const int rows = affected.height();
             for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * page->target().layout.rowStride
-                                + quint64(affected.x()) * page->descriptor()->format.pixelStride,
+                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * targetRowStride
+                                + quint64(affected.x()) * pixelStride,
                             static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes));
             d->counters.payloadCopyBytes += rowBytes * rows;
         }
@@ -2798,13 +2800,16 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation pending backing cannot be pinned"));
         return result;
     }
+    const auto &targetLayout = page->targetLayout();
+    const auto targetRowStride = targetLayout.rowStride;
+    const auto targetByteSize = targetLayout.byteSize;
     if (initialization) {
         KisPageStoreDiagnosticTimer phase(d->diagnosticOwner, KisPageStoreDiagnosticPhase::MutationSourceInitialize, 1);
         if (!d->provider->copySynchronousSourceToCpu(initialization,
                                                      *page->descriptor(),
                                                      data,
-                                                     page->target().layout.rowStride,
-                                                     page->target().layout.byteSize)) {
+                                                     targetRowStride,
+                                                     targetByteSize)) {
             page->writable.unpin();
             d->state = Private::State::Failed;
             KisPageStoreDetail::setError(error, QStringLiteral("alias pending initialization failed"));
@@ -2818,7 +2823,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
             const auto rowBytes = page->descriptor()->minimumRowBytes();
             const int rows = page->descriptor()->pageExtent.height();
             for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row) * page->target().layout.rowStride,
+                std::memcpy(static_cast<quint8 *>(data) + quint64(row) * targetRowStride,
                             static_cast<const quint8 *>(payload->data) + row * payload->rowStride,
                             size_t(rowBytes));
             counters.payloadCopyBytes += rowBytes * rows;
@@ -2830,7 +2835,7 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
         const auto &pixel = page->resetPixel;
         auto *pixels = static_cast<quint8 *>(data);
         for (int y = rect.top(); y <= rect.bottom(); ++y) {
-            quint8 *row = pixels + quint64(y) * page->target().layout.rowStride;
+            quint8 *row = pixels + quint64(y) * targetRowStride;
             for (int x = rect.left(); x <= rect.right(); ++x)
                 std::memcpy(row + quint64(x) * pixel.size(), pixel.constData(), size_t(pixel.size()));
         }
@@ -2849,8 +2854,8 @@ KisCpuWriteGuard KisPageMutationSession::beginWriteImpl(const KisPageKey &key,
     result.m_entry = bound ? quint32(bound - execution->entries()) : handle.index;
     result.m_entryIncarnation = handle.incarnation;
     result.m_data = data;
-    result.m_rowStride = page->target().layout.rowStride;
-    result.m_byteSize = page->target().layout.byteSize;
+    result.m_rowStride = targetRowStride;
+    result.m_byteSize = targetByteSize;
     if (execution)
         execution->markTouched(size_t(bound - execution->entries()));
     KisPageStoreDetail::setError(error, {});

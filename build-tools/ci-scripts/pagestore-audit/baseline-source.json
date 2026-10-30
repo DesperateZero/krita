@@ -2007,7 +2007,7 @@
         "boost/container/small_vector.hpp",
         "functional"
       ],
-      "lines": 376,
+      "lines": 379,
       "member_fields": [
         "m_authority",
         "m_blocks",
@@ -2044,7 +2044,7 @@
         "Native",
         "Resource"
       ],
-      "sha256": "045d85137b55d36a9508114a5255a47db967250d3987cd149ea39654a4af4234",
+      "sha256": "d7158218f29dedce9425892aecb9818d3fa3f3a0fb06cd1e31d77dd251ee0602",
       "synchronization_declarations": 0
     },
     "libs/image/pagestore/KisPageMetadataIndex_p.h": {
@@ -2825,7 +2825,7 @@
         "utility",
         "vector"
       ],
-      "lines": 5646,
+      "lines": 5651,
       "member_fields": [],
       "pagestore_identifiers": [
         "KisCapturedReadView",
@@ -2860,7 +2860,7 @@
         "WriteClosureRecord",
         "alignas"
       ],
-      "sha256": "ee92d66acaeb69e967d33a2efd5fd970d0e76c8238babce63cb2899d7c7f7315",
+      "sha256": "f7a0e0ec5a0353ef0f1224321ce5df19fbf820f1200269c843230cb924af72ab",
       "synchronization_declarations": 21
     },
     "libs/image/pagestore/KisPageStore.h": {
@@ -7129,5 +7129,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "955c6e4ded211f50260af9741456667d6dc74067"
+  "working_tree_head": "04f36f187057a525ec47bd236f9fd7da14de1cba"
 }
