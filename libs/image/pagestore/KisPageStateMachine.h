@@ -241,13 +241,10 @@ struct KRITAIMAGE_EXPORT KisPageTransitionResult
 };
 
 /**
- * Shared deterministic transition function for reference and production
- * providers. BR1 must implement it before PageStore can become operational.
+ * Deterministic reference transition function. Production edits original
+ * cells; this remains the independent
+ * value-model oracle for public snapshots and contract tests.
  */
-struct KisPageWorkingState;
-struct KisPageWorkingResult;
-class KisPageMetadataCoordinator;
-
 class KRITAIMAGE_EXPORT KisPageStateMachine
 {
 public:
@@ -255,19 +252,6 @@ public:
                                   const KisPageTransition &transition) const;
     bool validateInvariants(const KisPageStateSnapshot &state,
                             QString *failureReason = nullptr) const;
-
-private:
-    // Only indexed coordinator-owned values may omit the full boundary scans.
-    // Both entry points use the same transition-local policy. The coordinator
-    // owns one working result through the sequence; rejection discards it
-    // without installation, while the public oracle preserves its input.
-    void applyKnownValid(
-        KisPageWorkingResult &result,
-        const KisPageTransition &transition,
-        void *publicationContext = nullptr,
-        void (*publicationDelta)(void *, const KisPageVersion &,
-            KisPagePublicationState, KisPageTransactionId) = nullptr) const;
-    friend class KisPageMetadataCoordinator;
 };
 
 #endif // KIS_PAGE_STATE_MACHINE_H

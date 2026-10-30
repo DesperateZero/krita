@@ -4,13 +4,16 @@
  *  SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#include "KisPageStateMachine_p.h"
+#include "KisPageStateMachine.h"
 #include "KisPageCommitPolicy_p.h"
 
 #include <algorithm>
 #include <limits>
 
 namespace {
+KisPageVersionStateSnapshot kisPageVersionValue(const KisPageStateSnapshot &) { return {}; }
+KisReplicaStateSnapshot kisPageReplicaValue(const KisPageVersionStateSnapshot &) { return {}; }
+
 
 template<class State>
 bool physicalSlotInUse(const State &state,
@@ -174,10 +177,7 @@ void appendReplica(Version &version, const KisReplicaHandle &handle,
 
 template<class Result, class Validate>
 void applyPolicy(Result &result, const KisPageTransition &transition,
-                 bool validateBoundaryInvariants, Validate validate,
-                 void *publicationContext = nullptr,
-                 void (*publicationDelta)(void *, const KisPageVersion &,
-                     KisPagePublicationState, KisPageTransactionId) = nullptr)
+                 Validate validate)
 {
     result.accepted = false;
     result.effects.clear();
@@ -185,7 +185,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
     using Version = typename decltype(result.next.versions)::value_type;
     using Replica = typename decltype(std::declval<Version>().replicas)::value_type;
 
-    if (validateBoundaryInvariants) {
+    {
         QString currentFailure;
         if (!validate(result.next, &currentFailure)) {
             result.rejectionReason = currentFailure;
@@ -204,12 +204,8 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
         return result.next.findVersion(version);
     };
 
-    // Emit the actual semantic edits into the original publication candidate.
-    // The reference value model consumes this same policy without a receiver.
     const auto setPublication = [&](Version &version, KisPagePublicationState state,
                                     KisPageTransactionId preparedBy = {}) {
-        if (publicationDelta && (version.publication != state || !(version.preparedBy == preparedBy)))
-            publicationDelta(publicationContext, version.version, state, preparedBy);
         version.publication = state;
         version.preparedBy = preparedBy;
     };
@@ -875,7 +871,7 @@ void applyPolicy(Result &result, const KisPageTransition &transition,
     }
     }
 
-    if (validateBoundaryInvariants) {
+    {
         QString nextFailure;
         if (!validate(result.next, &nextFailure)) {
             return reject(nextFailure);
@@ -898,7 +894,7 @@ KisPageTransitionResult KisPageStateMachine::apply(
 {
     KisPageTransitionResult result;
     result.next = current;
-    applyPolicy(result, transition, true,
+    applyPolicy(result, transition,
         [this](const KisPageStateSnapshot &state, QString *reason) { return validateInvariants(state, reason); });
     if (!result.accepted) result.next = current;
     return result;
@@ -908,16 +904,6 @@ catch (const std::bad_alloc &) {
     refused.next = current;
     refused.rejectionReason = QStringLiteral("oracle transition storage was refused");
     return refused;
-}
-
-void KisPageStateMachine::applyKnownValid(
-    KisPageWorkingResult &result, const KisPageTransition &transition,
-    void *publicationContext,
-    void (*publicationDelta)(void *, const KisPageVersion &,
-        KisPagePublicationState, KisPageTransactionId)) const
-{
-    applyPolicy(result, transition, false,
-        [](const KisPageWorkingState &, QString *) { return true; }, publicationContext, publicationDelta);
 }
 
 bool KisPageStateMachine::validateInvariants(const KisPageStateSnapshot &state,

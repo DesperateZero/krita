@@ -68,7 +68,9 @@ struct KRITAIMAGE_EXPORT KisPageMetadataTransitionResult
 class KisPageStore;
 
 struct KRITAIMAGE_EXPORT KisPageMetadataShardMetrics {
-    // Owner-only local projection work, not timing or a unique page count.
+    // Owner-local mutation work, not timing or a unique page count. Inputs
+    // count selected scalar identities; installs count actual new Values.
+    // Surviving cells/protection chains are edited in place, never reinstalled.
     // Whole snapshot/commit/GC work is deliberately not hidden in these.
     quint64 localTransitionSequences = 0;
     quint64 localVersionInputs = 0;
@@ -634,11 +636,9 @@ private:
     friend class KisPageViewTestAccess;
     friend class KisPageStoreCpuMutationTest;
     friend class KisPageStoreResidentReadTest;
-    KisPageMetadataTransitionResult applyWriteSequence(const KisPageKey &key,
+    KisPageMetadataTransitionResult applyLocalSequence(const KisPageKey &key,
         const KisPageTransition *transitions, qsizetype count, bool acceptPreparedRetry = false);
     KisPageMetadataTransitionResult publishLeaseWrite(const KisPageTransition &write);
-    KisPageMetadataTransitionResult applyProjectedSequence(const KisPageKey &key,
-                                                   const KisPageTransition *transitions, qsizetype count);
     KisPageMetadataTransitionResult applyReadProtection(const KisPageKey &key,
                                                const KisPageTransition &transition,
                                                KisPageMetadataReadCleanup *cleanup = nullptr);

@@ -12,7 +12,10 @@
 #include "KisPagePublicationInput_p.h"
 #include "KisPageStoreReclamation_p.h"
 #include "KisPageWriteCoordinator_p.h"
-#include "KisPageStateMachine_p.h"
+#include "KisMutationStorage_p.h"
+
+#include <boost/container/small_vector.hpp>
+#include <type_traits>
 #include "KisPageCommitPolicy_p.h"
 
 #include <QAtomicInteger>
@@ -40,6 +43,13 @@ std::shared_ptr<KisCpuResidentBinding> KisPagePrivateWrite::exchangeBinding(
     next.swap(value->native.nativeBinding);
     value->primaryReplica.setHandle(target, value->native.nativeBinding.get());
     return next;
+}
+
+namespace {
+using MetadataLocalStorage = KisMutationStorageAllocator<char, false>;
+template<class T, size_t InlineCapacity = 0> using MetadataLocalArray = std::conditional_t<
+    InlineCapacity == 0, std::vector<T, KisMutationStorageAllocator<T, false>>,
+    boost::container::small_vector<T, InlineCapacity, KisMutationStorageAllocator<T, false>>>;
 }
 
 namespace KisPageStoreDetail {
@@ -327,15 +337,15 @@ bool metadataArenasHaveCapacity(const MetadataArenas &arenas, const MetadataAren
  * couples the resulting capacity to explicit slot/index reservations.
  */
 struct MetadataArenaGrowth {
-    explicit MetadataArenaGrowth(KisPageWorkingStorage storage)
+    explicit MetadataArenaGrowth(MetadataLocalStorage storage)
         : versions(storage), replicas(storage), overflow(storage)
         , versionDirectory(storage), replicaDirectory(storage), overflowDirectory(storage) {}
     // Candidate payloads are destroyed before the reservation that accounts
     // for them when preparation exits early.
     KisBackingBudgetReservation budgetReservation;
-    KisPageWorkingArray<VersionArena::PreparedBlock> versions;
-    KisPageWorkingArray<ReplicaArena::PreparedBlock> replicas;
-    KisPageWorkingArray<OverflowArena::PreparedBlock> overflow;
+    MetadataLocalArray<VersionArena::PreparedBlock> versions;
+    MetadataLocalArray<ReplicaArena::PreparedBlock> replicas;
+    MetadataLocalArray<OverflowArena::PreparedBlock> overflow;
     VersionArena::PreparedDirectory versionDirectory;
     ReplicaArena::PreparedDirectory replicaDirectory;
     OverflowArena::PreparedDirectory overflowDirectory;
@@ -548,7 +558,7 @@ static_assert(sizeof(MetadataPage) == 168);
 /**
  * Stack projection of original page facts and sparse generic payload. Public snapshots are never
  * retained here: stable record slots are projected back to value handles only
- * at a state-machine or diagnostic boundary. An entry exists only while a
+ * at a public diagnostic boundary. An entry exists only while a
  * writer, handoff, publication claim, or non-owning idle reference is live.
  */
 struct MetadataPageActivity {
@@ -601,7 +611,7 @@ struct MetadataMapAllocator : KisMutationStorageAllocator<T, false> {
     using Base = KisMutationStorageAllocator<T, false>;
     using value_type = T;
     template<class U> struct rebind { using other = MetadataMapAllocator<U>; };
-    MetadataMapAllocator(KisPageWorkingStorage storage, std::atomic<quint64> *bytes)
+    MetadataMapAllocator(MetadataLocalStorage storage, std::atomic<quint64> *bytes)
         : Base(storage), bytes(bytes) {}
     template<class U> MetadataMapAllocator(const MetadataMapAllocator<U> &other)
         : Base(other), bytes(other.bytes) {}
@@ -787,35 +797,6 @@ struct ShardRecordStore {
         if (identity)
             *identity = storedVersion->version;
         return true;
-    }
-
-    bool readLeaseOwner(const MetadataPage &page, KisPageLeaseId lease,
-                        KisPageVersion *identity) const
-    {
-        if (!lease.isValid()) return false;
-        for (KisVersionSlotId versionSlot = page.firstVersion; versionSlot.isValid();) {
-            const KisPageValueCell *storedVersion = version(versionSlot);
-            Q_ASSERT(storedVersion);
-            if (!storedVersion) break;
-            for (KisReplicaSlotId replicaSlot = storedVersion->firstReplica; replicaSlot.isValid();) {
-                const KisPageReplicaState *storedReplica = replica(replicaSlot);
-                Q_ASSERT(storedReplica);
-                if (!storedReplica) break;
-                for (KisMetadataOverflowSlotId slot = storedReplica->overflow; slot.isValid();) {
-                    const KisMetadataOverflowNode *node = overflow(slot);
-                    Q_ASSERT(node);
-                    if (!node) break;
-                    if (node->kind == KisMetadataOverflowKind::ReadLease && node->value == lease.value) {
-                        if (identity) *identity = storedVersion->version;
-                        return true;
-                    }
-                    slot = node->next;
-                }
-                replicaSlot = storedReplica->nextReplica;
-            }
-            versionSlot = storedVersion->nextVersion;
-        }
-        return false;
     }
 
     void linkVersion(MetadataPage *page, KisPageValueCell *record)
@@ -1038,37 +1019,16 @@ struct ShardRecordStore {
     }
 
     template<class Snapshot>
-    void assign(KisPageValueCell *record,
-                const Snapshot &snapshot,
-                MetadataArenaReservations *reservation)
+    void initializeValue(KisPageValueCell *record, const Snapshot &snapshot,
+                         MetadataArenaReservations *reservation)
     {
-        Q_ASSERT(record && reservation);
-        auto *native = &record->native;
-        const auto *selected = replica(native->nativeReplica);
-        const auto selectedIdentity = selected ? selected->identity() : KisReplicaAllocationIdentity{};
-        native->nativeReplica = {};
-        // Cold import may seed the independent oracle count. Existing Values
-        // own their live read edges; a prepared snapshot cannot restore an
-        // edge already returned while its publication claim was outstanding.
-        if (!record->indexed) record->readEdges = snapshot.readEdges;
-        const KisVersionSlotId previousVersion = record->previousVersion;
-        const KisVersionSlotId nextVersion = record->nextVersion;
-        const KisVersionSlotId nextMutable = record->nextMutable;
-        eraseChildren(record);
-        auto retainedNative = std::move(record->native);
-        const bool frameHeld = record->frameHeld;
-        const bool indexed = record->indexed;
-        // A root can already name this final identity. Reset mutable state,
-        // never its immutable header or independent memory references.
+        // Only true new cells or the memory-only initial-root identity enter
+        // here. Existing Values are exclusively edited at their original slots.
+        Q_ASSERT(record && reservation && !record->indexed && !record->firstReplica.isValid() && !record->frameHeld);
         Q_ASSERT(!record->version.isValid() || record->version == snapshot.version);
-        static_cast<KisPageValueState &>(*record) = {};
-        record->native = std::move(retainedNative);
-        record->frameHeld = frameHeld;
-        record->indexed = indexed;
         if (!record->version.isValid()) record->version = snapshot.version;
-        record->previousVersion = previousVersion;
-        record->nextVersion = nextVersion;
-        record->nextMutable = nextMutable;
+        record->initialIdentity = false;
+        record->readEdges = snapshot.readEdges;
         record->publication = storedPublication(snapshot.publication);
         record->preparedBy = snapshot.preparedBy;
         record->replicaCount = quint32(snapshot.replicas.size());
@@ -1076,8 +1036,7 @@ struct ShardRecordStore {
         KisReplicaSlotId replicaTail;
         for (const auto &source : snapshot.replicas) {
             KisPageReplicaState next;
-            const bool selectedResource = native->nativeBinding && source.replica.allocationIdentity() == selectedIdentity;
-            next.setHandle(source.replica, selectedResource ? native->nativeBinding.get() : nullptr);
+            next.setHandle(source.replica);
             next.ownerVersion = record->slot;
             next.activeOperation = source.activeOperation;
             next.pinCount = source.pinCount;
@@ -1086,8 +1045,6 @@ struct ShardRecordStore {
                 ? arenas->replicas.emplaceReserved(&reservation->replicas, next) : kisInlineReplicaSlot(record->slot);
             if (!replicaTail.isValid()) record->primaryReplica = next;
             Q_ASSERT(replicaSlot.isValid());
-            if (selectedResource)
-                native->nativeReplica = replicaSlot;
             KisPageReplicaState *inserted = replica(replicaSlot);
             Q_ASSERT(inserted);
             if (!record->firstReplica.isValid())
@@ -1122,9 +1079,9 @@ struct ShardRecordStore {
         Q_ASSERT(!snapshot.authority.isValid() || record->authorityReplica.isValid());
     }
 
-    template<bool Protection = true, class Version>
-    Version project(const KisPageValueCell &record, Version result) const
+    KisPageVersionStateSnapshot project(const KisPageValueCell &record) const
     {
+        KisPageVersionStateSnapshot result;
         result.version = record.version;
         result.publication = record.publication;
         result.preparedBy = record.preparedBy;
@@ -1135,12 +1092,12 @@ struct ShardRecordStore {
             Q_ASSERT(stored);
             if (!stored)
                 break;
-            auto projected = kisPageReplicaValue(result);
+            KisReplicaStateSnapshot projected;
             projected.replica = replicaHandle(*stored, record.version);
             projected.validity = stored->validity;
             projected.activeOperation = stored->activeOperation;
             projected.pinCount = stored->pinCount;
-            for (KisMetadataOverflowSlotId overflowSlot = Protection ? stored->overflow : KisMetadataOverflowSlotId{}; overflowSlot.isValid();) {
+            for (KisMetadataOverflowSlotId overflowSlot = stored->overflow; overflowSlot.isValid();) {
                 const KisMetadataOverflowNode *node = overflow(overflowSlot);
                 Q_ASSERT(node);
                 if (!node)
@@ -1159,19 +1116,6 @@ struct ShardRecordStore {
             slot = stored->nextReplica;
         }
         return result;
-    }
-
-    template<class Version, bool Protection = true>
-    bool snapshot(const KisPageVersion &identity, Version *snapshot) const
-    {
-        KisVersionSlotId slot;
-        if (!snapshot || !findVersion(identity, &slot))
-            return false;
-        const KisPageValueCell *record = version(slot);
-        if (!record)
-            return false;
-        *snapshot = project<Protection>(*record, kisPageVersionValue(*snapshot));
-        return true;
     }
 
     static bool matchesReplica(const KisPageReplicaState &stored, const KisPageVersion &version,
@@ -1384,7 +1328,7 @@ struct ShardRecordStore {
             const KisPageValueCell *record = version(slot);
             Q_ASSERT(record);
             if (!record) break;
-            result.versions.append(project(*record, KisPageVersionStateSnapshot{}));
+            result.versions.append(project(*record));
             slot = record->nextVersion;
         }
         const KisPageVersion selected{key, result.publishedGeneration, result.publishedDefaultPixelRevision};
@@ -1454,28 +1398,6 @@ struct ShardRecordStore {
     }
 
     template<class Snapshot>
-    bool canInstallPhysical(const Snapshot &snapshot,
-                            KisVersionSlotId replacing) const
-    {
-        for (auto candidate = snapshot.replicas.cbegin(); candidate != snapshot.replicas.cend(); ++candidate) {
-            const auto &replicaState = *candidate;
-            const PhysicalSlot key = replicaState.replica.physicalSlotIdentity();
-            if (std::any_of(snapshot.replicas.cbegin(), candidate, [&](const auto &other) {
-                           return other.replica.physicalSlotIdentity() == key;
-                       })) {
-                return false;
-            }
-            KisReplicaSlotId existing;
-            if (!physicalSlots.findExact(key, &existing))
-                continue;
-            const KisPageReplicaState *stored = replica(existing);
-            if (!stored || !(stored->ownerVersion == replacing))
-                return false;
-        }
-        return true;
-    }
-
-    template<class Snapshot>
     void finishReservedValue(KisPageValueCell *record, const Snapshot &snapshot,
                              ReservationSet *reservation)
     {
@@ -1505,7 +1427,7 @@ struct ShardRecordStore {
         auto *record = arenas->versions.get(slot);
         if (!initialized) record->slot = slot;
         linkVersion(page, record);
-        assign(record, snapshot, &reservation->arenas);
+        initializeValue(record, snapshot, &reservation->arenas);
         const bool indexed = exactVersions.insertReserved(&reservation->exactVersions, snapshot.version, slot);
         Q_ASSERT(indexed); Q_UNUSED(indexed);
         indexPublication(page, record);
@@ -1513,26 +1435,35 @@ struct ShardRecordStore {
         return slot;
     }
 
-    template<class Snapshot>
-    bool putReserved(MetadataPage *page, const Snapshot &snapshot, ReservationSet *reservation)
-    {
-        Q_ASSERT(reservation);
-        KisVersionSlotId slot;
-        if (!findVersion(snapshot.version, &slot))
-            return insertReserved(page, snapshot, reservation).isValid();
-        auto *record = version(slot);
-        const bool changed = record->publication != storedPublication(snapshot.publication)
-            || !(record->preparedBy == snapshot.preparedBy);
-        unindexPhysical(*record);
-        if (changed) unindexPublication(page, record);
-        assign(record, snapshot, &reservation->arenas);
-        if (changed) indexPublication(page, record);
-        finishReservedValue(record, snapshot, reservation);
-        return true;
-    }
-
     // Consume already validated original replica slots. No survivor is
     // projected/recreated: leases, pending uses and other placements stay put.
+    KisVersionSlotId insertEmptyReserved(MetadataPage *page, const KisPageVersion &identity,
+        KisPagePublicationState state, KisPageTransactionId preparedBy, ReservationSet *reservation)
+    {
+        struct EmptyValue {
+            const KisPageVersion &version;
+            KisPagePublicationState publication;
+            KisPageTransactionId preparedBy;
+            KisReplicaHandle authority;
+            quint32 readEdges = 0;
+            std::array<KisReplicaStateSnapshot, 0> replicas;
+        };
+        return insertReserved(page, EmptyValue{identity, state, preparedBy, {}, 0, {}}, reservation);
+    }
+
+    KisReplicaSlotId appendSingleReplicaReserved(KisPageValueCell *record, const KisReplicaHandle &handle,
+        ReservationSet *reservation)
+    {
+        Q_ASSERT(record && record->replicaCount == 0 && !record->firstReplica.isValid());
+        const auto slot = kisInlineReplicaSlot(record->slot);
+        record->primaryReplica.setHandle(handle);
+        record->primaryReplica.ownerVersion = record->slot;
+        record->firstReplica = slot; record->replicaCount = 1;
+        const bool indexed = physicalSlots.insertReserved(&reservation->physicalSlots, handle.physicalSlotIdentity(), slot);
+        Q_ASSERT(indexed); Q_UNUSED(indexed);
+        return slot;
+    }
+
     KisReplicaSlotId replaceHandoffAuthority(KisPageValueCell *base,
         KisReplicaSlotId oldSlot, KisReplicaSlotId sourceSlot)
     {
@@ -1623,50 +1554,6 @@ struct ShardRecordStore {
         return unusedPrepared(identity);
     }
 
-    bool reserveAcceptedBatch(const KisPageWorkingResult &accepted, ReservationSet *reservation)
-    {
-        Q_ASSERT(accepted.accepted);
-        if (!accepted.accepted) return false;
-        // The original transition result preserves physical uniqueness: inputs
-        // come from this canonical index, and every identity-introducing state
-        // transition checks physicalSlotInUse before appending/replacing it.
-        // Recheck canonical ownership after unlocked growth; no second scratch
-        // identity index is needed for the already accepted local sequence.
-        const auto &snapshots = accepted.next.versions;
-        qsizetype newVersions = 0;
-        qsizetype replicaCount = 0;
-        for (auto snapshotIt = snapshots.cbegin(); snapshotIt != snapshots.cend(); ++snapshotIt) {
-            KisVersionSlotId existing;
-            if (!findVersion(snapshotIt->version, &existing))
-                ++newVersions;
-            if (!canInstallPhysical(*snapshotIt, existing))
-                return false;
-            replicaCount += snapshotIt->replicas.size();
-        }
-
-        return reserve(batchDemand(snapshots), newVersions, replicaCount, reservation);
-    }
-
-    bool installAcceptedBatch(MetadataPage *page, const KisPageWorkingResult &accepted,
-                              ReservationSet *reservation, bool revalidate)
-    {
-        const auto &snapshots = accepted.next.versions;
-        // Other pages can change the shared physical index during the R -> V
-        // handoff even when this page revision is unchanged. Check the whole
-        // input before installing any record; capacity is already retained.
-        if (revalidate) for (const auto &snapshot : snapshots) {
-            KisVersionSlotId existing;
-            findVersion(snapshot.version, &existing);
-            if (!canInstallPhysical(snapshot, existing)) return false;
-        }
-        for (const auto &snapshot : snapshots) {
-            const bool stored = putReserved(page, snapshot, reservation);
-            Q_ASSERT(stored);
-            Q_UNUSED(stored);
-        }
-        return true;
-    }
-
     void remove(MetadataPage *page, const KisPageVersion &identity,
                 std::shared_ptr<const KisPageAllocationDescriptor> *releasedDescriptor = nullptr,
                 std::shared_ptr<KisCpuResidentBinding> *releasedBinding = nullptr,
@@ -1743,27 +1630,8 @@ struct ShardRecordStore {
         if (!reserve(demand, qsizetype(snapshots.size()), replicaCount, &reservation)) return false;
         const auto cancel = qScopeGuard([&] { reservation.cancel(this); });
         for (const auto &snapshot : snapshots) {
-            const bool stored = putReserved(page, snapshot, &reservation);
-            Q_ASSERT(stored); Q_UNUSED(stored);
-        }
-        return true;
-    }
-
-    template<class Additions>
-    bool installPreparedAdditionsReserved(MetadataPage *page,
-                                          Additions *additions,
-                                          ReservationSet *reservation)
-    {
-        if (!additions || additions->empty())
-            return true;
-        for (const auto &addition : *additions) {
-            if (findVersion(addition.version) || !canInstallPhysical(addition, {}))
-                return false;
-        }
-        for (const auto &addition : *additions) {
-            const bool stored = putReserved(page, addition, reservation);
-            Q_ASSERT(stored);
-            Q_UNUSED(stored);
+            const auto inserted = insertReserved(page, snapshot, &reservation);
+            Q_ASSERT(inserted.isValid()); Q_UNUSED(inserted);
         }
         return true;
     }
@@ -2665,7 +2533,7 @@ public:
     bool capture(size_t, const KisPageTransition &, const KisImageEpochRootSnapshot *, QString *);
     bool freezeAuthorities(QString *);
     struct ShardArenaGrowth {
-        explicit ShardArenaGrowth(KisPageWorkingStorage storage) : blocks(storage) {}
+        explicit ShardArenaGrowth(MetadataLocalStorage storage) : blocks(storage) {}
         std::shared_ptr<MetadataShard> shardOwner;
         MetadataArenaDemand totalDemand;
         MetadataArenaGrowth blocks;
@@ -5761,7 +5629,7 @@ bool KisPageMetadataCoordinator::retireHistoryValues(
         const auto storageOwner = shard->budgetAuthority->storage<char>();
         // Keep the common retirement span inline without imposing a large
         // stack-probe call on every batch, including empty/protected inputs.
-        using Effects = KisPageWorkingArray<KisPageTransitionEffect, 8>;
+        using Effects = MetadataLocalArray<KisPageTransitionEffect, 8>;
         Effects prepared{Effects::allocator_type(storageOwner.borrowed())};
         std::array<std::shared_ptr<const KisPageAllocationDescriptor>, HistoryCollection::Limit> releasedDescriptors;
         std::array<std::shared_ptr<KisCpuResidentBinding>, HistoryCollection::Limit> releasedBindings;
@@ -5889,16 +5757,687 @@ KisPageMetadataCoordinator::RegisteredKeys KisPageMetadataCoordinator::registere
 
 namespace
 {
-bool directWriteSequence(const KisPageTransition *transitions, qsizetype count)
+// Synchronous local mutations borrow the original cells. Only changed scalars,
+// actual new identities and actual protection edits survive until acceptance.
+// No surviving Value/replica/protection chain is projected or reinstalled.
+class MetadataLocalMutation final
 {
-    if (!transitions) return false;
-    using K = KisPageTransitionKind;
-    if (count == 1)
-        return transitions->kind == K::AcquireWrite
-            || transitions->kind == K::PrepareWrite || transitions->kind == K::BeginPublish;
-    return count == 2 && ((transitions[0].kind == K::AcquireWrite && transitions[1].kind == K::PrepareWrite)
-        || (transitions[0].kind == K::BeginPublish && transitions[1].kind == K::PublishWrite));
-}
+    static constexpr qsizetype Missing = -1;
+    struct Value {
+        const KisPageVersion *identity;
+        KisPageValueCell *original = nullptr;
+        KisVersionSlotId installed;
+        KisPagePublicationState publication = KisPagePublicationState::Historical;
+        KisPageTransactionId preparedBy;
+        qsizetype authority = Missing;
+        bool authorityLoaded = false;
+        bool removed = false;
+        bool synthetic = false;
+        bool changed = false;
+    };
+    struct Replica {
+        qsizetype owner;
+        KisReplicaSlotId slot;
+        const KisReplicaHandle *introduced = nullptr;
+        KisPageOperationId operation;
+        quint32 pins = 0;
+        KisReplicaValidity validity = KisReplicaValidity::Allocated;
+    };
+    struct Protection {
+        qsizetype replica;
+        KisMetadataOverflowSlotId slot;
+        quint64 lease;
+        const KisCompletionTicket *completion = nullptr;
+        size_t appendOrder = 0;
+        bool removed = false;
+    };
+public:
+    MetadataLocalMutation(MetadataShard &owner, MetadataPage &page, const KisPageKey &key,
+                          MetadataLocalStorage storage)
+        : shard(owner), page(page), key(key), image(owner.activityImage(key, page))
+        , nextGeneration(page.nextGeneration)
+        , values(decltype(values)::allocator_type(storage))
+        , replicas(decltype(replicas)::allocator_type(storage))
+        , protections(decltype(protections)::allocator_type(storage))
+        , appends(decltype(appends)::allocator_type(storage))
+        , effects(decltype(effects)::allocator_type(storage))
+        , released(decltype(released)::allocator_type(storage)) {}
+
+    void capture(const KisPageTransition *input, qsizetype count)
+    {
+        if (image.writerPhase != KisPageWriterPhase::None) loadWriter();
+        for (qsizetype i = 0; i < count; ++i) {
+            findValue(input[i].baseVersion); findValue(input[i].version);
+            for (const auto &version : input[i].versions) findValue(version);
+            if (input[i].kind == KisPageTransitionKind::AbortTransaction)
+                shard.records.forPreparedTransaction(page, input[i].transaction,
+                    [&](const auto &version) { findValue(version); });
+        }
+    }
+
+    bool apply(const KisPageTransition &t, QString *error)
+    {
+        const auto reject = [&](const QString &reason) {
+            KisPageStoreDetail::setError(error, reason); return false;
+        };
+        using K = KisPageTransitionKind;
+        const bool writing = t.kind == K::AcquireWrite || t.kind == K::PrepareWrite
+            || t.kind == K::BeginPublish || t.kind == K::PublishWrite || t.kind == K::FailWrite
+            || t.kind == K::CancelWrite || t.kind == K::AbortTransaction
+            || t.kind == K::AbortPreparedVersion || t.kind == K::DetachPreparedVersion;
+        if (writing && image.nativeWrite)
+            return reject(QStringLiteral("page has an unaccepted native write reservation"));
+        switch (t.kind) {
+        case K::AcquireWrite: {
+            if (image.writerPhase != KisPageWriterPhase::None)
+                return reject(QStringLiteral("page already has a reserved writer"));
+            if (!t.writer.isValid() || !t.operation.isValid() || !t.transaction.isValid()
+                || !t.baseVersion.isValid() || !t.version.isValid() || !t.target.isValid())
+                return reject(QStringLiteral("write reservation identity is incomplete"));
+            if (!(t.baseVersion.key == key) || !(t.version.key == key) || !(t.target.version == t.version))
+                return reject(QStringLiteral("write reservation targets another page"));
+            auto base = findValue(t.baseVersion);
+            if (base == Missing && t.baseVersion.isDefaultPixel() && !t.source.isValid())
+                base = addValue(t.baseVersion, KisPagePublicationState::Historical, true);
+            if (base == Missing || (values[base].publication != KisPagePublicationState::Historical
+                && !(values[base].publication == KisPagePublicationState::Prepared
+                     && values[base].preparedBy == t.transaction)))
+                return reject(QStringLiteral("write base is not visible to the transaction"));
+            const auto before = findReplica(base, t.source);
+            const bool virtualBase = virtualDefault(base) && !t.source.isValid()
+                && t.writeMode == KisPageWriteMode::DiscardContents;
+            if (!authorityMatches(base, t.source)
+                || (!virtualBase && (before == Missing || replicas[before].validity != KisReplicaValidity::Valid)))
+                return reject(QStringLiteral("write base authority is not a valid exact-generation replica"));
+            if (!(t.version.generation == nextGeneration)
+                || t.version.generation.value <= t.baseVersion.generation.value || findValue(t.version) != Missing)
+                return reject(QStringLiteral("write generation is not the next free generation"));
+            if (nextGeneration.value == std::numeric_limits<quint64>::max())
+                return reject(QStringLiteral("page generation space is exhausted"));
+            if (before != Missing && replicas[before].pins == std::numeric_limits<quint32>::max())
+                return reject(QStringLiteral("write before-image pin count is exhausted"));
+            if (!physicalAvailable(t.target, error, QStringLiteral("write allocation token is already in use"))) return false;
+            const auto targetValue = addValue(t.version, KisPagePublicationState::Unpublished);
+            writerTarget = addReplica(targetValue, t.target, KisReplicaValidity::Allocated);
+            writerBase = before;
+            if (before != Missing) ++replicas[before].pins;
+            image.writerToken = t.writer; image.writerOperation = t.operation;
+            image.writerTransaction = t.transaction; image.writerMode = t.writeMode;
+            image.writerDefaultGeneration = before == Missing ? t.baseVersion.generation : KisPageGeneration{};
+            image.writerDefaultRevision = before == Missing ? t.baseVersion.defaultPixelRevision : 0;
+            image.writerPhase = KisPageWriterPhase::Reserved;
+            ++nextGeneration.value;
+            break;
+        }
+        case K::PrepareWrite:
+        case K::BeginPublish: {
+            const bool prepare = t.kind == K::PrepareWrite;
+            if (image.writerPhase != (prepare ? KisPageWriterPhase::Reserved : KisPageWriterPhase::Writable)
+                || !matchesWriter(t))
+                return reject(prepare ? QStringLiteral("write preparation does not match the reservation")
+                                      : QStringLiteral("publish request is stale or mismatched"));
+            const auto &target = replicas[writerTarget];
+            if (target.operation.isValid() || (prepare
+                    ? target.validity == KisReplicaValidity::Failed || target.validity == KisReplicaValidity::Retiring
+                    : !publishable(target)))
+                return reject(prepare ? QStringLiteral("write target is not ready for exclusive access")
+                                      : QStringLiteral("write replica cannot begin publishing"));
+            image.writerPhase = prepare ? KisPageWriterPhase::Writable : KisPageWriterPhase::Publishing;
+            break;
+        }
+        case K::PublishWrite:
+        case K::FailWrite: {
+            const bool publish = t.kind == K::PublishWrite;
+            if ((image.writerPhase != KisPageWriterPhase::Publishing
+                 && image.writerPhase != KisPageWriterPhase::CancelPending) || !matchesWriter(t))
+                return reject(publish ? QStringLiteral("publish completion is stale or mismatched")
+                                      : QStringLiteral("write failure completion is stale or mismatched"));
+            const auto target = writerTarget;
+            const auto value = replicas[target].owner;
+            if (publish ? !publishable(replicas[target])
+                        : replicas[target].operation.isValid() || protectedReplica(target) || replicas[target].pins)
+                return reject(publish ? QStringLiteral("write replica cannot complete publishing")
+                                      : QStringLiteral("failed write still has in-flight state"));
+            if (!releaseBefore())
+                return reject(publish ? QStringLiteral("write before-image retention was lost")
+                                      : QStringLiteral("failed write still has in-flight state"));
+            if (!publish || image.writerPhase == KisPageWriterPhase::CancelPending) {
+                effects.push_back({handle(target), {}});
+                values[value].removed = true;
+            } else {
+                replicas[target].validity = KisReplicaValidity::Valid;
+                values[value].authority = target; values[value].authorityLoaded = true;
+                values[value].publication = KisPagePublicationState::Prepared;
+                values[value].preparedBy = image.writerTransaction;
+            }
+            clearWriter();
+            break;
+        }
+        case K::CancelWrite: {
+            if (!matchesWriter(t)) return reject(QStringLiteral("write cancellation is stale or mismatched"));
+            if (image.writerPhase == KisPageWriterPhase::Publishing) {
+                image.writerPhase = KisPageWriterPhase::CancelPending; break;
+            }
+            if (image.writerPhase == KisPageWriterPhase::CancelPending)
+                return reject(QStringLiteral("write cancellation is already pending"));
+            const auto value = replicas[writerTarget].owner;
+            if (!idle(value, false)) return reject(QStringLiteral("write generation still has in-flight users"));
+            if (!releaseBefore()) return reject(QStringLiteral("write before-image retention was lost"));
+            retire(value); clearWriter();
+            break;
+        }
+        case K::AcquireRead:
+        case K::ReleaseRead: {
+            const bool acquire = t.kind == K::AcquireRead;
+            if (!t.lease.isValid()) return reject(QStringLiteral("read lease identity is invalid"));
+            const auto value = findValue(t.version);
+            if (acquire && (value == Missing || values[value].publication == KisPagePublicationState::Unpublished
+                            || values[value].publication == KisPagePublicationState::Retiring))
+                return reject(QStringLiteral("requested page version is not readable"));
+            if (acquire && values[value].publication == KisPagePublicationState::Prepared
+                && !(values[value].preparedBy == t.transaction))
+                return reject(QStringLiteral("prepared page is private to another transaction"));
+            const auto target = value == Missing ? Missing : findReplica(value, t.target);
+            if (acquire) {
+                if (target == Missing || replicas[target].validity != KisReplicaValidity::Valid)
+                    return reject(QStringLiteral("requested replica is not valid"));
+                if (leaseExists(t.lease)) return reject(QStringLiteral("read lease identity is already active"));
+                KisMetadataOverflowSlotId reusable;
+                for (auto &p : protections) if (p.replica == target && p.removed && p.slot.isValid()) {
+                    reusable = std::exchange(p.slot, KisMetadataOverflowSlotId{}); break;
+                }
+                protections.push_back({target, reusable, t.lease.value});
+                appendProtection(qsizetype(protections.size() - 1));
+            } else {
+                const auto node = target == Missing ? Missing : findLease(target, t.lease);
+                if (node == Missing) return reject(QStringLiteral("read lease is stale or belongs to another replica"));
+                if (t.completion.isValid()) {
+                    protections[node].completion = &t.completion;
+                    appendProtection(node);
+                } else protections[node].removed = true;
+            }
+            break;
+        }
+        case K::AttachHistoricalDefault: {
+            if (!t.version.isValid() || !(t.version.key == key) || !t.version.isDefaultPixel()
+                || (t.target.isValid() && !(t.target.version == t.version))
+                || t.imageEpoch.isValid() || findValue(t.version) != Missing)
+                return reject(QStringLiteral("historical default attachment identity is invalid"));
+            if (!physicalAvailable(t.target, error, QStringLiteral("historical default allocation token is already in use"))) return false;
+            const auto value = addValue(t.version, KisPagePublicationState::Historical);
+            if (t.target.isValid()) {
+                values[value].authority = addReplica(value, t.target, KisReplicaValidity::Valid);
+                values[value].authorityLoaded = true;
+            }
+            break;
+        }
+        case K::MaterializeDefault: {
+            const auto value = findValue(t.version);
+            if (value == Missing || !virtualDefault(value) || !t.target.isValid()
+                || !(t.target.version == t.version) || t.imageEpoch.isValid())
+                return reject(QStringLiteral("virtual default materialization is invalid"));
+            if (!physicalAvailable(t.target, error, QStringLiteral("default allocation token is already in use"))) return false;
+            values[value].synthetic = false;
+            const auto target = addReplica(value, t.target, KisReplicaValidity::Valid);
+            values[value].authority = target; values[value].authorityLoaded = true;
+            break;
+        }
+        case K::BeginAuthorityHandoff: {
+            if (image.handoffOperation.isValid() || !t.operation.isValid())
+                return reject(QStringLiteral("authority handoff is already active or invalid"));
+            const auto value = findValue(t.version);
+            const auto source = value == Missing ? Missing : findReplica(value, t.source);
+            const auto target = value == Missing ? Missing : findReplica(value, t.target);
+            if (source == Missing || target == Missing || !authorityMatches(value, t.source)
+                || replicas[source].validity != KisReplicaValidity::Valid
+                || replicas[target].validity != KisReplicaValidity::Valid || source == target)
+                return reject(QStringLiteral("authority handoff endpoints are invalid"));
+            if (replicas[source].pins == std::numeric_limits<quint32>::max()
+                || replicas[target].pins == std::numeric_limits<quint32>::max())
+                return reject(QStringLiteral("authority handoff pin count is exhausted"));
+            ++replicas[source].pins; ++replicas[target].pins;
+            image.handoffOperation = t.operation; handoffSource = source; handoffTarget = target;
+            break;
+        }
+        case K::CommitAuthorityHandoff:
+        case K::FailAuthorityHandoff: {
+            const bool commit = t.kind == K::CommitAuthorityHandoff;
+            loadHandoff();
+            if (!image.handoffOperation.isValid() || !(image.handoffOperation == t.operation)
+                || handoffSource == Missing || handoffTarget == Missing
+                || !matches(handoffSource, t.source) || !matches(handoffTarget, t.target)
+                || !(*values[replicas[handoffSource].owner].identity == t.version))
+                return reject(commit ? QStringLiteral("authority handoff completion is stale or mismatched")
+                                     : QStringLiteral("authority handoff failure is stale or mismatched"));
+            const auto value = replicas[handoffSource].owner;
+            if (!replicas[handoffSource].pins || !replicas[handoffTarget].pins
+                || (commit ? replicas[handoffTarget].validity != KisReplicaValidity::Valid
+                           : authority(value) != handoffSource))
+                return reject(commit ? QStringLiteral("authority handoff lost a protected endpoint")
+                                     : QStringLiteral("failed authority handoff lost a protected endpoint"));
+            --replicas[handoffSource].pins; --replicas[handoffTarget].pins;
+            if (commit) { values[value].authority = handoffTarget; values[value].authorityLoaded = true; }
+            image.handoffOperation = {}; image.handoffSource = {}; image.handoffTarget = {};
+            handoffSource = handoffTarget = Missing;
+            break;
+        }
+        case K::DetachPreparedVersion: {
+            const auto value = findValue(t.version);
+            if (!t.transaction.isValid() || t.operation.isValid() || value == Missing
+                || values[value].publication != KisPagePublicationState::Prepared
+                || !(values[value].preparedBy == t.transaction) || image.writerPhase != KisPageWriterPhase::None)
+                return reject(QStringLiteral("prepared detachment identity is invalid or still writable"));
+            values[value].publication = KisPagePublicationState::Historical;
+            values[value].preparedBy = {};
+            break;
+        }
+        case K::DiscardHistoricalVersions: {
+            if (t.versions.empty() || t.transaction.isValid() || t.operation.isValid())
+                return reject(QStringLiteral("historical discard identity is invalid"));
+            for (auto it = t.versions.cbegin(); it != t.versions.cend(); ++it) {
+                if (!it->isValid() || !(it->key == key) || std::find(t.versions.cbegin(), it, *it) != it)
+                    return reject(QStringLiteral("historical discard set is invalid"));
+                const auto value = findValue(*it);
+                if (value == Missing || values[value].publication != KisPagePublicationState::Historical
+                    || readEdges(value) || (authority(value) == Missing && !virtualDefault(value))
+                    || (values[value].original && values[value].original->rootEdges.load(std::memory_order_acquire)))
+                    return reject(QStringLiteral("historical discard target is unavailable"));
+                if (!idle(value, true)) return reject(QStringLiteral("historical discard target is still in use"));
+            }
+            for (qsizetype i = qsizetype(values.size()); i-- > 0;)
+                if (!values[i].removed && std::find(t.versions.cbegin(), t.versions.cend(), *values[i].identity) != t.versions.cend())
+                    retire(i);
+            break;
+        }
+        case K::AbortPreparedVersion:
+        case K::AbortTransaction: {
+            const bool exact = t.kind == K::AbortPreparedVersion;
+            if (!t.transaction.isValid() || (exact && (!t.version.isValid() || !(t.version.key == key))))
+                return reject(QStringLiteral("transaction identity is invalid"));
+            if (image.writerPhase != KisPageWriterPhase::None && image.writerTransaction == t.transaction)
+                return reject(QStringLiteral("transaction still owns a write lease"));
+            bool found = false;
+            for (qsizetype i = qsizetype(values.size()); i-- > 0;) {
+                if (values[i].removed || values[i].publication != KisPagePublicationState::Prepared
+                    || !(values[i].preparedBy == t.transaction) || (exact && !(*values[i].identity == t.version))) continue;
+                if (readEdges(i)) {
+                    values[i].publication = KisPagePublicationState::Historical;
+                    values[i].preparedBy = {};
+                } else {
+                    if (!idle(i, false)) return reject(QStringLiteral("prepared page still has in-flight users"));
+                    retire(i);
+                }
+                found = true;
+            }
+            if (!found) return reject(QStringLiteral("transaction has no prepared page in this record"));
+            break;
+        }
+        default: return reject(QStringLiteral("owner transition is not a local metadata mutation"));
+        }
+        return true;
+    }
+
+    MetadataArenaDemand demand() const
+    {
+        MetadataArenaDemand out;
+        for (const auto &v : values) out.versions += !v.original && !v.removed && !v.synthetic;
+        for (const auto &p : protections)
+            out.overflow += !p.slot.isValid() && !p.removed && !values[replicas[p.replica].owner].removed;
+        return out;
+    }
+    qsizetype physicalInsertions() const
+    {
+        return std::count_if(replicas.begin(), replicas.end(),
+            [&](const auto &r) { return r.introduced && !values[r.owner].removed; });
+    }
+    quint64 inputs() const { return values.size(); }
+    void prepareRelease()
+    {
+        released.resize(std::count_if(values.begin(), values.end(), [](const auto &v) { return v.original && v.removed; }));
+    }
+    bool validate(QString *error) const
+    {
+        for (const auto &v : values) {
+            if (v.removed && v.original && (v.original->rootEdges.load(std::memory_order_acquire)
+                || (!v.identity->isDefaultPixel() && v.original->readEdges))) {
+                KisPageStoreDetail::setError(error, QStringLiteral("removed value gained view retention before acceptance"));
+                return false;
+            }
+        }
+        for (const auto &r : replicas) if (r.introduced && !values[r.owner].removed) {
+            KisReplicaSlotId occupied;
+            if (shard.records.physicalSlots.findExact(r.introduced->physicalSlotIdentity(), &occupied)
+                && !removedOwner(occupied)) {
+                KisPageStoreDetail::setError(error, QStringLiteral("metadata physical ownership changed before acceptance"));
+                return false;
+            }
+        }
+        return true;
+    }
+    void install(ShardRecordStore::ReservationSet &reservation)
+    {
+        size_t releasedCount = 0;
+        for (auto &v : values) if (v.original && v.removed) {
+            auto &out = released[releasedCount++];
+            shard.records.remove(&page, v.original, &out.descriptor, &out.binding);
+        }
+        for (auto &v : values) if (!v.removed && !v.original && !v.synthetic) {
+            v.installed = shard.records.insertEmptyReserved(&page, *v.identity, v.publication, v.preparedBy, &reservation);
+            Q_ASSERT(v.installed.isValid());
+            ++shard.localVersionInstalls;
+            if (kisOnPageStoreReclamationThread()) ++shard.backgroundLocalVersionInstalls;
+        }
+        for (auto &r : replicas) {
+            if (values[r.owner].removed) continue;
+            auto *v = cell(r.owner);
+            if (r.introduced) r.slot = shard.records.appendSingleReplicaReserved(v, *r.introduced, &reservation);
+            auto *stored = shard.records.replica(r.slot); Q_ASSERT(stored);
+            if (stored->pinCount != r.pins || !(stored->activeOperation == r.operation) || stored->validity != r.validity) {
+                stored->pinCount = r.pins; stored->activeOperation = r.operation; stored->validity = r.validity;
+                values[r.owner].changed = true;
+            }
+        }
+        // Unlink only real modified nodes. Every unchanged original chain and
+        // node keeps its identity, capacity and relative order.
+        for (qsizetype i = 0; i < qsizetype(replicas.size()); ++i) {
+            if (values[replicas[i].owner].removed) continue;
+            if (std::none_of(protections.begin(), protections.end(), [&](const auto &p) { return p.replica == i && p.slot.isValid(); })) continue;
+            auto *link = &shard.records.replica(replicas[i].slot)->overflow;
+            while (link->isValid()) {
+                const auto slot = *link; auto *node = shard.records.overflow(slot);
+                const auto p = std::find_if(protections.begin(), protections.end(), [&](const auto &p) { return p.slot == slot; });
+                if (p == protections.end()) { link = &node->next; continue; }
+                *link = node->next; node->next = {};
+                values[replicas[i].owner].changed = true;
+                if (p->removed) { const bool erased = shard.arenas.overflow.erase(slot); Q_ASSERT(erased); Q_UNUSED(erased); }
+            }
+        }
+        for (size_t order = 0; order < appends.size(); ++order) {
+            auto &p = protections[appends[order]];
+            if (p.removed || p.appendOrder != order || values[replicas[p.replica].owner].removed) continue;
+            KisMetadataOverflowNode node;
+            node.kind = p.completion ? KisMetadataOverflowKind::PendingLastUse : KisMetadataOverflowKind::ReadLease;
+            node.value = p.completion ? 0 : p.lease;
+            if (p.completion) node.completion = *p.completion;
+            if (!p.slot.isValid()) p.slot = shard.arenas.overflow.emplaceReserved(&reservation.arenas.overflow, node);
+            else *shard.records.overflow(p.slot) = node;
+            Q_ASSERT(p.slot.isValid());
+            auto *link = &shard.records.replica(replicas[p.replica].slot)->overflow;
+            while (link->isValid()) link = &shard.records.overflow(*link)->next;
+            *link = p.slot;
+            values[replicas[p.replica].owner].changed = true;
+        }
+        for (qsizetype i = 0; i < qsizetype(values.size()); ++i) {
+            auto &v = values[i];
+            if (v.removed || v.synthetic) continue;
+            auto *stored = cell(i);
+            const auto selected = v.authority == Missing ? KisReplicaSlotId{} : replicas[v.authority].slot;
+            if (v.authorityLoaded && !(stored->authorityReplica == selected)) {
+                stored->authorityReplica = selected; v.changed = true;
+            }
+            if (stored->publication != v.publication || !(stored->preparedBy == v.preparedBy)) {
+                const bool set = shard.records.setPublication(&page, stored, v.publication, v.preparedBy);
+                Q_ASSERT(set); Q_UNUSED(set);
+            } else if (v.changed) shard.records.reconsiderHistory(stored);
+        }
+        if (image.writerPhase != KisPageWriterPhase::None) {
+            image.writerBaseAuthority = writerBase == Missing ? KisReplicaSlotId{} : replicas[writerBase].slot;
+            image.writerTarget = replicas[writerTarget].slot;
+        }
+        if (image.handoffOperation.isValid() && handoffSource != Missing) {
+            image.handoffSource = replicas[handoffSource].slot;
+            image.handoffTarget = replicas[handoffTarget].slot;
+        }
+        image.preparedPublications = page.activity.preparedPublications;
+        shard.installActivityImage(key, &page, image);
+        page.nextGeneration = nextGeneration;
+        shard.localVersionRemovals += releasedCount;
+        if (kisOnPageStoreReclamationThread()) shard.backgroundLocalVersionRemovals += releasedCount;
+    }
+    bool hasActivity() const { return image.writerPhase != KisPageWriterPhase::None || image.handoffOperation.isValid(); }
+private:
+    MetadataShard &shard;
+    MetadataPage &page;
+    const KisPageKey &key;
+    MetadataPageActivity image;
+    KisPageGeneration nextGeneration;
+    MetadataLocalArray<Value, 2> values;
+    MetadataLocalArray<Replica, 2> replicas;
+    MetadataLocalArray<Protection, 2> protections;
+    MetadataLocalArray<qsizetype, 2> appends;
+public:
+    MetadataLocalArray<KisPageTransitionEffect, 2> effects;
+private:
+    MetadataLocalArray<MetadataReleasedReferences, 2> released;
+    qsizetype writerBase = Missing, writerTarget = Missing;
+    qsizetype handoffSource = Missing, handoffTarget = Missing;
+
+    KisPageValueCell *cell(qsizetype i) const
+    { return values[i].original ? values[i].original : shard.records.version(values[i].installed); }
+    quint32 readEdges(qsizetype i) const
+    { return values[i].original && !values[i].identity->isDefaultPixel() ? values[i].original->readEdges : 0; }
+    qsizetype findValue(const KisPageVersion &identity)
+    {
+        if (!identity.isValid() || !(identity.key == key)) return Missing;
+        for (qsizetype i = qsizetype(values.size()); i-- > 0;)
+            if (*values[i].identity == identity) return values[i].removed ? Missing : i;
+        KisVersionSlotId slot;
+        if (!shard.records.findVersion(identity, &slot)) return Missing;
+        auto *stored = shard.records.version(slot);
+        values.push_back({&stored->version, stored, slot, stored->publication, stored->preparedBy});
+        return qsizetype(values.size() - 1);
+    }
+    qsizetype addValue(const KisPageVersion &identity, KisPagePublicationState state, bool synthetic = false)
+    {
+        values.push_back({&identity, nullptr, {}, state, {}, Missing, true, false, synthetic});
+        return qsizetype(values.size() - 1);
+    }
+    qsizetype originalReplica(qsizetype owner, KisReplicaSlotId slot)
+    {
+        if (!slot.isValid()) return Missing;
+        for (qsizetype i = 0; i < qsizetype(replicas.size()); ++i)
+            if (replicas[i].slot == slot) return i;
+        const auto *stored = shard.records.replica(slot); Q_ASSERT(stored);
+        replicas.push_back({owner, slot, nullptr, stored->activeOperation, stored->pinCount, stored->validity});
+        return qsizetype(replicas.size() - 1);
+    }
+    qsizetype addReplica(qsizetype owner, const KisReplicaHandle &handle, KisReplicaValidity validity)
+    {
+        replicas.push_back({owner, {}, &handle, {}, 0, validity});
+        return qsizetype(replicas.size() - 1);
+    }
+    qsizetype findReplica(qsizetype owner, const KisReplicaHandle &handle)
+    {
+        if (!handle.isValid()) return Missing;
+        for (qsizetype i = 0; i < qsizetype(replicas.size()); ++i)
+            if (replicas[i].owner == owner && matches(i, handle)) return i;
+        auto *stored = values[owner].original;
+        KisReplicaSlotId slot;
+        return stored && shard.records.findReplicaSlot(stored->slot, handle, &slot) ? originalReplica(owner, slot) : Missing;
+    }
+    qsizetype authority(qsizetype value)
+    {
+        if (!values[value].authorityLoaded) {
+            const auto slot = values[value].original->authorityReplica;
+            const auto index = originalReplica(value, slot);
+            values[value].authority = index; values[value].authorityLoaded = true;
+        }
+        return values[value].authority;
+    }
+    bool authorityMatches(qsizetype value, const KisReplicaHandle &handle)
+    {
+        const auto r = authority(value);
+        return r == Missing ? handle == KisReplicaHandle{} : matches(r, handle);
+    }
+    bool virtualDefault(qsizetype value) const
+    {
+        if (!values[value].identity->isDefaultPixel()
+            || (values[value].publication != KisPagePublicationState::Historical
+                && values[value].publication != KisPagePublicationState::Published)) return false;
+        if (values[value].original && values[value].original->replicaCount) return false;
+        return std::none_of(replicas.begin(), replicas.end(), [&](const auto &r) { return r.owner == value && r.introduced; });
+    }
+    bool matches(qsizetype r, const KisReplicaHandle &handle) const
+    {
+        const auto &record = replicas[r];
+        return record.introduced ? *record.introduced == handle
+            : ShardRecordStore::matchesReplica(*shard.records.replica(record.slot), *values[record.owner].identity, handle);
+    }
+    KisReplicaHandle handle(qsizetype r) const
+    { return replicas[r].introduced ? *replicas[r].introduced : shard.records.projectReplica(replicas[r].slot); }
+    void loadWriter()
+    {
+        if (image.writerPhase == KisPageWriterPhase::None || writerTarget != Missing) return;
+        const auto *target = shard.records.replica(image.writerTarget);
+        Q_ASSERT(target);
+        if (image.writerBaseAuthority.isValid()) {
+            const auto *base = shard.records.replica(image.writerBaseAuthority); Q_ASSERT(base);
+            writerBase = originalReplica(findValue(shard.records.version(base->ownerVersion)->version), image.writerBaseAuthority);
+        }
+        writerTarget = originalReplica(findValue(shard.records.version(target->ownerVersion)->version), image.writerTarget);
+    }
+    bool matchesWriter(const KisPageTransition &t)
+    {
+        if (image.writerPhase == KisPageWriterPhase::None) return false;
+        loadWriter();
+        return image.writerToken == t.writer && image.writerOperation == t.operation
+            && image.writerTransaction == t.transaction && image.writerMode == t.writeMode
+            && (writerBase == Missing ? t.source == KisReplicaHandle{}
+                    && t.baseVersion == KisPageVersion{key, image.writerDefaultGeneration, image.writerDefaultRevision}
+                : matches(writerBase, t.source) && *values[replicas[writerBase].owner].identity == t.baseVersion)
+            && matches(writerTarget, t.target) && *values[replicas[writerTarget].owner].identity == t.version;
+    }
+    bool releaseBefore()
+    {
+        if (writerBase == Missing) return image.writerDefaultRevision && image.writerMode == KisPageWriteMode::DiscardContents;
+        const auto value = replicas[writerBase].owner;
+        if (authority(value) != writerBase || !replicas[writerBase].pins) return false;
+        --replicas[writerBase].pins;
+        return true;
+    }
+    void clearWriter()
+    {
+        image.writerToken = {}; image.writerOperation = {}; image.writerTransaction = {};
+        image.writerDefaultGeneration = {}; image.writerDefaultRevision = 0;
+        image.writerBaseAuthority = {}; image.writerTarget = {};
+        image.writerMode = KisPageWriteMode::PreserveContents; image.writerPhase = KisPageWriterPhase::None;
+        writerBase = writerTarget = Missing;
+    }
+    void loadHandoff()
+    {
+        if (!image.handoffOperation.isValid() || handoffSource != Missing) return;
+        const auto *source = shard.records.replica(image.handoffSource); Q_ASSERT(source);
+        const auto value = findValue(shard.records.version(source->ownerVersion)->version);
+        handoffSource = originalReplica(value, image.handoffSource);
+        handoffTarget = originalReplica(value, image.handoffTarget);
+    }
+    static bool publishable(const Replica &r)
+    { return !r.operation.isValid() && (r.validity == KisReplicaValidity::Allocated || r.validity == KisReplicaValidity::Valid); }
+    template<class Visit> void forReplicas(qsizetype value, const Visit &visit)
+    {
+        if (const auto *original = values[value].original)
+            for (auto slot = original->firstReplica; slot.isValid();) {
+                const auto next = shard.records.replica(slot)->nextReplica;
+                visit(originalReplica(value, slot)); slot = next;
+            }
+        for (qsizetype i = 0; i < qsizetype(replicas.size()); ++i)
+            if (replicas[i].owner == value && replicas[i].introduced) visit(i);
+    }
+    bool idle(qsizetype value, bool validity)
+    {
+        bool ready = true;
+        forReplicas(value, [&](qsizetype r) {
+            const auto &replica = replicas[r];
+            if (replica.operation.isValid() || replica.pins || protectedReplica(r)
+                || (validity && replica.validity != KisReplicaValidity::Valid && replica.validity != KisReplicaValidity::Failed)) ready = false;
+        });
+        return ready;
+    }
+    void retire(qsizetype value)
+    {
+        forReplicas(value, [&](qsizetype r) { effects.push_back({handle(r), {}}); });
+        values[value].removed = true;
+    }
+    bool removedOwner(KisReplicaSlotId slot) const
+    {
+        const auto *stored = shard.records.replica(slot);
+        return stored && std::any_of(values.begin(), values.end(),
+            [&](const auto &v) { return v.original && v.original->slot == stored->ownerVersion && v.removed; });
+    }
+    bool physicalAvailable(const KisReplicaHandle &target, QString *error, const QString &localReason) const
+    {
+        if (!target.isValid()) return true;
+        const auto key = target.physicalSlotIdentity();
+        for (const auto &r : replicas)
+            if (r.introduced && !values[r.owner].removed && r.introduced->physicalSlotIdentity() == key) {
+                KisPageStoreDetail::setError(error, localReason); return false;
+            }
+        KisReplicaSlotId slot;
+        if (!shard.records.physicalSlots.findExact(key, &slot) || removedOwner(slot)) return true;
+        const auto *r = shard.records.replica(slot); const auto *v = shard.records.version(r->ownerVersion);
+        KisPageStoreDetail::setError(error, v->version.key == this->key ? localReason
+            : QStringLiteral("metadata index reservation or physical ownership conflict"));
+        return false;
+    }
+    qsizetype editedProtection(KisMetadataOverflowSlotId slot) const
+    {
+        for (qsizetype i = 0; i < qsizetype(protections.size()); ++i)
+            if (protections[i].slot == slot) return i;
+        return Missing;
+    }
+    qsizetype findLease(qsizetype replica, KisPageLeaseId lease)
+    {
+        for (qsizetype i = 0; i < qsizetype(protections.size()); ++i)
+            if (protections[i].replica == replica && !protections[i].removed && !protections[i].completion
+                && protections[i].lease == lease.value) return i;
+        const auto *r = replicas[replica].introduced ? nullptr : shard.records.replica(replicas[replica].slot);
+        for (auto slot = r ? r->overflow : KisMetadataOverflowSlotId{}; slot.isValid();) {
+            const auto *node = shard.records.overflow(slot);
+            if (node->kind == KisMetadataOverflowKind::ReadLease && node->value == lease.value) {
+                if (editedProtection(slot) != Missing) return Missing;
+                protections.push_back({replica, slot, lease.value});
+                return qsizetype(protections.size() - 1);
+            }
+            slot = node->next;
+        }
+        return Missing;
+    }
+    bool leaseExists(KisPageLeaseId lease) const
+    {
+        for (const auto &p : protections)
+            if (!p.removed && !p.completion && p.lease == lease.value && !values[replicas[p.replica].owner].removed) return true;
+        for (auto value = page.firstVersion; value.isValid();) {
+            const auto *v = shard.records.version(value);
+            for (auto replica = v->firstReplica; replica.isValid();) {
+                const auto *r = shard.records.replica(replica);
+                if (!removedOwner(replica)) for (auto slot = r->overflow; slot.isValid();) {
+                    const auto *node = shard.records.overflow(slot);
+                    if (node->kind == KisMetadataOverflowKind::ReadLease && node->value == lease.value
+                        && editedProtection(slot) == Missing) return true;
+                    slot = node->next;
+                }
+                replica = r->nextReplica;
+            }
+            value = v->nextVersion;
+        }
+        return false;
+    }
+    bool protectedReplica(qsizetype replica) const
+    {
+        for (const auto &p : protections) if (p.replica == replica && !p.removed) return true;
+        const auto *r = replicas[replica].introduced ? nullptr : shard.records.replica(replicas[replica].slot);
+        for (auto slot = r ? r->overflow : KisMetadataOverflowSlotId{}; slot.isValid();) {
+            const auto *node = shard.records.overflow(slot);
+            if (editedProtection(slot) == Missing) return true;
+            slot = node->next;
+        }
+        return false;
+    }
+    void appendProtection(qsizetype p)
+    {
+        protections[p].appendOrder = appends.size(); appends.push_back(p);
+    }
+};
 
 bool localTransition(KisPageTransitionKind kind)
 {
@@ -5962,9 +6501,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwner(const Kis
 {
     if (transition.kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, transition, cleanup);
-    if (directWriteSequence(&transition, 1))
-        return applyWriteSequence(key, &transition, 1);
-    return applyProjectedSequence(key, &transition, 1);
+    return applyLocalSequence(key, &transition, 1);
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(const KisPageKey &key,
@@ -5973,9 +6510,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyOwnerSequence(c
 {
     if (transitions && count == 1 && transitions->kind == KisPageTransitionKind::ReleaseRead)
         return applyReadProtection(key, *transitions);
-    if (directWriteSequence(transitions, count))
-        return applyWriteSequence(key, transitions, count);
-    return applyProjectedSequence(key, transitions, count);
+    return applyLocalSequence(key, transitions, count);
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::publishLeaseWrite(const KisPageTransition &write)
@@ -5985,190 +6520,7 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::publishLeaseWrite(co
     auto publish = begin;
     publish.kind = KisPageTransitionKind::PublishWrite;
     const KisPageTransition transitions[] = {begin, publish};
-    return applyWriteSequence(write.version.key, transitions, 2, true);
-}
-
-KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyWriteSequence(
-    const KisPageKey &key, const KisPageTransition *transitions, qsizetype count, bool acceptPreparedRetry)
-try {
-    Q_ASSERT(directWriteSequence(transitions, count));
-    KisPageMetadataTransitionResult result;
-    auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), key);
-    if (!shard) {
-        result.rejectionReason = QStringLiteral("metadata coordinator is not configured");
-        return result;
-    }
-    const auto &write = transitions[0];
-    const bool addition = write.kind == KisPageTransitionKind::AcquireWrite;
-    for (;;) {
-        const auto storageOwner = shard->budgetAuthority->storage<char>();
-        const auto storage = storageOwner.borrowed();
-        MetadataArenaGrowth growth(storage);
-        KisPageWorkingResult step(storage);
-        KisPageWorkingArray<KisPageWorkingVersion, 1> additions{
-            KisPageWorkingArray<KisPageWorkingVersion, 1>::allocator_type(storage)};
-        QMutexLocker lock(&shard->mutex);
-        auto page = shard->pages.find(key);
-        if (page == shard->pages.end() || !shard->canMutate(key, page->second)
-            || page->second.activity.nativeWrite) {
-            result.rejectionReason = QStringLiteral("page is missing or reserved for publication");
-            return result;
-        }
-        if (acceptPreparedRetry) {
-            KisVersionSlotId acceptedSlot;
-            const auto *accepted = shard->records.findVersion(write.version, &acceptedSlot)
-                ? shard->records.version(acceptedSlot) : nullptr;
-            if (accepted && accepted->publication == KisPagePublicationState::Prepared
-                && accepted->preparedBy == write.transaction
-                && shard->records.projectReplica(accepted->authorityReplica) == write.target) {
-                result.accepted = true;
-                return result;
-            }
-        }
-        step.next.setHeader(shard->activityHeader(key, page->second));
-        const auto include = [&](const KisPageVersion &identity) {
-            if (!identity.isValid() || step.next.findVersion(identity)) return;
-            KisPageWorkingVersion value(storage);
-            // This finite sequence only reads scalar replica facts and changes
-            // a new target, base pin, writer or publication. No guard reads
-            // leases/last-use/capture and no original overflow is replaced.
-            const bool found = shard->records.snapshot<KisPageWorkingVersion, false>(identity, &value);
-            const auto &base = addition ? write.baseVersion : step.next.writer.baseVersion;
-            if (!found && identity == base && identity.isDefaultPixel() && !write.source.isValid()) {
-                // Default bytes belong to the admitted surface identity, not
-                // an optional materialization cache that can disappear.
-                value.version = identity;
-                value.publication = KisPagePublicationState::Historical;
-            }
-            if (found || value.version.isValid()) {
-                if (identity == base
-                    && value.publication == KisPagePublicationState::Historical)
-                    value.publication = KisPagePublicationState::Published;
-                step.next.versions.push_back(std::move(value));
-            }
-        };
-        include(step.next.writer.baseVersion);
-        include(step.next.writer.target.version);
-        include(write.baseVersion);
-        include(write.version);
-        if (addition && write.target.isValid()) {
-            KisPageVersion witness;
-            if (shard->records.physicalOwner(write.target.physicalSlotIdentity(), &witness) && witness.key == key)
-                include(witness);
-        }
-        const quint64 inputs = quint64(step.next.versions.size());
-        const bool background = kisOnPageStoreReclamationThread();
-        ++shard->localTransitionSequences;
-        shard->localVersionInputs += inputs;
-        if (background) {
-            ++shard->backgroundLocalTransitionSequences;
-            shard->backgroundLocalVersionInputs += inputs;
-        }
-        const KisPageStateMachine machine;
-        for (qsizetype i = 0; i < count; ++i) {
-            machine.applyKnownValid(step, transitions[i]);
-            if (!step.accepted) {
-                ++shard->rejectedTransitions;
-                result.rejectionReason = step.rejectionReason;
-                return result;
-            }
-            Q_ASSERT(step.effects.empty());
-        }
-        const auto nextHeader = step.next.header();
-        if (addition) {
-            auto *target = step.next.findVersion(write.version);
-            Q_ASSERT(target);
-            additions.push_back(std::move(*target));
-        }
-        const quint64 revision = page->second.revision;
-        const auto demand = shard->records.batchDemand(additions);
-        const auto ready = growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
-            page = shard->pages.find(key);
-            return page != shard->pages.end() && shard->canMutate(key, page->second)
-                && page->second.revision == revision;
-        }, nullptr);
-        if (ready == MetadataGrowthResult::Stale) {
-            --shard->localTransitionSequences;
-            shard->localVersionInputs -= inputs;
-            if (background) {
-                --shard->backgroundLocalTransitionSequences;
-                shard->backgroundLocalVersionInputs -= inputs;
-            }
-            continue;
-        }
-        if (ready != MetadataGrowthResult::Ready
-            || !shard->ensureActivityCapacity(key, &nextHeader, &result.rejectionReason)) {
-            ++shard->rejectedTransitions;
-            result.storageRefused = true;
-            result.rejectionReason = QStringLiteral("metadata write delta capacity is exhausted");
-            return result;
-        }
-        auto discardActivity = qScopeGuard([&] {
-            const auto activity = shard->activities.find(key);
-            if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
-        });
-        ShardRecordStore::ReservationSet reservation;
-        qsizetype replicas = 0;
-        for (const auto &value : additions) replicas += qsizetype(value.replicas.size());
-        if (!shard->records.reserve(demand, qsizetype(additions.size()), replicas, &reservation)) {
-            ++shard->rejectedTransitions;
-            result.storageRefused = true;
-            result.rejectionReason = QStringLiteral("metadata write delta reservation was refused");
-            return result;
-        }
-        auto cancelReservation = qScopeGuard([&] { reservation.cancel(&shard->records); });
-        if (!shard->records.installPreparedAdditionsReserved(&page->second, &additions, &reservation)) {
-            ++shard->rejectedTransitions;
-            result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
-            return result;
-        }
-        // All fallible work precedes this point. The shared policy has
-        // decided the values; only these finite sequence's actual fields are
-        // installed. Other replicas and every protection node stay in place.
-        const bool publication = write.kind == KisPageTransitionKind::BeginPublish && count == 2;
-        if ((write.kind == KisPageTransitionKind::AcquireWrite || publication) && write.source.isValid()) {
-            const auto *base = step.next.findVersion(write.baseVersion);
-            const auto *value = base ? base->findReplica(write.source) : nullptr;
-            KisVersionSlotId versionSlot;
-            KisReplicaSlotId replicaSlot;
-            const bool found = value && shard->records.findVersion(write.baseVersion, &versionSlot)
-                && shard->records.findReplicaSlot(versionSlot, write.source, &replicaSlot);
-            Q_ASSERT(found); Q_UNUSED(found);
-            shard->records.replica(replicaSlot)->pinCount = value->pinCount;
-        }
-        if (publication) {
-            const auto *value = step.next.findVersion(write.version);
-            KisVersionSlotId versionSlot;
-            KisReplicaSlotId replicaSlot;
-            const bool found = value && shard->records.findVersion(write.version, &versionSlot)
-                && shard->records.findReplicaSlot(versionSlot, write.target, &replicaSlot);
-            Q_ASSERT(found); Q_UNUSED(found);
-            shard->records.replica(replicaSlot)->validity = value->findReplica(write.target)->validity;
-            shard->records.version(versionSlot)->authorityReplica = replicaSlot;
-            const bool installed = shard->records.setPublication(&page->second, write.version,
-                value->publication, value->preparedBy);
-            Q_ASSERT(installed); Q_UNUSED(installed);
-        }
-        const bool installed = shard->installActivityHeader(key, &page->second, nextHeader);
-        Q_ASSERT(installed); Q_UNUSED(installed);
-        discardActivity.dismiss();
-        reservation.cancel(&shard->records);
-        cancelReservation.dismiss();
-        ++page->second.revision;
-        shard->localVersionInstalls += quint64(additions.size());
-        if (background) shard->backgroundLocalVersionInstalls += quint64(additions.size());
-        shard->acceptedTransitions += quint64(count);
-        result.accepted = true;
-        auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
-        lock.unlock();
-        Q_UNUSED(releasedBlocks);
-        return result;
-    }
-} catch (const std::bad_alloc &) {
-    KisPageMetadataTransitionResult refused;
-    refused.storageRefused = true;
-    refused.rejectionReason = QStringLiteral("metadata write delta storage was refused");
-    return refused;
+    return applyLocalSequence(write.version.key, transitions, 2, true);
 }
 
 KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
@@ -6225,13 +6577,12 @@ KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyReadProtection(
     return result;
 }
 
-KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyProjectedSequence(
-    const KisPageKey &key, const KisPageTransition *transitions, qsizetype count)
+KisPageMetadataTransitionResult KisPageMetadataCoordinator::applyLocalSequence(
+    const KisPageKey &key, const KisPageTransition *transitions, qsizetype count, bool acceptPreparedRetry)
 try {
     KisPageMetadataTransitionResult result;
-    if (count <= 0 || !transitions || std::any_of(transitions, transitions + count, [](const auto &t) {
-            return !localTransition(t.kind);
-        })) {
+    if (count <= 0 || !transitions || std::any_of(transitions, transitions + count,
+            [](const auto &t) { return !localTransition(t.kind); })) {
         result.rejectionReason = QStringLiteral("owner transition is not a local metadata mutation");
         return result;
     }
@@ -6242,163 +6593,82 @@ try {
     }
     for (;;) {
         const auto storageOwner = shard->budgetAuthority->storage<char>();
-        const auto workingStorage = storageOwner.borrowed();
-        MetadataArenaGrowth growth(workingStorage);
-        KisPageWorkingArray<KisPageTransitionEffect> effects(workingStorage);
-        KisPageWorkingArray<std::shared_ptr<const KisPageAllocationDescriptor>, 2> releasedDescriptors{
-            decltype(releasedDescriptors)::allocator_type(workingStorage)};
-        KisPageWorkingArray<std::shared_ptr<KisCpuResidentBinding>, 2> releasedBindings{
-            decltype(releasedBindings)::allocator_type(workingStorage)};
+        MetadataArenaGrowth growth(storageOwner.borrowed());
+        std::optional<MetadataLocalMutation> plan;
+        MetadataArenas::ReleasedBlocks releasedBlocks;
         QMutexLocker lock(&shard->mutex);
         auto page = shard->pages.find(key);
         if (page == shard->pages.end() || !shard->canMutate(key, page->second)) {
             result.rejectionReason = QStringLiteral("page is missing or reserved for publication");
             return result;
         }
-        KisPageWorkingResult step(workingStorage);
-        auto &input = step.next;
-        input.setHeader(shard->activityHeader(key, page->second));
-        const auto add = [&](const KisPageVersion &identity) {
-            if (!identity.isValid() || input.findVersion(identity))
-                return;
-            KisPageWorkingVersion version(workingStorage);
-            if (shard->records.snapshot(identity, &version)) {
-                input.versions.push_back(std::move(version));
-            }
-        };
-        add(input.writer.baseVersion);
-        add(input.writer.target.version);
-        for (qsizetype i = 0; i < count; ++i) {
-            const auto &transition = transitions[i];
-            add(transition.baseVersion);
-            add(transition.version);
-            for (const auto &version : transition.versions)
-                add(version);
-            if (transition.kind == KisPageTransitionKind::AcquireRead) {
-                KisPageVersion leaseOwner;
-                if (shard->records.readLeaseOwner(page->second, transition.lease, &leaseOwner))
-                    add(leaseOwner);
-            }
-            if (transition.kind == KisPageTransitionKind::AbortTransaction) {
-                shard->records.forPreparedTransaction(page->second, transition.transaction, add);
-            }
-            // Allocation slot uniqueness is a PAGE-wide condition, including old
-            // history and regardless of allocation generation/domain. Include its
-            // exact witness so the shared state machine rejects with the same guard.
-            if (transition.target.isValid()) {
-                KisPageVersion physicalOwner;
-                if (shard->records.physicalOwner(transition.target.physicalSlotIdentity(), &physicalOwner)
-                    && physicalOwner.key == key) {
-                    add(physicalOwner);
-                }
+        if (acceptPreparedRetry) {
+            const auto &write = transitions[0];
+            KisVersionSlotId slot;
+            const auto *value = shard->records.findVersion(write.version, &slot) ? shard->records.version(slot) : nullptr;
+            const auto *authority = value ? shard->records.replica(value->authorityReplica) : nullptr;
+            if (value && value->publication == KisPagePublicationState::Prepared && value->preparedBy == write.transaction
+                && authority && ShardRecordStore::matchesReplica(*authority, value->version, write.target)) {
+                result.accepted = true;
+                return result;
             }
         }
-        ++shard->localTransitionSequences;
-        shard->localVersionInputs += quint64(input.versions.size());
+        const auto revision = page->second.revision;
+        plan.emplace(*shard, page->second, key, storageOwner.borrowed());
+        plan->capture(transitions, count);
         const bool background = kisOnPageStoreReclamationThread();
-        if (background) {
-            ++shard->backgroundLocalTransitionSequences;
-            shard->backgroundLocalVersionInputs += quint64(input.versions.size());
-        }
-        // Installation needs the original identities only to remove records
-        // absent from the accepted result. No second replica/protection image
-        // is needed through unlocked growth or retirement preparation.
-        KisPageWorkingArray<KisPageVersion, 2> inputVersions{
-            KisPageWorkingArray<KisPageVersion, 2>::allocator_type(workingStorage)};
-        inputVersions.reserve(input.versions.size());
-        for (const auto &version : input.versions)
-            inputVersions.push_back(version.version);
-        auto &next = input;
-        const KisPageStateMachine machine;
+        ++shard->localTransitionSequences;
+        if (background) ++shard->backgroundLocalTransitionSequences;
         for (qsizetype i = 0; i < count; ++i) {
-            const auto &transition = transitions[i];
-            if (transition.kind == KisPageTransitionKind::DiscardHistoricalVersions) {
-                for (const auto &identity : transition.versions) {
-                    KisVersionSlotId slot;
-                    const auto *value = shard->records.findVersion(identity, &slot) ? shard->records.version(slot) : nullptr;
-                    if (value && value->rootEdges.load(std::memory_order_acquire)) {
-                        ++shard->rejectedTransitions;
-                        result.rejectionReason = QStringLiteral("historical discard target is unavailable");
-                        return result;
-                    }
-                }
-            } else if (transition.kind == KisPageTransitionKind::AcquireWrite) {
-                auto *base = next.findVersion(transition.baseVersion);
-                if (base && base->publication == KisPagePublicationState::Historical)
-                    base->publication = KisPagePublicationState::Published;
-            }
-            machine.applyKnownValid(step, transition);
-            if (!step.accepted) {
+            if (!plan->apply(transitions[i], &result.rejectionReason)) {
+                shard->localVersionInputs += plan->inputs();
+                if (background) shard->backgroundLocalVersionInputs += plan->inputs();
                 ++shard->rejectedTransitions;
-                result.rejectionReason = step.rejectionReason;
-                return result; // no authoritative record has changed
+                return result;
             }
-            effects.insert(effects.end(), step.effects.cbegin(), step.effects.cend());
         }
-        // Only projected records are installed/removed. Unrelated history and its
-        // reader/pin/last-use state are neither copied nor overwritten.
-        const quint64 expectedRevision = page->second.revision;
-        const auto discardStaleAttempt = [&] {
-            Q_ASSERT(shard->localTransitionSequences > 0);
-            Q_ASSERT(shard->localVersionInputs >= quint64(inputVersions.size()));
-            --shard->localTransitionSequences;
-            shard->localVersionInputs -= quint64(inputVersions.size());
-            if (background) {
-                Q_ASSERT(shard->backgroundLocalTransitionSequences > 0);
-                Q_ASSERT(shard->backgroundLocalVersionInputs >= quint64(inputVersions.size()));
-                --shard->backgroundLocalTransitionSequences;
-                shard->backgroundLocalVersionInputs -= quint64(inputVersions.size());
-            }
+        const auto inputs = plan->inputs();
+        shard->localVersionInputs += inputs;
+        if (background) shard->backgroundLocalVersionInputs += inputs;
+        const auto discardStale = [&] {
+            --shard->localTransitionSequences; shard->localVersionInputs -= inputs;
+            if (background) { --shard->backgroundLocalTransitionSequences; shard->backgroundLocalVersionInputs -= inputs; }
         };
-        const MetadataArenaDemand demand = shard->records.batchDemand(next.versions);
-        const auto storage = growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
-            page = shard->pages.find(key);
-            return page != shard->pages.end() && shard->canMutate(key, page->second)
-                && page->second.revision == expectedRevision;
-        }, nullptr);
-        if (storage == MetadataGrowthResult::Stale) {
-            // Local owner transitions are composable against the newest page
-            // revision. Arena growth is an implementation detail, so do not leak
-            // its unlock window as a transient semantic rejection to callers.
-            discardStaleAttempt();
-            continue;
-        }
-        if (storage != MetadataGrowthResult::Ready) {
-            ++shard->rejectedTransitions;
-            result.storageRefused = true;
+        const auto demand = plan->demand();
+        const auto ready = shard->records.hasCapacity(demand) ? MetadataGrowthResult::Ready
+            : growMetadataArenasOutsideLock(shard, demand, &growth, &lock, [&] {
+                return shard->canMutate(key, page->second) && page->second.revision == revision;
+            }, nullptr);
+        if (ready == MetadataGrowthResult::Stale) { discardStale(); continue; }
+        if (ready != MetadataGrowthResult::Ready) {
+            ++shard->rejectedTransitions; result.storageRefused = true;
             result.rejectionReason = QStringLiteral("metadata arena budget is exhausted");
             return result;
         }
-        const auto nextHeader = next.header();
-        if (!shard->ensureActivityCapacity(key, &nextHeader, &result.rejectionReason)) {
-            result.storageRefused = true;
-            result.rejectionReason = QStringLiteral("metadata activity capacity budget is exhausted");
-            return result;
-        }
-        const bool needsRetirement = !effects.empty();
+        // Only a real surviving writer/handoff needs the original sparse
+        // activity payload. No full activity-header projection or relookup.
+        if (plan->hasActivity()) shard->activities.try_emplace(key);
+        const bool retirement = !plan->effects.empty();
         bool activityRetained = false;
-        auto *originalPage = &page->second;
-        auto discardActivity = qScopeGuard([&] {
+        auto cleanupActivity = qScopeGuard([&] {
             if (!lock.isLocked()) lock.relock();
-            if (activityRetained) shard->releasePublicationActivity(key, *originalPage);
+            if (activityRetained) shard->releasePublicationActivity(key, page->second);
             else {
                 const auto activity = shard->activities.find(key);
                 if (activity != shard->activities.end() && activity->second.isEmpty()) shard->activities.erase(activity);
             }
         });
-        if (needsRetirement && !shard->reservePublicationActivity(page->second)) {
+        if (retirement && !shard->reservePublicationActivity(page->second)) {
             result.storageRefused = true;
             result.rejectionReason = QStringLiteral("metadata activity reservation is exhausted");
             return result;
         }
-        activityRetained = needsRetirement;
-        // Prepare every real output before entering R. These original arena
-        // and index reservations survive V being dropped for fee acceptance.
-        releasedDescriptors.resize(size_t(inputVersions.size()));
-        releasedBindings.resize(size_t(inputVersions.size()));
+        activityRetained = retirement;
+        plan->prepareRelease();
         ShardRecordStore::ReservationSet reservation;
-        if (!shard->records.reserveAcceptedBatch(step, &reservation)) {
+        if (!shard->records.reserve(demand, qsizetype(demand.versions), plan->physicalInsertions(), &reservation)) {
             ++shard->rejectedTransitions;
+            result.storageRefused = true;
             result.rejectionReason = QStringLiteral("metadata index reservation or physical ownership conflict");
             return result;
         }
@@ -6409,63 +6679,34 @@ try {
         bool stale = false;
         auto install = [&] {
             if (!lock.isLocked()) lock.relock();
-            page = shard->pages.find(key);
-            if (page == shard->pages.end() || !shard->canMutate(key, page->second)
-                || page->second.revision != expectedRevision) {
+            if (!shard->canMutate(key, page->second) || page->second.revision != revision) {
                 stale = true;
-                lock.unlock();
+                if (retirement) lock.unlock();
                 return false;
             }
-            for (const auto &identity : inputVersions) {
-                if (next.findVersion(identity)) continue;
-                KisVersionSlotId slot;
-                const auto *value = shard->records.findVersion(identity, &slot) ? shard->records.version(slot) : nullptr;
-                if (value && value->rootEdges.load(std::memory_order_acquire)) {
-                    result.rejectionReason = QStringLiteral("removed value gained view retention before acceptance");
-                    lock.unlock();
-                    return false;
-                }
-            }
-            if (!shard->records.installAcceptedBatch(&page->second, step, &reservation, needsRetirement)) {
-                result.rejectionReason = QStringLiteral("metadata physical ownership changed before acceptance");
-                lock.unlock();
+            if (!plan->validate(&result.rejectionReason)) {
+                if (retirement) lock.unlock();
                 return false;
             }
-            quint64 removed = 0;
-            for (const auto &version : inputVersions) {
-                if (!next.findVersion(version)) {
-                    shard->records.remove(&page->second, version, &releasedDescriptors[size_t(removed)],
-                                          &releasedBindings[size_t(removed)]);
-                    ++removed;
-                }
-            }
-            const bool headerInstalled = shard->installActivityHeader(key, &page->second, nextHeader);
-            Q_ASSERT(headerInstalled);
-            Q_UNUSED(headerInstalled);
+            plan->install(reservation);
             ++page->second.revision;
-            shard->localVersionInstalls += quint64(next.versions.size());
-            shard->localVersionRemovals += removed;
-            if (background) {
-                shard->backgroundLocalVersionInstalls += quint64(next.versions.size());
-                shard->backgroundLocalVersionRemovals += removed;
-            }
             shard->acceptedTransitions += quint64(count);
             result.accepted = true;
-            if (needsRetirement) lock.unlock();
+            if (retirement) lock.unlock();
             return true;
         };
-        bool accepted;
         QString debtError;
-        if (!needsRetirement) accepted = install();
+        bool accepted;
+        if (!retirement) accepted = install();
         else {
             lock.unlock();
             accepted = m_acceptRetirement && m_acceptRetirement(m_retirementContext,
-                effects.data(), qsizetype(effects.size()), &install,
+                plan->effects.data(), qsizetype(plan->effects.size()), &install,
                 [](void *p) { return (*static_cast<decltype(install) *>(p))(); }, &debtError);
         }
         if (!lock.isLocked()) lock.relock();
         if (!accepted) {
-            if (stale) { discardStaleAttempt(); continue; }
+            if (stale) { discardStale(); continue; }
             ++shard->rejectedTransitions;
             if (result.rejectionReason.isEmpty()) {
                 result.storageRefused = true;
@@ -6476,20 +6717,17 @@ try {
         }
         reservation.cancel(&shard->records);
         cancelReservation.dismiss();
-        if (activityRetained) shard->releasePublicationActivity(key, *originalPage);
-        discardActivity.dismiss();
-        auto releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
+        if (activityRetained) shard->releasePublicationActivity(key, page->second);
+        cleanupActivity.dismiss();
+        releasedBlocks = shard->arenas.takeEmptyBlocks(&shard->budgetCharge);
         lock.unlock();
-        if (needsRetirement)
-            m_deliverRetirement(m_retirementContext, effects.data(), qsizetype(effects.size()));
-        Q_UNUSED(releasedBlocks);
+        if (retirement) m_deliverRetirement(m_retirementContext, plan->effects.data(), qsizetype(plan->effects.size()));
         return result;
     }
-}
-catch (const std::bad_alloc &) {
+} catch (const std::bad_alloc &) {
     KisPageMetadataTransitionResult refused;
     refused.storageRefused = true;
-    refused.rejectionReason = QStringLiteral("metadata transition working storage was refused");
+    refused.rejectionReason = QStringLiteral("metadata local mutation storage was refused");
     return refused;
 }
 

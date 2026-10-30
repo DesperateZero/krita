@@ -1465,7 +1465,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct MetadataArenaGrowth",
             "growMetadataArenasOutsideLock",
             "metadataArenaBlockCandidatesPrepared",
-            "installPreparedAdditionsReserved",
+            "insertEmptyReserved",
+            "appendSingleReplicaReserved",
+            "MetadataLocalMutation",
         ):
             if contract not in metadata_text:
                 errors.append(f"R2/M2 shard arena authority is missing: {contract}")
@@ -1477,6 +1479,26 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         for obsolete in ("KisPageStateSnapshot next", "installRecords", "PublicationDelta", "applyKnownValid"):
             if obsolete in cold_text:
                 errors.append(f"cold acceptance restored working-state reconstruction: {obsolete}")
+        for obsolete in ("KisPageWorking", "applyKnownValid", "applyProjectedSequence", "applyWriteSequence",
+                         "reserveAcceptedBatch", "installAcceptedBatch", "installPreparedAdditionsReserved", "putReserved"):
+
+            if obsolete in metadata_text:
+                errors.append(f"local mutation restored working-state reconstruction: {obsolete}")
+        if (REPOSITORY_ROOT / "libs/image/pagestore/KisPageStateMachine_p.h").exists():
+            errors.append("obsolete production working-state header remains")
+        local_begin = metadata_text.find("class MetadataLocalMutation final")
+        local_end = metadata_text.find("bool localTransition(", local_begin)
+        local_text = metadata_text[local_begin:local_end]
+        if local_begin < 0 or local_end < 0 or "KisPageStateSnapshot" in local_text:
+            errors.append("original local mutation boundary is missing or projects full page state")
+        local_install_begin = local_text.find("void install(ShardRecordStore::ReservationSet &reservation)")
+        local_install_end = local_text.find("bool hasActivity()", local_install_begin)
+        if local_install_begin < 0 or local_install_end < 0:
+            errors.append("original local installation boundary is missing")
+        for obsolete in ("findValue(", "findVersion(", "findReplicaSlot(", "pages.find(",
+                         "loadHandoff(", "push_back(", "reserve("):
+            if obsolete in local_text[local_install_begin:local_install_end]:
+                errors.append(f"local installation re-resolves or allocates an accepted fact: {obsolete}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
         install_begin = metadata_text.find("size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(")
