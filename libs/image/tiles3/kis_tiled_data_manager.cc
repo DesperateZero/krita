@@ -95,12 +95,22 @@ public:
     }
 
     bool prepare(KisTileHashTable &table, KisTiledExtentManager &extent, KisSurfaceId surface,
-                 const KisImageEpochRootSnapshot &root)
+                 const KisImageEpochRootSnapshot &root, const KisPageRestorationChanges &changes)
     {
+        size_t next = 0;
         return prepareReconciliation(table, extent,
             [&](const auto &page) { return root.containsPage({surface, page}); },
             [&](const auto &visit) {
-                return root.forEachPage(surface, [&](const KisPageVersion &version) { return visit(version.key.page, nullptr); });
+                return root.forEachPage(surface, [&](const KisPageVersion &version) {
+                    const auto less = [](const KisPageKey &a, const KisPageKey &b) {
+                        return std::tie(a.surface.value, a.page.row, a.page.column)
+                            < std::tie(b.surface.value, b.page.row, b.page.column);
+                    };
+                    while (next < changes.size() && less(changes.version(next).key, version.key)) ++next;
+                    void **location = next < changes.size() && changes.version(next).key == version.key
+                        ? &changes.location(next++) : nullptr;
+                    return visit(version.key.page, location);
+                });
             });
     }
 
@@ -219,16 +229,16 @@ public:
 
     void installLocked(KisTileHashTable &table, KisTiledExtentManager &extent,
                        KisTiledDataManagerPageStoreBackend *bridge, KisSurfaceId surface,
-                       const KisPageVersion *targets, qsizetype count)
+                       const KisPageRestorationChanges &changes)
     {
-        // Reconcile any adapter-only remnants as well as root removals.
-        // Public writable misses already establish canonical presence.
         installRemovals(table, extent);
-        for (qsizetype i = 0; i < count; ++i) {
-            const auto &version = targets[i];
-            if (version.key.surface == surface && !version.isDefaultPixel())
-                installPage(table, extent, bridge, version.key.page, true);
+        for (size_t i = 0; i < changes.size(); ++i) {
+            const auto &version = changes.version(i);
+            if (version.key.surface == surface && !version.isDefaultPixel() && changes.location(i))
+                installPage(table, extent, bridge, version.key.page, true, static_cast<KisTile *>(changes.location(i)));
         }
+        // A null changed location is a real missing candidate proved by the
+        // complete root pass. This also installs unchanged backend-only pages.
         installMissing(table, extent, bridge);
     }
 
@@ -807,10 +817,10 @@ void KisTiledDataManager::restoreHistory(KisMementoSP memento, bool before)
     if (m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         const auto surface = m_pageStoreBackend->surface();
         const bool restored = m_pageStoreBackend->restoreHistory(memento, before, nullptr,
-            [&](const KisImageEpochRootSnapshot &root) {
-                return preparedTiles.prepare(*m_hashTable, m_extentManager, surface, root);
-            }, [&](const KisPageVersion *targets, qsizetype count) {
-                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, surface, targets, count);
+            [&](const KisImageEpochRootSnapshot &root, const KisPageRestorationChanges &changes) {
+                return preparedTiles.prepare(*m_hashTable, m_extentManager, surface, root, changes);
+            }, [&](const KisPageRestorationChanges &changes) {
+                preparedTiles.installLocked(*m_hashTable, m_extentManager, m_pageStoreBackend, surface, changes);
                 if (defaultChanged) installDefaultPixel(pixel, defaultTile.get());
             });
         if (!restored) return;

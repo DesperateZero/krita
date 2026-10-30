@@ -22,6 +22,7 @@
 
 class KisMutationPageEntry;
 class KisPageStoreMementoManager;
+class KisPageRestorationChanges;
 class KisImageEpochRootSnapshot;
 class KisBackingBudgetController;
 class KisCpuReadGuard;
@@ -708,12 +709,13 @@ private:
     // Memento retention uses the original immutable root without exporting
     // its manifest. Restore/release never infer scope from a memento delta.
     KisRetainedImageEpochSnapshot captureRetainedEpochRoot();
-    // Synchronous compatibility delivery borrows the original restore targets.
+    // Synchronous compatibility delivery borrows the original root difference and locations.
     // Prepare may refuse before publication; complete must not allocate/refuse.
-    // Neither callback nor the target span escapes this call.
+    // Locations require a preparation hook. Completion-only notifications
+    // borrow versions without a position column. Nothing escapes this call.
     KisImageEpochCommitTicket restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained,
-        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
-        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter);
+        const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter,
+        const std::function<void(const KisPageRestorationChanges &)> &completeAdapter);
     class Private;
     static KisCapturedReadView captureReadViewImpl(Private *, const KisPageReadView &, QString *error);
     struct PrivateReleaser {

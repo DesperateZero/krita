@@ -2044,8 +2044,8 @@ bool KisTiledDataManagerPageStoreBackend::rollforward(const KisMementoSP &mement
 
 bool KisTiledDataManagerPageStoreBackend::restoreHistory(
     const KisMementoSP &memento, bool before, QString *error,
-    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
-    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
+    const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter,
+    const std::function<void(const KisPageRestorationChanges &)> &completeAdapter)
 {
     if (!memento) return false;
     QMutexLocker transactionLocker(&d->transactionMutex);
@@ -2062,9 +2062,9 @@ bool KisTiledDataManagerPageStoreBackend::restoreHistory(
     // this mutex nor publication write may enclose adapter barrier acquisition.
     locker.unlock();
     return d->history->restore(stored, before, error, prepareAdapter,
-        [&](const KisPageVersion *targets, qsizetype count) {
+        [&](const KisPageRestorationChanges &changes) {
             publicationLocker.unlock(); // canonical acceptance already succeeded
-            if (completeAdapter) completeAdapter(targets, count);
+            if (completeAdapter) completeAdapter(changes);
         }).isValid();
 }
 

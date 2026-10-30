@@ -5592,8 +5592,8 @@ KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedIm
 }
 
 KisImageEpochCommitTicket KisPageStore::restoreRetainedEpoch(const KisRetainedImageEpochSnapshot &retained,
-    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
-    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
+    const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter,
+    const std::function<void(const KisPageRestorationChanges &)> &completeAdapter)
 {
     QMutexLocker locker(&d->mutex);
     return d->publicationCoordinator.restoreRetainedEpochLocked(retained, this, locker, prepareAdapter, completeAdapter);

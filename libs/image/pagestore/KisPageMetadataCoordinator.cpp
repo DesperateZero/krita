@@ -2897,10 +2897,9 @@ size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(
                 if (publication.targetValue.isValid()
                     && (page->second.hasMetadata() || !(page->second.initialIdentity == publication.targetValue))) break;
             }
-            Q_ASSERT(entry.activityReservation);
-            // Keep the existing reservation until this Data is cleaned outside
-            // installation. Clearing the transient claim cannot then erase/free
-            // an otherwise empty activity node under the publication gate.
+            Q_ASSERT(entry.activityReservation || (!publication.addition && !publication.lease));
+            // Only actual metadata edits retain activity storage through their
+            // deferred cleanup. A pure view neither changes nor erases it.
             if (!held) page->second.activity.publicationClaim = this;
             ++claimed;
         }
@@ -3006,7 +3005,9 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
             }
             if (auto *displaced = shard.records.version(publication.displacedDefault))
                 shard.records.reconsiderHistory(displaced);
-            ++page.revision;
+            // ViewRoot owns pure visibility. Metadata revision tracks only
+            // actual new cells/writer state; a cache reclaim hint is not a write.
+            if (publication.addition || publication.lease) ++page.revision;
             ++(mutation ? shard.installedMutationPages : shard.installedPublicationPages);
             if (!held) page.activity.publicationClaim = nullptr;
         }
@@ -4132,16 +4133,15 @@ try {
         while (end < data->entries.size() && data->entries[end].shardOwner == pin) ++end;
         first = end;
     }
+    size_t countedPrepared = 0;
     const auto rollbackPreparationCounts = qScopeGuard([&] {
         if (!data) return;
-        for (size_t first = 0; first < data->entries.size();) {
-            const size_t end = data->batchEnd(first, data->entries.size());
+        for (size_t first = 0; first < countedPrepared;) {
+            const size_t end = data->batchEnd(first, countedPrepared);
             QMutexLocker locker(&data->entries[first].shardOwner->mutex);
-            for (size_t i = first; i < end; ++i) {
-                const auto &entry = data->entries[i];
-                if (entry.activityReservation)
-                    --(mutation ? entry.shardOwner->preparedMutationPages : entry.shardOwner->preparedPublicationPages);
-            }
+            for (size_t i = first; i < end; ++i)
+                --(mutation ? data->entries[i].shardOwner->preparedMutationPages
+                            : data->entries[i].shardOwner->preparedPublicationPages);
             first = end;
         }
     });
@@ -4201,8 +4201,8 @@ try {
         }
     }
 
-    // Prepare real generic payload before installation, and retain the
-    // original page facts through the candidate's last reservation. Native
+    // Only real edits need generic/activity storage. Pure view observations
+    // retain their original shard/dynamic guards without creating write activity.
     for (size_t first = 0; first < data->entries.size();) {
         const size_t end = data->batchEnd(first, data->entries.size());
         QMutexLocker locker(&data->entries[first].shardOwner->mutex);
@@ -4216,14 +4216,17 @@ try {
                 try { entry.shardOwner->activities.try_emplace(entry.key()); }
                 catch (const std::bad_alloc &) { genericReady = false; }
             }
-            if (!stillValid || !genericReady || !entry.shardOwner->reservePublicationActivity(page->second)) {
+            const bool editsMetadata = data->publications[i].addition || data->publications[i].lease.has_value();
+            if (!stillValid || !genericReady
+                || (editsMetadata && !entry.shardOwner->reservePublicationActivity(page->second))) {
                 KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication activity"));
                 result.m_failure = !stillValid
                     ? PreparedPublication::Failure::Conflict : PreparedPublication::Failure::Storage;
                 return result;
             }
-            entry.activityReservation = true;
+            entry.activityReservation = editsMetadata;
             ++(mutation ? entry.shardOwner->preparedMutationPages : entry.shardOwner->preparedPublicationPages);
+            ++countedPrepared;
         }
         first = end;
     }

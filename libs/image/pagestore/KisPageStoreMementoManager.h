@@ -75,8 +75,8 @@ private:
         const KisPageStoreMemento &memento,
         bool before,
         QString *error,
-        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter = {},
-        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter = {});
+        const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter = {},
+        const std::function<void(const KisPageRestorationChanges &)> &completeAdapter = {});
     class Private;
     struct PrivateReleaser { static void cleanup(Private *); };
     QScopedPointer<Private, PrivateReleaser> d;

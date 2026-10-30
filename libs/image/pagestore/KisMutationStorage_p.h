@@ -214,6 +214,21 @@ public:
         m_data = kisAllocateMutationStorage(m_budget, bytes, alignof(std::max_align_t));
         m_capacity = bytes;
     }
+    template<class T> void reserveWithPrefix(size_t bytes, size_t count)
+    {
+        static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>);
+        static_assert(alignof(T) <= alignof(std::max_align_t));
+        Q_ASSERT(count <= m_capacity / sizeof(T));
+        if (bytes <= m_capacity) return;
+        if (!count) { reserve(bytes); return; }
+        // Only the original live prefix survives. All phase arrays are empty.
+        // Growth has a real old/new peak; refusal leaves the old prefix intact.
+        void *replacement = kisAllocateMutationStorage(m_budget, bytes, alignof(std::max_align_t));
+        std::uninitialized_copy_n(at<T>(0), count, static_cast<T *>(replacement));
+        reset();
+        m_data = replacement;
+        m_capacity = bytes;
+    }
     void reset() noexcept
     {
         if (m_data) kisFreeMutationStorage(m_budget, m_data, m_capacity, alignof(std::max_align_t));

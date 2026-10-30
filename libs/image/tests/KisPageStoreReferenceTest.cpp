@@ -1135,6 +1135,7 @@ private Q_SLOTS:
     void reclamationTaskRejectedPreparation();
     void retainedStorageWeakTailAndCapacity();
     void borrowedMutationStorageFollowsRootLifetime();
+    void mutationWorkspacePreservesOriginalPrefix();
     void retainedStorageConcurrentTeardown();
     void retainedWakeInFlightAfterController();
     void preparedReclamationRunsAtCapacity();
@@ -1193,6 +1194,13 @@ private Q_SLOTS:
     }
     void indexedPublicationTransitions();
     void coldPublicationTargetsStayAtomic();
+    void pureViewMetadataObservations_data()
+    {
+        QTest::addColumn<bool>("activity");
+        QTest::newRow("activity") << true;
+        QTest::newRow("revision") << false;
+    }
+    void pureViewMetadataObservations();
     void localMutationRechecksPhysicalOwnershipAtAcceptance();
     void recoveryKeepsCachedBeforeIndependent();
     void publicationDirectoryStorageLifetime();
@@ -5451,6 +5459,40 @@ void KisPageStoreReferenceTest::retainedStorageWeakTailAndCapacity()
     QVERIFY(lifetime.expired());
 }
 
+void KisPageStoreReferenceTest::mutationWorkspacePreservesOriginalPrefix()
+{
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 1024 * 1024;
+    KisBackingBudgetController budget(limits);
+    auto warm = budget.reserve({}, nullptr); QVERIFY(warm.isValid()); warm.release();
+    const auto live = [&] { return budget.usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam; };
+    const auto baseline = live();
+    {
+        KisMutationWorkspace workspace(&budget);
+        constexpr size_t count = 8;
+        std::array<int, count> originals;
+        workspace.reserve(count * sizeof(void *));
+        auto **prefix = workspace.at<void *>(0);
+        std::uninitialized_value_construct_n(prefix, count);
+        for (size_t i = 0; i < count; ++i) prefix[i] = &originals[i];
+        const auto before = live();
+        const size_t bytes = size_t(limits.metadataArenaBytes - before);
+        void *filler = allocateTestStoragePressure(&budget, bytes, 1);
+        {
+            const auto free = qScopeGuard([&] { freeTestStoragePressure(&budget, filler, bytes, 1); });
+            QVERIFY_EXCEPTION_THROWN(workspace.reserveWithPrefix<void *>(4096, count), std::bad_alloc);
+            QCOMPARE(workspace.at<void *>(0), prefix);
+            QCOMPARE(live(), limits.metadataArenaBytes);
+            for (size_t i = 0; i < count; ++i) QCOMPARE(prefix[i], static_cast<void *>(&originals[i]));
+        }
+        QCOMPARE(live(), before);
+        workspace.reserveWithPrefix<void *>(4096, count);
+        QVERIFY(workspace.at<void *>(0) != prefix); // Old allocation remains live until the copy completes.
+        for (size_t i = 0; i < count; ++i) QCOMPARE(workspace.at<void *>(0)[i], static_cast<void *>(&originals[i]));
+    }
+    QCOMPARE(live(), baseline);
+    for (const auto &bucket : budget.usage().buckets) QCOMPARE(bucket.reserved.cpuRam, quint64(0));
+}
+
 void KisPageStoreReferenceTest::borrowedMutationStorageFollowsRootLifetime()
 {
     using Storage = KisMutationStorageAllocator<char>;
@@ -7986,6 +8028,33 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
     QCOMPARE(coordinator.metrics().publicationDirectoryHeaders, quint64(1));
 }
 
+void KisPageStoreReferenceTest::pureViewMetadataObservations()
+{
+    QFETCH(bool, activity);
+    auto page = pageWithHistory(2);
+    KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
+    QVERIFY(metadata.configure(1)); QVERIFY(view.registerPage(metadata, page));
+    KisPageTransition restore; restore.kind = KisPageTransitionKind::RestoreCommittedVersion;
+    restore.version = page.versions.last().version; restore.imageEpoch = {2};
+    auto first = metadata.prepareRestoration(view.root(), {2}, {restore});
+    auto second = metadata.prepareRestoration(view.root(), {2}, {restore});
+    QVERIFY(first.isValid() && second.isValid());
+    if (activity) QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+    KisPageMetadataCoordinator::DeferredPublicationCleanup a, b;
+    QVERIFY(metadata.installPublication(std::move(first), {}, {2}, nullptr, &a));
+    // No epoch cut has happened: these are two observations of the same
+    // original metadata facts. Visibility belongs to the separate epoch owner,
+    // whose stale-root rejection is covered by the real Store restore tests.
+    QVERIFY(metadata.installPublication(std::move(second), {}, {2}, nullptr, &b));
+    QVERIFY(view.accept(metadata, {2}, restore.version));
+    const auto expected = KisPageStateMachine{}.apply(page, restore); QVERIFY(expected.accepted);
+    KisPageStateSnapshot actual; QVERIFY(metadata.pageSnapshot(page.key, view.root(), &actual));
+    comparePageRecords(actual, expected.next);
+    while (!a.isEmpty()) a.clearBatch(1);
+    while (!b.isEmpty()) b.clearBatch(1);
+    QCOMPARE(metadata.footprint().pageActivities, quint64(0));
+}
+
 void KisPageStoreReferenceTest::coldPublicationTargetsStayAtomic()
 {
     for (bool repeatedBatch : {false, true}) {
@@ -8263,7 +8332,7 @@ void KisPageStoreReferenceTest::preparedPublicationStorageIsBound()
                               : coordinator->preparePublication(tx, coordinatorView.root(), {2}, transitions);
     QVERIFY(candidate.isValid());
     const auto reservedFootprint = coordinator->footprint();
-    QCOMPARE(reservedFootprint.pageActivities, synthesizedDefault ? quint64(pages) : quint64(0));
+    QCOMPARE(reservedFootprint.pageActivities, quint64(0));
     if (pages && !mutation && synthesizedDefault) {
         QCOMPARE(reservedFootprint.versionArena.outstandingReservations, quint64(0));
         QCOMPARE(reservedFootprint.exactVersionIndex.outstandingReservations, quint64(0));
@@ -8429,9 +8498,9 @@ void KisPageStoreReferenceTest::deferredPublicationCleanupOwnsCandidate()
         coordinator->installPublication(std::move(candidate), {}, {2}, nullptr, &cleanup);
     QCOMPARE(installed, !reject);
     if (installed) QVERIFY(coordinatorView.accept(*coordinator, {2}, transition.version));
-    // The transient claim ends at install, while this original reservation
-    // keeps actual activity storage alive until deferred physical cleanup.
-    QCOMPARE(coordinator->footprint().pageActivities, quint64(1));
+    // A pure view has no generic activity payload to retain. The original
+    // candidate still retains its shard/fee inputs through deferred cleanup.
+    QCOMPARE(coordinator->footprint().pageActivities, quint64(0));
     QVERIFY(!cleanup.isEmpty());
     QCOMPARE(cleanup.pendingWorkUnits(), qsizetype(1));
     QCOMPARE(cleanup.clearBatch(0), qsizetype(0));
@@ -8568,16 +8637,16 @@ void KisPageStoreReferenceTest::groupedPublicationOrderAndDuplicateGuards()
             comparePageRecords(actual, oracle.next);
         }
         QCOMPARE(metadata.footprint().pageActivities, quint64(0));
-        // A real restoration still owns sparse generic output and its Data
-        // cleanup. Check its bounded tail, including destruction of the owner.
+        // Restoration owns its original fee/shard inputs through Data cleanup,
+        // without manufacturing a generic write activity. Check its bounded tail.
         QVector<KisPageVersion> before;
         for (const auto &page : expected) before.append(page.versions.first().version);
         auto restore = metadata.prepareRestoration(metadataView.root(), {3}, before.constData(), before.size());
         QVERIFY(restore.isValid());
         QVERIFY(metadata.installPublication(std::move(restore), {}, {3}, nullptr, &cleanup));
-        QCOMPARE(metadata.footprint().pageActivities, quint64(33));
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
         QCOMPARE(cleanup.clearBatch(17), qsizetype(17));
-        QCOMPARE(metadata.footprint().pageActivities, quint64(16));
+        QCOMPARE(metadata.footprint().pageActivities, quint64(0));
         coordinator.reset(); // Both real independent tails may outlive the owner.
         stale = {};
         qsizetype remaining = 0;
@@ -8664,7 +8733,7 @@ void KisPageStoreReferenceTest::publicationStorageRefusalAndLateCleanup()
     freeTestStoragePressure(parent.get(), filler, fillerBytes, 1); filler = nullptr;
     auto candidate = prepare(); QVERIFY(candidate.isValid());
     QVERIFY(childLive() > before);
-    QCOMPARE(metadata->footprint().pageActivities, kind == 0 || kind == 3 ? quint64(0) : quint64(1));
+    QCOMPARE(metadata->footprint().pageActivities, kind == 1 ? quint64(1) : quint64(0));
     auto expected = KisPageStateMachine().apply(page, transition);
     QVERIFY(expected.accepted);
     if (kind == 1) {

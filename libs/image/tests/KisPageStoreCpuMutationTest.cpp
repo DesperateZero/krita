@@ -35,6 +35,7 @@
 #include "KisPageReadCoordinator_p.h"
 #include "KisPageHistoryCollector_p.h"
 #include "KisPagePublicationCoordinator_p.h"
+#include "KisPageRestoration_p.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisPageStoreStoragePressure.h"
@@ -3884,8 +3885,28 @@ void KisPageStoreCpuMutationTest::restorationUsesOriginalTargets()
         if (phase == KisPageStoreDiagnosticPhase::RestorePublishOwnerWait && ++attempts == 1)
             QCOMPARE(f.pixel({}, 4), QByteArray(f.bpp, char(0x55))); // New directory key, outside the original prefix.
     });
-    const auto restored = f.store->restoreRetainedEpoch(retained);
+    std::array<int, 2> originalLocations;
+    std::array<KisPageVersion, 2> originalVersions;
+    int prepared = 0, delivered = 0;
+    bool bindingsPreserved = false;
+    const auto restored = f.store->restoreRetainedEpoch(retained,
+        [&](const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &changes) {
+            ++prepared;
+            if (changes.size() != originalLocations.size()) return false;
+            for (size_t i = 0; i < changes.size(); ++i) {
+                originalVersions[i] = changes.version(i);
+                changes.location(i) = &originalLocations[i];
+            }
+            return true;
+        }, [&](const KisPageRestorationChanges &changes) {
+            ++delivered;
+            bindingsPreserved = changes.size() == originalLocations.size();
+            for (size_t i = 0; i < changes.size(); ++i)
+                bindingsPreserved &= changes.location(i) == &originalLocations[i]
+                    && changes.version(i) == originalVersions[i];
+        });
     QVERIFY(restored.isValid()); QCOMPARE(attempts, 2);
+    QCOMPARE(prepared, 1); QCOMPARE(delivered, 1); QVERIFY(bindingsPreserved);
     QCOMPARE(f.store->publicationStatistics().restoreDirectoryRepreparations,
              before.restoreDirectoryRepreparations + 1);
     for (int x : {0, 1}) QCOMPARE(f.pixel({}, x), QByteArray(f.bpp, char(0x31)));

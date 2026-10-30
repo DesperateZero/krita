@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "KisPageStoreMementoManager.h"
+#include "KisPageRestoration_p.h"
 #include "KisPageStoreWriteOperation_p.h"
 #include "tiles3/KisTilePageStoreBridge.h"
 #include "tiles3/kis_tile_data.h"
@@ -321,8 +322,8 @@ private:
     bool prepareHistoryAbort(const KisMementoSP &memento,
                              QVector<KisLogicalPageId> *pages, QString *error);
     bool restoreHistory(const KisMementoSP &memento, bool before, QString *error,
-        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter = {},
-        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter = {});
+        const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter = {},
+        const std::function<void(const KisPageRestorationChanges &)> &completeAdapter = {});
     class Private;
     QScopedPointer<Private> d;
 };

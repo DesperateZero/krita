@@ -363,8 +363,8 @@ public:
     KisImageEpochCommitTicket restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                          const KisPageStore *diagnosticOwner,
                                                          QMutexLocker<QMutex> &ownerLock,
-        const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
-        const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter);
+        const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter,
+        const std::function<void(const KisPageRestorationChanges &)> &completeAdapter);
     KRITAIMAGE_EXPORT bool abortLocked(const KisPageTransaction &transaction, QMutexLocker<QMutex> &ownerLock,
                      KisPageReadCleanup &cleanup);
 

@@ -5,6 +5,7 @@
  */
 
 #include "KisPagePublicationCoordinator_p.h"
+#include "KisPageRestoration_p.h"
 #include "KisPageStoreDiagnostics_p.h"
 #include "KisPageWriteCoordinator_p.h"
 #include "KisPageReadCoordinator_p.h"
@@ -163,11 +164,18 @@ public:
         restoreTargets = decltype(restoreTargets){restoreTargets.get_allocator()};
         workspace.reset();
     }
-    void prepareChanges(size_t semanticCount, size_t changes, size_t feeChanges = 0)
+    void prepareChanges(size_t semanticCount, size_t changes, size_t feeChanges = 0,
+                        size_t adapterCount = 0, bool preserveAdapter = false)
     {
         Q_ASSERT(semanticTargets.empty() && publicationChanges.empty());
-        workspace.reserve(layout(semanticCount, changes, feeChanges ? feeChanges : changes));
-        semanticTargets.bind(workspace.at<KisPageVersion>(0), semanticCount);
+        size_t semanticOffset = 0;
+        const auto bytes = layout(semanticCount, changes, feeChanges ? feeChanges : changes, adapterCount, semanticOffset);
+        if (preserveAdapter) workspace.reserveWithPrefix<void *>(bytes, adapterCount);
+        else {
+            workspace.reserve(bytes);
+            if (adapterCount) std::uninitialized_value_construct_n(workspace.at<void *>(0), adapterCount);
+        }
+        semanticTargets.bind(workspace.at<KisPageVersion>(semanticOffset), semanticCount);
         publicationChanges.bind(workspace.at<PublicationChange>(phaseOffset), changes);
     }
     void beginBackingChanges()
@@ -208,11 +216,13 @@ public:
     KisPageMetadataCoordinator::DeferredPublicationCleanup metadataCleanup;
     KisImageEpochCommitResult result;
 private:
-    size_t layout(size_t semanticCount, size_t changes, size_t feeChanges)
+    size_t layout(size_t semanticCount, size_t changes, size_t feeChanges,
+                  size_t adapterCount, size_t &semanticOffset)
     {
         if (feeChanges > std::numeric_limits<size_t>::max() / 2) throw std::bad_alloc();
         size_t bytes = 0;
-        KisMutationWorkspace::append<KisPageVersion>(bytes, semanticCount);
+        KisMutationWorkspace::append<void *>(bytes, adapterCount);
+        semanticOffset = KisMutationWorkspace::append<KisPageVersion>(bytes, semanticCount);
         phaseOffset = KisMutationWorkspace::append<std::max_align_t>(bytes, 0);
         size_t publicationBytes = bytes, backingBytes = bytes;
         KisMutationWorkspace::append<PublicationChange>(publicationBytes, changes);
@@ -630,7 +640,8 @@ void KisPagePublicationCoordinator::KisPreparedMutationCommit::clear() noexcept
     semanticTargets.clear();
     publicationChanges.clear();
     directoryKeys.clear();
-    restoreTargets.clear();
+    // Root restore inputs and their workspace prefix span retries. Ordinary
+    // commits never populate restoreTargets; release() ends this input lifetime.
     transaction = {};
     completion = {};
     result = {};
@@ -1385,8 +1396,8 @@ KisImageEpochCommitTicket
 KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImageEpochSnapshot &retained,
                                                           const KisPageStore *diagnosticOwner,
                                                           QMutexLocker<QMutex> &ownerLock,
-    const std::function<bool(const KisImageEpochRootSnapshot &)> &prepareAdapter,
-    const std::function<void(const KisPageVersion *, qsizetype)> &completeAdapter)
+    const std::function<bool(const KisImageEpochRootSnapshot &, const KisPageRestorationChanges &)> &prepareAdapter,
+    const std::function<void(const KisPageRestorationChanges &)> &completeAdapter)
 {
     using Phase = KisPageStoreDiagnosticPhase;
     if (!m_operational || !m_epochs.validateRetainedSnapshot(retained) || !m_restoreIsIdle(m_ownerContext)) {
@@ -1434,6 +1445,12 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         preparedCommit.release();
         ownerLock.relock();
     });
+    // These immutable roots are fixed for this call. Generate their actual
+    // difference once; only default-cache directory inputs can grow on retry.
+    try {
+        if (!retainedRoot.appendRestoreTargets(currentRoot, &preparedCommit.restoreTargets)) return {};
+    } catch (const std::bad_alloc &) { return {}; }
+    const size_t rootTargetCount = preparedCommit.restoreTargets.size();
     for (;;) {
         const quint64 directoryRevision = m_metadata.pageRegistrationCount();
         const auto discardCommit = qScopeGuard([&] {
@@ -1444,7 +1461,7 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         auto &restoreTargets = preparedCommit.restoreTargets;
         auto &registeredPages = preparedCommit.directoryKeys;
         try {
-            if (!retainedRoot.appendRestoreTargets(currentRoot, &restoreTargets)) return {};
+            restoreTargets.resize(rootTargetCount);
             if (changesDefaults) {
                 // The original target prefix is sorted and unique. Directory keys
                 // are unique by shard ownership; suffix insertions need no second
@@ -1470,7 +1487,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
                 }
             }
 
-            preparedCommit.prepareChanges(0, restoreTargets.size());
+            preparedCommit.prepareChanges(0, restoreTargets.size(), 0,
+                prepareAdapter ? rootTargetCount : 0, adapterPrepared);
             for (const KisPageVersion &version : std::as_const(restoreTargets)) {
                 KisPageMetadataCoordinator::PublicationInfo page;
                 KisPageVersion current;
@@ -1500,7 +1518,9 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         // wrappers. The caller's original manager gate preserves prepared
         // table identity and warm coverage until the successful delivery.
         if (!adapterPrepared) {
-            if (prepareAdapter && !prepareAdapter(retainedRoot)) return {};
+            const KisPageRestorationChanges changes(restoreTargets.data(),
+                prepareAdapter ? preparedCommit.workspace.at<void *>(0) : nullptr, rootTargetCount);
+            if (prepareAdapter && !prepareAdapter(retainedRoot, changes)) return {};
             adapterPrepared = true;
         }
         auto &publication = preparedCommit.metadata;
@@ -1563,8 +1583,11 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
             completion = preparedCommit.completion;
         }
         ownerLock.unlock();
-        if (installed && completeAdapter)
-            completeAdapter(restoreTargets.data(), qsizetype(restoreTargets.size()));
+        if (installed && completeAdapter) {
+            const KisPageRestorationChanges changes(restoreTargets.data(),
+                prepareAdapter ? preparedCommit.workspace.at<void *>(0) : nullptr, rootTargetCount);
+            completeAdapter(changes);
+        }
         m_disposeMetadataCleanup(m_ownerContext, std::move(metadataCleanup));
         ownerLock.relock();
         if (restored.isCommitted()) {
