@@ -1432,7 +1432,9 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             if obsolete in metadata_text:
                 errors.append(f"view selection restored metadata head/role coupling: {obsolete}")
         for contract in ("KisVersionSlotId initialIdentity", "committedCount", "currentRoot->resolveVersion",
-                         "writerDefaultGeneration", "writerDefaultRevision", "displacedDefault", "registerImplicitPage"):
+                         "writerDefaultGeneration", "writerDefaultRevision", "selectedValue", "registerImplicitPage",
+                         "if (selected.isDefaultPixel() && !(selected == entry.version))",
+                         "shard.records.reconsiderHistory(displaced)"):
             if contract not in metadata_text:
                 errors.append(f"view/content ownership boundary is missing: {contract}")
         for contract in (
@@ -1521,10 +1523,17 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                          "loadHandoff(", "push_back(", "reserve("):
             if obsolete in local_text[local_install_begin:local_install_end]:
                 errors.append(f"local installation re-resolves or allocates an accepted fact: {obsolete}")
-        if "if (publication.addition || publication.lease) ++page.revision" not in metadata_text:
+        if "if (publication.addition || publication.lease()) ++page.revision" not in metadata_text:
             errors.append("pure view publication restored a metadata revision write")
         if "entry.activityReservation = editsMetadata" not in metadata_text:
             errors.append("pure view publication restored generic activity reservation")
+        for contract in ("std::variant<std::monostate, Selection, Lease> dependency",
+                         "bool KisPageMetadataCoordinator::PreparedPublication::Data::inputsValid(size_t i)",
+                         "if (kind != PreparationKind::Publication || page.activity.hasWriter() || page.mutableCount)",
+                         "if (!inputsValid(i)) break;", "if (!data->inputsValid(i)) return true;",
+                         "if (!data->inputsValid(i)) return false;", "const bool stillValid = data->inputsValid(i)"):
+            if contract not in metadata_text:
+                errors.append(f"cold preparation lost its actual dependency validity policy: {contract}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
         install_begin = metadata_text.find("size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(")

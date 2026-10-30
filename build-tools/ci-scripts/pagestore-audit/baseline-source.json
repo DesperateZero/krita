@@ -1844,9 +1844,10 @@
         "tuple",
         "type_traits",
         "utility",
+        "variant",
         "vector"
       ],
-      "lines": 6990,
+      "lines": 7029,
       "member_fields": [
         "m_capacity",
         "m_coreMemory",
@@ -1890,11 +1891,12 @@
         "Replica",
         "ReplicaRange",
         "ReservationSet",
+        "Selection",
         "ShardArenaGrowth",
         "ShardRecordStore",
         "Value"
       ],
-      "sha256": "7f807d8ebff6e686f6ef43d6c427a63224e3b6f1b69cca9069fbb378d8262442",
+      "sha256": "54f865d1c4e95e72e5d6cba90a9df18364722ee015c50793cbde920007f71a22",
       "synchronization_declarations": 11
     },
     "libs/image/pagestore/KisPageMetadataCoordinator.h": {
@@ -3999,7 +4001,7 @@
         "TestProvider",
         "Value"
       ],
-      "sha256": "0b320fc6606a54ff6ee312ff9ae25233dff1512c5225f8181d51590cf15cf356",
+      "sha256": "9926eb5df96ed1179bcc60f860e7487f8ff724aa86f68e0c8344fa474492ba66",
       "synchronization_declarations": 4
     },
     "libs/image/tests/KisPageStoreFoundationTest.cpp": {
@@ -4102,7 +4104,7 @@
       "synchronization_declarations": 0
     },
     "libs/image/tests/KisPageStoreReferenceTest.cpp": {
-      "container_declarations": 148,
+      "container_declarations": 151,
       "include_edges": [
         "KisCompletionRegistry.h",
         "KisCpuPageReplicaProvider.h",
@@ -4169,7 +4171,7 @@
         "utility",
         "vector"
       ],
-      "lines": 16848,
+      "lines": 16967,
       "member_fields": [
         "m_activeLeases",
         "m_allocations",
@@ -4239,7 +4241,7 @@
         "Value",
         "alignas"
       ],
-      "sha256": "6ccecaed71e7bea22af86bf0b1c54bd3b7f0811fe7586694ace1be8383470ee8",
+      "sha256": "3a65852b716a3b118b5d7ce76ed3c6c5e63541f2c623bfa5b8984d8618490faf",
       "synchronization_declarations": 16
     },
     "libs/image/tests/KisPageStoreResidentReadTest.cpp": {
@@ -7127,5 +7129,5 @@
     "libs/vulkanbackend/tests/KisVulkanFoundationContractsTest.cpp"
   ],
   "untracked_sources": [],
-  "working_tree_head": "b60e2709ceddec8227d3f6e3587e866d9a6d1052"
+  "working_tree_head": "b18eba09d9796e7045a4b2f96b9dd1aa0e13e4cd"
 }

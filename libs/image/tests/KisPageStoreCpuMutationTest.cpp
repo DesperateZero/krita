@@ -5214,8 +5214,8 @@ void KisPageStoreCpuMutationTest::restoreProtectsSourceAndRevalidatesLease()
         reader = std::make_unique<KisReadLease>(f.store->resolve(request, request.readiness));
     });
     QVERIFY(f.store->restoreRetainedEpoch(retained).isValid());
-    QVERIFY(released); QCOMPARE(attempts, 2); QVERIFY(reader && reader->isValid());
-    QCOMPARE(f.store->publicationStatistics().restoreMetadataRepreparations, quint64(1));
+    QVERIFY(released); QCOMPARE(attempts, 1); QVERIFY(reader && reader->isValid());
+    QCOMPARE(f.store->publicationStatistics().restoreMetadataRepreparations, quint64(0));
     QCOMPARE(static_cast<const quint8 *>(reader->cpuData())[0], quint8(0x72));
     QCOMPARE(quint8(f.pixel()[0]), quint8(0x31));
     f.store->release(std::move(*reader)); reader.reset();

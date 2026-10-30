@@ -35,6 +35,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <variant>
 
 std::shared_ptr<KisCpuResidentBinding> KisPagePrivateWrite::exchangeBinding(
     std::shared_ptr<KisCpuResidentBinding> next, const KisReplicaHandle &target)
@@ -2494,12 +2495,16 @@ public:
     struct Publication {
         KisPageCpuPublicationResource resourceAcceptance;
         KisVersionSlotId targetValue;
-        KisVersionSlotId displacedDefault;
+        KisVersionSlotId selectedValue;
         size_t beforeAuthority = NoAuthority;
         size_t targetAuthority = NoAuthority;
         bool addition = false;
+        struct Selection {
+            KisPageGeneration generation;
+            quint64 defaultPixelRevision;
+        };
         struct Lease {
-            KisPageVersion base;
+            Selection base;
             KisPageWriterToken writer;
             KisPageOperationId operation;
             KisPageWriteMode mode;
@@ -2507,7 +2512,11 @@ public:
             KisReplicaSlotId before;
             KisReplicaSlotId removed;
         };
-        std::optional<Lease> lease;
+        // Only one actual input exists. Empty construction touches no
+        // inactive payload; view and write retain no parallel state images.
+        std::variant<std::monostate, Selection, Lease> dependency;
+        Lease *lease() { return std::get_if<Lease>(&dependency); }
+        const Lease *lease() const { return std::get_if<Lease>(&dependency); }
     };
     // The real fee/provider identities are frozen once. The two optional
     // locators bind original plan fields after the single sort and are never
@@ -2532,6 +2541,7 @@ public:
     }
     bool capture(size_t, const KisPageTransition &, const KisImageEpochRootSnapshot *, QString *);
     bool freezeAuthorities(QString *);
+    bool inputsValid(size_t);
     struct ShardArenaGrowth {
         explicit ShardArenaGrowth(MetadataLocalStorage storage) : blocks(storage) {}
         std::shared_ptr<MetadataShard> shardOwner;
@@ -2683,8 +2693,8 @@ bool KisPageMetadataCoordinator::PreparedPublication::Data::capture(
             || !input.baseVersion.isValid() || !input.version.isValid() || !input.target.isValid()
             || !(input.baseVersion.key == entry.key()) || !(input.target.version == input.version))
             return reject(QStringLiteral("write reservation identity is incomplete or targets another page"));
-        auto &lease = output.lease.emplace();
-        lease.base = input.baseVersion; lease.writer = input.writer; lease.operation = input.operation;
+        auto &lease = output.dependency.emplace<Publication::Lease>();
+        lease.base = {input.baseVersion.generation, input.baseVersion.defaultPixelRevision}; lease.writer = input.writer; lease.operation = input.operation;
         lease.mode = input.writeMode;
         records.findVersion(input.baseVersion, &lease.baseValue);
         const auto *base = records.version(lease.baseValue);
@@ -2737,6 +2747,8 @@ bool KisPageMetadataCoordinator::PreparedPublication::Data::capture(
         KisVersionSlotId selectedSlot;
         records.findVersion(selected, &selectedSlot);
         const auto *current = records.version(selectedSlot);
+        output.selectedValue = selectedSlot;
+        output.dependency.emplace<Publication::Selection>(Publication::Selection{selected.generation, selected.defaultPixelRevision});
         if (!current && !selected.isDefaultPixel())
             return reject(QStringLiteral("historical restore has no published source"));
         records.findVersion(input.version, &output.targetValue);
@@ -2778,7 +2790,6 @@ bool KisPageMetadataCoordinator::PreparedPublication::Data::capture(
             output.targetAuthority = output.beforeAuthority;
             backingAuthorities[output.beforeAuthority].second = &output.targetAuthority;
         } else addAuthority(targetAuthority, output.targetAuthority, output.addition);
-        if (selected.isDefaultPixel() && !(selected == input.version)) output.displacedDefault = selectedSlot;
     }
     if (output.addition) {
         // An original initial identity can already be named by a root. It is
@@ -2791,6 +2802,40 @@ bool KisPageMetadataCoordinator::PreparedPublication::Data::capture(
         ++shard.publicationAdditionRecordsPrepared;
         if (kind == PreparationKind::Publication) ++shard.publicationCommittedValuesPrepared;
     }
+    return true;
+}
+
+bool KisPageMetadataCoordinator::PreparedPublication::Data::inputsValid(size_t i)
+{
+    auto &entry = entries[i];
+    auto &shard = *entry.shardOwner;
+    const auto &page = entry.originalPage->second;
+    if (!shard.canMutate(entry.key(), page)) return false;
+    if (page.revision == entry.revision) return true;
+    // A write plan consumes exact pin counts and an independent before-image.
+    // A view plan consumes neither: only its actual version/authority inputs.
+    if (kind != PreparationKind::Publication || page.activity.hasWriter() || page.mutableCount) return false;
+    const auto &publication = publications[i];
+    const auto &selection = std::get<Publication::Selection>(publication.dependency);
+    const KisPageVersion selected{entry.key(), selection.generation, selection.defaultPixelRevision};
+    const auto matches = [&](KisVersionSlotId slot, const KisPageVersion &version,
+                             size_t authorityIndex, bool target) {
+        if (!slot.isValid()) return !shard.records.findVersion(version);
+        const auto *value = shard.records.version(slot);
+        if (!value || !(value->version == version)
+            || value->publication != KisPagePublicationState::Historical) return false;
+        const auto &expected = authority(authorityIndex);
+        if (!expected.isValid()) return !value->authorityReplica.isValid()
+            && (!target || (version.isDefaultPixel() && !value->replicaCount));
+        const auto *replica = shard.records.replica(value->authorityReplica);
+        return replica && ShardRecordStore::matchesReplica(*replica, version, expected);
+    };
+    if (!matches(publication.selectedValue, selected, publication.beforeAuthority, false)
+        || !matches(publication.addition ? KisVersionSlotId{} : publication.targetValue,
+                    entry.version, publication.targetAuthority, true)) return false;
+    // Memoize only this successful fact comparison. Real physical occupancy
+    // and all-D claims are still checked at their original final accept cut.
+    entry.revision = page.revision;
     return true;
 }
 
@@ -2880,10 +2925,7 @@ size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(
         for (size_t i = first; i < end; ++i) {
             auto &entry = entries[i];
             auto page = entry.originalPage;
-            if (!entry.shardOwner->canMutate(entry.key(), page->second))
-                break;
-            if (page->second.revision != entry.revision)
-                break;
+            if (!inputsValid(i)) break;
             const auto &publication = publications[i];
             if (publication.addition) {
                 if (entry.shardOwner->records.findVersion(entry.version)) break;
@@ -2891,13 +2933,13 @@ size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(
                 if (target.isValid()) {
                     KisReplicaSlotId occupiedSlot;
                     const bool occupied = entry.shardOwner->records.physicalSlots.findExact(target.physicalSlotIdentity(), &occupiedSlot);
-                    const auto expected = publication.lease ? publication.lease->removed : KisReplicaSlotId{};
+                    const auto expected = publication.lease() ? publication.lease()->removed : KisReplicaSlotId{};
                     if (occupied ? !(occupiedSlot == expected) : expected.isValid()) break;
                 }
                 if (publication.targetValue.isValid()
                     && (page->second.hasMetadata() || !(page->second.initialIdentity == publication.targetValue))) break;
             }
-            Q_ASSERT(entry.activityReservation || (!publication.addition && !publication.lease));
+            Q_ASSERT(entry.activityReservation || (!publication.addition && !publication.lease()));
             // Only actual metadata edits retain activity storage through their
             // deferred cleanup. A pure view neither changes nor erases it.
             if (!held) page->second.activity.publicationClaim = this;
@@ -2962,7 +3004,7 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
             auto &entry = entries[i]; auto &publication = publications[i];
             auto &shard = *entry.shardOwner; auto &page = entry.originalPage->second;
             Q_ASSERT(held || page.activity.publicationClaim == this);
-            if (auto *lease = publication.lease ? &*publication.lease : nullptr) {
+            if (auto *lease = publication.lease()) {
                 if (recoverable) {
                     auto *base = shard.records.version(lease->baseValue);
                     const bool removedBinding = base->native.nativeReplica == lease->removed;
@@ -2989,9 +3031,9 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
                 ++shard.publicationVersionInstalls;
                 if (!mutation) ++shard.publicationCommittedValuesInstalled;
             }
-            if (publication.lease) {
+            if (publication.lease()) {
                 Q_ASSERT(privateWrite || recoverable);
-                const auto &lease = *publication.lease;
+                const auto &lease = *publication.lease();
                 auto image = shard.activityImage(entry.key(), page);
                 image.writerToken = lease.writer; image.writerOperation = lease.operation;
                 image.writerTransaction = transaction.id; image.writerMode = lease.mode;
@@ -3003,11 +3045,16 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
                 page.nextGeneration = {entry.version.generation.value + 1};
                 shard.installActivityImage(entry.key(), &page, image);
             }
-            if (auto *displaced = shard.records.version(publication.displacedDefault))
-                shard.records.reconsiderHistory(displaced);
+            if (kind == PreparationKind::Publication) {
+                const auto &selection = std::get<Publication::Selection>(publication.dependency);
+                const KisPageVersion selected{entry.key(), selection.generation, selection.defaultPixelRevision};
+                if (selected.isDefaultPixel() && !(selected == entry.version))
+                    if (auto *displaced = shard.records.version(publication.selectedValue))
+                        shard.records.reconsiderHistory(displaced);
+            }
             // ViewRoot owns pure visibility. Metadata revision tracks only
             // actual new cells/writer state; a cache reclaim hint is not a write.
-            if (publication.addition || publication.lease) ++page.revision;
+            if (publication.addition || publication.lease()) ++page.revision;
             ++(mutation ? shard.installedMutationPages : shard.installedPublicationPages);
             if (!held) page.activity.publicationClaim = nullptr;
         }
@@ -3303,9 +3350,7 @@ bool KisPageMetadataCoordinator::PreparedPublication::genericInputsChanged() con
         const size_t end = data->batchEnd(first, data->entries.size());
         QMutexLocker lock(&data->entries[first].shardOwner->mutex);
         for (size_t i = first; i < end; ++i) {
-            const auto &entry = data->entries[i];
-            if (entry.originalPage->second.revision != entry.revision
-                || !entry.shardOwner->canMutate(entry.key(), entry.originalPage->second)) return true;
+            if (!data->inputsValid(i)) return true;
         }
         first = end;
     }
@@ -4167,12 +4212,7 @@ try {
         QMutexLocker locker(&growth.shardOwner->mutex);
         const auto revalidate = [&] {
             for (size_t i = growth.firstEntry; i < growth.firstEntry + growth.entryCount; ++i) {
-                const auto &entry = data->entries[i];
-                const auto page = entry.originalPage;
-                if (!growth.shardOwner->canMutate(entry.key(), page->second)
-                    || page->second.revision != entry.revision) {
-                    return false;
-                }
+                if (!data->inputsValid(i)) return false;
             }
             return true;
         };
@@ -4209,14 +4249,13 @@ try {
         for (size_t i = first; i < end; ++i) {
             auto &entry = data->entries[i];
             const auto page = entry.originalPage;
-            bool stillValid = entry.shardOwner->canMutate(entry.key(), page->second)
-                && page->second.revision == entry.revision;
+            const bool stillValid = data->inputsValid(i);
             bool genericReady = true;
-            if (stillValid && data->publications[i].lease) {
+            if (stillValid && data->publications[i].lease()) {
                 try { entry.shardOwner->activities.try_emplace(entry.key()); }
                 catch (const std::bad_alloc &) { genericReady = false; }
             }
-            const bool editsMetadata = data->publications[i].addition || data->publications[i].lease.has_value();
+            const bool editsMetadata = data->publications[i].addition || bool(data->publications[i].lease());
             if (!stillValid || !genericReady
                 || (editsMetadata && !entry.shardOwner->reservePublicationActivity(page->second))) {
                 KisPageStoreDetail::setError(error, QStringLiteral("metadata changed while reserving publication activity"));
