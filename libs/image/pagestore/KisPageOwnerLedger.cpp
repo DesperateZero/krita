@@ -1724,15 +1724,22 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     const KisReplicaHandle &source, const KisReplicaHandle &target, QString *error,
     KisPageRetirementRecord *originalIdle)
 {
+    return prepareBackingHandoff(KisPageWriteSource(source), target, error, originalIdle);
+}
+
+KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
+    const KisPageWriteSource &source, const KisReplicaHandle &target, QString *error,
+    KisPageRetirementRecord *originalIdle)
+{
     if (!source.isValid() || !target.isValid()
-        || source.domain != KisPageAccessDomain::CpuRam || target.domain != source.domain
-        || !(source.provider == target.provider) || !(source.providerEpoch == target.providerEpoch)
-        || source.allocation.slot != target.allocation.slot
-        || source.allocation.generation == std::numeric_limits<quint64>::max()
-        || target.allocation.generation != source.allocation.generation + 1
+        || source.domain() != KisPageAccessDomain::CpuRam || target.domain != source.domain()
+        || !(source.provider() == target.provider) || !(source.providerEpoch() == target.providerEpoch)
+        || source.allocationIdentity().allocation.slot != target.allocation.slot
+        || source.allocationIdentity().allocation.generation == std::numeric_limits<quint64>::max()
+        || target.allocation.generation != source.allocationIdentity().allocation.generation + 1
         || !(source.version.key == target.version.key)
         || target.version.generation.value <= source.version.generation.value
-        || !(source.layout == target.layout)) {
+        || !(source.layout() == target.layout)) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing handoff identity is invalid"));
         return {};
     }
@@ -1771,7 +1778,7 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     auto *physical = backing->second.physicalRecord;
     Q_ASSERT(physical);
     if (physical->domainClaim || physical->classClaim
-        || physical->domain != source.domain || physical->accountMember != &backing->second
+        || physical->domain != source.domain() || physical->accountMember != &backing->second
         || physical->shared()) {
         KisPageStoreDetail::setError(error, QStringLiteral("backing handoff physical owner is shared or busy"));
         return {};

@@ -117,6 +117,9 @@ public:
     // record. The old handle stays authoritative until commit; cancel this
     // preparation before provider retag. Logical detachment is the caller's duty.
     KisBackingHandoffReservation prepareBackingHandoff(
+        const KisPageWriteSource &source, const KisReplicaHandle &target,
+        QString *error = nullptr, KisPageRetirementRecord *originalIdle = nullptr);
+    KisBackingHandoffReservation prepareBackingHandoff(
         const KisReplicaHandle &source, const KisReplicaHandle &target,
         QString *error = nullptr, KisPageRetirementRecord *originalIdle = nullptr);
     // Caller has installed logical detachment and consumed physical retag under

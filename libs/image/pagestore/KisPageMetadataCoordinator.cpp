@@ -1174,7 +1174,14 @@ struct ShardRecordStore {
         return true;
     }
 
-    bool findReplicaSlot(KisVersionSlotId owner, const KisReplicaHandle &identity, KisReplicaSlotId *slot) const
+    static bool matchesReplica(const KisPageReplicaState &stored, const KisPageVersion &version,
+                               const KisReplicaHandle &identity)
+    { return replicaHandle(stored, version) == identity; }
+    static bool matchesReplica(const KisPageReplicaState &stored, const KisPageVersion &version,
+                               const KisPageWriteSource &identity)
+    { return stored.matchesSource(identity, version); }
+    template<class Identity>
+    bool findReplicaSlot(KisVersionSlotId owner, const Identity &identity, KisReplicaSlotId *slot) const
     {
         if (!slot)
             return false;
@@ -1188,7 +1195,7 @@ struct ShardRecordStore {
             const KisPageReplicaState *stored = replica(current);
             if (!stored)
                 return false;
-            if (replicaHandle(*stored, record->version) == identity) {
+            if (matchesReplica(*stored, record->version, identity)) {
                 *slot = current;
                 return true;
             }
@@ -2912,21 +2919,23 @@ void KisPageMetadataCoordinator::PreparedPublication::Data::installRows(
     owner.reset();
 }
 
-bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
-    void *context, bool (*accept)(void *), QString *error)
+bool KisPageMetadataCoordinator::PreparedPublication::CpuResources::before(
+    const KisPageCpuPublicationResource &a, const KisPageCpuPublicationResource &b)
 {
-    if (!accept) return false;
+    // Immutable logical key orders gates; address distinguishes actual
+    // Resources even when two providers expose identical external identities.
+    const auto &ka = a.binding->m_key, &kb = b.binding->m_key;
+    if (ka.surface.value != kb.surface.value) return ka.surface.value < kb.surface.value;
+    if (ka.page.row != kb.page.row) return ka.page.row < kb.page.row;
+    if (ka.page.column != kb.page.column) return ka.page.column < kb.page.column;
+    return std::less<KisCpuResidentBinding *>{}(a.binding, b.binding);
+}
+
+KisPageMetadataCoordinator::PreparedPublication::CpuResources
+KisPageMetadataCoordinator::PreparedPublication::prepareCpuResources(QString *error)
+{
+    CpuResources result;
     using Resource = KisPageCpuPublicationResource;
-    // Every binding keeps its logical key for its whole physical lifetime.
-    // The address only breaks ties between distinct gates for the same key;
-    // equal exported identities do not imply the same actual Resource.
-    const auto before = [](const Resource &a, const Resource &b) {
-        const auto &ka = a.binding->m_key, &kb = b.binding->m_key;
-        if (ka.surface.value != kb.surface.value) return ka.surface.value < kb.surface.value;
-        if (ka.page.row != kb.page.row) return ka.page.row < kb.page.row;
-        if (ka.page.column != kb.page.column) return ka.page.column < kb.page.column;
-        return std::less<KisCpuResidentBinding *>{}(a.binding, b.binding);
-    };
     using It = KisPublicationMemberIterator<Resource, &KisPagePublicationChange::resourceAcceptance>;
     It nativeBegin(m_rows.begin());
     auto *cold = data && !data->publications.empty() ? data->publications.begin() : nullptr;
@@ -2936,7 +2945,7 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
     bool nativeOrdered = true, coldOrdered = true;
     const auto append = [&](Resource resource, auto begin, size_t &count, bool &ordered) {
         if (!resource.binding) return;
-        if (ordered && count && before(resource, begin[ptrdiff_t(count - 1)])) ordered = false;
+        if (ordered && count && CpuResources::before(resource, begin[ptrdiff_t(count - 1)])) ordered = false;
         begin[ptrdiff_t(count++)] = resource;
     };
     const auto capture = [](const ShardRecordStore &records, const KisPageValueCell *value) {
@@ -2957,7 +2966,10 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
         Resource resource;
         if (const auto *native = row.replacement.native) {
             // The private result already owns its final primary replica.
-            if (!native->hasValue()) return false;
+            if (!native->hasValue()) {
+                KisPageStoreDetail::setError(error, QStringLiteral("private Value missing before Resource preparation"));
+                return {};
+            }
             if (native->binding()) resource = {
                 native->binding().get(), native->value, &native->value->primaryReplica};
         } else {
@@ -2982,8 +2994,27 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
     }
     // Canonical rows already have key order. Arbitrary cold/public inputs
     // retain a bounded sort, with the SAME global order as native acceptance.
-    if (!nativeOrdered) std::sort(nativeBegin, nativeBegin + ptrdiff_t(nativeTotal), before);
-    if (!coldOrdered) std::sort(coldBegin, coldBegin + ptrdiff_t(coldTotal), before);
+    if (!nativeOrdered) std::sort(nativeBegin, nativeBegin + ptrdiff_t(nativeTotal), CpuResources::before);
+    if (!coldOrdered) std::sort(coldBegin, coldBegin + ptrdiff_t(coldTotal), CpuResources::before);
+    result.m_rows = m_rows;
+    result.m_cold = data.get();
+    result.m_nativeCount = nativeTotal;
+    result.m_coldCount = coldTotal;
+    result.m_valid = true;
+    return result;
+}
+
+bool KisPageMetadataCoordinator::PreparedPublication::CpuResources::accept(
+    void *context, bool (*accept)(void *), QString *error) const
+{
+    if (!m_valid || !accept) return false;
+    using Resource = KisPageCpuPublicationResource;
+    using It = KisPublicationMemberIterator<Resource, &KisPagePublicationChange::resourceAcceptance>;
+    It nativeBegin(m_rows.begin());
+    auto *cold = m_cold && !m_cold->publications.empty() ? m_cold->publications.begin() : nullptr;
+    const auto column = +[](Data::Publication &row) -> Resource & { return row.resourceAcceptance; };
+    auto coldBegin = boost::make_transform_iterator(cold, column);
+    const auto nativeTotal = m_nativeCount, coldTotal = m_coldCount;
     if (!nativeTotal && !coldTotal) return accept(context);
 
     size_t nativeCount = 0, coldTaken = 0;
@@ -3013,7 +3044,10 @@ bool KisPageMetadataCoordinator::PreparedPublication::acceptCpuResources(
             last = resource.binding;
         }
         if (resource.binding->m_retired
-            || !resource.binding->matchesHandleLocked(resource.replica->handle(resource.value->version))) {
+            || !(resource.binding->allocationIdentityLocked() == resource.replica->identity())
+            || !resource.binding->matchesVersionLocked(resource.value->version)
+            || resource.binding->m_domain != resource.replica->domain()
+            || !(resource.binding->m_layout == resource.replica->layout())) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU Resource changed before publication acceptance"));
             return false;
         }
@@ -4944,28 +4978,26 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
 
     // There is one output carrier. Actual source and accepted-location facts
     // are created in it, not copied through a second metadata projection.
-    Q_ASSERT(!selection->write.baseVersion.isValid() && !selection->layout
-        && !selection->binding && !selection->surfaceLayout);
+    Q_ASSERT(!selection->write.source.version.isValid() && !selection->layout
+        && !selection->surfaceLayout);
     auto &write = selection->write;
-    write.baseVersion = base;
+    write.source.version = base;
     write.version = target;
     write.baseWasPrepared = record && record->publication == KisPagePublicationState::Prepared;
     selection->base = {shard, &*page, shardIndex, selectedSlot};
+    if (record) selection->layout = record->native.descriptor;
     if (authority) {
-        write.source = replicaHandle(*authority, base);
+        const auto binding = record->native.nativeReplica == record->authorityReplica
+            ? record->native.nativeBinding : std::shared_ptr<KisCpuResidentBinding>{};
+        write.source = authority->writeSource(base, binding);
         if (!write.source.isValid())
             return reject(QStringLiteral("write base has no exact authority"));
-    }
-    if (record) {
-        selection->layout = record->native.descriptor;
-        if (authority && record->native.nativeReplica == record->authorityReplica)
-            selection->binding = record->native.nativeBinding;
     }
     if (discoverBefore && !base.isDefaultPixel() && record && record->replicaCount > 1
         && authority && authority->validity == KisReplicaValidity::Valid
         && !authority->activeOperation.isValid() && !authority->pinCount
         && !authority->overflow.isValid()) {
-        const auto &layout = write.source.layout;
+        const auto &layout = write.source.layout();
         const auto sourceIdentity = authority->identity();
         for (auto slot = record->firstReplica; slot.isValid();) {
             const auto *replica = shard->records.replica(slot);
@@ -4977,7 +5009,7 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
                 if (!(candidateIdentity.provider == sourceIdentity.provider
                     && candidateIdentity.providerEpoch == sourceIdentity.providerEpoch
                     && candidateIdentity.allocation.slot == sourceIdentity.allocation.slot)) {
-                    selection->recoverableBefore = replicaHandle(*replica, base);
+                    selection->recoverableBefore.emplace(replica->writeSource(base, {}));
                     break;
                 }
             }
@@ -5213,14 +5245,14 @@ try {
     MetadataArenaGrowth growth(storage.borrowed());
     QMutexLocker lock(&shard->mutex);
     auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
-    if (!(node->first == write.version.key) || !(write.baseVersion.key == write.version.key)) return false;
+    if (!(node->first == write.version.key) || !(write.source.version.key == write.version.key)) return false;
     auto *page = &node->second;
     const auto valid = [&] {
         const auto *base = shard->records.version(location.value);
         return page->revisionCanAdvance() && !page->activity.hasWriter()
             && !page->activity.publicationClaim && page->nextGeneration == write.version.generation
-            && (base ? base->version == write.baseVersion
-                : !write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !write.source.isValid());
+            && (base ? base->version == write.source.version
+                : !write.baseWasPrepared && write.source.version.isDefaultPixel() && !write.source.isValid());
     };
     if (!valid()) return false;
     const MetadataArenaDemand demand{1, 0, 0};
@@ -5286,7 +5318,7 @@ void KisPageMetadataCoordinator::discardPrivateValue(KisPagePrivateWrite *native
 }
 
 bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection &selection,
-    const KisReplicaHandle &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
+    const KisPageWriteSource &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
     const std::shared_ptr<KisCpuResidentBinding> &before, bool complete,
     std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
@@ -5300,7 +5332,7 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
     const size_t shardIndex = native->location.shardIndex;
     auto *shard = core->shards[shardIndex].get();
     if (native->location.shard != shard || location.shard != shard || native->reserved || !target.isValid()
-        || !(write.baseVersion.key == write.version.key)
+        || !(write.source.version.key == write.version.key)
         || !(target.version == write.version) || !write.transaction.isValid()) return false;
     QMutexLocker lock(&shard->mutex);
     const auto *preparedValue = native->location.shard == shard
@@ -5310,8 +5342,8 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
     const KisVersionSlotId baseSlot = location.value;
     auto *base = shard->records.version(baseSlot);
     auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
-    const bool originalSource = base ? base->version == write.baseVersion
-        : !write.baseWasPrepared && write.baseVersion.isDefaultPixel() && !source.isValid();
+    const bool originalSource = base ? base->version == write.source.version
+        : !write.baseWasPrepared && write.source.version.isDefaultPixel() && !source.isValid();
     if (!originalSource || !(node->first == write.version.key)
         || &node->second != native->location.page) return false;
     auto *page = &node->second;
@@ -5319,13 +5351,13 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
     if (!page->revisionCanAdvance()
         || page->activity.publicationClaim || page->activity.hasWriter()
         || !(write.version.generation == page->nextGeneration)
-        || write.version.generation.value <= write.baseVersion.generation.value
+        || write.version.generation.value <= write.source.version.generation.value
         || write.version.generation.value == std::numeric_limits<quint64>::max()) return false;
     const bool occupied = shard->records.physicalOwner(target.physicalSlotIdentity(), &physicalOwner);
     if (base ? (write.baseWasPrepared
         ? base->publication != KisPagePublicationState::Prepared || !(base->preparedBy == write.transaction)
         : base->publication != KisPagePublicationState::Historical)
-        : write.baseWasPrepared || !write.baseVersion.isDefaultPixel() || source.isValid()) return false;
+        : write.baseWasPrepared || !write.source.version.isDefaultPixel() || source.isValid()) return false;
     Q_ASSERT(page->versionCount >= page->committedCount);
     if (quint64(page->versionCount) - page->committedCount >= limit) return false;
 
@@ -5333,7 +5365,7 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
         // Reclaiming an authority needs no new metadata: its independent exact
         // before already exists, and the new private target lives in native.
         // All semantic and identity checks precede the first mutation below.
-        if (!base || !occupied || !(physicalOwner == write.baseVersion) || page->activity.genericHandoff) return false;
+        if (!base || !occupied || !(physicalOwner == write.source.version) || page->activity.genericHandoff) return false;
         const auto oldSlot = base->authorityReplica;
         auto *old = shard->records.replica(oldSlot);
         KisReplicaSlotId sourceSlot;
@@ -5342,20 +5374,23 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
         if (!old || !sourceRecord || old->validity != KisReplicaValidity::Valid
             || sourceRecord->validity != KisReplicaValidity::Valid || old->activeOperation.isValid()
             || sourceRecord->activeOperation.isValid() || old->pinCount || old->overflow.isValid()) return false;
-        const auto authority = replicaHandle(*old, base->version);
-        if (!(authority.layout == source.layout) || !(authority.layout == target.layout)
-            || authority.domain != target.domain
-            || !(authority.physicalSlotIdentity() == target.physicalSlotIdentity())
-            || authority.physicalSlotIdentity() == source.physicalSlotIdentity()
-            || authority.allocation.generation == std::numeric_limits<quint64>::max()
-            || target.allocation.generation != authority.allocation.generation + 1) return false;
+        const auto authorityIdentity = old->identity();
+        const auto &authorityLayout = old->layout();
+        const KisReplicaPhysicalSlotIdentity authoritySlot{authorityIdentity.provider,
+            authorityIdentity.providerEpoch, authorityIdentity.allocation.slot};
+        if (!(authorityLayout == source.layout()) || !(authorityLayout == target.layout)
+            || old->domain() != target.domain
+            || !(authoritySlot == target.physicalSlotIdentity())
+            || authoritySlot == source.physicalSlotIdentity()
+            || authorityIdentity.allocation.generation == std::numeric_limits<quint64>::max()
+            || target.allocation.generation != authorityIdentity.allocation.generation + 1) return false;
         auto *link = &base->firstReplica;
         while (!(*link == oldSlot)) {
             auto *previous = shard->records.replica(*link);
             Q_ASSERT(previous); link = &previous->nextReplica;
         }
         *link = old->nextReplica;
-        const bool unindexed = shard->records.physicalSlots.eraseExact(authority.physicalSlotIdentity(), oldSlot);
+        const bool unindexed = shard->records.physicalSlots.eraseExact(authoritySlot, oldSlot);
         const bool erased = shard->records.eraseReplica(oldSlot);
         Q_ASSERT(unindexed && erased); Q_UNUSED(unindexed); Q_UNUSED(erased);
         --base->replicaCount;
@@ -5386,15 +5421,15 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
         facts->nativeBinding = native->exchangeBinding(std::move(facts->nativeBinding), target);
         facts->nativeBinding = before;
         facts->nativeReplica = sourceSlot;
-        shard->records.replica(sourceSlot)->setHandle(source, before.get());
+        shard->records.replica(sourceSlot)->setHandle(source.handle(), before.get());
         ++shard->arenas.cpuReadBindings;
         ++shard->publicationVersionInstalls;
     } else {
         const auto authority = base ? base->authorityReplica : KisReplicaSlotId{};
         const auto *replica = shard->records.replica(authority);
-        if (occupied || (!(shard->records.projectReplica(authority) == source)
-                && !(write.baseVersion.isDefaultPixel() && !source.isValid()))
-            || (!write.baseVersion.isDefaultPixel() && (!replica || replica->validity != KisReplicaValidity::Valid))) return false;
+        if (occupied || (!(replica && replica->matchesSource(source, base->version))
+                && !(write.source.version.isDefaultPixel() && !source.isValid()))
+            || (!write.source.version.isDefaultPixel() && (!replica || replica->validity != KisReplicaValidity::Valid))) return false;
     }
     auto &activity = page->activity;
     activity.nativeWrite = native;

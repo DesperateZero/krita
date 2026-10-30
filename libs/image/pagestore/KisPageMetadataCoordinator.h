@@ -27,8 +27,10 @@ class KisImageEpochRootSnapshot;
 class KisCpuResidentBinding;
 struct KisPagePrivateWrite;
 struct KisPageWriteInput;
+class KisPageWriteSource;
 struct KisPageWriteSelection;
 struct KisPagePublicationChange;
+struct KisPageCpuPublicationResource;
 struct KisPagePublicationIdentity;
 struct KisPageRetirementRecord;
 template<class Tag> struct KisGenerationalSlotId;
@@ -317,7 +319,7 @@ private:
     // On success, an optional original target binding is exchanged into the
     // Value; the caller receives any displaced binding for release outside V.
     // Refusal leaves that input untouched.
-    bool acceptPrivateTarget(const KisPageWriteSelection &, const KisReplicaHandle &source,
+    bool acceptPrivateTarget(const KisPageWriteSelection &, const KisPageWriteSource &source,
                              const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
         QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
         bool complete = false, std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);
@@ -443,6 +445,7 @@ private:
     class DeferredPublicationCleanup;
     class KRITAIMAGE_EXPORT PreparedPublication final
     {
+        class Data;
     public:
         PreparedPublication();
         ~PreparedPublication();
@@ -467,17 +470,27 @@ private:
         KisPageRetirementRecord *originalBacking(const KisPageVersion &) const;
         void forEachDetachedBacking(void *, void (*)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
         KisPagePublicationRows originalRows() const { return m_rows; }
-        // Caller holds Store/adapter admission and, for fee changes, the
-        // original ledger gate after admission. Only prepaid acceptance is
-        // invoked while sorted original CPU Resource gates are held. Original
-        // rows and DeferredPublicationCleanup keep candidate storage alive
-        // until this returns; physical delivery/cleanup follows gate release.
-        // The callback must not reenter the ledger or perform fee admission,
-        // provider work, storage allocation/reclaim, or physical destruction.
-        bool acceptCpuResources(void *, bool (*accept)(void *), QString *error = nullptr);
+        // Borrowed ranges over the SAME original row columns, never a second
+        // Resource array or owner. Prepare while Store admission is held and
+        // before Ledger entry; any Store-unlocked retry must prepare afresh.
+        class KRITAIMAGE_EXPORT CpuResources final {
+        public:
+            bool isValid() const { return m_valid; }
+            // Fee admission has completed. The installer retains its original
+            // payload through this return and cannot reenter Ledger/provider,
+            // allocate/reclaim storage or perform physical destruction.
+            bool accept(void *, bool (*install)(void *), QString *error = nullptr) const;
+        private:
+            friend class PreparedPublication;
+            static bool before(const KisPageCpuPublicationResource &, const KisPageCpuPublicationResource &);
+            KisPagePublicationRows m_rows;
+            Data *m_cold = nullptr;
+            size_t m_nativeCount = 0, m_coldCount = 0;
+            bool m_valid = false;
+        };
+        CpuResources prepareCpuResources(QString *error = nullptr);
 
     private:
-        class Data;
         struct DataDeleter {
             void operator()(Data *value) const noexcept;
         };

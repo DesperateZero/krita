@@ -175,14 +175,16 @@ public:
         publicationChanges.clear();
     }
     template<class Reader, class Install>
-    KisPageOwnerLedger::BackingAcceptance acceptFees(KisPageOwnerLedger &ledger, Reader &reader, Install &install)
+    KisPageOwnerLedger::BackingAcceptance acceptFees(KisPageOwnerLedger &ledger,
+        const KisPageMetadataCoordinator::PreparedPublication::CpuResources &resources,
+        Reader &reader, Install &install)
     {
         // Reserve fees before taking any Resource gate: admission may grow
         // budget slots or reclaim terminal management capacity. The original
         // ledger window then protects the actual class changes through the
         // Resource check and metadata/root cut. Installation cannot reenter it.
         auto acceptResources = [&] {
-            return metadata.acceptCpuResources(&install,
+            return resources.accept(&install,
                 [](void *context) { return (*static_cast<Install *>(context))(); });
         };
         const auto accepted = ledger.acceptPreparedBackingChanges(workspace.at<KisPagePreparedBackingChange>(phaseOffset),
@@ -492,6 +494,8 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     const bool hasIdleChange = allowance && std::any_of(data->changes.begin(), data->changes.end(),
         [](const auto &row) { return row.detachesSuperseded; });
     const bool idleFeesReady = hasIdleChange && owner.m_owner.synchronizeBackingDomains(error);
+    const auto resources = data->metadata.prepareCpuResources(error);
+    if (!resources.isValid()) return false;
     auto accept = [&] {
         if (data->mutationCount && !owner.m_metadata.installAcceptance(
                 std::move(data->metadata), data->transaction, error)) return false;
@@ -504,7 +508,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         return true;
     };
     auto install = [&] {
-        return data->metadata.acceptCpuResources(&accept,
+        return resources.accept(&accept,
             [](void *p) { return (*static_cast<decltype(accept) *>(p))(); }, error);
     };
     // Fee refusal is optional; a rejected Resource/metadata cut is terminal
@@ -1290,6 +1294,10 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             return preparedCommit.installRoot(retainedAfter);
         };
         using Acceptance = KisPageOwnerLedger::BackingAcceptance;
+        const bool domainsReady = m_owner.synchronizeBackingDomains();
+        const auto resources = domainsReady ? publication.prepareCpuResources()
+            : KisPageMetadataCoordinator::PreparedPublication::CpuResources{};
+        if (domainsReady && !resources.isValid()) return {};
         const auto acceptFees = [&](bool cacheDetached) {
             auto nextTarget = [proof = owned.proofs.begin(), proofEnd = owned.proofs.end(),
                                semantic = semanticTargets.begin(), semanticEnd = semanticTargets.end()]
@@ -1307,9 +1315,8 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             };
             auto reader = publicationBackingReader(publication, currentRoot, std::move(nextTarget),
                                                    cacheDetached ? idleAllowanceLocked() : 0);
-            return preparedCommit.acceptFees(m_owner, reader, install);
+            return preparedCommit.acceptFees(m_owner, resources, reader, install);
         };
-        const bool domainsReady = m_owner.synchronizeBackingDomains();
         auto accepted = domainsReady ? acceptFees(detachesBacking) : Acceptance::FeesRefused;
         if (accepted == Acceptance::FeesRefused && detachesBacking && domainsReady)
             accepted = acceptFees(false);
@@ -1534,7 +1541,10 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         auto install = [&] { return preparedCommit.installRoot(nullptr); };
         using Acceptance = KisPageOwnerLedger::BackingAcceptance;
         const bool domainsReady = m_owner.synchronizeBackingDomains();
-        auto accepted = domainsReady ? preparedCommit.acceptFees(m_owner, reader, install)
+        const auto resources = domainsReady ? publication.prepareCpuResources()
+            : KisPageMetadataCoordinator::PreparedPublication::CpuResources{};
+        if (domainsReady && !resources.isValid()) return {};
+        auto accepted = domainsReady ? preparedCommit.acceptFees(m_owner, resources, reader, install)
                                     : Acceptance::FeesRefused;
         if (accepted != Acceptance::FeesRefused) preparedCommit.finishInstallation();
         if (accepted == Acceptance::FeesRefused) {
@@ -1659,8 +1669,8 @@ bool KisPagePublicationCoordinator::selectWriteBaseLocked(
     KisPageWriteSelection *selection, QString *error)
 {
     Q_ASSERT(selection);
-    Q_ASSERT(!selection->write.baseVersion.isValid() && !selection->layout
-        && !selection->binding && !selection->surfaceLayout);
+    Q_ASSERT(!selection->write.source.version.isValid() && !selection->layout
+        && !selection->surfaceLayout);
     const auto fail = [&](const QString &reason) { KisPageStoreDetail::setError(error, reason); return false; };
     const auto overlay = KisPageReadView::transactionOverlay(transaction.id);
     // This Store-owner window excludes edits to the original delta throughout

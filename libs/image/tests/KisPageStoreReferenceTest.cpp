@@ -1015,9 +1015,12 @@ class KisPageStoreReferenceTest : public QObject
         const KisPageWriteInput &input)
     {
         KisPageWriteSelection selected;
-        if (metadata.selectMutationBase(input.baseVersion, false, &selected)
+        if (metadata.selectMutationBase(input.source.version, false, &selected)
             != KisPageMetadataCoordinator::MutationBaseSelection::Selected) return {};
+        auto source = std::move(selected.write.source);
         selected.write = input;
+        if (source.matches(input.source.handle()) && source.version == input.source.version)
+            selected.write.source = std::move(source);
         return selected;
     }
     static bool freezeOriginalValue(KisPageMetadataCoordinator &metadata, KisPagePrivateWrite &value,
@@ -6760,24 +6763,24 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
         return coordinator.selectMutationBase(version, discover, &info);
     };
     QCOMPARE(select(sealed, true), Selection::Selected);
-    QCOMPARE(info.write.baseVersion, sealed);
-    QCOMPARE(info.write.source, authority);
-    QVERIFY(!info.recoverableBefore.isValid());
+    QCOMPARE(info.write.source.version, sealed);
+    QCOMPARE(info.write.source.handle(), authority);
+    QVERIFY(!info.recoverableBefore);
     QCOMPARE(info.write.version.generation, page.nextGeneration);
     KisPageMetadataCoordinator::VersionInfo exact;
     QVERIFY(coordinator.versionSnapshot(page.versions[history].version, &exact));
     QCOMPARE(exact.version, page.versions[history].version);
     QCOMPARE(select(base, true), Selection::Selected);
-    QCOMPARE(info.write.baseVersion, base);
-    QCOMPARE(info.write.source, page.versions.first().authority);
+    QCOMPARE(info.write.source.version, base);
+    QCOMPARE(info.write.source.handle(), page.versions.first().authority);
     QVERIFY(coordinator.versionSnapshot(base, &exact));
     QVERIFY(exact.captured); // Capture is diagnostic state, not another write-selection output.
-    QCOMPARE(info.recoverableBefore, beforeReplica);
+    QVERIFY(info.recoverableBefore); QCOMPARE(info.recoverableBefore->handle(), beforeReplica);
     QCOMPARE(coordinator.metrics().mutationBaseVersionInputs - before.mutationBaseVersionInputs, quint64(2));
     auto foreign = sealed;
     ++foreign.key.surface.value;
     QCOMPARE(coordinator.selectMutationBase(foreign, true, &info), Selection::Absent);
-    QCOMPARE(info.write.baseVersion, base); // Refusal leaves caller output intact.
+    QCOMPARE(info.write.source.version, base); // Refusal leaves caller output intact.
 
     // A live authority lease, then its deferred last use, excludes discovery.
     // Releasing the protection re-enables the same independent before, even
@@ -6787,16 +6790,16 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
     read.version = base; read.target = page.versions.first().authority; read.lease = {76};
     QVERIFY(coordinator.applyOwner(page.key, read).accepted);
     QCOMPARE(select(base, true), Selection::Selected);
-    QVERIFY(!info.recoverableBefore.isValid());
+    QVERIFY(!info.recoverableBefore);
     const auto pending = completions.allocatePending(completions.registerSource(KisCompletionDomain::HostLogical));
     read.kind = KisPageTransitionKind::ReleaseRead; read.completion = pending;
     QVERIFY(coordinator.applyOwner(page.key, read).accepted);
     QCOMPARE(select(base, true), Selection::Selected);
-    QVERIFY(!info.recoverableBefore.isValid());
+    QVERIFY(!info.recoverableBefore);
     QVERIFY(completions.complete(pending, KisCompletionStatus::Succeeded));
     QVERIFY(coordinator.acknowledgeLastUse(base, read.target, completions.verifyTerminal(pending)).accepted);
     QCOMPARE(select(base, true), Selection::Selected);
-    QCOMPARE(info.recoverableBefore, beforeReplica);
+    QVERIFY(info.recoverableBefore); QCOMPARE(info.recoverableBefore->handle(), beforeReplica);
 
     KisPageTransition write;
     write.kind = KisPageTransitionKind::AcquireWrite;
@@ -6827,7 +6830,7 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
         QCOMPARE(coordinator.selectMutationBase(base, true, &info, &error), Selection::Rejected);
         QVERIFY(error.contains(QStringLiteral("writer")));
         QCOMPARE(info.write.transaction, retained.write.transaction);
-        QCOMPARE(info.write.baseVersion, retained.write.baseVersion);
+        QCOMPARE(info.write.source.version, retained.write.source.version);
         QCOMPARE(info.write.source, retained.write.source);
         QCOMPARE(info.recoverableBefore, retained.recoverableBefore);
         QCOMPARE(coordinator.selectMutationBase(base, false, &info), Selection::Rejected);
@@ -6835,13 +6838,13 @@ void KisPageStoreReferenceTest::indexedMutationBaseLookup()
         QCOMPARE(coordinator.selectMutationBase(missing, true, &info), Selection::Absent);
         QCOMPARE(info.write.transaction, retained.write.transaction);
         QCOMPARE(select(defaultVersion, true), Selection::Selected);
-        QCOMPARE(info.write.baseVersion, defaultVersion);
-        QVERIFY(!info.write.source.isValid() && !info.recoverableBefore.isValid());
+        QCOMPARE(info.write.source.version, defaultVersion);
+        QVERIFY(!info.write.source.isValid() && !info.recoverableBefore);
         QVERIFY(!info.write.transaction.isValid()); // Only the fresh input is filled, not a second carrier.
         KisPageWriteSelection wrongHint;
         QCOMPARE(coordinator.selectMutationBase(base, true, &wrongHint, &error, &info.base.value), Selection::Rejected);
         QVERIFY(error.contains(QStringLiteral("another version")));
-        QVERIFY(!wrongHint.write.baseVersion.isValid());
+        QVERIFY(!wrongHint.write.source.version.isValid());
     }
     QCOMPARE(live(), limits.metadataArenaBytes);
     QCOMPARE(budget.usage().backpressureCount, pressure);
@@ -6872,12 +6875,13 @@ void KisPageStoreReferenceTest::logicalDefaultWriteSurvivesCacheRemoval()
             KisPageMetadataCoordinator::MutationBaseSelection::Selected);
         QCOMPARE(selected.write.version.generation.value, generation + 1);
         auto &write = selected.write;
-        write.transaction = {71}; write.operation = {72}; write.writer = {73};
+        write.transaction = {71};
+        if (route) selected.lease.emplace(KisPageWriteSelection::Lease{{72}, {73}});
         write.writeMode = KisPageWriteMode::DiscardContents;
         const auto target = replica(write.version, 1, 1, 100);
         KisPageEditValues values; KisPagePrivateWrite native(values);
         if (route == 0) QVERIFY(metadata.preparePrivateValue(selected, &native, nullptr));
-        else QVERIFY(metadata.applyOwner(base.key, write.leaseTransition(target)).accepted);
+        else QVERIFY(metadata.applyOwner(base.key, selected.leaseTransition(target)).accepted);
         // Deliberately remove the optional record after admission/preparation.
         // Only the writer's exact input can preserve a non-unit generation.
         const auto collected = metadata.collectHistoryValues();
@@ -6889,11 +6893,11 @@ void KisPageStoreReferenceTest::logicalDefaultWriteSurvivesCacheRemoval()
             QVERIFY(metadata.completePrivateWrite(&native));
             QVERIFY(metadata.cancelPrivateResult(&native));
         } else if (route == 1) {
-            auto step = write.leaseTransition(target, KisPageTransitionKind::PrepareWrite);
+            auto step = selected.leaseTransition(target, KisPageTransitionKind::PrepareWrite);
             QVERIFY(metadata.applyOwner(base.key, step).accepted);
             QVERIFY(metadata.publishLeaseWrite(step).accepted);
         } else {
-            auto step = write.leaseTransition(target, KisPageTransitionKind::CancelWrite);
+            auto step = selected.leaseTransition(target, KisPageTransitionKind::CancelWrite);
             QVERIFY(metadata.applyOwner(base.key, step).accepted);
         }
         QVERIFY(metadata.versionSnapshot(base, &absent)); QVERIFY(!absent.version.isValid());
@@ -7268,7 +7272,7 @@ void KisPageStoreReferenceTest::supersededValueTerminalIdentity()
         QVERIFY(metadata.bindCpuProofIssuer(1, completion));
         for (int i = 0; i < 2; ++i) {
             KisPageWriteInput input;
-            input.baseVersion = previous.version; input.source = previous;
+            input.source.version = previous.version; input.source = previous;
             input.version = pageVersion(0, quint64(2 + i)); input.transaction = tx.id;
             input.baseWasPrepared = i != 0;
             const auto allocated = provider->prepareWrite({quint64(100 + i)}, input.version,
@@ -7282,7 +7286,7 @@ void KisPageStoreReferenceTest::supersededValueTerminalIdentity()
             if (!i) oldBinding = binding;
             QVERIFY(metadata.acceptPrivateTarget(selected, input.source, allocated.replica,
                 frame.get(), 64, nullptr, {}, true, &binding));
-            if (i) QCOMPARE(selected.binding, oldBinding.lock());
+            if (i) QCOMPARE(selected.write.source.binding(), oldBinding.lock());
             selected = {}; // Pixel preparation ends before the publication cut.
             QVERIFY(freezeOriginalValue(metadata, *frame, tx.id, 1));
             KisPagePublicationChange row{KisPagePublicationChange::Replacement(frame.get())};
@@ -7366,8 +7370,8 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
         if (nativePage) {
             auto original = std::make_unique<KisPagePrivateWrite>(edit);
             KisPageWriteInput write;
-            write.baseVersion = base; write.version = target; write.source = page.versions.first().authority;
-            write.transaction = tx.id; write.operation = {quint64(2000 + i)};
+            write.source.version = base; write.version = target; write.source = page.versions.first().authority;
+            write.transaction = tx.id;
             auto selected = selectPrivateInput(metadata, write);
             QVERIFY(metadata.preparePrivateValue(selected, original.get(), nullptr));
             QVERIFY(metadata.acceptPrivateTarget(selected, write.source, allocated.replica, original.get(), 64));
@@ -7399,7 +7403,7 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
     // A rejected installer must release every actual Resource, and retry
     // must recapture from the input rather than reuse the reordered scratch.
     bool declined = false;
-    QVERIFY(!candidate.acceptCpuResources(&declined, [](void *p) {
+    QVERIFY(!candidate.prepareCpuResources().accept(&declined, [](void *p) {
         *static_cast<bool *>(p) = true; return false;
     }));
     QVERIFY(declined);
@@ -7433,7 +7437,7 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
             native && shape != 4 ? KisImageEpochId{} : KisImageEpochId{2}, &cleanup);
         return installed;
     };
-    const bool accepted = candidate.acceptCpuResources(&install,
+    const bool accepted = candidate.prepareCpuResources().accept(&install,
         [](void *p) { return (*static_cast<decltype(install) *>(p))(); });
     if (revoker.joinable()) revoker.join();
     const bool expected = outcome == 0 || outcome == 2;
@@ -7479,7 +7483,7 @@ void KisPageStoreReferenceTest::editValuesGroupLifetimeAndPressure()
     const auto prepare = [&](size_t i) {
         if (!rows[i]) rows[i] = std::make_unique<KisPagePrivateWrite>(edit);
         KisPageWriteInput input;
-        input.baseVersion = bases[i]; input.version = bases[i];
+        input.source.version = bases[i]; input.version = bases[i];
         ++input.version.generation.value; input.transaction = {74};
         auto selected = selectPrivateInput(*metadata, input);
         return metadata->preparePrivateValue(selected, rows[i].get(), nullptr);
@@ -7650,7 +7654,7 @@ void KisPageStoreReferenceTest::viewMemoryDoesNotExtendPrivateAuthority()
     KisPageEditValues edit;
     KisPageViewValue *memory = nullptr;
     KisPageWriteInput input;
-    input.baseVersion = base; input.version = pageVersion(0, 2); input.transaction = {74};
+    input.source.version = base; input.version = pageVersion(0, 2); input.transaction = {74};
     {
         KisPagePrivateWrite row(edit);
         auto selected = selectPrivateInput(metadata, input);
@@ -11773,10 +11777,10 @@ void KisPageStoreReferenceTest::freshWriteSelectorAndBackingBudgetAreBounded()
         QVERIFY(!pendingEntry.isExposed());
     }
     const auto reconstructed = coordinator.writeInput(pendingEntry, prepared.transaction);
-    QCOMPARE(reconstructed.baseVersion, prepared.baseVersion);
+    QCOMPARE(reconstructed.source.version, prepared.baseVersion);
     QCOMPARE(reconstructed.version, prepared.version);
-    QVERIFY(!reconstructed.operation.isValid()); // Operation IDs are not retained after completion.
-    QVERIFY(!reconstructed.writer.isValid()); // Native aliases acquire no generic lease token.
+    // Native input has no operation or writer fields; only a real lease
+    // selection can carry those independent external capabilities.
     QCOMPARE(reconstructed.transaction, prepared.transaction);
     QCOMPARE(reconstructed.writeMode, prepared.writeMode);
     QVERIFY(!reconstructed.source.isValid()); // Alias adoption consumes its initialization capability.

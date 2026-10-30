@@ -20,7 +20,7 @@ KisCpuReplicaPreparation KisPageReplicaProvider::prepareCpuReplica(const KisCpuR
             KisPageAccessDomain::CpuRam, input.mode, input.priority);
         break;
     case Kind::Copy:
-        result = prepareSynchronousWriteCopy(operation, input.source, input.version,
+        result = prepareSynchronousWriteCopy(operation, input.source.handle(), input.version,
             input.descriptor, input.priority);
         break;
     case Kind::Payload:

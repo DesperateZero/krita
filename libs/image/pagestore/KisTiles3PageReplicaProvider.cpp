@@ -848,7 +848,7 @@ public:
         return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 adoption storage preparation failed"));
     }
 
-    KisCpuReplicaPreparation prepareCopy(const KisReplicaHandle &source,
+    KisCpuReplicaPreparation prepareCopy(const KisPageWriteSource &source,
         const KisPageVersion &targetVersion, const KisPageAllocationDescriptor &descriptor,
         const std::shared_ptr<KisCpuResidentBinding> &knownBinding,
         const KisPageOperationId *operation = nullptr)
@@ -856,17 +856,17 @@ public:
         std::shared_ptr<Tiles3ResidentBinding> located;
         auto *binding = dynamic_cast<Tiles3ResidentBinding *>(knownBinding.get());
         if (knownBinding) {
-            if (!binding || !binding->belongsTo(&handoffAdmission) || !binding->matchesHandle(source))
+            if (!binding || !binding->belongsTo(&handoffAdmission) || !binding->matchesReadIdentity(source.allocationIdentity(), source.version))
                 return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source binding is foreign or stale"));
         } else {
-            const auto it = findExactAllocation(source);
+            const auto it = findExactAllocation(source.handle());
             if (it != allocations.end()) located = providerBinding(it);
             binding = located.get();
         }
         KisTileData *sourceTile = binding ? binding->guardedTile() : nullptr;
         if (!targetVersion.isValid() || !(source.version.key == targetVersion.key) ||
             targetVersion.generation.value <= source.version.generation.value ||
-            !source.layout.matches(descriptor) || !sourceTile) {
+            !source.layout().matches(descriptor) || !sourceTile) {
             return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source is stale or mutable"));
         }
         // Same exact source and physical pin for native and public callers.
@@ -874,7 +874,7 @@ public:
         if (!binding->acquireRead(source.allocationIdentity(), false))
             return KisCpuReplicaPreparation::failed(QStringLiteral("tiles3 native copy source binding is busy or retired"));
         const auto releaseSource = qScopeGuard([&] { binding->releaseRead(); });
-        return allocate(targetVersion, descriptor, source.domain, sourceTile, nullptr, operation);
+        return allocate(targetVersion, descriptor, source.domain(), sourceTile, nullptr, operation);
     }
 
     KisCpuReplicaPreparation prepareSource(const std::shared_ptr<const KisPageReplicaSource> &source,
@@ -1058,7 +1058,7 @@ KisCpuReplicaPreparation KisTiles3PageReplicaProvider::prepareCpuReplica(const K
         case Kind::Default:
             return d->allocate(input.version, input.descriptor, KisPageAccessDomain::CpuRam);
         case Kind::Copy:
-            return d->prepareCopy(input.source, input.version, input.descriptor, input.sourceBinding);
+            return d->prepareCopy(input.source, input.version, input.descriptor, input.source.binding());
         case Kind::Payload:
             return input.payload ? d->allocate(input.version, input.descriptor,
                 KisPageAccessDomain::CpuRam, nullptr, input.payload)

@@ -73,42 +73,37 @@ struct KisPageMutationBaseLocation {
 // transition kinds are not part of native acquisition. Only a real generic
 // lease boundary projects the reference-model transition below.
 struct KisPageWriteInput {
-    KisPageVersion baseVersion, version;
-    // The accepted target belongs to the original private/request result.
-    // Selection retains only the exact source, never another result copy.
-    KisReplicaHandle source;
-    KisPageOperationId operation;
-    KisPageWriterToken writer; // Only the generic lease consumer needs a token.
+    KisPageWriteSource source;
+    KisPageVersion version;
     KisPageTransactionId transaction;
     KisPageWriteMode writeMode = KisPageWriteMode::PreserveContents;
-    // Original source kind survives provider unlock. A Prepared source must
-    // still belong to this transaction; a committed source is admitted by
-    // the view owner against the actual current root after relocking.
     bool baseWasPrepared = false;
     KisPageWriteInput() = default;
     explicit KisPageWriteInput(const KisPageTransition &value)
-        : baseVersion(value.baseVersion), version(value.version), source(value.source),
-          operation(value.operation), writer(value.writer), transaction(value.transaction), writeMode(value.writeMode) {}
-    KisPageTransition leaseTransition(const KisReplicaHandle &target,
-        KisPageTransitionKind kind = KisPageTransitionKind::AcquireWrite) const
-    {
-        KisPageTransition value;
-        value.kind = kind; value.baseVersion = baseVersion; value.version = version;
-        value.source = source; value.target = target; value.operation = operation;
-        value.writer = writer; value.transaction = transaction; value.writeMode = writeMode;
-        return value;
-    }
+        : source(value.source), version(value.version), transaction(value.transaction), writeMode(value.writeMode)
+    { source.version = value.baseVersion; }
 };
 
 struct KisPageWriteSelection {
     KisPageWriteInput write;
     KisPageMutationBaseLocation base;
-    KisReplicaHandle recoverableBefore;
-    std::shared_ptr<KisCpuResidentBinding> binding;
+    std::optional<KisPageWriteSource> recoverableBefore;
     std::shared_ptr<const KisPageAllocationDescriptor> layout;
     std::optional<KisPageAllocationDescriptor> surfaceLayout;
+    struct Lease { KisPageOperationId operation; KisPageWriterToken writer; };
+    std::optional<Lease> lease;
     const KisPageAllocationDescriptor &descriptor() const
     { Q_ASSERT(layout || surfaceLayout); return layout ? *layout : *surfaceLayout; }
+    KisPageTransition leaseTransition(const KisReplicaHandle &target,
+        KisPageTransitionKind kind = KisPageTransitionKind::AcquireWrite) const
+    {
+        Q_ASSERT(lease);
+        KisPageTransition value;
+        value.kind = kind; value.baseVersion = write.source.version; value.version = write.version;
+        value.source = write.source.handle(); value.target = target; value.operation = lease->operation;
+        value.writer = lease->writer; value.transaction = write.transaction; value.writeMode = write.writeMode;
+        return value;
+    }
 };
 
 struct KisPageReplicaState {
@@ -177,6 +172,20 @@ struct KisPageReplicaState {
             m_domain = handle.domain;
             m_kind = Kind::External;
         }
+    }
+
+    KisPageWriteSource writeSource(const KisPageVersion &version,
+        const std::shared_ptr<KisCpuResidentBinding> &binding) const
+    {
+        if (m_kind == Kind::Resource && binding.get() == m_physical.resource.binding)
+            return KisPageWriteSource::native(version, binding, m_physical.resource.incarnation);
+        return KisPageWriteSource(handle(version));
+    }
+    bool matchesSource(const KisPageWriteSource &source, const KisPageVersion &version) const
+    {
+        return source.matches(identity(), domain(), layout(), version)
+            && (!source.binding() || m_kind != Kind::Resource
+                || source.binding().get() == m_physical.resource.binding);
     }
 
     void detachResource(const KisPageVersion &version)

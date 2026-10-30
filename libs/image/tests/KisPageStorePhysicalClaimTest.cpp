@@ -131,6 +131,7 @@ private Q_SLOTS:
     void handoffExcludesNewOwner();
     void physicalBackingHandoffRejectsWrongIdentity_data();
     void physicalBackingHandoffRejectsWrongIdentity();
+    void typedSourcePreservesExpectedIdentity();
     void backingHandoffAccounting_data();
     void backingHandoffAccounting();
     void backingHandoffAccountingGuards_data();
@@ -186,9 +187,11 @@ void KisPageStorePhysicalClaimTest::freshResourceDelivery()
     while (owner.nextOperationId().value <= 3) {} // Fixture imported explicit ids 1–3.
     KisPageOperationId operation;
     // Native creation needs no fabricated public operation or ready ticket.
+    const auto selectedSource = KisPageWriteSource::native(f.replica.version, f.binding,
+        f.replica.allocation.generation);
     const KisCpuReplicaInput input{KisCpuReplicaInput::Kind(kind), owner, operation,
         version, f.desc, KisPageWriteMode::PreserveContents, KisPagePriority::Normal,
-        f.replica, f.binding, &payload, source};
+        selectedSource, &payload, source};
     auto result = external ? f.provider->KisPageReplicaProvider::prepareCpuReplica(input)
                            : f.provider->prepareCpuReplica(input);
     QCOMPARE(result.nativeReady(), !external);
@@ -239,11 +242,44 @@ void KisPageStorePhysicalClaimTest::freshCopyRequiresOriginalSource()
     if (failure == 3) QVERIFY(f.provider->retire({12}, f.replica, {}).isValid());
     const auto before = f.provider->payloadWork();
     KisPageOwnerLedger owner; QVERIFY(owner.configure(f.completions)); KisPageOperationId operation;
+    const auto selected = KisPageWriteSource::native(source.version, binding, source.allocation.generation);
     auto result = f.provider->prepareCpuReplica({KisCpuReplicaInput::Kind::Copy, owner, operation, version, f.desc,
-        KisPageWriteMode::PreserveContents, KisPagePriority::Normal, source, binding, nullptr, initialization});
+        KisPageWriteMode::PreserveContents, KisPagePriority::Normal, selected, nullptr, initialization});
     QVERIFY(!result.nativeReady()); QVERIFY(!result.replica(version).isValid()); QVERIFY(!result.error().isEmpty());
     QVERIFY(!operation.isValid());
     QCOMPARE(f.provider->payloadWork().nativeDuplicatePages, before.nativeDuplicatePages);
+}
+
+void KisPageStorePhysicalClaimTest::typedSourcePreservesExpectedIdentity()
+{
+    Fixture f; QVERIFY(f.init());
+    const KisPageVersion target{key(0), {2}};
+    const auto selected = KisPageWriteSource::native(f.replica.version, f.binding,
+        f.replica.allocation.generation);
+    QVERIFY(selected.matches(f.replica));
+    QCOMPARE(selected.binding(), f.binding);
+    auto mismatched = KisPageWriteSource(f.replica);
+    ++mismatched.version.generation.value;
+    auto expected = f.replica; expected.version = mismatched.version;
+    QVERIFY(!mismatched.matches(expected)); // Expected logical identity cannot normalize a supplied handle.
+    QVERIFY(!KisCpuBackingHandoff::prepare(f.provider, mismatched, {key(0), {3}}, f.desc).isValid());
+    auto handoff = KisCpuBackingHandoff::prepare(f.provider, selected, target, f.desc);
+    QVERIFY(handoff.isValid()); QVERIFY(handoff.tryClaim());
+    const auto next = handoff.target();
+    auto writer = handoff.commit(); QVERIFY(writer.isValid()); writer.reset();
+    // Advancing the original Resource must not silently advance an old
+    // observer's generation/incarnation, even though immutable facts are shared.
+    QCOMPARE(selected.handle(), f.replica);
+    QCOMPARE(selected.allocationIdentity(), f.replica.allocationIdentity());
+    QVERIFY(!selected.matches(next));
+    QVERIFY(!KisCpuBackingHandoff::prepare(f.provider, selected, {key(0), {3}}, f.desc).isValid());
+    QVERIFY(!f.binding->acquireRead(selected.allocationIdentity(), true));
+    const auto current = KisPageWriteSource::native(next.version, f.binding, next.allocation.generation);
+    QVERIFY(current.matches(next));
+    const auto *bytes = f.binding->acquireRead(current.allocationIdentity(), true); QVERIFY(bytes);
+    f.binding->releaseRead();
+    f.binding->revoke();
+    QVERIFY(!KisCpuBackingHandoff::prepare(f.provider, current, {key(0), {3}}, f.desc).isValid());
 }
 
 void KisPageStorePhysicalClaimTest::mappedFinalReferenceCannotBeRetained_data()

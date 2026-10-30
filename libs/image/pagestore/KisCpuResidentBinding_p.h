@@ -18,6 +18,7 @@
 
 class KisCpuWriteBindingReservation;
 class KisCpuBackingHandoff;
+class KisPageWriteSource;
 
 /**
  * Provider-owned, stable allocation record. Not a consumer authorization: a
@@ -79,6 +80,7 @@ private:
     friend struct KisPageBackingRecord;
     friend class KisCpuWriteBindingReservation;
     friend class KisCpuBackingHandoff;
+    friend class KisPageWriteSource;
     friend class KisCpuReplicaPreparation;
     friend class KisTiles3PageReplicaProvider;
     template<class Binding> friend struct KisCpuResidentAllocationIndex;
@@ -98,7 +100,7 @@ private:
             && matchesVersionLocked(expected.version) && m_domain == expected.domain && m_layout == expected.layout;
     }
     KisReplicaHandle projectHandle(const KisPageVersion &version, quint64 incarnation) const;
-    bool prepareHandoff(const KisReplicaHandle &source, const KisPageVersion &target,
+    bool prepareHandoff(const KisPageWriteSource &source, const KisPageVersion &target,
                          const KisPageAllocationDescriptor &descriptor, quint64 *incarnation) const;
     bool tryClaimHandoff(quint64 incarnation);
     void finishHandoff(const KisPageVersion *target) noexcept;
@@ -139,6 +141,109 @@ private:
     std::shared_ptr<KisPageReadinessSignal> m_retirementReadiness;
 };
 
+// The original selected source owns its logical version once. Native physical
+// facts stay in the retained Resource; only the issued incarnation is copied.
+// Actual external input has an inline cold capability. Its independent logical
+// identity remains available for rejection, never normalized into a valid one.
+class KisPageWriteSource
+{
+public:
+    KisPageWriteSource() = default;
+    KisPageWriteSource(const KisReplicaHandle &value) : version(value.version), m_value(value) {}
+    static KisPageWriteSource native(const KisPageVersion &version,
+        const std::shared_ptr<KisCpuResidentBinding> &binding, quint64 incarnation)
+    {
+        KisPageWriteSource value;
+        value.version = version;
+        if (binding && incarnation) value.m_value.emplace<Native>(Native{binding, incarnation});
+        return value;
+    }
+    bool isValid() const
+    {
+        if (const auto *native = std::get_if<Native>(&m_value))
+            return native->binding && native->incarnation && version.isValid()
+                && native->binding->m_key == version.key;
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return external && external->isValid();
+    }
+    const std::shared_ptr<KisCpuResidentBinding> &binding() const
+    {
+        if (const auto *native = std::get_if<Native>(&m_value)) return native->binding;
+        static const std::shared_ptr<KisCpuResidentBinding> empty;
+        return empty;
+    }
+    KisReplicaAllocationIdentity allocationIdentity() const
+    {
+        if (const auto *native = std::get_if<Native>(&m_value)) {
+            const auto &slot = native->binding->m_slot;
+            return {slot.provider, slot.providerEpoch, {slot.slot, native->incarnation}};
+        }
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return external ? external->allocationIdentity() : KisReplicaAllocationIdentity{};
+    }
+    KisReplicaPhysicalSlotIdentity physicalSlotIdentity() const
+    {
+        const auto identity = allocationIdentity();
+        return {identity.provider, identity.providerEpoch, identity.allocation.slot};
+    }
+    KisReplicaProviderId provider() const { return allocationIdentity().provider; }
+    KisReplicaProviderEpoch providerEpoch() const { return allocationIdentity().providerEpoch; }
+    KisPageAccessDomain domain() const
+    {
+        if (const auto *native = std::get_if<Native>(&m_value)) return native->binding->m_domain;
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return external ? external->domain : KisPageAccessDomain::Unknown;
+    }
+    const KisReplicaLayout &layout() const
+    {
+        if (const auto *native = std::get_if<Native>(&m_value)) return native->binding->m_layout;
+        static const KisReplicaLayout empty;
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return external ? external->layout : empty;
+    }
+    bool matches(const KisReplicaAllocationIdentity &identity, KisPageAccessDomain domain,
+                 const KisReplicaLayout &layout, const KisPageVersion &version) const
+    {
+        if (!(this->version == version) || !isValid() || !(allocationIdentity() == identity)
+            || this->domain() != domain || !(this->layout() == layout)) return false;
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return !external || external->version == version;
+    }
+    bool matches(const KisReplicaHandle &value) const
+    { return matches(value.allocationIdentity(), value.domain, value.layout, value.version); }
+    // Full handles are projected only for actual external protocols/exports.
+    KisReplicaHandle handle() const
+    {
+        if (const auto *external = std::get_if<KisReplicaHandle>(&m_value)) return *external;
+        const auto *native = std::get_if<Native>(&m_value);
+        return native ? native->binding->projectHandle(version, native->incarnation) : KisReplicaHandle{};
+    }
+    bool operator==(const KisPageWriteSource &other) const
+    {
+        if (!(version == other.version) || m_value.index() != other.m_value.index()) return false;
+        if (const auto *native = std::get_if<Native>(&m_value)) {
+            const auto &right = std::get<Native>(other.m_value);
+            return native->binding == right.binding && native->incarnation == right.incarnation;
+        }
+        const auto *external = std::get_if<KisReplicaHandle>(&m_value);
+        return !external || *external == std::get<KisReplicaHandle>(other.m_value);
+    }
+    KisPageVersion version;
+private:
+    friend class KisPageWriteCoordinator;
+    // The original Idle checkout transfers its owning binding to the physical
+    // handoff. This stack view ends before that handoff resets; it needs no
+    // second ownership increment merely to expose the same immutable facts.
+    static KisPageWriteSource borrowedNative(const KisPageVersion &version,
+        KisCpuResidentBinding *binding, quint64 incarnation)
+    {
+        return native(version, std::shared_ptr<KisCpuResidentBinding>(
+            std::shared_ptr<KisCpuResidentBinding>{}, binding), incarnation);
+    }
+    struct Native { std::shared_ptr<KisCpuResidentBinding> binding; quint64 incarnation; };
+    std::variant<std::monostate, Native, KisReplicaHandle> m_value;
+};
+
 // Borrowed inputs of one synchronous creation call; no storage/owner or
 // second mutable write selection. Only the public-provider adapter may issue
 // an external operation into the caller's original expected-id slot.
@@ -148,19 +253,22 @@ struct KisCpuReplicaInput
     enum class Kind { Default, Copy, Payload, SourceCopy, Alias };
     KisCpuReplicaInput(Kind kind, KisPageOwnerLedger &owner, KisPageOperationId &operation,
         const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor,
-        KisPageWriteMode mode, KisPagePriority priority, const KisReplicaHandle &source,
-        const std::shared_ptr<KisCpuResidentBinding> &sourceBinding, const KisCpuPagePayload *payload,
+        KisPageWriteMode mode, KisPagePriority priority, const KisPageWriteSource &source,
+        const KisCpuPagePayload *payload,
         const std::shared_ptr<const KisPageReplicaSource> &initialization)
         : kind(kind), version(version), descriptor(descriptor), mode(mode), priority(priority),
-          source(source), sourceBinding(sourceBinding), payload(payload), initialization(initialization),
+          source(source), payload(payload), initialization(initialization),
           m_owner(owner), m_operation(operation) {}
+    KisCpuReplicaInput(Kind, KisPageOwnerLedger &, KisPageOperationId &,
+        const KisPageVersion &, const KisPageAllocationDescriptor &,
+        KisPageWriteMode, KisPagePriority, KisPageWriteSource &&,
+        const KisCpuPagePayload *, const std::shared_ptr<const KisPageReplicaSource> &) = delete;
     Kind kind;
     const KisPageVersion &version;
     const KisPageAllocationDescriptor &descriptor;
     KisPageWriteMode mode;
     KisPagePriority priority;
-    const KisReplicaHandle &source;
-    const std::shared_ptr<KisCpuResidentBinding> &sourceBinding;
+    const KisPageWriteSource &source;
     const KisCpuPagePayload *payload;
     const std::shared_ptr<const KisPageReplicaSource> &initialization;
 private:
@@ -182,7 +290,7 @@ public:
     KisCpuReplicaPreparation(const KisCpuReplicaPreparation &) = delete;
     KisCpuReplicaPreparation &operator=(const KisCpuReplicaPreparation &) = delete;
     static KisCpuReplicaPreparation external(KisReplicaOperation result)
-    { KisCpuReplicaPreparation value; value.m_result = std::move(result); return value; }
+    { KisCpuReplicaPreparation value; value.m_result = External{{}, std::move(result)}; return value; }
     static KisCpuReplicaPreparation failed(QString error)
     { KisCpuReplicaPreparation value; value.m_result = std::move(error); return value; }
     bool nativeReady() const
@@ -190,7 +298,9 @@ public:
     bool nativeReadyFrom(const KisPageReplicaProvider &provider) const
     { const auto *native = std::get_if<Native>(&m_result); return native && native->binding && native->issuer == &provider; }
     const KisReplicaOperation *externalOperation() const
-    { return std::get_if<KisReplicaOperation>(&m_result); }
+    { const auto *external = std::get_if<External>(&m_result); return external ? &external->result : nullptr; }
+    KisPageOperationId expectedOperation() const
+    { const auto *external = std::get_if<External>(&m_result); return external ? external->expected : KisPageOperationId{}; }
     KisReplicaHandle replica(const KisPageVersion &version) const
     {
         if (const auto *external = externalOperation()) return external->replica;
@@ -212,19 +322,23 @@ public:
     }
     KisReplicaOperation takeExternalOperation(KisPageOperationId operation)
     {
-        if (auto *external = std::get_if<KisReplicaOperation>(&m_result)) return std::move(*external);
+        if (auto *external = std::get_if<External>(&m_result)) return std::move(external->result);
         Q_ASSERT(!nativeReady());
         return KisReplicaOperation::failed(operation, error());
     }
 private:
     friend class KisTiles3PageReplicaProvider;
+    friend class KisPageWriteCoordinator;
+    void setExpectedOperation(KisPageOperationId operation)
+    { if (auto *external = std::get_if<External>(&m_result)) external->expected = operation; }
+    struct External { KisPageOperationId expected; KisReplicaOperation result; };
     struct Native {
         std::shared_ptr<KisCpuResidentBinding> binding;
         const KisPageReplicaProvider *issuer = nullptr; // Borrowed during this synchronous call only.
     };
     explicit KisCpuReplicaPreparation(std::shared_ptr<KisCpuResidentBinding> binding)
         : m_result(Native{std::move(binding), nullptr}) {}
-    std::variant<Native, KisReplicaOperation, QString> m_result;
+    std::variant<Native, External, QString> m_result;
 };
 
 struct KisCpuBindingLease
@@ -521,6 +635,9 @@ public:
     KisCpuBackingHandoff &operator=(KisCpuBackingHandoff &&other) noexcept;
     KisCpuBackingHandoff(const KisCpuBackingHandoff &) = delete;
     KisCpuBackingHandoff &operator=(const KisCpuBackingHandoff &) = delete;
+    static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
+        const KisPageWriteSource &source, const KisPageVersion &target,
+        const KisPageAllocationDescriptor &descriptor, std::shared_ptr<KisCpuResidentBinding> binding = {});
     static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
                                         const KisReplicaHandle &source, const KisPageVersion &target,
                                         const KisPageAllocationDescriptor &descriptor,

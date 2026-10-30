@@ -584,8 +584,7 @@ private Q_SLOTS:
     void nativePreparationAdapterPreservesContract()
     {
         Fixture f; QVERIFY(f.init(4, 1));
-        const KisReplicaHandle source;
-        const std::shared_ptr<KisCpuResidentBinding> binding;
+        const KisPageWriteSource source;
         const std::shared_ptr<const KisPageReplicaSource> initialization;
         int callbacks = 0;
         f.provider->beforePrepareWrite = [&] { ++callbacks; };
@@ -594,7 +593,7 @@ private Q_SLOTS:
             KisPageOperationId operation;
             const KisPageVersion target{key(1), {1}};
             const KisCpuReplicaInput input{KisCpuReplicaInput::Kind::Default, owner, operation, target,
-                f.importedDescriptor, mode, KisPagePriority::Interactive, source, binding, nullptr, initialization};
+                f.importedDescriptor, mode, KisPagePriority::Interactive, source, nullptr, initialization};
             f.provider->rejectWrite = true;
             auto rejected = f.provider->prepareCpuReplica(input);
             QVERIFY(operation.isValid()); const auto expected = operation;
@@ -7299,7 +7298,7 @@ void KisPageStoreCpuMutationTest::publicationDescriptorStorageAtCapacity()
         KisPageWriteIntent implicitIntent; implicitIntent.key = implicit.key;
         KisPageWriteSelection selectedImplicit;
         QVERIFY2(publication->selectWriteBaseLocked(selectionTransaction, implicitIntent, &selectedImplicit, &f.error), qPrintable(f.error));
-        QCOMPARE(selectedImplicit.write.baseVersion, implicit);
+        QCOMPARE(selectedImplicit.write.source.version, implicit);
         QVERIFY(!selectedImplicit.base.value.isValid() && !selectedImplicit.write.source.isValid());
         QCOMPARE(selectedImplicit.descriptor(), descriptor);
         QVERIFY(!f.metadata.versionDescriptor(implicit));

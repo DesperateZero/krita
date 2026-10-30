@@ -368,7 +368,7 @@ public:
     // Store admission gate must be held through metadata acceptance. Native
     // acceptance consumes the source phase in its existing shard window.
     bool validateWriteBase(const KisPageWriteInput &, bool native, QString *error = nullptr) const;
-    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteInput &, const KisReplicaHandle &target);
+    KisPageMetadataTransitionResult acquireLeaseWrite(KisPageWriteSelection &, const KisReplicaHandle &target);
     // Both adapters try the same physical reuse/metadata/accounting protocol.
     // A success writes the original private or request target, not selection.
     // A refusal leaves selection/result unchanged for Fresh. Admission spans
@@ -383,8 +383,8 @@ public:
         KisPagePrivateWrite *native = nullptr);
     KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
-        KisPageReplicaProvider &, const KisPageWriteInput &,
-        const KisPageAllocationDescriptor &, KisPageAccessRequirement,
+        KisPageReplicaProvider &, const KisPageWriteSelection &,
+        KisPageAccessRequirement,
         KisPagePriority, const KisCpuPagePayload *,
         const std::shared_ptr<const KisPageReplicaSource> &initialization,
         bool *synchronousCopy = nullptr) const;

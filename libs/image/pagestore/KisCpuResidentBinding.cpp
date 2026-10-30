@@ -42,19 +42,20 @@ bool KisCpuResidentBinding::matchesReadIdentity(
     return !m_retired && allocationIdentityLocked() == expected && matchesVersionLocked(version);
 }
 
-bool KisCpuResidentBinding::prepareHandoff(const KisReplicaHandle &source,
+bool KisCpuResidentBinding::prepareHandoff(const KisPageWriteSource &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
     quint64 *incarnation) const
 {
     std::unique_lock<QMutex> lock(m_mutex);
     // Advisory rejection only: readers may arrive after this mutex is released,
     // so tryClaimHandoff must still perform the final physical exclusion.
-    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !matchesHandleLocked(source) ||
+    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !source.matches(allocationIdentityLocked(), m_domain, m_layout,
+            {m_key, m_generation, m_defaultPixelRevision}) ||
         m_readers || m_writeState != WriteState::Idle ||
-        source.domain != KisPageAccessDomain::CpuRam || !source.layout.matches(descriptor) ||
+        source.domain() != KisPageAccessDomain::CpuRam || !source.layout().matches(descriptor) ||
         !target.isValid() || !(target.key == source.version.key) ||
         target.generation.value <= source.version.generation.value ||
-        source.allocation.generation == std::numeric_limits<quint64>::max()) return false;
+        source.allocationIdentity().allocation.generation == std::numeric_limits<quint64>::max()) return false;
     *incarnation = m_incarnation;
     return true;
 }
@@ -126,15 +127,25 @@ KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
     std::shared_ptr<KisCpuResidentBinding> binding)
 {
+    return prepare(provider, KisPageWriteSource(source), target, descriptor, std::move(binding));
+}
+KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
+    const std::shared_ptr<KisPageReplicaProvider> &provider, const KisPageWriteSource &source,
+    const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
+    std::shared_ptr<KisCpuResidentBinding> binding)
+{
     KisCpuBackingHandoff result;
     if (!provider) return result;
-    if (!binding) binding = provider->cpuResidentBinding(source);
+    if (binding && source.binding() && binding != source.binding()) return result;
+    if (!binding) binding = source.binding();
+    if (!binding) binding = provider->cpuResidentBinding(source.handle()); // Actual unbound external input.
     if (!binding || !binding->prepareHandoff(source, target, descriptor, &result.m_incarnation)) return result;
     result.m_provider = provider;
     result.m_binding = std::move(binding);
     result.m_targetVersion = target;
     return result;
 }
+
 KisReplicaHandle KisCpuBackingHandoff::target() const
 {
     return m_binding ? m_binding->projectHandle(m_targetVersion, m_incarnation + 1) : KisReplicaHandle{};

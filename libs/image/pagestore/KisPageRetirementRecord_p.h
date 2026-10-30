@@ -55,6 +55,14 @@ struct KisPageBackingRecord
                 && m_facts.native.defaultRevision == value.version.defaultPixelRevision;
         return m_kind == Kind::External && m_facts.external == value;
     }
+    bool matches(const KisPageWriteSource &value) const noexcept
+    {
+        if (m_kind == Kind::Resource)
+            return (!value.binding() || value.binding() == m_binding)
+                && value.matches(identity(), m_binding->m_domain, m_binding->m_layout,
+                {m_binding->m_key, m_facts.native.generation, m_facts.native.defaultRevision});
+        return m_kind == Kind::External && value.matches(m_facts.external);
+    }
     void setReplica(const KisReplicaHandle &value) noexcept
     {
         if (immutableMatches(value)) {

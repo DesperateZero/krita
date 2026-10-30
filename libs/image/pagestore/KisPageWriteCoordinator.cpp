@@ -3220,35 +3220,38 @@ bool KisPageWriteCoordinator::validateWriteBase(const KisPageWriteInput &write, 
     if (write.baseWasPrepared) {
         if (native) return true; // Checked with the actual target acceptance.
         KisPageMetadataCoordinator::VersionInfo base;
-        if (metadata->versionSnapshot(write.baseVersion, &base)
+        if (metadata->versionSnapshot(write.source.version, &base)
             && base.publication == KisPagePublicationState::Prepared
             && base.preparedBy == write.transaction) return true;
     } else {
         KisPageVersion current;
-        if (epoch->resolve(write.baseVersion.key, {}, &current)
-            && current == write.baseVersion) return true;
+        if (epoch->resolve(write.source.version.key, {}, &current)
+            && current == write.source.version) return true;
     }
     KisPageStoreDetail::setError(error, QStringLiteral("write base is no longer selected"));
     return false;
 }
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::acquireLeaseWrite(
-    KisPageWriteInput &write, const KisReplicaHandle &target)
+    KisPageWriteSelection &selection, const KisReplicaHandle &target)
 {
+    auto &write = selection.write;
     KisPageMetadataTransitionResult rejected;
     if (!validateWriteBase(write, false, &rejected.rejectionReason)) return rejected;
     // A reader can materialize a virtual before-image during the unlocked
     // provider allocation. Acquire its actual authority pin, not a stale null
     // source; the target still initializes directly from the exact default.
-    if (write.baseVersion.isDefaultPixel() && !write.source.isValid()) {
+    if (write.source.version.isDefaultPixel() && !write.source.isValid()) {
         KisPageMetadataCoordinator::VersionInfo current;
-        if (!metadata->versionSnapshot(write.baseVersion, &current)) {
+        if (!metadata->versionSnapshot(write.source.version, &current)) {
             rejected.rejectionReason = QStringLiteral("write default base disappeared");
             return rejected;
         }
-        write.source = current.authority;
+        const auto baseVersion = write.source.version;
+        write.source = KisPageWriteSource(current.authority);
+        write.source.version = baseVersion;
     }
-    return metadata->applyOwner(write.version.key, write.leaseTransition(target));
+    return metadata->applyOwner(write.version.key, selection.leaseTransition(target));
 }
 
 KisPageMetadataTransitionResult KisPageWriteCoordinator::publishLeaseWrite(KisPageTransition write)
@@ -3268,7 +3271,8 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
 {
     auto &write = selection.write;
     const auto &descriptor = selection.descriptor();
-    const auto &before = selection.recoverableBefore;
+    const auto *before = selection.recoverableBefore ? &*selection.recoverableBefore : nullptr;
+    KisPageWriteSource capacitySource;
     auto &spare = capacity.replica;
     const auto retireUnused = qScopeGuard([&] {
         if (!spare.isValid()) return;
@@ -3286,10 +3290,10 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     if (intent.inputKind == KisPageWriteInputKind::Semantic || !provider
         || (intent.flags & quint8(KisPageWriteIntentFlag::SourceInitialization))
         || access.domain != KisPageAccessDomain::CpuRam || access.kind != KisPageAccessKind::CpuPointer
-        || write.source.domain != KisPageAccessDomain::CpuRam
-        || write.baseVersion.isDefaultPixel() || !write.source.isValid()
-        || !(provider->providerId() == write.source.provider)
-        || !(provider->providerEpoch() == write.source.providerEpoch)
+        || write.source.domain() != KisPageAccessDomain::CpuRam
+        || write.source.version.isDefaultPixel() || !write.source.isValid()
+        || !(provider->providerId() == write.source.provider())
+        || !(provider->providerEpoch() == write.source.providerEpoch())
         || writable.isValid()) return false;
 
     const auto transientLimit = budget->maxTransientVersionsPerPage();
@@ -3297,7 +3301,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         && !metadata->canAddTransientVersion(write.version, transientLimit)) return false;
 
     const bool reuseCapacity = spare.isValid();
-    if (!reuseCapacity && !before.isValid()) return false;
+    if (!reuseCapacity && (!before || !before->isValid())) return false;
 
     // Cold short-lived storage only. The existing owners retain every live
     // fact after install; neither adapter receives a second terminal ledger.
@@ -3330,6 +3334,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         // requires a held lock for unlock(); always restore it for the caller.
         if (locker.isLocked()) locker.unlock();
         diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableCleanup, 1);
+        capacitySource = {};
         physical.reset();
         prepared.reset();
         locker.relock();
@@ -3339,7 +3344,12 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepare, 1);
     // Check the source before pinning the independent before or preparing
     // fallible storage. This observes eligibility but acquires no write claim.
-    physical = KisCpuBackingHandoff::prepare(provider, reuseCapacity ? spare : write.source, write.version, descriptor, reuseCapacity ? std::move(capacity.binding) : selection.binding);
+    if (reuseCapacity) capacitySource = capacity.binding
+        ? KisPageWriteSource::borrowedNative(spare.version, capacity.binding.get(), spare.allocation.generation)
+        : KisPageWriteSource(spare);
+    const auto &handoffSource = reuseCapacity ? capacitySource : write.source;
+    physical = KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, descriptor,
+        reuseCapacity ? std::move(capacity.binding) : write.source.binding());
     if (!physical.isValid()) return false;
     const auto targetReplica = physical.target();
     prepared.emplace();
@@ -3348,15 +3358,15 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     const bool needsSource = !reuseCapacity || (write.writeMode == KisPageWriteMode::PreserveContents
         && !(intent.flags & quint8(KisPageWriteIntentFlag::InputBytesReady)));
     if (needsSource) {
-        const auto &source = reuseCapacity ? write.source : before;
+        const auto &source = reuseCapacity ? write.source : *before;
         auto *beforeProvider = provider.get();
-        if (!(source.provider == write.source.provider) || !(source.providerEpoch == write.source.providerEpoch)) {
-            prepared->beforeProvider = ownerLedger->provider(source.provider, source.providerEpoch);
+        if (!(source.provider() == write.source.provider()) || !(source.providerEpoch() == write.source.providerEpoch())) {
+            prepared->beforeProvider = ownerLedger->provider(source.provider(), source.providerEpoch());
             beforeProvider = prepared->beforeProvider.get();
         }
         if (!beforeProvider) return false;
-        prepared->beforeBinding = reuseCapacity && selection.binding
-            ? selection.binding : beforeProvider->cpuResidentBinding(source);
+        prepared->beforeBinding = reuseCapacity && write.source.binding()
+            ? write.source.binding() : beforeProvider->cpuResidentBinding(source.handle());
         prepared->sourceBytes = prepared->beforeBinding
             ? prepared->beforeBinding->acquireRead(source.allocationIdentity(), true) : nullptr;
         prepared->beforePinned = bool(prepared->sourceBytes);
@@ -3364,14 +3374,14 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     }
     // All stable selection facts stay in the original input. Only the source
     // may differ for recovery; the target is owned by physical until accepted.
-    const auto &acceptedSource = reuseCapacity ? write.source : before;
-    prepared->accounting = ownerLedger->prepareBackingHandoff(reuseCapacity ? spare : write.source,
+    const auto &acceptedSource = reuseCapacity ? write.source : *before;
+    prepared->accounting = ownerLedger->prepareBackingHandoff(handoffSource,
         targetReplica, nullptr, reuseCapacity ? capacity.original : nullptr);
     if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
-        auto lease = write.leaseTransition(targetReplica, reuseCapacity
+        auto lease = selection.leaseTransition(targetReplica, reuseCapacity
             ? KisPageTransitionKind::AcquireWrite : KisPageTransitionKind::AcquireRecoverableWrite);
-        lease.source = acceptedSource;
+        lease.source = acceptedSource.handle();
         publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, lease)
             : metadata->prepareRecoverableWrite(transaction, lease);
     }
@@ -3382,7 +3392,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
 
     // All fallible storage exists before taking the physical claim. Metadata
     // install rechecks actual blockers and the exact recovery identity.
-    if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.baseVersion);
+    if (!native) prepared->publication->descriptors = publication.prepareDescriptorLocked(write.version, descriptor, write.source.version);
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverableInstall, 1);
     if (!validateWriteBase(write, bool(native))) return false;
     if (!physical.tryClaim()) return false;
@@ -3414,7 +3424,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         const auto rowBytes = descriptor.minimumRowBytes();
         for (int y = 0; y < descriptor.pageExtent.height(); ++y)
             std::memcpy(bytes + quint64(y) * targetReplica.layout.rowStride,
-                static_cast<const quint8 *>(prepared->sourceBytes) + quint64(y) * write.source.layout.rowStride,
+                static_cast<const quint8 *>(prepared->sourceBytes) + quint64(y) * write.source.layout().rowStride,
                 size_t(rowBytes));
         locker.relock();
     } else if (write.writeMode == KisPageWriteMode::DiscardContents
@@ -3436,7 +3446,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         Q_ASSERT(target);
         *target = targetReplica; // Original preallocated request is the owner.
     }
-    if (!reuseCapacity) write.source = before;
+    if (!reuseCapacity) write.source = std::move(*selection.recoverableBefore);
     return true;
 }
 
@@ -3556,43 +3566,50 @@ KisCpuReplicaPreparation KisPageWriteCoordinator::prepareFreshCpuReplica(
         : initialization ? Kind::SourceCopy
         : plan == KisPageWritePlanKind::FreshCow ? Kind::Copy : Kind::Default;
     auto &write = selection.write;
-    return provider.prepareCpuReplica({kind, *ownerLedger, write.operation, write.version, selection.descriptor(),
-        write.writeMode, priority, write.source, selection.binding, payload, initialization});
+    KisPageOperationId operation;
+    auto result = provider.prepareCpuReplica({kind, *ownerLedger, operation, write.version, selection.descriptor(),
+        write.writeMode, priority, write.source, payload, initialization});
+    result.setExpectedOperation(operation);
+    return result;
 }
 
 KisReplicaOperation KisPageWriteCoordinator::prepareFreshReplica(
     const KisPageWriteIntent &intent, KisPageReplicaProvider &provider,
-    const KisPageWriteInput &write, const KisPageAllocationDescriptor &descriptor,
+    const KisPageWriteSelection &selection,
     KisPageAccessRequirement access, KisPagePriority priority,
     const KisCpuPagePayload *payload,
     const std::shared_ptr<const KisPageReplicaSource> &initialization,
     bool *synchronousCopy) const
 {
+    const auto &write = selection.write;
+    const auto &descriptor = selection.descriptor();
+    Q_ASSERT(selection.lease);
+    const auto operation = selection.lease->operation;
     if (synchronousCopy) *synchronousCopy = false;
     if (intent.inputKind == KisPageWriteInputKind::Semantic)
-        return initialization ? provider.prepareSynchronousSource(write.operation, initialization,
+        return initialization ? provider.prepareSynchronousSource(operation, initialization,
             write.version, descriptor, KisReplicaSourceUse::ImmutableAlias, priority) : KisReplicaOperation{};
     const auto plan = select(intent);
     if (plan == KisPageWritePlanKind::FreshPayload)
         return payload ? provider.prepareSynchronousCpuPayload(
-            write.operation, write.version, descriptor, *payload, priority) : KisReplicaOperation{};
+            operation, write.version, descriptor, *payload, priority) : KisReplicaOperation{};
     if (initialization)
-        return provider.prepareSynchronousSource(write.operation, initialization,
+        return provider.prepareSynchronousSource(operation, initialization,
             write.version, descriptor, KisReplicaSourceUse::WritableCopy, priority);
     if (plan == KisPageWritePlanKind::FreshCow) {
         const bool copy = !(intent.flags & quint8(KisPageWriteIntentFlag::AsyncLease))
             || (access.kind == KisPageAccessKind::CpuPointer
-                && write.source.domain == access.domain
-                && write.source.provider == provider.providerId()
-                && write.source.providerEpoch == provider.providerEpoch()
+                && write.source.domain() == access.domain
+                && write.source.provider() == provider.providerId()
+                && write.source.providerEpoch() == provider.providerEpoch()
                 && provider.capabilities().synchronousWriteCopy);
         if (copy) {
             if (synchronousCopy) *synchronousCopy = true;
-            return provider.prepareSynchronousWriteCopy(write.operation, write.source,
+            return provider.prepareSynchronousWriteCopy(operation, write.source.handle(),
                 write.version, descriptor, priority);
         }
     }
-    return provider.prepareWrite(write.operation, write.version, descriptor,
+    return provider.prepareWrite(operation, write.version, descriptor,
         access.domain, write.writeMode, priority);
 }
 
@@ -3686,8 +3703,8 @@ void KisPageWriteCoordinator::recordTarget(KisMutationPageEntry &entry,
     const quint8 semanticRemoval = entry.intent.flags & quint8(KisPageWriteIntentFlag::SemanticRemoval);
     entry.intent = intent;
     entry.intent.flags |= semanticRemoval;
-    entry.baseGeneration = write.baseVersion.generation;
-    entry.baseDefaultPixelRevision = write.baseVersion.defaultPixelRevision;
+    entry.baseGeneration = write.source.version.generation;
+    entry.baseDefaultPixelRevision = write.source.version.defaultPixelRevision;
     entry.state = state;
 }
 
@@ -3723,7 +3740,7 @@ KisPageWriteInput KisPageWriteCoordinator::writeInput(const KisMutationPageEntry
     const auto *result = entry.coldPageStorage;
     Q_ASSERT(result && entry.state != KisMutationPageEntryState::IntentOnly);
     KisPageWriteInput write;
-    write.baseVersion = {entry.key(), entry.baseGeneration, entry.baseDefaultPixelRevision};
+    write.source.version = {entry.key(), entry.baseGeneration, entry.baseDefaultPixelRevision};
     write.version = result->version();
     write.writeMode = entry.intent.mode;
     write.transaction = transaction;

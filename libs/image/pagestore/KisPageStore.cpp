@@ -47,8 +47,9 @@
 namespace
 {
 
+template<class Source = KisReplicaHandle>
 bool ownsPreparedReplica(const KisReplicaHandle &replica, const KisPageVersion &version,
-                         const KisPageReplicaProvider &provider, const KisReplicaHandle *source = nullptr)
+                         const KisPageReplicaProvider &provider, const Source *source = nullptr)
 {
     return replica.isValid() && replica.version == version
         && replica.provider == provider.providerId()
@@ -1409,9 +1410,9 @@ KisPageMutationSession::Private::prepareTarget(
     // The input retains the source through checkout. Recovery may replace it
     // only on success; Fresh and rejection consume this same original fact.
     const auto &source = acquire.source;
-    if (!alias && source.isValid() && (!(source.provider == targetProvider->providerId())
-                        || !(source.providerEpoch == targetProvider->providerEpoch())
-                        || source.domain != KisPageAccessDomain::CpuRam)) {
+    if (!alias && source.isValid() && (!(source.provider() == targetProvider->providerId())
+                        || !(source.providerEpoch() == targetProvider->providerEpoch())
+                        || source.domain() != KisPageAccessDomain::CpuRam)) {
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation requires an exact native CPU authority"));
         return {};
     }
@@ -1551,7 +1552,7 @@ KisPageMutationSession::Private::prepareTarget(
             && target.domain == KisPageAccessDomain::CpuRam
             && target.layout.matches(descriptor)
             && (alias || (binding && (finalPayload || result.data)))
-            && (nativeReady || owner->owner.verifyTerminalProviderResult(acquire.operation, *external, error).succeeded());
+            && (nativeReady || owner->owner.verifyTerminalProviderResult(preparation.expectedOperation(), *external, error).succeeded());
         lock.relock();
         if (!ready) {
             if (error && error->isEmpty()) *error = preparation.error().isEmpty()
@@ -2152,27 +2153,34 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
         KisPageWriteSelection selection;
         if (!scope->owner->publicationCoordinator.selectWriteBaseLocked(scope->transaction, intent, &selection, error)) return fail();
         auto &selected = selection.write;
-        auto &binding = selection.binding;
+        auto *binding = selected.source.binding().get();
         const auto &descriptor = selection.descriptor();
         if (!validRect(descriptor)) {
             KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
             return fail();
         }
         const quint64 rowBytes = quint64(affected.width()) * descriptor.format.pixelStride;
-        if (!selected.baseVersion.isDefaultPixel()) {
+        if (!selected.source.version.isDefaultPixel()) {
             // The original admission and transaction retain this selection.
             // A physical pin covers the comparison, then ends before any
             // writable claim. No captured overlay or second base lookup.
             ++scope->owner->activeProviderCalls;
             ownerLock.unlock();
             const auto restore = qScopeGuard([&] { ownerLock.relock(); --scope->owner->activeProviderCalls; });
-            if (!binding) binding = scope->provider->cpuResidentBinding(selected.source);
+            if (!binding) {
+                auto resolved = scope->provider->cpuResidentBinding(selected.source.handle());
+                if (resolved) {
+                    selected.source = KisPageWriteSource::native(selected.source.version, resolved,
+                        selected.source.allocationIdentity().allocation.generation);
+                    binding = selected.source.binding().get();
+                }
+            }
             const auto *bytes = binding ? static_cast<const quint8 *>(binding->acquireRead(
                 selected.source.allocationIdentity(), false, nullptr, true)) : nullptr;
             const auto matches = [&](const void *data) {
                 for (int row = 0; row < affected.height(); ++row)
                     if (std::memcmp(static_cast<const quint8 *>(data)
-                        + quint64(affected.y()+row) * selected.source.layout.rowStride
+                        + quint64(affected.y()+row) * selected.source.layout().rowStride
                         + quint64(affected.x()) * descriptor.format.pixelStride,
                         static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes))) return false;
                 return true;
@@ -2194,8 +2202,8 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
                     ownerLock.unlock();
                 });
                 if (!cleanup.prepareRequestLocked(ownerLock, error)) return fail();
-                const auto request = scope->owner->readCoordinator.registerRequestLocked(selected.baseVersion,
-                    selected.source, {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
+                const auto request = scope->owner->readCoordinator.registerRequestLocked(selected.source.version,
+                    selected.source.handle(), {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer},
                     scope->owner->readyHostCompletion, scope->transaction.id, cleanup);
                 read.emplace(scope->owner->readCoordinator.resolveLocked(request, request.readiness, ownerLock, cleanup));
                 if (!read->isValid() || !read->cpuData()) {
@@ -4771,17 +4779,18 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         return fail();
     }
     const auto &descriptor = selection.descriptor();
-    transition.operation = d->owner.nextOperationId();
-    transition.writer = d->owner.nextWriterToken();
-    const auto baseVersion = transition.baseVersion;
+    auto &leaseInput = selection.lease.emplace();
+    leaseInput.operation = d->owner.nextOperationId();
+    leaseInput.writer = d->owner.nextWriterToken();
+    const auto baseVersion = transition.source.version;
     const auto writeVersion = transition.version;
-    const auto writeOperation = transition.operation;
-    const auto writer = transition.writer;
+    const auto writeOperation = leaseInput.operation;
+    const auto writer = leaseInput.writer;
     const auto requestId = d->owner.nextRequestId();
     const auto accessOperation = d->owner.nextOperationId();
     mode = transition.writeMode;
     request.mode = mode;
-    auto provider = d->owner.provider(transition.source.provider, transition.source.providerEpoch);
+    auto provider = d->owner.provider(transition.source.provider(), transition.source.providerEpoch());
     if (!provider || !provider->capabilities().supports(access))
         provider = d->owner.providerFor(access);
     if (!provider) {
@@ -4792,7 +4801,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     pending.state = PendingWriteRequestRecord::State::Preparing;
     pending.baseVersion = baseVersion;
     pending.version = writeVersion;
-    pending.source = transition.source;
+    pending.source = transition.source.handle();
     pending.access = access;
     pending.operation = writeOperation;
     pending.accessOperation = accessOperation;
@@ -4839,7 +4848,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         // logical writer/admission survive releasing the short native pin;
         // resolve() acquires the ordinary generic provider access later.
         auto &prepared = d->writeRequests.find(requestId.value)->second;
-        prepared.source = transition.source;
+        prepared.source = transition.source.handle();
         prepared.readiness = d->readyHostCompletion;
         prepared.state = PendingWriteRequestRecord::State::Pending;
         request.status = KisPageRequestStatus::Ready;
@@ -4895,7 +4904,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     try {
         KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::WriteProviderPrepare, 1);
         allocation = d->writeCoordinator.prepareFreshReplica(writeIntent, *provider,
-            transition, descriptor, access, priority, nullptr, {}, &nativeWriteCopy);
+            selection, access, priority, nullptr, {}, &nativeWriteCopy);
     } catch (const std::bad_alloc &) {
         locker.relock();
         d->writeRequests.erase(requestId.value);
@@ -4934,14 +4943,14 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
         return request;
     }
     pendingIt->second.replica = allocation.replica;
-    KisPageMetadataTransitionResult stateResult = d->writeCoordinator.acquireLeaseWrite(transition, allocation.replica);
+    KisPageMetadataTransitionResult stateResult = d->writeCoordinator.acquireLeaseWrite(selection, allocation.replica);
     if (!stateResult.accepted) {
         rejectAllocation(stateResult.rejectionReason);
         return request;
     }
 
     d->publicationCoordinator.installDescriptorAdditionsLocked(&descriptors);
-    pendingIt->second.source = transition.source;
+    pendingIt->second.source = transition.source.handle();
     pendingIt->second.readiness = allocation.completion;
     const auto rejectPrepared = [&](const QString &message) {
         const auto cancelled = d->cancelWriteLocked(d->writeRequests.find(requestId.value)->second);
@@ -4980,7 +4989,7 @@ KisWriteRequest KisPageStore::acquireWrite(const KisPageTransaction &transaction
     }
     pendingIt->second.readiness = initializationReadiness;
 
-    stateResult = d->metadata.applyOwner(key, transition.leaseTransition(allocation.replica, KisPageTransitionKind::PrepareWrite));
+    stateResult = d->metadata.applyOwner(key, selection.leaseTransition(allocation.replica, KisPageTransitionKind::PrepareWrite));
     if (!stateResult.accepted) {
         rejectPrepared(stateResult.rejectionReason);
         return request;

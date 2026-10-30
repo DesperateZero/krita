@@ -1228,7 +1228,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                          "preparedCommit.beginBackingChanges", "preparedCommit.release",
                          "publicationBackingReader", "KisPagePreparedBackingChange", "preparedCommit.acceptFees",
                          "Acceptance::FeesRefused", "Acceptance::InstallRejected", "acceptPreparedIdleCapacity",
-                         "acceptCpuResources", "synchronizeBackingDomains"):
+                         "prepareCpuResources", "resources.accept", "synchronizeBackingDomains"):
             if contract not in source_text:
                 errors.append(f"Publication synchronous workspace contract is missing: {contract}")
         for retired in ("KisPreparedMutationCommit::Data", "preparedCommit.data",
