@@ -177,10 +177,18 @@ public:
     template<class Reader, class Install>
     KisPageOwnerLedger::BackingAcceptance acceptFees(KisPageOwnerLedger &ledger, Reader &reader, Install &install)
     {
+        // Reserve fees before taking any Resource gate: admission may grow
+        // budget slots or reclaim terminal management capacity. The original
+        // ledger window then protects the actual class changes through the
+        // Resource check and metadata/root cut. Installation cannot reenter it.
+        auto acceptResources = [&] {
+            return metadata.acceptCpuResources(&install,
+                [](void *context) { return (*static_cast<Install *>(context))(); });
+        };
         const auto accepted = ledger.acceptPreparedBackingChanges(workspace.at<KisPagePreparedBackingChange>(phaseOffset),
             backingCapacity, &reader, [](void *context, KisBackingClassChange *change) {
                 return (*static_cast<Reader *>(context))(change);
-            }, &install, [](void *context) { return (*static_cast<Install *>(context))(); });
+            }, &acceptResources, [](void *context) { return (*static_cast<decltype(acceptResources) *>(context))(); });
         return accepted;
     }
     KisPagePublicationCoordinator *owner = nullptr;
@@ -485,24 +493,8 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         [](const auto &row) { return row.detachesSuperseded; });
     const bool idleFeesReady = hasIdleChange && owner.m_owner.synchronizeBackingDomains(error);
     auto accept = [&] {
-        // Fee refusal is optional; metadata refusal is terminal for this attempt.
-        // Run the same installer exactly once, with fees only when admitted.
-        auto install = [&] {
-            return !data->mutationCount || owner.m_metadata.installAcceptance(
-                std::move(data->metadata), data->transaction, error);
-        };
-        using Acceptance = KisPageOwnerLedger::BackingAcceptance;
-        auto accepted = Acceptance::FeesRefused;
-        for (size_t i = 0; i < data->changes.size(); ++i) {
-            if (!data->changes[i].detachesSuperseded) continue;
-            if (idleFeesReady)
-                accepted = owner.m_owner.acceptPreparedIdleCapacity(data->changes.subspan(i), allowance,
-                    &install, [](void *context) { return (*static_cast<decltype(install) *>(context))(); }, error);
-            break;
-        }
-        if (accepted == Acceptance::InstallRejected
-            || (accepted == Acceptance::FeesRefused && !install())) return false;
-
+        if (data->mutationCount && !owner.m_metadata.installAcceptance(
+                std::move(data->metadata), data->transaction, error)) return false;
         acceptSelection<true>(state.proofs, data->changes);
         acceptSelection<false>(state.removals, data->changes);
         if (data->surfaceChange.after.surface.isValid()) {
@@ -511,8 +503,23 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
         }
         return true;
     };
-    if (!data->metadata.acceptCpuResources(&accept,
-            [](void *p) { return (*static_cast<decltype(accept) *>(p))(); }, error)) return false;
+    auto install = [&] {
+        return data->metadata.acceptCpuResources(&accept,
+            [](void *p) { return (*static_cast<decltype(accept) *>(p))(); }, error);
+    };
+    // Fee refusal is optional; a rejected Resource/metadata cut is terminal
+    // for this attempt. All actual selection changes stay inside that cut.
+    using Acceptance = KisPageOwnerLedger::BackingAcceptance;
+    auto accepted = Acceptance::FeesRefused;
+    for (size_t i = 0; i < data->changes.size(); ++i) {
+        if (!data->changes[i].detachesSuperseded) continue;
+        if (idleFeesReady)
+            accepted = owner.m_owner.acceptPreparedIdleCapacity(data->changes.subspan(i), allowance,
+                &install, [](void *context) { return (*static_cast<decltype(install) *>(context))(); }, error);
+        break;
+    }
+    if (accepted == Acceptance::InstallRejected
+        || (accepted == Acceptance::FeesRefused && !install())) return false;
     for (const auto &change : std::as_const(data->changes)) {
         if (change.detachesSuperseded)
             owner.acceptCapacityLocked(change.supersededReplica(), change.acceptedIdle);
@@ -1303,15 +1310,9 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
             return preparedCommit.acceptFees(m_owner, reader, install);
         };
         const bool domainsReady = m_owner.synchronizeBackingDomains();
-        auto accepted = Acceptance::FeesRefused;
-        auto accept = [&] {
-            accepted = acceptFees(detachesBacking);
-            if (accepted == Acceptance::FeesRefused && detachesBacking)
-                accepted = acceptFees(false);
-            return true;
-        };
-        if (domainsReady && !publication.acceptCpuResources(&accept,
-                [](void *p) { return (*static_cast<decltype(accept) *>(p))(); })) return {};
+        auto accepted = domainsReady ? acceptFees(detachesBacking) : Acceptance::FeesRefused;
+        if (accepted == Acceptance::FeesRefused && detachesBacking && domainsReady)
+            accepted = acceptFees(false);
         if (accepted != Acceptance::FeesRefused) preparedCommit.finishInstallation();
         // Only an admission refusal may downgrade the detachment plan. Once
         // installation was entered, its original metadata/root result owns
@@ -1533,13 +1534,8 @@ KisPagePublicationCoordinator::restoreRetainedEpochLocked(const KisRetainedImage
         auto install = [&] { return preparedCommit.installRoot(nullptr); };
         using Acceptance = KisPageOwnerLedger::BackingAcceptance;
         const bool domainsReady = m_owner.synchronizeBackingDomains();
-        auto accepted = Acceptance::FeesRefused;
-        auto accept = [&] {
-            accepted = preparedCommit.acceptFees(m_owner, reader, install);
-            return true;
-        };
-        if (domainsReady && !publication.acceptCpuResources(&accept,
-                [](void *p) { return (*static_cast<decltype(accept) *>(p))(); })) return {};
+        auto accepted = domainsReady ? preparedCommit.acceptFees(m_owner, reader, install)
+                                    : Acceptance::FeesRefused;
         if (accepted != Acceptance::FeesRefused) preparedCommit.finishInstallation();
         if (accepted == Acceptance::FeesRefused) {
             if (publication.genericInputsChanged()) {

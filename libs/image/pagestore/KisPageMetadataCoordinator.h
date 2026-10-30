@@ -467,10 +467,13 @@ private:
         KisPageRetirementRecord *originalBacking(const KisPageVersion &) const;
         void forEachDetachedBacking(void *, void (*)(void *, const KisReplicaHandle &, KisPageRetirementRecord *)) const;
         KisPagePublicationRows originalRows() const { return m_rows; }
-        // Caller holds Store/adapter admission. Only prepaid acceptance is
+        // Caller holds Store/adapter admission and, for fee changes, the
+        // original ledger gate after admission. Only prepaid acceptance is
         // invoked while sorted original CPU Resource gates are held. Original
         // rows and DeferredPublicationCleanup keep candidate storage alive
         // until this returns; physical delivery/cleanup follows gate release.
+        // The callback must not reenter the ledger or perform fee admission,
+        // provider work, storage allocation/reclaim, or physical destruction.
         bool acceptCpuResources(void *, bool (*accept)(void *), QString *error = nullptr);
 
     private:

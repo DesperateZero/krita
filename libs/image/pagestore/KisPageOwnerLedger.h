@@ -208,7 +208,8 @@ private:
     KisPageRetirementRecords takeShutdownRetirementRecords();
     // Provider domain synchronization must finish BEFORE Resource gates.
     // These prepared entries invoke no provider callback or physical I/O.
-    // One synchronous ledger -> epoch/V acceptance. Inputs and all installation
+    // One synchronous ledger -> sorted Resource -> epoch -> metadata acceptance.
+    // Budget preparation precedes Resource entry. Inputs and all installation
     // capacity are prepared before entry; install cannot call a provider,
     // reenter this ledger, or leave partial state on refusal. Final references
     // and physical delivery stay in the caller's unlocked cleanup.

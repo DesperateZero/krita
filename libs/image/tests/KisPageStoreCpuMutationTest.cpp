@@ -546,6 +546,13 @@ class KisPageStoreCpuMutationTest : public QObject
     Q_OBJECT
 private Q_SLOTS:
     void nativeControlExcludesExternalThreads();
+    void feeAdmissionPrecedesResourceWindow_data()
+    {
+        QTest::addColumn<bool>("overlay");
+        QTest::newRow("overlay") << true;
+        QTest::newRow("commit") << false;
+    }
+    void feeAdmissionPrecedesResourceWindow();
     void implicitDefaultsDoNotBuildPublicationValues()
     {
         Fixture f; QVERIFY(f.init());
@@ -1619,6 +1626,98 @@ void KisPageStoreCpuMutationTest::pageStoreMementoStorageIsProcessOwned()
         QCOMPARE(memento->newDefaultPixel()[0], quint8(0x71));
     }
     QCOMPARE(kisPageProcessStorageBytes(), before);
+}
+
+// Real parent-budget pressure forces the production fee admission to reclaim
+// charged terminal capacity. Its disposer may inspect a binding, but may not
+// enter a Store. The final Resource gate must not cover this earlier service.
+void KisPageStoreCpuMutationTest::feeAdmissionPrecedesResourceWindow()
+{
+    QFETCH(bool, overlay);
+    KisPageBackingLimits limits; limits.metadataArenaBytes = 4 * 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(limits);
+    std::array<KisBackingBudgetReservation, 8> slots;
+    for (auto &slot : slots) { slot = parent->reserve({}, nullptr); QVERIFY(slot.isValid()); }
+    for (auto &slot : slots) slot.release();
+    Fixture f;
+    QVERIFY(f.store->configureSharedNonPayloadBudget(parent, &f.error));
+    QVERIFY(f.init());
+    QSemaphore begin, finished;
+    std::shared_ptr<KisCpuResidentBinding> binding;
+    KisReplicaHandle target;
+    bool matches = false;
+    std::thread inspector([&] {
+        begin.acquire();
+        matches = binding && binding->matchesHandle(target);
+        finished.release();
+    });
+    struct Reclaim : KisReusableMutationStorage {
+        void *pressure = nullptr;
+        QSemaphore *begin = nullptr, *finished = nullptr;
+        bool called = false, available = false;
+    } reclaim;
+    std::unique_ptr<KisPageStoreStoragePressure> filler;
+    const auto cleanup = qScopeGuard([&] {
+        f.provider->afterDomainSnapshot = {};
+        begin.release();
+        inspector.join();
+        if (reclaim.origin) {
+            auto *taken = parent->takeMutationStorage();
+            Q_ASSERT(taken == &reclaim); Q_UNUSED(taken);
+        }
+        if (reclaim.pressure) freeTestStoragePressure(std::exchange(reclaim.pressure, nullptr));
+        filler.reset();
+    });
+    reclaim.pressure = allocateTestStoragePressure(parent.get(), 32 * 1024, 1);
+    reclaim.bytes = 32 * 1024;
+    reclaim.begin = &begin; reclaim.finished = &finished;
+    reclaim.dispose = [](KisReusableMutationStorage *value) noexcept {
+        auto &probe = *static_cast<Reclaim *>(value);
+        probe.called = true;
+        probe.begin->release();
+        probe.available = probe.finished->tryAcquire(1, 1000);
+        freeTestStoragePressure(std::exchange(probe.pressure, nullptr));
+    };
+    // Register before the Store's first terminal scope so this real paid
+    // capacity is the first pressure victim, not an unrelated warm scope.
+    QVERIFY(parent->retainMutationStorage(&reclaim));
+    QVERIFY(f.fill(0x31));
+    const auto tx = f.store->beginCurrentTransaction();
+    auto first = f.begin(tx);
+    auto write = first.beginWrite(key()); QVERIFY(write.isValid());
+    static_cast<quint8 *>(write.data())[0] = 0x61;
+    write = {}; QVERIFY(first.seal()); first = {};
+    auto second = overlay ? f.begin(tx) : KisPageMutationSession{};
+    if (overlay) {
+        write = second.beginWrite(key()); QVERIFY(write.isValid());
+        static_cast<quint8 *>(write.data())[0] = 0x71;
+        write = {};
+    }
+    target = f.provider->lastTarget;
+    binding = f.provider->cpuResidentBinding(target); QVERIFY(binding);
+    f.provider->forceDomainJournalProbe = true;
+    bool pressured = false;
+    f.provider->afterDomainSnapshot = [&] {
+        if (pressured) return;
+        const auto usage = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        const auto used = usage.live.cpuRam + usage.reserved.cpuRam;
+        filler = std::make_unique<KisPageStoreStoragePressure>(
+            KisMutationStorageAllocator<char>(parent.get()), size_t(limits.metadataArenaBytes - used));
+        pressured = true;
+    };
+    const bool accepted = overlay ? second.seal(&f.error)
+        : f.store->commitPreparedTransaction(tx, nullptr);
+    f.provider->afterDomainSnapshot = {};
+    filler.reset();
+    QVERIFY2(pressured, "the production fee/domain boundary was not reached");
+    QVERIFY2(reclaim.called, "the fee did not reclaim the charged capacity under real pressure");
+    QVERIFY2(reclaim.available, "fee reclamation still ran under the target Resource gate");
+    QVERIFY(matches);
+    QVERIFY2(accepted, qPrintable(f.error));
+    second = {};
+    if (overlay) QVERIFY(f.store->commitPreparedTransaction(tx, nullptr));
+    QCOMPARE(f.pixel()[0], char(overlay ? 0x71 : 0x61));
+    QVERIFY(f.store->waitForRetirementIdle());
 }
 
 void KisPageStoreCpuMutationTest::nativeControlExcludesExternalThreads()
