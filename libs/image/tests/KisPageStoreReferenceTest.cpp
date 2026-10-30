@@ -1186,6 +1186,8 @@ private Q_SLOTS:
                         << h << v << compact;
     }
     void indexedPublicationTransitions();
+    void coldPublicationTargetsStayAtomic();
+    void recoveryKeepsCachedBeforeIndependent();
     void publicationDirectoryStorageLifetime();
     void indexedPublicationIgnoresRetainedHistory_data()
     {
@@ -7960,6 +7962,91 @@ void KisPageStoreReferenceTest::indexedPublicationTransitions()
     QCOMPARE(coordinator.metrics().publicationDirectoryHeaders, quint64(1));
 }
 
+void KisPageStoreReferenceTest::coldPublicationTargetsStayAtomic()
+{
+    for (bool repeatedBatch : {false, true}) {
+        KisPageMetadataCoordinator metadata; KisPageMetadataTestView view;
+        QVERIFY(metadata.configure(1));
+        std::array<KisPageStateSnapshot, 2> pages;
+        std::array<KisPageMetadataCoordinator::PublicationChange, 2> changes;
+        for (int i = 0; i < 2; ++i) {
+            auto base = pageVersion(i, 1); base.defaultPixelRevision = 1;
+            pages[size_t(i)] = initialPageState(base, replica(base, 1, 1, quint64(10+i)));
+            pages[size_t(i)].publishedDefaultPixelRevision = base.defaultPixelRevision;
+            pages[size_t(i)].nextGeneration = {3}; // Leave a valid identity for the competing historical insertion.
+            auto target = base; target.defaultPixelRevision = 2;
+            changes[size_t(i)] = {KisPageTransitionKind::ReplaceDefaultPixel, target, replica(target, 1, 1, 100)};
+            QVERIFY(view.registerPage(metadata, pages[size_t(i)]));
+        }
+        const KisPageTransaction tx{{71}, {1}};
+        auto candidate = metadata.preparePublication(tx, view.root(), {2}, changes.data(), repeatedBatch ? 2 : 1);
+        if (repeatedBatch) {
+            QVERIFY(!candidate.isValid());
+        } else {
+            QVERIFY(candidate.isValid());
+            // The other page consumes the physical token after preparation.
+            // This page's revision is unchanged: final index ownership still
+            // has to be checked before any new Value or view is installed.
+            KisPageTransition attach;
+            attach.kind = KisPageTransitionKind::AttachHistoricalDefault;
+            attach.version = pageVersion(1, 2); attach.version.defaultPixelRevision = 3;
+            attach.target = replica(attach.version, 1, 1, 100);
+            const auto expected = KisPageStateMachine().apply(pages[1], attach);
+            QVERIFY(expected.accepted);
+            QVERIFY(metadata.applyOwner(attach.version.key, attach).accepted);
+            pages[1] = expected.next;
+            QVERIFY(!metadata.installPublication(std::move(candidate), tx, {2}));
+        }
+        for (const auto &page : pages) {
+            KisPageStateSnapshot actual;
+            QVERIFY(metadata.pageSnapshot(page.key, view.root(), &actual));
+            comparePageRecords(actual, page);
+        }
+    }
+}
+
+void KisPageStoreReferenceTest::recoveryKeepsCachedBeforeIndependent()
+{
+    auto completions = std::make_shared<KisCompletionRegistry>();
+    auto provider = std::make_shared<KisTiles3PageReplicaProvider>();
+    const auto descriptor = allocationDescriptor();
+    QVERIFY(provider->configure({{81}, {1}, 4 * 1024 * 1024}, completions));
+    const auto base = pageVersion(0, 1);
+    const auto allocate = [&](quint64 id) {
+        return provider->prepareWrite({id}, base, descriptor, KisPageAccessDomain::CpuRam,
+            KisPageWriteMode::DiscardContents, KisPagePriority::Normal);
+    };
+    const auto original = allocate(100), independent = allocate(101);
+    QVERIFY(original.isValid() && independent.isValid());
+    auto oldBinding = provider->cpuResidentBinding(original.replica);
+    auto beforeBinding = provider->cpuResidentBinding(independent.replica);
+    QVERIFY(oldBinding && beforeBinding && oldBinding != beforeBinding);
+    auto page = initialPageState(base, original.replica);
+    page.versions.first().replicas.append({independent.replica, KisReplicaValidity::Valid, {}, {}, 0, {}});
+    KisPageMetadataCoordinator metadata;
+    QVERIFY(metadata.configure(1)); QVERIFY(metadata.registerPage(page));
+    QCOMPARE(metadata.installCpuReadBinding(independent.replica, beforeBinding).binding, beforeBinding);
+    KisPageWriteInput input; input.source = original.replica; input.version = pageVersion(0, 2); input.transaction = {71};
+    auto selected = selectPrivateInput(metadata, input);
+    KisPageEditValues values; KisPagePrivateWrite result(values);
+    KisCpuWriteBindingReservation writable;
+    const auto cancel = qScopeGuard([&] {
+        writable.reset();
+        if (result.reserved) metadata.cancelPrivateResult(&result);
+    });
+    QVERIFY(metadata.preparePrivateValue(selected, &result, nullptr));
+    auto physical = KisCpuBackingHandoff::prepare(provider, original.replica, input.version, descriptor, oldBinding);
+    QVERIFY(physical.isValid()); QVERIFY(physical.tryClaim());
+    const auto target = physical.target();
+    QVERIFY(metadata.acceptPrivateTarget(selected, independent.replica, target, &result, 64, nullptr, beforeBinding));
+    writable = physical.commit(); QVERIFY(writable.isValid());
+    if (!result.binding()) result.exchangeBinding(writable.binding(), target);
+    QCOMPARE(result.binding(), oldBinding);
+    QCOMPARE(metadata.cpuReadBinding(base).binding, beforeBinding);
+    QCOMPARE(metadata.cpuReadBinding(base).replica, independent.replica);
+    QVERIFY(metadata.completePrivateWrite(&result));
+}
+
 void KisPageStoreReferenceTest::publicationDirectoryStorageLifetime()
 {
     KisPageBackingLimits limits; limits.metadataArenaBytes = 256 * 1024;
@@ -9285,7 +9372,7 @@ void KisPageStoreReferenceTest::preparedRecoverableWriteLifecycle()
     const auto reserved = metadata->footprint();
     QVERIFY(reserved.versionArena.outstandingReservations > 0);
     QCOMPARE(reserved.replicaArena.outstandingReservations, quint64(0)); // Both surviving values have one inline replica.
-    QVERIFY(reserved.overflowArena.outstandingReservations > 0);
+    QCOMPARE(reserved.overflowArena.outstandingReservations, quint64(0)); // Original before protection is not rebuilt.
     QCOMPARE(reserved.exactVersionIndex.outstandingReservations, quint64(1));
     QVERIFY(reserved.physicalSlotIndex.outstandingReservations > 0);
     QCOMPARE(prepared.backingAuthority(baseVersion), before);

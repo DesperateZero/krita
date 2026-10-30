@@ -1449,7 +1449,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "facts->nativeBinding",
             "struct MetadataMapAllocator : KisMutationStorageAllocator<T, false>",
             "decltype(pages)::allocator_type(storage.borrowed(), &mapAllocationBytes)",
-            "const auto storage = data->storage.borrowed()",
+            "ShardArenaGrowth growth(storage.borrowed())",
             "assignActivityHeader",
             "installActivityHeader",
             "projectReplica",
@@ -1469,6 +1469,14 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         ):
             if contract not in metadata_text:
                 errors.append(f"R2/M2 shard arena authority is missing: {contract}")
+        cold_begin = metadata_text.find("class KisPageMetadataCoordinator::PreparedPublication::Data final")
+        cold_end = metadata_text.find("bool KisPageMetadataCoordinator::PreparedPublication::CpuResources::before(", cold_begin)
+        if cold_begin < 0 or cold_end < 0:
+            errors.append("cold original-effect boundary is missing")
+        cold_text = metadata_text[cold_begin:cold_end]
+        for obsolete in ("KisPageStateSnapshot next", "installRecords", "PublicationDelta", "applyKnownValid"):
+            if obsolete in cold_text:
+                errors.append(f"cold acceptance restored working-state reconstruction: {obsolete}")
         if "VersionRecordNode" in metadata_text:
             errors.append("R2/M2 retained the transitional VersionRecordNode owner")
         install_begin = metadata_text.find("size_t KisPageMetadataCoordinator::PreparedPublication::Data::claimRows(")
@@ -1482,7 +1490,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         if re.search(r"\bpages\s*\.\s*(?:erase|clear|extract|swap)\s*\(|\bpages\s*=(?!=)", metadata_text):
             errors.append("metadata original-page lifetime lost its append-only directory")
         for obsolete in ("bool hasWriter(const KisPageKey &", "publicationClaim(const KisPageKey &",
-                         "setPublicationClaim(", "acceptedPage", "pages.find(entry.key())"):
+                         "setPublicationClaim(", "acceptedPage"):
             if obsolete in metadata_text:
                 errors.append(f"metadata restored an obsolete key lookup: {obsolete}")
         if "pages.find(" in install_text:
