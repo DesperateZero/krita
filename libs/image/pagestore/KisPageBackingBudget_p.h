@@ -301,6 +301,10 @@ private:
     // caller must settle once, with its still-claimed source class and bytes.
     bool reserveCpuOptionalHandoff(quint64 bytes, QString *error);
     void settleCpuOptionalHandoff(KisBackingBudgetClass source, quint64 bytes, bool commit) noexcept;
+    // Synchronous sole-CPU idle acceptance owns the local reservation on its
+    // original ledger scope. The real parent reservation remains independent.
+    bool reserveCpuIdleAcceptance(quint64 bytes, KisBackingBudgetReservation &parent, QString *error);
+    void settleCpuIdleAcceptance(quint64 bytes, bool commit) noexcept;
     struct ReservationSlot {
         static_assert(static_cast<size_t>(KisBackingBudgetClass::Count) == 8);
         // Accepted signed change; only its positive components are reserved.

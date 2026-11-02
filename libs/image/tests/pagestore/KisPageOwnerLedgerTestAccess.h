@@ -48,10 +48,16 @@ public:
     static bool acceptIdle(KisPageOwnerLedger &owner, KisPagePublicationRows rows,
         quint64 allowance, QString *error = nullptr, bool commit = true)
     {
-        if (!owner.synchronizeBackingDomains(error)) return false;
-        return owner.acceptPreparedIdleCapacity(rows, allowance, &commit,
-            [](void *context) { return *static_cast<bool *>(context); }, error)
+        return acceptIdleRows(owner, rows, allowance, [commit] { return commit; }, error)
             == (commit ? Acceptance::Accepted : Acceptance::InstallRejected);
+    }
+    template<class Install>
+    static Acceptance acceptIdleRows(KisPageOwnerLedger &owner, KisPagePublicationRows rows,
+        quint64 allowance, Install install, QString *error = nullptr)
+    {
+        if (!owner.synchronizeBackingDomains(error)) return Acceptance::FeesRefused;
+        return owner.acceptPreparedIdleCapacity(rows, allowance, &install,
+            [](void *context) { return (*static_cast<Install *>(context))(); }, error);
     }
     static bool withdrawRegistration(KisPageOwnerLedger &owner, KisPageRetirementRecord &record)
     {

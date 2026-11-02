@@ -1714,38 +1714,104 @@ try
         KisPageStoreDetail::setError(error, QStringLiteral("backing budget is not attached"));
         return BackingAcceptance::FeesRefused;
     }
-    auto next = [this, rows, count, index = size_t(0), allowance]
-                (Private::ResolvedBackingChange *change) mutable -> int {
-        while (index < count) {
-            auto &row = rows[index++];
-            if (!row.detachesSuperseded) continue;
-            if (!row.hasSupersededAuthority()) return -1;
-            const auto *value = row.supersededValue;
-            const auto bytes = value ? value->primaryReplica.layout().byteSize
-                                     : row.supersededAuthority->layout.byteSize;
-            if (bytes > allowance) continue;
-            const auto identity = value ? value->primaryReplica.identity()
-                                        : row.supersededAuthority->allocationIdentity();
-            const auto found = d->backings.find(identity);
-            if (found == d->backings.end()) return -1;
-            if (const auto *resource = value ? value->primaryReplica.nativeResource() : nullptr) {
-                if (!found->second.matchesNative(resource, identity.allocation.generation, value->version)) return -1;
-            } else {
-                const auto authority = row.supersededReplica();
-                if (!authority.isValid() || !found->second.matches(authority)) return -1;
-            }
-            // Only actual pending backings consume the optional allowance.
-            // Metadata detachment remains independent of this fee choice.
-            if (found->second.budgetClass != KisBackingBudgetClass::ActivePending) continue;
-            allowance -= bytes;
-            *change = {found, KisBackingBudgetClass::IdleCapacity, &row.acceptedIdle};
-            return 1;
-        }
-        return 0;
-    };
     auto *scratch = count ? &rows[0].backingPreparation : nullptr;
-    BorrowedBackingChanges projected(scratch, rows, count);
-    return d->acceptProjectedChanges(next, count, projected, context, install, error);
+    BorrowedBackingChanges selected(scratch, rows, count);
+    quint64 cpuBytes = 0;
+    bool soleCpu = true, reserved = false;
+    KisBackingBudgetReservation parent;
+    // Selection owns only same-gate duplicate marks. Failure never modifies
+    // classes, headroom or output; the complete fee is cancelled before marks.
+    const auto clearMarks = [&] {
+        for (auto &row : selected)
+            if (row.physical->classClaim == &row) row.physical->classClaim = nullptr;
+    };
+    auto finish = qScopeGuard([&] {
+        if (reserved) d->backingBudget->settleCpuIdleAcceptance(cpuBytes, false);
+        parent.release();
+        clearMarks();
+    });
+    const auto reject = [&](const char *message) {
+        KisPageStoreDetail::setError(error, QString::fromLatin1(message));
+        return BackingAcceptance::FeesRefused;
+    };
+    for (auto &input : rows) {
+        if (!input.detachesSuperseded) continue;
+        if (!input.hasSupersededAuthority()) return reject("backing change source is invalid");
+        const auto *value = input.supersededValue;
+        const auto bytes = value ? value->primaryReplica.layout().byteSize : input.supersededAuthority->layout.byteSize;
+        if (bytes > allowance) continue;
+        const auto identity = value ? value->primaryReplica.identity() : input.supersededAuthority->allocationIdentity();
+        const auto found = d->backings.find(identity);
+        if (found == d->backings.end()) return reject("backing change source is invalid");
+        if (const auto *resource = value ? value->primaryReplica.nativeResource() : nullptr) {
+            if (!found->second.matchesNative(resource, identity.allocation.generation, value->version))
+                return reject("backing change source is invalid");
+        } else {
+            const auto authority = input.supersededReplica();
+            if (!authority.isValid() || !found->second.matches(authority)) return reject("backing change source is invalid");
+        }
+        auto &backing = found->second;
+        if (backing.budgetClass != KisBackingBudgetClass::ActivePending) continue;
+        if (!backing.retirement) return reject("backing responsibility was transferred");
+        auto *physical = backing.physicalRecord;
+        Q_ASSERT(physical);
+        if (physical->domainClaim || physical->classClaim == HandoffClaim)
+            return reject("physical backing transition is active");
+        const bool alias = backing.previous || backing.next;
+        if (!alias && physical->classClaim) return reject("backing is classified more than once");
+        selected.push_back({found, physical, selected.size(), KisBackingBudgetClass::IdleCapacity,
+                            KisBackingBudgetClass::Count, &input.acceptedIdle});
+        auto &row = selected[selected.size() - 1];
+        if (!alias) physical->classClaim = &row;
+        soleCpu &= !alias && physical->domain == KisPageAccessDomain::CpuRam;
+        if (soleCpu) {
+            const auto charge = physical->byteSize();
+            if (charge > quint64(std::numeric_limits<qint64>::max()) - cpuBytes)
+                return reject("physical backing delta overflows");
+            cpuBytes += charge;
+        }
+        allowance -= bytes;
+    }
+    if (!soleCpu) {
+        // The general physical-group algorithm consumes the already resolved
+        // original locations. Reuse the same scratch in place; never restart
+        // identity search or introduce another owning selection container.
+        clearMarks();
+        finish.dismiss();
+        auto next = [&, index = size_t(0)](Private::ResolvedBackingChange *change) mutable -> int {
+            if (index == selected.size()) return 0;
+            const auto &row = selected[index++];
+            *change = {row.backing, row.after, row.idleResult};
+            return 1;
+        };
+        BorrowedBackingChanges projected(scratch, rows, count);
+        return d->acceptProjectedChanges(next, count, projected, context, install, error);
+    }
+    if (cpuBytes) {
+        if (!d->backingBudget->reserveCpuIdleAcceptance(cpuBytes, parent, error))
+            return BackingAcceptance::FeesRefused;
+        reserved = true;
+    } else if (!d->backingBudget->admitUnchangedBacking(error)) return BackingAcceptance::FeesRefused;
+    if (!install(context)) return BackingAcceptance::InstallRejected;
+    if (reserved) {
+        d->backingBudget->settleCpuIdleAcceptance(cpuBytes, true);
+        reserved = false;
+        if (parent.isValid()) parent.commitPrepared();
+    }
+    // Both fees are final before any headroom is returned. The same ledger
+    // gate excludes observers; these no-fail stores need no generic delta,
+    // class-priority calculation or third headroom/claim finishing traversal.
+    for (auto &row : selected) {
+        auto &backing = row.backing->second;
+        row.physical->classCounts = KisPageClassCounts::single(KisBackingBudgetClass::IdleCapacity).packed();
+        row.physical->chargedClass = backing.budgetClass = KisBackingBudgetClass::IdleCapacity;
+        *row.idleResult = backing.retirement;
+        backing.retirementHeadroom.release();
+        row.physical->classClaim = nullptr;
+    }
+    finish.dismiss();
+    KisPageStoreDetail::setError(error, {});
+    return BackingAcceptance::Accepted;
 } catch (const std::bad_alloc &) {
     KisPageStoreDetail::setError(error, QStringLiteral("backing change storage budget is exhausted"));
     return BackingAcceptance::FeesRefused;

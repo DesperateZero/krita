@@ -1294,6 +1294,94 @@ void KisBackingBudgetController::settleCpuOptionalHandoff(
             m_sharedNonPayloadUsage, KisPageAccessDomain::CpuRam, bytes);
 }
 
+bool KisBackingBudgetController::reserveCpuIdleAcceptance(
+    quint64 bytes, KisBackingBudgetReservation &parent, QString *error)
+{
+    Q_ASSERT(!parent.isValid());
+    if (!bytes || bytes > quint64(std::numeric_limits<qint64>::max())) return false;
+    if (m_sharedNonPayloadBudget) {
+        parent = m_sharedNonPayloadBudget->reserveSharedNonPayload(
+            m_sharedNonPayloadUsage, {qint64(bytes), 0, 0, 0}, error);
+        if (!parent.isValid()) {
+            QMutexLocker lock(&m_mutex);
+            ++m_usage.backpressureCount;
+            return false;
+        }
+    }
+    constexpr auto idle = size_t(KisBackingBudgetClass::IdleCapacity);
+    QMutexLocker lock(&m_mutex);
+    for (;;) {
+        if (m_usage.waitingRequests) {
+            KisBackingBudgetDelta demand;
+            demand.setBucket(idle, {qint64(bytes), 0, 0, 0});
+            std::array<quint64, budgetClassCount> aggregate{};
+            aggregate[idle] = bytes;
+            if (priorWaiterConflictsLocked(demand, aggregate, 0)) {
+                ++m_usage.backpressureCount;
+                KisPageStoreDetail::setError(error, QStringLiteral("backing reservation waits for an earlier admission request"));
+                return false;
+            }
+        }
+        const auto fits = [&] {
+            if (!fitsMetadataStorageLocked(0)) return false;
+            const auto &usage = m_usage.buckets[idle];
+            constexpr auto maximum = std::numeric_limits<quint64>::max();
+            if (usage.live.cpuRam > maximum - bytes
+                || usage.reserved.cpuRam > maximum - bytes - usage.live.cpuRam) return false;
+            const auto live = sumComponents(components(usage.live));
+            const auto limit = m_limits.idleCapacityBytes;
+            if (bytes > limit || live > limit - bytes
+                || m_reservedAggregateBytes[idle] > limit - bytes - live) return false;
+            if (m_limits.optionalCacheBytes != maximum) {
+                const auto optional = optionalBytes(m_usage, m_reservedAggregateBytes);
+                if (bytes > m_limits.optionalCacheBytes
+                    || optional > m_limits.optionalCacheBytes - bytes) return false;
+            }
+            return true;
+        };
+        if (fits()) break;
+        lock.unlock();
+        const bool reclaimed = reclaimMutationStorage(bool(m_sharedNonPayloadBudget));
+        lock.relock();
+        if (reclaimed) continue;
+        ++m_usage.backpressureCount;
+        KisPageStoreDetail::setError(error, QStringLiteral("backing reservation exceeds its hard budget"));
+        return false;
+    }
+    auto &usage = m_usage.buckets[idle];
+    usage.reserved.cpuRam += bytes;
+    m_reservedAggregateBytes[idle] += bytes;
+    usage.peak.cpuRam = std::max(usage.peak.cpuRam,
+        saturatedAdd(usage.live.cpuRam, usage.reserved.cpuRam));
+    if (m_processStorage) {
+        auto &metadata = m_usage.buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+        metadata.peak.cpuRam = std::max(metadata.peak.cpuRam,
+            saturatedAdd(saturatedAdd(saturatedAdd(metadata.live.cpuRam, metadata.reserved.cpuRam),
+                                      storageBytesLocked()), processStorageSnapshot().total));
+    }
+    KisPageStoreDetail::setError(error, {});
+    return true;
+}
+
+void KisBackingBudgetController::settleCpuIdleAcceptance(quint64 bytes, bool commit) noexcept
+{
+    QMutexLocker lock(&m_mutex);
+    constexpr auto idle = size_t(KisBackingBudgetClass::IdleCapacity);
+    auto &usage = m_usage.buckets[idle];
+    Q_ASSERT(usage.reserved.cpuRam >= bytes && m_reservedAggregateBytes[idle] >= bytes);
+    usage.reserved.cpuRam -= bytes;
+    m_reservedAggregateBytes[idle] -= bytes;
+    if (commit) {
+        auto &active = m_usage.buckets[size_t(KisBackingBudgetClass::ActivePending)].live.cpuRam;
+        Q_ASSERT(active >= bytes);
+        active -= bytes;
+        usage.live.cpuRam += bytes;
+    }
+    // Reserved -> live and a source decrease preserve the admitted fit facts.
+    // Parent settlement follows this local settlement, before headroom exits.
+    notifyWaitersLocked();
+}
+
 quint64 KisBackingBudgetController::idleCapacityAllowance() const
 {
     QMutexLocker lock(&m_mutex);

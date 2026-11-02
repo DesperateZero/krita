@@ -11642,15 +11642,19 @@ void KisPageStoreReferenceTest::referenceOnlyChangesNeedNoFeeSlot()
 void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback()
 {
     using Class = KisBackingBudgetClass;
+    using Acceptance = KisPageOwnerLedger::BackingAcceptance;
     KisPageBackingLimits limits; limits.metadataArenaBytes = 64 * 1024;
+    KisPageBackingLimits parentLimits; parentLimits.metadataArenaBytes = 64 * 1024 * 1024;
+    auto parent = std::make_shared<KisBackingBudgetController>(parentLimits);
     KisBackingBudgetController budget(limits);
+    QString error;
+    QVERIFY(budget.configureSharedNonPayloadBudget(parent, &error));
     KisPageOwnerLedger owner;
     owner.attachBackingBudget(budget);
     auto completions = std::make_shared<KisCompletionRegistry>();
     auto provider = std::make_shared<KisCpuPageReplicaProvider>();
     KisCpuResidentReplicaProviderConfig config;
     config.provider = {1}; config.providerEpoch = {1}; config.budgetBytes = 64 * 1024 * 1024;
-    QString error;
     QVERIFY(owner.configure(completions, &error));
     QVERIFY(provider->configure(config, completions, &error));
     QVERIFY(owner.registerProvider(provider, &error));
@@ -11667,6 +11671,53 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
         QVERIFY(fee.isValid());
         QVERIFY(owner.registerBacking(*row.supersededAuthority, fee, Class::ActivePending, &error));
     }
+    // Observe the real installer boundary: positive parent and local quota is
+    // reserved while the entire Active source remains live. Rejecting that
+    // cut refunds both, but must retain the observed admission peak.
+    {
+        auto warmParentSlot = parent->reserve({}, &error);
+        auto secondParentSlot = parent->reserve({}, &error);
+        QVERIFY(warmParentSlot.isValid()); QVERIFY(secondParentSlot.isValid());
+    }
+    const auto parentBefore = parent->usage().buckets[size_t(Class::MetadataArena)].live.cpuRam;
+    bool observed = false;
+    QCOMPARE(KisPageOwnerLedgerTestAccess::acceptIdleRows(owner, {rows.data(), rows.size()}, 4096, [&] {
+        const auto local = budget.usage();
+        const auto shared = parent->usage().buckets[size_t(Class::MetadataArena)];
+        observed = local.buckets[size_t(Class::ActivePending)].live.cpuRam == 12288
+            && local.buckets[size_t(Class::IdleCapacity)].reserved.cpuRam == 4096
+            && local.buckets[size_t(Class::IdleCapacity)].live.cpuRam == 0
+            && shared.reserved.cpuRam == 4096 && shared.live.cpuRam == parentBefore;
+        return false;
+    }, &error), Acceptance::InstallRejected);
+    QVERIFY(observed);
+    QCOMPARE(parent->usage().buckets[size_t(Class::MetadataArena)].reserved.cpuRam, quint64(0));
+    QCOMPARE(parent->usage().buckets[size_t(Class::MetadataArena)].live.cpuRam, parentBefore);
+    QVERIFY(parent->usage().buckets[size_t(Class::MetadataArena)].peak.cpuRam >= parentBefore + 4096);
+    for (auto &row : rows) QVERIFY(!row.acceptedIdle);
+    // Local rejection occurs after parent admission; parent rejection occurs
+    // before local admission. Neither may run the installation callback.
+    KisBackingBudgetDelta occupyIdle;
+    occupyIdle.bucket(Class::IdleCapacity).cpuRam = qint64(limits.idleCapacityBytes);
+    auto heldIdle = budget.reserve(occupyIdle, &error);
+    QVERIFY(heldIdle.isValid());
+    int installs = 0;
+    auto install = [&] { ++installs; return true; };
+    QCOMPARE(KisPageOwnerLedgerTestAccess::acceptIdleRows(owner, {rows.data(), rows.size()}, 4096,
+        install, &error), Acceptance::FeesRefused);
+    QCOMPARE(installs, 0);
+    QCOMPARE(parent->usage().buckets[size_t(Class::MetadataArena)].reserved.cpuRam, limits.idleCapacityBytes);
+    QCOMPARE(parent->usage().buckets[size_t(Class::MetadataArena)].live.cpuRam, parentBefore);
+    heldIdle.release();
+    KisBackingBudgetDelta occupyParent;
+    occupyParent.bucket(Class::MetadataArena).cpuRam = qint64(parentLimits.metadataArenaBytes - parentBefore);
+    auto heldParent = parent->reserve(occupyParent, &error);
+    QVERIFY(heldParent.isValid());
+    QCOMPARE(KisPageOwnerLedgerTestAccess::acceptIdleRows(owner, {rows.data(), rows.size()}, 4096,
+        install, &error), Acceptance::FeesRefused);
+    QCOMPARE(installs, 0);
+    QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].reserved.cpuRam, quint64(0));
+    heldParent.release();
     // A stream can reject after accepting a prefix, or exceed its advertised
     // workspace. Neither failure may leave a claim/fee or publish an idle row.
     for (const bool invalidTail : {true, false}) {
@@ -11752,6 +11803,37 @@ void KisPageStoreReferenceTest::originalCapacityRowsPreserveSelectionAndRollback
     QVERIFY(owner.acceptRetirementDebt(&effect, 1, nullptr, [](void *) { return true; }, &error));
     QCOMPARE(budget.usage().buckets[size_t(Class::MetadataArena)].live.cpuRam, before);
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
+    // A sole prefix followed by a physical alias must enter the general
+    // group algorithm with its already resolved positions, cancel cleanly,
+    // and charge each physical group once on the next successful attempt.
+    for (auto &row : rows) {
+        row.detachesSuperseded = true;
+        row.acceptedIdle = nullptr;
+        QVERIFY(owner.reclassifyBacking(*row.supersededAuthority, Class::ActivePending, &error));
+    }
+    const auto alias = replica(pageVersion(3, 1), 1, 1, 1, 2);
+    KisBackingBudgetDelta aliasDemand; aliasDemand.bucket(Class::ActivePending).cpuRam = 4096;
+    auto aliasFee = budget.reserve(aliasDemand, &error);
+    QVERIFY(aliasFee.isValid());
+    QVERIFY(owner.registerBacking(alias, aliasFee, Class::ActivePending, &error));
+    std::array<KisPagePublicationChange, 3> mixed{rows[2], rows[0], {}};
+    mixed[2].detachesSuperseded = true;
+    mixed[2].supersededAuthority = &alias;
+    QVERIFY(KisPageOwnerLedgerTestAccess::acceptIdle(owner, {mixed.data(), mixed.size()}, 12288, &error, false));
+    for (auto &row : mixed) {
+        QVERIFY(!row.acceptedIdle);
+        QCOMPARE(owner.backingClass(*row.supersededAuthority), Class::ActivePending);
+    }
+    auto duplicateAlias = mixed; duplicateAlias[2] = mixed[1];
+    QVERIFY(!KisPageOwnerLedgerTestAccess::acceptIdle(owner,
+        {duplicateAlias.data(), duplicateAlias.size()}, 12288, &error));
+    QVERIFY(KisPageOwnerLedgerTestAccess::acceptIdle(owner, {mixed.data(), mixed.size()}, 12288, &error));
+    for (auto &row : mixed) {
+        QVERIFY(row.acceptedIdle);
+        QCOMPARE(owner.backingClass(*row.supersededAuthority), Class::IdleCapacity);
+    }
+    QCOMPARE(budget.usage().buckets[size_t(Class::IdleCapacity)].live.cpuRam, quint64(8192));
+    KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, alias);
     for (const auto &row : rows) KisPageOwnerLedgerTestAccess::withdrawRegistration(owner, *row.supersededAuthority);
 }
 
