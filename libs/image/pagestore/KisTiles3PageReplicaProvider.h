@@ -103,6 +103,9 @@ public:
     bool prepareCpuPublication(const KisReplicaHandle &replica,
                                const KisPageAllocationDescriptor &descriptor,
                                const std::shared_ptr<KisCpuResidentBinding> &binding) const override;
+    bool prepareCpuPublication(const KisReplicaHandle &replica,
+                               KisValidatedPageDescriptor descriptor,
+                               const std::shared_ptr<KisCpuResidentBinding> &binding) const;
     KisReplicaOperation retire(KisPageOperationId operation,
                                const KisReplicaHandle &replica,
                                const KisCompletionTicket &lastUse) override;

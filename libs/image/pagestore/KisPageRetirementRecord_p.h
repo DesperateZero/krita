@@ -55,12 +55,31 @@ struct KisPageBackingRecord
                 && m_facts.native.defaultRevision == value.version.defaultPixelRevision;
         return m_kind == Kind::External && m_facts.external == value;
     }
+    // Synchronous consumption of original immutable facts. The ledger retains
+    // its own accepted incarnation/version; the Resource's mutable generation
+    // is deliberately not observed. Direct/adopted external records still use
+    // their complete accepted snapshot, even with a native input.
+    bool matchesNative(const KisCpuResidentBinding *binding, quint64 incarnation,
+                       const KisPageVersion &version) const noexcept
+    {
+        // Registration validated the accepted facts. Exact equality below
+        // also rejects zero/stale identities, without validating them twice.
+        if (!binding) return false;
+        if (m_kind == Kind::Resource)
+            return binding == m_binding.get() && incarnation == m_facts.native.incarnation
+                && version.key == binding->m_key && version.generation == m_facts.native.generation
+                && version.defaultPixelRevision == m_facts.native.defaultRevision;
+        return m_kind == Kind::External && m_facts.external == binding->projectHandle(version, incarnation);
+    }
     bool matches(const KisPageWriteSource &value) const noexcept
     {
-        if (m_kind == Kind::Resource)
-            return (!value.binding() || value.binding() == m_binding)
-                && value.matches(identity(), m_binding->m_domain, m_binding->m_layout,
-                {m_binding->m_key, m_facts.native.generation, m_facts.native.defaultRevision});
+        if (m_kind == Kind::Resource) {
+            const KisPageVersion expected{m_binding->m_key,
+                m_facts.native.generation, m_facts.native.defaultRevision};
+            if (value.binding())
+                return value.matchesNative(m_binding.get(), m_facts.native.incarnation, expected);
+            return value.matches(identity(), m_binding->m_domain, m_binding->m_layout, expected);
+        }
         return m_kind == Kind::External && value.matches(m_facts.external);
     }
     void setReplica(const KisReplicaHandle &value) noexcept

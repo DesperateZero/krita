@@ -1,3 +1,4 @@
+#include "KisTiles3PageReplicaProvider.h"
 /*
  *  SPDX-FileCopyrightText: 2026 Krita contributors
  *
@@ -1697,16 +1698,24 @@ try
             auto &row = rows[index++];
             if (!row.detachesSuperseded) continue;
             if (!row.hasSupersededAuthority()) return -1;
-            const auto authority = row.supersededReplica();
-            if (authority.layout.byteSize > allowance) continue;
-            const auto found = d->backings.find(authority.allocationIdentity());
-            if (!authority.isValid() || found == d->backings.end()
-                || !found->second.matches(authority)) return -1;
-            // Metadata detachment is independent of this optional fee choice.
-            // Only actual pending backings consume the idle allowance; another
-            // legal class neither poisons the whole D nor authorizes reuse.
+            const auto *value = row.supersededValue;
+            const auto bytes = value ? value->primaryReplica.layout().byteSize
+                                     : row.supersededAuthority->layout.byteSize;
+            if (bytes > allowance) continue;
+            const auto identity = value ? value->primaryReplica.identity()
+                                        : row.supersededAuthority->allocationIdentity();
+            const auto found = d->backings.find(identity);
+            if (found == d->backings.end()) return -1;
+            if (const auto *resource = value ? value->primaryReplica.nativeResource() : nullptr) {
+                if (!found->second.matchesNative(resource, identity.allocation.generation, value->version)) return -1;
+            } else {
+                const auto authority = row.supersededReplica();
+                if (!authority.isValid() || !found->second.matches(authority)) return -1;
+            }
+            // Only actual pending backings consume the optional allowance.
+            // Metadata detachment remains independent of this fee choice.
             if (found->second.budgetClass != KisBackingBudgetClass::ActivePending) continue;
-            allowance -= authority.layout.byteSize;
+            allowance -= bytes;
             *change = {found, KisBackingBudgetClass::IdleCapacity, &row.acceptedIdle};
             return 1;
         }
@@ -2418,6 +2427,13 @@ bool KisPageOwnerLedger::ownsPreparedPageProof(
 bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     KisPageTransactionId transaction, QString *error, bool complete)
 {
+    return preparePrivatePublication(rows, transaction, error, complete, nullptr);
+}
+
+bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
+    KisPageTransactionId transaction, QString *error, bool complete, bool *grouped)
+{
+    if (grouped) *grouped = false;
     if (!transaction.isValid() || (rows.size() && !rows)) return false;
     const KisPagePrivateWrite *firstPending = nullptr;
     for (const auto &row : rows) {
@@ -2443,6 +2459,7 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
         if (registered) authorityProvider = registered->provider;
         if (!metadata) return false;
     }
+    auto *nativeProvider = dynamic_cast<const KisTiles3PageReplicaProvider *>(authorityProvider.get());
     // Provider preparation establishes provenance/layout/custom policy.
     // Final binding identity/revocation is consumed at the actual cut.
     for (auto &row : rows) {
@@ -2452,9 +2469,13 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
         if (!authorityProvider || key != selected) {
             authorityProvider = provider(result->target().provider, result->target().providerEpoch);
             selected = key;
+            nativeProvider = dynamic_cast<const KisTiles3PageReplicaProvider *>(authorityProvider.get());
         }
+        const auto admitted = result->descriptorAdmission();
         if (!result->descriptor() || !authorityProvider
-            || !authorityProvider->prepareCpuPublication(result->target(), *result->descriptor(), result->binding())) {
+            || !(nativeProvider && admitted
+                ? nativeProvider->prepareCpuPublication(result->target(), admitted, result->binding())
+                : authorityProvider->prepareCpuPublication(result->target(), *result->descriptor(), result->binding()))) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
             return false;
         }
@@ -2463,6 +2484,8 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
         KisPageStoreDetail::setError(error, QStringLiteral("CPU original results changed during freezing"));
         return false;
     }
+    if (grouped) *grouped = std::none_of(rows.begin(), rows.end(),
+        [](const auto &row) { return row.replacement.removal; });
     KisPageStoreDetail::setError(error, {});
     return true;
 }

@@ -781,6 +781,23 @@ public:
         const auto *slot = slotAt(index);
         return slot && slot->value && slot->incarnation ? Handle{quint32(index), slot->incarnation} : Handle{};
     }
+    template<class Visit> bool visitLive(const Visit &visit) const
+    {
+        for (auto index = m_liveHead; index != Invalid;) {
+            const auto *slot = slotAt(index);
+            Q_ASSERT(slot && slot->value);
+            const auto next = slot->next;
+            if (!visit(*slot->value)) return false;
+            index = next;
+        }
+        return true;
+    }
+    template<class Visit> bool visitLive(const Visit &visit)
+    {
+        return std::as_const(*this).visitLive([&](const T &value) {
+            return visit(const_cast<T &>(value));
+        });
+    }
     Handle first() const { return handleAt(m_liveHead); }
     Handle next(Handle current) const
     {

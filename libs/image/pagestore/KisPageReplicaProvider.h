@@ -143,6 +143,7 @@ struct KRITAIMAGE_EXPORT KisCpuPagePayload
     qsizetype rowStride = 0;
     qsizetype byteSize = 0;
     bool isValidFor(const KisPageAllocationDescriptor &descriptor) const;
+    bool isValidFor(KisValidatedPageDescriptor descriptor) const;
 };
 
 /**

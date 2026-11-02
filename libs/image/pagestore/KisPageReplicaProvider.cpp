@@ -39,7 +39,13 @@ KisCpuReplicaPreparation KisPageReplicaProvider::prepareCpuReplica(const KisCpuR
 
 bool KisCpuPagePayload::isValidFor(const KisPageAllocationDescriptor &descriptor) const
 {
-    if (!data || !descriptor.isValid() || rowStride <= 0 || byteSize <= 0) return false;
+    return isValidFor(KisValidatedPageDescriptor::checked(descriptor));
+}
+
+bool KisCpuPagePayload::isValidFor(KisValidatedPageDescriptor admitted) const
+{
+    if (!data || !admitted || rowStride <= 0 || byteSize <= 0) return false;
+    const auto &descriptor = admitted.get();
     const quint64 rowBytes = descriptor.minimumRowBytes();
     const quint64 precedingRows = quint64(descriptor.pageExtent.height() - 1);
     const quint64 maximum = quint64(std::numeric_limits<qsizetype>::max());

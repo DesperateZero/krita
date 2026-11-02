@@ -188,6 +188,16 @@ public:
     EntryHandle handleAt(EntryIndex) const;
     // The caller still owns this original entry; do not rediscover it by key.
     EntryHandle handleOf(const KisMutationPageEntry &) const;
+    // The scope/range owner keeps membership stable throughout this visit.
+    // Public handles still validate their issued incarnation separately.
+    template<class Visit> bool visitEntries(const Visit &visit) const
+    {
+        return (!inlineEntry || visit(*inlineEntry)) && overflow.visitLive(visit);
+    }
+    template<class Visit> bool visitEntries(const Visit &visit)
+    {
+        return (!inlineEntry || visit(*inlineEntry)) && overflow.visitLive(visit);
+    }
     EntryHandle firstEntry() const;
     EntryHandle nextEntry(EntryHandle) const;
     // Caller first terminates cold resources and releases this entry's claim.
@@ -300,6 +310,8 @@ public:
     qsizetype activeNativeClaimCountLocked() const;
     qsizetype activeGenericClaimCountLocked() const;
     Conflict conflictLocked(const KisPageKey &, Qt::HANDLE requester) const;
+    // Store-gated original row keeps the location for the subsequent claim.
+    Conflict conflictLocked(KisMutationPageEntry &, Qt::HANDLE requester) const;
     bool pageClaimedLocked(const KisPageKey &) const;
     // One legacy entry inspection, before fallible operation preparation.
     // A null location means a real first key, not authority to skip the
@@ -333,6 +345,7 @@ public:
 private:
     template<class Visit> Result claimEntries(ClaimSet &, Visit &&, QMutexLocker<QMutex> &,
                                              QString *, ClaimOrigin);
+    static Conflict classify(const KisPageWriteClaim *, Qt::HANDLE requester);
     bool valid(const ClaimSet &) const;
     bool owned(const KisPageWriteClaim *, quint64 token, bool generic = false) const;
     void attach(ClaimSet &, KisPageWriteClaim &, ClaimOrigin);

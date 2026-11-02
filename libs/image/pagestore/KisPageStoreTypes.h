@@ -548,6 +548,23 @@ inline bool operator==(const KisPageAllocationDescriptor &lhs,
            lhs.initialization == rhs.initialization;
 }
 
+// Borrowed immutable fact. The caller must keep the admitted descriptor alive
+// and unchanged throughout this synchronous use; this is not access authority.
+class KisValidatedPageDescriptor
+{
+public:
+    KisValidatedPageDescriptor() = default;
+    static KisValidatedPageDescriptor checked(const KisPageAllocationDescriptor &value)
+    { return value.isValid() ? KisValidatedPageDescriptor(&value) : KisValidatedPageDescriptor{}; }
+    explicit operator bool() const { return m_value != nullptr; }
+    const KisPageAllocationDescriptor &get() const { Q_ASSERT(m_value); return *m_value; }
+private:
+    friend struct KisPagePrivateWrite;
+    friend class KisPageMutationSession;
+    explicit KisValidatedPageDescriptor(const KisPageAllocationDescriptor *value) : m_value(value) {}
+    const KisPageAllocationDescriptor *m_value = nullptr;
+};
+
 /** Provider-selected physical layout, always qualified by canonical format. */
 struct KRITAIMAGE_EXPORT KisReplicaLayout
 {
@@ -571,7 +588,14 @@ struct KRITAIMAGE_EXPORT KisReplicaLayout
 
     bool matches(const KisPageAllocationDescriptor &descriptor) const
     {
-        return isValid() && descriptor.isValid() &&
+        return matches(KisValidatedPageDescriptor::checked(descriptor));
+    }
+
+    bool matches(KisValidatedPageDescriptor admitted) const
+    {
+        if (!admitted) return false;
+        const auto &descriptor = admitted.get();
+        return isValid() &&
                layoutRevision == descriptor.layoutRevision &&
                formatId == descriptor.format.formatId &&
                pageExtent == descriptor.pageExtent &&

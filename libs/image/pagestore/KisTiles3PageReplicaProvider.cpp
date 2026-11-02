@@ -26,9 +26,11 @@
 
 namespace {
 
-bool supportsNativeTileLayout(const KisPageAllocationDescriptor &descriptor)
+bool supportsNativeTileLayout(KisValidatedPageDescriptor admitted)
 {
-    if (!descriptor.isValid() ||
+    if (!admitted) return false;
+    const auto &descriptor = admitted.get();
+    if (
         descriptor.pageExtent != QSize(KisTileData::WIDTH,
                                        KisTileData::HEIGHT) ||
         descriptor.format.pixelStride >
@@ -39,6 +41,11 @@ bool supportsNativeTileLayout(const KisPageAllocationDescriptor &descriptor)
     return rowStride <= quint64(std::numeric_limits<quint32>::max()) &&
            rowStride % descriptor.rowAlignment == 0 &&
            rowStride % descriptor.format.pixelAlignment == 0;
+}
+
+bool supportsNativeTileLayout(const KisPageAllocationDescriptor &descriptor)
+{
+    return supportsNativeTileLayout(KisValidatedPageDescriptor::checked(descriptor));
 }
 
 }
@@ -1316,6 +1323,17 @@ bool KisTiles3PageReplicaProvider::prepareCpuPublication(const KisReplicaHandle 
     // exact generation under the same local gate. No provider-wide lookup or
     // gate adds a fact here. The admission address establishes provenance,
     // including two providers configured with identical numeric identities.
+    const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding.get());
+    return original && original->belongsTo(&d->handoffAdmission)
+        && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor);
+}
+
+bool KisTiles3PageReplicaProvider::prepareCpuPublication(const KisReplicaHandle &replica,
+    KisValidatedPageDescriptor descriptor,
+    const std::shared_ptr<KisCpuResidentBinding> &binding) const
+{
+    if (!descriptor) return false;
+    if (!binding) return validate(replica, descriptor.get());
     const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding.get());
     return original && original->belongsTo(&d->handoffAdmission)
         && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor);

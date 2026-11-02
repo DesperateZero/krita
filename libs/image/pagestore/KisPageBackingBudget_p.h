@@ -403,6 +403,7 @@ private:
         quint64 durableBytes, bool emptyUsage = false,
         quint64 irreducibleMetadataBytes = 0) const;
     bool fitsMetadataStorageLocked(quint64 bytes, quint64 *processBytes = nullptr) const;
+    bool fitsCpuOptionalHandoffLocked(quint64 bytes) const;
     bool reclaimMutationStorage(bool ownOnly, bool waitingOnly = false) noexcept;
     void unlinkMutationStorageLocked(KisReusableMutationStorage *) noexcept;
     void *allocateStorage(const KisPageStorageLayout &layout);

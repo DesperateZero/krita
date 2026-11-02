@@ -286,6 +286,7 @@ public:
             bool prepared = false;
             bool installed = false;
             bool canonical = false;
+            bool freshlyGrouped = false; // One unchanged freeze-to-accept attempt.
         };
         std::optional<Data> data;
         void cancel() noexcept;
@@ -390,6 +391,9 @@ public:
     KRITAIMAGE_EXPORT KisPreparedPagePublication preparePagePublicationLocked(
         const KisPageTransaction &transaction, KisPagePublicationRows changes,
         QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned = {});
+    KRITAIMAGE_EXPORT KisPreparedPagePublication preparePagePublicationLocked(
+        const KisPageTransaction &, KisPagePublicationRows, QString *, bool *, bool,
+        KisPagePublicationChanges, bool freshlyGrouped);
     // Consume the caller's stable sequence directly into candidate storage.
     // The reader is borrowed synchronously and is never kept by the candidate.
     template<class ReadChange>
@@ -402,7 +406,7 @@ public:
             error, storageRefused, canonical);
     }
 
-    void preparePrivateLayoutLocked(KisPagePrivateWrite &, const KisPageAllocationDescriptor &,
+    bool preparePrivateLayoutLocked(KisPagePrivateWrite &, const KisPageAllocationDescriptor &,
                                     std::shared_ptr<const KisPageAllocationDescriptor>);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version, const KisPageAllocationDescriptor &descriptor);
     KRITAIMAGE_EXPORT PreparedDescriptors prepareDescriptorLocked(const KisPageVersion &version,

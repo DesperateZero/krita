@@ -46,11 +46,20 @@ bool KisCpuResidentBinding::prepareHandoff(const KisPageWriteSource &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
     quint64 *incarnation) const
 {
+    return prepareHandoff(source, target, KisValidatedPageDescriptor::checked(descriptor), incarnation);
+}
+
+bool KisCpuResidentBinding::prepareHandoff(const KisPageWriteSource &source,
+    const KisPageVersion &target, KisValidatedPageDescriptor descriptor,
+    quint64 *incarnation) const
+{
     std::unique_lock<QMutex> lock(m_mutex);
     // Advisory rejection only: readers may arrive after this mutex is released,
     // so tryClaimHandoff must still perform the final physical exclusion.
-    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !source.matches(allocationIdentityLocked(), m_domain, m_layout,
-            {m_key, m_generation, m_defaultPixelRevision}) ||
+    if (!supportsBackingHandoff() || m_storageBusy || m_retired || !(source.binding().get() == this
+            ? source.matchesNative(this, m_incarnation, {m_key, m_generation, m_defaultPixelRevision})
+            : source.matches(allocationIdentityLocked(), m_domain, m_layout,
+                {m_key, m_generation, m_defaultPixelRevision})) ||
         m_readers || m_writeState != WriteState::Idle ||
         source.domain() != KisPageAccessDomain::CpuRam || !source.layout().matches(descriptor) ||
         !target.isValid() || !(target.key == source.version.key) ||
@@ -132,6 +141,13 @@ KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
 KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
     const std::shared_ptr<KisPageReplicaProvider> &provider, const KisPageWriteSource &source,
     const KisPageVersion &target, const KisPageAllocationDescriptor &descriptor,
+    std::shared_ptr<KisCpuResidentBinding> binding)
+{
+    return prepare(provider, source, target, KisValidatedPageDescriptor::checked(descriptor), std::move(binding));
+}
+KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
+    const std::shared_ptr<KisPageReplicaProvider> &provider, const KisPageWriteSource &source,
+    const KisPageVersion &target, KisValidatedPageDescriptor descriptor,
     std::shared_ptr<KisCpuResidentBinding> binding)
 {
     KisCpuBackingHandoff result;

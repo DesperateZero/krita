@@ -102,6 +102,8 @@ private:
     KisReplicaHandle projectHandle(const KisPageVersion &version, quint64 incarnation) const;
     bool prepareHandoff(const KisPageWriteSource &source, const KisPageVersion &target,
                          const KisPageAllocationDescriptor &descriptor, quint64 *incarnation) const;
+    bool prepareHandoff(const KisPageWriteSource &source, const KisPageVersion &target,
+                         KisValidatedPageDescriptor descriptor, quint64 *incarnation) const;
     bool tryClaimHandoff(quint64 incarnation);
     void finishHandoff(const KisPageVersion *target) noexcept;
     bool reserveWrite(const KisReplicaAllocationIdentity &expected);
@@ -154,9 +156,15 @@ public:
         const std::shared_ptr<KisCpuResidentBinding> &binding, quint64 incarnation)
     {
         KisPageWriteSource value;
-        value.version = version;
-        if (binding && incarnation) value.m_value.emplace<Native>(Native{binding, incarnation});
+        value.setNative(version, binding, incarnation);
         return value;
+    }
+    void setNative(const KisPageVersion &next,
+        const std::shared_ptr<KisCpuResidentBinding> &binding, quint64 incarnation)
+    {
+        version = next;
+        if (binding && incarnation) m_value.emplace<Native>(Native{binding, incarnation});
+        else m_value.emplace<std::monostate>();
     }
     bool isValid() const
     {
@@ -208,6 +216,15 @@ public:
             || this->domain() != domain || !(this->layout() == layout)) return false;
         const auto *external = std::get_if<KisReplicaHandle>(&m_value);
         return !external || external->version == version;
+    }
+    bool matchesNative(const KisCpuResidentBinding *binding, quint64 incarnation,
+                       const KisPageVersion &expected) const
+    {
+        const auto *native = std::get_if<Native>(&m_value);
+        // Same retained Resource proves only immutable physical facts.
+        // Issued identity and all later dynamic permission gates remain.
+        return native && native->binding.get() == binding
+            && native->incarnation == incarnation && version == expected && isValid();
     }
     bool matches(const KisReplicaHandle &value) const
     { return matches(value.allocationIdentity(), value.domain, value.layout, value.version); }
@@ -638,6 +655,9 @@ public:
     static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
         const KisPageWriteSource &source, const KisPageVersion &target,
         const KisPageAllocationDescriptor &descriptor, std::shared_ptr<KisCpuResidentBinding> binding = {});
+    static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
+        const KisPageWriteSource &source, const KisPageVersion &target,
+        KisValidatedPageDescriptor descriptor, std::shared_ptr<KisCpuResidentBinding> binding = {});
     static KisCpuBackingHandoff prepare(const std::shared_ptr<KisPageReplicaProvider> &provider,
                                         const KisReplicaHandle &source, const KisPageVersion &target,
                                         const KisPageAllocationDescriptor &descriptor,

@@ -320,7 +320,8 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepare(
     }
     if (data->mutationCount) {
         data->metadata = data->owner->m_metadata.prepareAcceptance(
-            data->transaction, data->changes, error);
+            data->transaction, data->changes, error, {}, false, nullptr, 0, nullptr,
+            std::exchange(data->freshlyGrouped, false));
         if (!data->metadata.isValid()) {
             if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
             return false;
@@ -1913,6 +1914,15 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
     const KisPageTransaction &transaction, KisPagePublicationRows changes,
     QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned)
 {
+    return preparePagePublicationLocked(transaction, changes, error, storageRefused,
+                                        canonical, std::move(owned), false);
+}
+
+KisPagePublicationCoordinator::KisPreparedPagePublication
+KisPagePublicationCoordinator::preparePagePublicationLocked(
+    const KisPageTransaction &transaction, KisPagePublicationRows changes,
+    QString *error, bool *storageRefused, bool canonical, KisPagePublicationChanges owned, bool freshlyGrouped)
+{
     if (storageRefused) *storageRefused = false;
     if (!hasActiveTransactionLocked(transaction) || !changes || changes.empty()) {
         KisPageStoreDetail::setError(error, QStringLiteral("overlay update input is invalid"));
@@ -1925,6 +1935,7 @@ KisPagePublicationCoordinator::preparePagePublicationLocked(
         candidate->owner = this;
         candidate->transaction = transaction;
         candidate->canonical = canonical;
+        candidate->freshlyGrouped = freshlyGrouped;
         if (!owned.empty()) candidate->ownedChanges = std::move(owned);
         candidate->changes = changes;
         size_t proofInsertions = 0, removalInsertions = 0;
@@ -2129,7 +2140,7 @@ bool KisPagePublicationCoordinator::reserveDefaultRevisionLocked(
     return true;
 }
 
-void KisPagePublicationCoordinator::preparePrivateLayoutLocked(KisPagePrivateWrite &result,
+bool KisPagePublicationCoordinator::preparePrivateLayoutLocked(KisPagePrivateWrite &result,
     const KisPageAllocationDescriptor &descriptor,
     std::shared_ptr<const KisPageAllocationDescriptor> selected)
 {
@@ -2137,10 +2148,11 @@ void KisPagePublicationCoordinator::preparePrivateLayoutLocked(KisPagePrivateWri
     Q_ASSERT(!selected || selected.get() == &descriptor);
     if (!selected) selected = std::allocate_shared<const KisPageAllocationDescriptor>(
         KisMutationStorageAllocator<KisPageAllocationDescriptor>::retained(&m_budget), descriptor);
-    result.descriptor() = std::move(selected);
+    const bool admitted = result.setDescriptor(std::move(selected));
     // This unregistered original result is not visible through metadata yet.
     // Only its successful acceptance publishes a descriptor change. A local
     // preparation/refusal must not invalidate another default/restore candidate.
+    return admitted;
 }
 
 KisPagePublicationCoordinator::PreparedDescriptors

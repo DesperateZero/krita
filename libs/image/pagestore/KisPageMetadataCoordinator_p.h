@@ -129,6 +129,11 @@ struct KisPageReplicaState {
         else if (m_kind == Kind::External) new (&m_physical.external) External(other.m_physical.external);
         return *this;
     }
+    // Immutable resource identity, borrowed only while the owning Value is held.
+    // It proves no mutable access right or accepted incarnation by itself.
+    const KisCpuResidentBinding *nativeResource() const noexcept
+    { return m_kind == Kind::Resource ? m_physical.resource.binding : nullptr; }
+
     KisReplicaAllocationIdentity identity() const
     {
         if (m_kind == Kind::Resource) {
@@ -174,18 +179,19 @@ struct KisPageReplicaState {
         }
     }
 
-    KisPageWriteSource writeSource(const KisPageVersion &version,
+    void writeSourceTo(KisPageWriteSource &result, const KisPageVersion &version,
         const std::shared_ptr<KisCpuResidentBinding> &binding) const
     {
         if (m_kind == Kind::Resource && binding.get() == m_physical.resource.binding)
-            return KisPageWriteSource::native(version, binding, m_physical.resource.incarnation);
-        return KisPageWriteSource(handle(version));
+            result.setNative(version, binding, m_physical.resource.incarnation);
+        else result = KisPageWriteSource(handle(version));
     }
     bool matchesSource(const KisPageWriteSource &source, const KisPageVersion &version) const
     {
-        return source.matches(identity(), domain(), layout(), version)
-            && (!source.binding() || m_kind != Kind::Resource
-                || source.binding().get() == m_physical.resource.binding);
+        if (m_kind == Kind::Resource && source.binding())
+            return source.matchesNative(m_physical.resource.binding,
+                m_physical.resource.incarnation, version);
+        return source.matches(identity(), domain(), layout(), version);
     }
 
     void detachResource(const KisPageVersion &version)
@@ -285,7 +291,25 @@ struct KisPagePrivateWrite {
     // Layout is borrowed from the original physical state. Internal pixel
     // access does not need to materialize a complete public identity handle.
     const KisReplicaLayout &targetLayout() const { Q_ASSERT(value); return value->primaryReplica.layout(); }
-    auto &descriptor() { Q_ASSERT(value); return value->native.descriptor; }
+    bool setDescriptor(std::shared_ptr<const KisPageAllocationDescriptor> descriptor)
+    {
+        Q_ASSERT(value);
+        if (value->native.descriptor || !descriptor || !descriptor->isValid()) return false;
+        value->native.descriptor = std::move(descriptor);
+        m_descriptorAdmitted = true;
+        return true;
+    }
+    void exchangeDescriptor(std::shared_ptr<const KisPageAllocationDescriptor> &replacement)
+    {
+        Q_ASSERT(value);
+        m_descriptorAdmitted = replacement && replacement->isValid();
+        value->native.descriptor.swap(replacement);
+    }
+    KisValidatedPageDescriptor descriptorAdmission() const
+    {
+        return m_descriptorAdmitted && value && value->native.descriptor
+            ? KisValidatedPageDescriptor(value->native.descriptor.get()) : KisValidatedPageDescriptor{};
+    }
     const auto &descriptor() const { Q_ASSERT(value); return value->native.descriptor; }
     const auto &binding() const { Q_ASSERT(value); return value->native.nativeBinding; }
     KRITAIMAGE_EXPORT std::shared_ptr<KisCpuResidentBinding> exchangeBinding(
@@ -316,6 +340,8 @@ struct KisPagePrivateWrite {
     std::shared_ptr<KisCpuResidentBinding> releasedBinding;
     bool reserved = false;
     bool completed = false;
+private:
+    bool m_descriptorAdmitted = false;
 };
 
 enum class KisMetadataOverflowKind : quint8 {

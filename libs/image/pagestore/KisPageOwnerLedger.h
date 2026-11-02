@@ -183,6 +183,8 @@ public:
     // actual dynamic CPU Resource gates cover the eventual acceptance cut.
     bool preparePrivatePublication(KisPagePublicationRows rows, KisPageTransactionId transaction,
                                QString *error = nullptr, bool complete = false);
+    bool preparePrivatePublication(KisPagePublicationRows, KisPageTransactionId,
+                                   QString *, bool complete, bool *grouped);
 
     // Caller protects the Prepared version/provider across validation (owner
     // gate or equivalent transaction + per-key mutation claims). The ledger

@@ -583,6 +583,10 @@ private:
                                         bool detachCurrent = false,
                                         const PublicationChange *generic = nullptr, qsizetype genericCount = 0,
                                         const KisImageEpochRootSnapshot *currentRoot = nullptr) const;
+    // Only a freshly frozen, unchanged all-native row set may pass grouped.
+    PreparedPublication prepareAcceptance(const KisPageTransaction &, KisPagePublicationRows,
+        QString *, KisImageEpochId, bool, const PublicationChange *, qsizetype,
+        const KisImageEpochRootSnapshot *, bool grouped) const;
     PreparedPublication prepareAcceptance(const KisPageTransaction &,
         std::vector<KisPagePublicationChange, KisMutationStorageAllocator<KisPagePublicationChange>> &&,
         QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,

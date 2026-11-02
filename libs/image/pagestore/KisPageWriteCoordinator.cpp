@@ -672,6 +672,22 @@ bool KisBackingBudgetController::fitsMetadataStorageLocked(quint64 bytes, quint6
     return liveSsd <= limit && m_reservedDurableBytes <= limit - liveSsd;
 }
 
+bool KisBackingBudgetController::fitsCpuOptionalHandoffLocked(quint64 bytes) const
+{
+    // Certify unchanged classes, optional/global/metadata/process and durable
+    // constraints using the original invalidation mask under this same gate.
+    if (!fitsMetadataStorageLocked(0)) return false;
+    constexpr auto active = size_t(KisBackingBudgetClass::ActivePending);
+    const auto &usage = m_usage.buckets[active];
+    constexpr auto maximum = std::numeric_limits<quint64>::max();
+    if (usage.live.cpuRam > maximum - bytes
+        || usage.reserved.cpuRam > maximum - bytes - usage.live.cpuRam) return false;
+    const auto current = sumComponents(components(usage.live));
+    const auto limit = m_limits.activePendingBytes;
+    return bytes <= limit && current <= limit - bytes
+        && m_reservedAggregateBytes[active] <= limit - bytes - current;
+}
+
 bool KisBackingBudgetController::priorWaiterConflictsLocked(
     const KisBackingBudgetDelta &delta,
     const std::array<quint64, budgetClassCount> &aggregateBytes,
@@ -1211,18 +1227,20 @@ bool KisBackingBudgetController::reserveCpuOptionalHandoff(quint64 bytes, QStrin
 {
     if (!bytes || bytes > quint64(std::numeric_limits<qint64>::max())) return false;
     constexpr auto active = size_t(KisBackingBudgetClass::ActivePending);
-    KisBackingBudgetDelta demand;
-    demand.setBucket(active, {qint64(bytes), 0, 0, 0});
-    std::array<quint64, budgetClassCount> aggregate{};
-    aggregate[active] = bytes;
     QMutexLocker lock(&m_mutex);
     for (;;) {
-        if (priorWaiterConflictsLocked(demand, aggregate, 0)) {
-            ++m_usage.backpressureCount;
-            KisPageStoreDetail::setError(error, QStringLiteral("backing reservation waits for an earlier admission request"));
-            return false;
+        if (m_usage.waitingRequests) {
+            KisBackingBudgetDelta demand;
+            demand.setBucket(active, {qint64(bytes), 0, 0, 0});
+            std::array<quint64, budgetClassCount> aggregate{};
+            aggregate[active] = bytes;
+            if (priorWaiterConflictsLocked(demand, aggregate, 0)) {
+                ++m_usage.backpressureCount;
+                KisPageStoreDetail::setError(error, QStringLiteral("backing reservation waits for an earlier admission request"));
+                return false;
+            }
         }
-        if (fitsLocked(demand, aggregate, 0)) break;
+        if (fitsCpuOptionalHandoffLocked(bytes)) break;
         lock.unlock();
         const bool reclaimed = reclaimMutationStorage(bool(m_sharedNonPayloadBudget));
         lock.relock();
@@ -2658,8 +2676,7 @@ KisPagePublicationRows KisMutationWriteSet::publicationRows()
         // Reuse the same directory allocation. No page/permission entry moves
         // and no second D index or key/proof snapshot is built.
         size_t used = 0;
-        for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot))
-            (*index)[used++] = at(slot);
+        visitEntries([&](auto &entry) { (*index)[used++] = &entry; return true; });
         index->resize(used);
         const auto active = [](const auto *row) {
             const auto *entry = static_cast<const KisMutationPageEntry *>(row);
@@ -2856,10 +2873,10 @@ void KisMutationWriteSet::growDirectory(qsizetype count)
     // Reuse already funded capacity and initialize only today's logical range.
     index->resize(buckets, nullptr);
     std::fill_n(index->begin(), previous, nullptr);
-    for (auto slot = firstEntry(); slot.isValid(); slot = nextEntry(slot)) {
-        auto *entry = at(slot);
-        (*index)[directoryBucket(*index, entry->key())] = entry;
-    }
+    visitEntries([&](auto &entry) {
+        (*index)[directoryBucket(*index, entry.key())] = &entry;
+        return true;
+    });
 }
 
 qsizetype KisMutationWriteSet::size() const
@@ -2935,16 +2952,28 @@ bool KisPageWriteAdmission::pageClaimedLocked(const KisPageKey &key) const
     return claim && claim->token;
 }
 
-KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
-    const KisPageKey &key, Qt::HANDLE requester) const
+KisPageWriteAdmission::Conflict KisPageWriteAdmission::classify(
+    const KisPageWriteClaim *found, Qt::HANDLE requester)
 {
-    const auto *found = m_metadata->findWriteClaim(key);
     if (!found || !found->token) return Conflict::None;
     if (found->origin == ClaimOrigin::LegacyAdapter)
         return found->thread == requester ? Conflict::LegacySameThread : Conflict::LegacyBorrower;
     if (found->origin == ClaimOrigin::ManagedRange)
         return found->thread == requester ? Conflict::ManagedSameThread : Conflict::ManagedOtherThread;
     return found->thread == requester ? Conflict::WriterSameThread : Conflict::WriterOtherThread;
+}
+
+KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
+    const KisPageKey &key, Qt::HANDLE requester) const
+{
+    return classify(m_metadata->findWriteClaim(key), requester);
+}
+
+KisPageWriteAdmission::Conflict KisPageWriteAdmission::conflictLocked(
+    KisMutationPageEntry &entry, Qt::HANDLE requester) const
+{
+    entry.writeClaim = m_metadata->findWriteClaim(entry.key());
+    return classify(entry.writeClaim, requester);
 }
 
 KisPageWriteAdmission::LegacyInspection KisPageWriteAdmission::inspectLegacyClaimLocked(
@@ -3150,8 +3179,7 @@ KisPageWriteAdmission::Result KisPageWriteAdmission::claimAll(ClaimSet &claims, 
     QString *error, ClaimOrigin origin)
 {
     return claimEntries(claims, [&](auto &&consume) {
-        for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot))
-            if (!consume(*claims.writeSet->at(slot))) break;
+        claims.writeSet->visitEntries(consume);
     }, lock, error, origin);
 }
 
@@ -3171,9 +3199,9 @@ bool KisPageWriteAdmission::claimRange(ClaimSet &claims, Rows rows,
 bool KisPageWriteAdmission::ownsClaimSetLocked(const ClaimSet &claims) const
 {
     if (!claims.isValid() || !claims.writeSet || claims.owner != this) return false;
-    for (auto slot = claims.writeSet->firstEntry(); slot.isValid(); slot = claims.writeSet->nextEntry(slot))
-        if (!owned(claims.writeSet->at(slot)->writeClaim, claims.token)) return false;
-    return true;
+    return claims.writeSet->visitEntries([&](const auto &entry) {
+        return owned(entry.writeClaim, claims.token);
+    });
 }
 
 bool KisPageWriteAdmission::ownsClaimLocked(const ClaimSet &claims, const KisPageKey &key) const
@@ -3348,8 +3376,11 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         ? KisPageWriteSource::borrowedNative(spare.version, capacity.binding.get(), spare.allocation.generation)
         : KisPageWriteSource(spare);
     const auto &handoffSource = reuseCapacity ? capacitySource : write.source;
-    physical = KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, descriptor,
-        reuseCapacity ? std::move(capacity.binding) : write.source.binding());
+    physical = native
+        ? KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, native->descriptorAdmission(),
+            reuseCapacity ? std::move(capacity.binding) : write.source.binding())
+        : KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, descriptor,
+            reuseCapacity ? std::move(capacity.binding) : write.source.binding());
     if (!physical.isValid()) return false;
     const auto targetReplica = physical.target();
     prepared.emplace();

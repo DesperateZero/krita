@@ -774,16 +774,16 @@ struct ShardRecordStore {
         return exactVersions.findExact(identity, slot);
     }
 
-    bool isPreparedBy(const KisPageVersion &identity, KisPageTransactionId transaction, bool nativeValue = false,
-                      const KisReplicaHandle *authority = nullptr, KisVersionSlotId slot = {}) const
+    const KisPageValueCell *preparedValue(const KisPageVersion &identity, KisPageTransactionId transaction,
+                      bool nativeValue = false, const KisReplicaHandle *authority = nullptr,
+                      KisVersionSlotId slot = {}) const
     {
-        if (!slot.isValid() && !findVersion(identity, &slot))
-            return false;
+        if (!slot.isValid() && !findVersion(identity, &slot)) return nullptr;
         const KisPageValueCell *record = version(slot);
         return record && record->version == identity
             && record->publication == KisPagePublicationState::Prepared && record->preparedBy == transaction
             && (!nativeValue || record->native.sealedBy == transaction)
-            && (!authority || projectReplica(record->authorityReplica) == *authority);
+            && (!authority || projectReplica(record->authorityReplica) == *authority) ? record : nullptr;
     }
 
     bool physicalOwner(const PhysicalSlot &physical, KisPageVersion *identity) const
@@ -1528,6 +1528,12 @@ struct ShardRecordStore {
         if (identity.isDefaultPixel() || (!slot.isValid() && !findVersion(identity, &slot))) return nullptr;
         const auto *record = version(slot);
         if (!record || !(record->version == identity)) return nullptr;
+        return unusedRecord(record);
+    }
+
+    const KisPageValueCell *unusedRecord(const KisPageValueCell *record) const
+    {
+        if (!record || record->version.isDefaultPixel()) return nullptr;
         const auto *facts = &record->native;
         const auto *cpu = replica(record->authorityReplica);
         const bool accepted = record->publication == KisPagePublicationState::Historical
@@ -1544,15 +1550,12 @@ struct ShardRecordStore {
             && unusedRecord(selected->version, selected->slot);
     }
 
-    const KisPageValueCell *unusedPrepared(const KisPageVersion &identity) const
+    bool canDetachPrepared(const KisPageValueCell *checked) const
     {
-        const auto *record = unusedRecord(identity);
-        return record && record->publication == KisPagePublicationState::Prepared ? record : nullptr;
-    }
-
-    bool canDetachPrepared(const KisPageVersion &identity) const
-    {
-        return unusedPrepared(identity);
+        // Only the immediately preceding locked validation issues this pointer.
+        // Retention and replica eligibility are still checked here.
+        const auto *record = unusedRecord(checked);
+        return record && record->publication == KisPagePublicationState::Prepared;
     }
 
     void remove(MetadataPage *page, const KisPageVersion &identity,
@@ -1738,7 +1741,7 @@ struct MetadataShard : KisPageMetadataShardMetrics {
     }
 
     bool validDetachment(const MetadataPage &page, const KisPagePublicationChange &input,
-                         KisPageTransactionId transaction) const
+                         KisPageTransactionId transaction, const KisPageValueCell **checkedSource = nullptr) const
     {
         const auto *native = input.replacement.native;
         const auto &version = input.mutationVersion();
@@ -1747,13 +1750,13 @@ struct MetadataShard : KisPageMetadataShardMetrics {
                         || !native->isSealed() || !(native->sealedBy() == transaction)
                    : activity.hasWriter()) return false;
         if (native && version == native->version()) return true;
-        if (input.supersededValue) {
-            const auto *source = records.version(input.superseded.metadataSlot);
-            if (source != input.supersededValue || !(source->authorityReplica == kisInlineReplicaSlot(source->slot)))
-                return false;
-        }
-        return records.isPreparedBy(version, transaction, input.superseded.native,
+        const auto *source = records.preparedValue(version, transaction, input.superseded.native,
             input.superseded.native ? input.supersededAuthority : nullptr, input.superseded.metadataSlot);
+        if (!source || (input.supersededValue && (!input.superseded.metadataSlot.isValid()
+            || source != input.supersededValue
+            || !(source->authorityReplica == kisInlineReplicaSlot(source->slot))))) return false;
+        if (checkedSource) *checkedSource = source;
+        return true;
     }
 
     void installDetachment(MetadataPage &page, const KisPageVersion &version, KisPagePrivateWrite *native,
@@ -3557,6 +3560,17 @@ KisPageMetadataCoordinator::prepareAcceptance(const KisPageTransaction &transact
                                             QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
                                             const PublicationChange *generic, qsizetype genericCount,
                                             const KisImageEpochRootSnapshot *currentRoot) const
+{
+    return prepareAcceptance(transaction, rows, error, minimumEpoch, detachCurrent,
+                             generic, genericCount, currentRoot, false);
+}
+
+KisPageMetadataCoordinator::PreparedPublication
+KisPageMetadataCoordinator::prepareAcceptance(const KisPageTransaction &transaction,
+                                            KisPagePublicationRows rows,
+                                            QString *error, KisImageEpochId minimumEpoch, bool detachCurrent,
+                                            const PublicationChange *generic, qsizetype genericCount,
+                                            const KisImageEpochRootSnapshot *currentRoot, bool grouped) const
 try {
     PreparedPublication result;
     auto *d = m_core.load(std::memory_order_acquire);
@@ -3588,13 +3602,14 @@ try {
     KisPagePublicationChange::MetadataAcceptance *previous = nullptr;
     bool ordered = true;
     for (size_t i = 0; i < count; ++i) {
-        auto &input = rows[i];
+        auto &work = rows[i].metadataAcceptance;
+        auto &input = grouped ? *work.input : rows[i];
         if (published) {
             input.superseded = {}; input.supersededAuthority = nullptr; input.supersededValue = nullptr;
             input.acceptedIdle = nullptr; input.canonicalRecord = nullptr;
             if (!(input.replacement.key() == input.replacement.version().key) && !input.replacement.removal) return {};
         }
-        input.metadataAcceptance = {};
+        if (!grouped) work = {};
         if (!input.replacement.key().isValid()
             || (input.superseded.version.key.isValid() && !input.superseded.isValid())) return {};
         if (published ? input.replacement.removal : !input.hasMutation()) continue;
@@ -3602,12 +3617,13 @@ try {
         if (native && (!native->reserved || !native->completed || !native->isSealed()
             || !(native->sealedBy() == transaction.id))) return {};
         ++mutations;
-        auto &work = input.metadataAcceptance;
-        work.input = &input;
-        work.shardIndex = native ? native->location.shardIndex
-            : kisStablePageKeyHash(input.mutationVersion().key) % d->shards.size();
-        work.shard = native ? Private::registeredShard(d, *native) : d->shards[work.shardIndex].get();
-        if (!work.shard) return {};
+        if (!grouped) {
+            work.input = &input;
+            work.shardIndex = native ? native->location.shardIndex
+                : kisStablePageKeyHash(input.mutationVersion().key) % d->shards.size();
+            work.shard = native ? Private::registeredShard(d, *native) : d->shards[work.shardIndex].get();
+        }
+        if (!work.shard || (grouped && work.shard != Private::registeredShard(d, *native))) return {};
         ordered &= i + 1 == mutations && (!previous || !before(work, *previous));
         previous = &work;
         if (published) {
@@ -3741,11 +3757,12 @@ try {
                         const auto found = shard->pages.find(input.mutationVersion().key);
                         if (found != shard->pages.end()) page = &found->second;
                     }
+                    const KisPageValueCell *checkedSource = nullptr;
                     if (!page || !shard->canMutate(input.mutationVersion().key, *page)
                         || (published ? !shard->validPublication(*page, input, work, transaction.id, minimumEpoch)
-                            : !shard->validDetachment(*page, input, transaction.id))) return {};
+                            : !shard->validDetachment(*page, input, transaction.id, &checkedSource))) return {};
                     if (!published) input.detachesSuperseded = input.detachesSuperseded
-                        && shard->records.canDetachPrepared(input.mutationVersion());
+                        && shard->records.canDetachPrepared(checkedSource);
                     if (published || input.detachesSuperseded) {
                         if (published) {
                             auto *references = result.m_acceptanceReferences->appendCanonical();
@@ -3880,13 +3897,13 @@ bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepare
                 ? static_cast<MetadataPage *>(native->location.page) : nullptr
                 : static_cast<MetadataPage *>(work.page);
             if (!page || !shard->canMutate(version.key, *page)) break;
+            const KisPageValueCell *checkedSource = nullptr;
             if (published ? !shard->validPublication(*page, input, work, transaction.id, epoch)
-                : !shard->validDetachment(*page, input, transaction.id)) break;
+                : !shard->validDetachment(*page, input, transaction.id, &checkedSource)) break;
             const auto *current = published ? shard->records.version(work.input->superseded.metadataSlot) : nullptr;
-            const auto &sourceVersion = published ? input.superseded.version : version;
             const bool available = !input.detachesSuperseded
                 || (published ? shard->records.canDetachSelected(current)
-                              : shard->records.canDetachPrepared(sourceVersion));
+                              : shard->records.canDetachPrepared(checkedSource));
             if (!available) {
                 if (!retentionChanged) ++shard->nativeRetentionRevalidations;
                 retentionChanged = true;
@@ -4909,9 +4926,10 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
     selection->base = {shard, &*page, shardIndex, selectedSlot};
     if (record) selection->layout = record->native.descriptor;
     if (authority) {
-        const auto binding = record->native.nativeReplica == record->authorityReplica
-            ? record->native.nativeBinding : std::shared_ptr<KisCpuResidentBinding>{};
-        write.source = authority->writeSource(base, binding);
+        const std::shared_ptr<KisCpuResidentBinding> unbound;
+        const auto &binding = record->native.nativeReplica == record->authorityReplica
+            ? record->native.nativeBinding : unbound;
+        authority->writeSourceTo(write.source, base, binding);
         if (!write.source.isValid())
             return reject(QStringLiteral("write base has no exact authority"));
     }
@@ -4931,7 +4949,7 @@ KisPageMetadataCoordinator::selectMutationBase(const KisPageVersion &base, bool 
                 if (!(candidateIdentity.provider == sourceIdentity.provider
                     && candidateIdentity.providerEpoch == sourceIdentity.providerEpoch
                     && candidateIdentity.allocation.slot == sourceIdentity.allocation.slot)) {
-                    selection->recoverableBefore.emplace(replica->writeSource(base, {}));
+                    replica->writeSourceTo(selection->recoverableBefore.emplace(), base, {});
                     break;
                 }
             }
@@ -4991,7 +5009,7 @@ bool KisPageMetadataCoordinator::versionSnapshot(const KisPageVersion &identity,
 namespace {
 // Caller holds this shard's gate. All descriptor consumers share the same
 // exact-version/native-result policy; the returned field is never exported.
-std::shared_ptr<const KisPageAllocationDescriptor> *findVersionDescriptorLocked(
+const std::shared_ptr<const KisPageAllocationDescriptor> *findVersionDescriptorLocked(
     MetadataShard *shard, const KisPageVersion &identity)
 {
     KisVersionSlotId slot;
@@ -5039,9 +5057,17 @@ bool KisPageMetadataCoordinator::exchangeVersionDescriptor(const KisPageVersion 
     auto *shard = Private::shardFor(m_core.load(std::memory_order_acquire), identity.key);
     if (!shard || !prepared) return false;
     QMutexLocker lock(&shard->mutex);
-    auto *field = findVersionDescriptorLocked(shard, identity);
-    if (!field) return false;
-    field->swap(*prepared);
+    // Updating a descriptor also updates the original row's admitted fact.
+    // The descriptor field cannot escape this exchange as a mutable pointer.
+    auto *activity = shard->activity(identity.key);
+    auto *native = activity ? activity->nativeWrite : nullptr;
+    if (native && native->version() == identity) {
+        native->exchangeDescriptor(*prepared);
+        return true;
+    }
+    KisVersionSlotId slot;
+    if (!shard->records.findVersion(identity, &slot)) return false;
+    shard->records.version(slot)->native.descriptor.swap(*prepared);
     return true;
 }
 
@@ -5450,7 +5476,9 @@ bool KisPageMetadataCoordinator::freezePrivateValues(KisPagePublicationRows rows
                                            &KisPagePublicationChange::metadataAcceptance>;
     std::sort(It(rows.begin()), It(rows.end()), [](const auto &a, const auto &b) {
         if (bool(a.input) != bool(b.input)) return bool(a.input);
-        return a.shardIndex < b.shardIndex;
+        if (!a.input) return false;
+        return a.shardIndex != b.shardIndex ? a.shardIndex < b.shardIndex
+            : MetadataKeyLess{}(a.input->replacement.key(), b.input->replacement.key());
     });
     for (size_t first = 0; first < count;) {
         auto *shard = static_cast<MetadataShard *>(rows[first].metadataAcceptance.shard);
