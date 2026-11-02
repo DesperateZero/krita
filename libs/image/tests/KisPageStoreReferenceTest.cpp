@@ -1028,7 +1028,8 @@ class KisPageStoreReferenceTest : public QObject
         KisPageTransactionId transaction, quint64 issuer, bool complete = false)
     {
         KisPagePublicationChange row{KisPagePublicationChange::Replacement{&value}};
-        return metadata.freezePrivateValues({&row, 1}, transaction, issuer, complete);
+        return metadata.completePrivatePublication({&row, 1}, transaction, issuer, complete, nullptr,
+            [](void *, KisPagePrivateWrite &) { return true; });
     }
     Q_OBJECT
 
@@ -7513,10 +7514,12 @@ void KisPageStoreReferenceTest::publicationResourceWindow()
         }
     }
     if (native) {
-        QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
+        QVERIFY(metadata.completePrivatePublication({rows.data(), rows.size()}, tx.id, 1, false, nullptr,
+            [](void *, KisPagePrivateWrite &) { return true; }));
         QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(originals.size()));
         // Retrying the original Frame neither reseals nor exports new proofs.
-        QVERIFY(metadata.freezePrivateValues({rows.data(), rows.size()}, tx.id, 1));
+        QVERIFY(metadata.completePrivatePublication({rows.data(), rows.size()}, tx.id, 1, false, nullptr,
+            [](void *, KisPagePrivateWrite &) { return true; }));
         QCOMPARE(metadata.sealedCpuValueCount(1), qsizetype(originals.size()));
     }
     const auto root = view.root();
@@ -7650,7 +7653,17 @@ void KisPageStoreReferenceTest::editValuesGroupLifetimeAndPressure()
     // The same edit reuses its actual shard capacity at a hard-full budget.
     const auto warmLive = live();
     pressure = fill(); QVERIFY(pressure.isValid());
-    for (size_t i = 0; i < rows.size(); ++i) QVERIFY(prepare(i));
+    std::array<KisPageWriteSelection, 8> selectedBatch;
+    std::array<KisPrivateTargetInput, 8> actualBatch;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        rows[i] = std::make_unique<KisPagePrivateWrite>(edit);
+        KisPageWriteInput input;
+        input.source.version = bases[i]; input.version = bases[i];
+        ++input.version.generation.value; input.transaction = {74};
+        selectedBatch[i] = selectPrivateInput(*metadata, input);
+        actualBatch[i] = {&selectedBatch[i], rows[i].get(), nullptr};
+    }
+    QVERIFY(metadata->preparePrivateTargets(actualBatch.data(), actualBatch.size(), nullptr));
     QCOMPARE(live(), warmLive); QCOMPARE(edit.storageBytes(), capacity);
     pressure.release();
     for (auto &row : rows) metadata->discardPrivateValue(row.get());

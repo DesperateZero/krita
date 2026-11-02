@@ -2459,6 +2459,8 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
         using Phase = KisPageStoreDiagnosticPhase;
         Q_UNUSED(transaction);
         KisPageStoreDiagnosticTimer phase(store(), Phase::PackedWritePrepare, 1);
+        std::array<KisPageMutationExecution::FinalRect, 16> batch;
+        size_t count = 0;
         for (const auto &page : targets) {
             const KisPageKey key{surface(), page};
             const QRect pageRect(page.column * KisTileData::WIDTH, page.row * KisTileData::HEIGHT,
@@ -2472,8 +2474,13 @@ KisPageStoreWriteOperationResult KisTiledDataManagerPageStoreBackend::writeBytes
             phase.next(Phase::PackedWritePrepare, 1);
             const KisCpuPagePayload payload{input, qsizetype(sourceStride),
                 qsizetype((affected.height() - 1) * sourceStride + lineBytes)};
-            if (!mutation.writeFinalRect(key, QRect(localX, localY, affected.width(), affected.height()), payload, error)) return false;
+            batch[count++] = {key, QRect(localX, localY, affected.width(), affected.height()), payload};
+            if (count == batch.size()) {
+                if (!mutation.writeFinalRects(batch.data(), count, error)) return false;
+                count = 0;
+            }
         }
+        if (count && !mutation.writeFinalRects(batch.data(), count, error)) return false;
         phase.next(Phase::PackedWriteRelease, 1);
         return true;
     }, changed, error, {}, delivery, prepareAdapter, completeAdapter);

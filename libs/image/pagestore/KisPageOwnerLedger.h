@@ -183,8 +183,8 @@ public:
     // independent capability lifetime and may coexist for the same version.
     bool bindCpuProofs(KisPageMetadataCoordinator &metadata, const KisCompletionTicket &completion);
     // The caller freezes original rows through completion and acceptance.
-    // Provenance/custom provider preparation precedes grouped Value freezing;
-    // actual dynamic CPU Resource gates cover the eventual acceptance cut.
+    // One original-row pass joins producer policy to grouped completion and
+    // acceptance locations. Dynamic Resource facts remain at the actual cut.
     bool preparePrivatePublication(KisPagePublicationRows rows, KisPageTransactionId transaction,
                                QString *error = nullptr, bool complete = false);
     bool preparePrivatePublication(KisPagePublicationRows, KisPageTransactionId,

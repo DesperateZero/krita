@@ -1360,7 +1360,8 @@ public:
                                  KisPageWriteIntent intent, const KisCpuPagePayload *payload,
                                  Counters &local, QMutexLocker<QMutex> &lock,
                                  KisPageStoreDiagnosticTimer &diagnostic, QString *error,
-                                 KisPageWriteSelection *selected = nullptr, bool *storageRefused = nullptr);
+                                 KisPageWriteSelection *selected = nullptr, bool *storageRefused = nullptr,
+                                 KisPreparedPrivateTarget *prepared = nullptr);
 };
 
 KisPageMutationSession::Private::PreparedTarget
@@ -1368,13 +1369,13 @@ KisPageMutationSession::Private::prepareTarget(
     KisMutationPageEntry &value, KisPageWriteIntent intent,
     const KisCpuPagePayload *payload, Counters &local, QMutexLocker<QMutex> &lock,
     KisPageStoreDiagnosticTimer &diagnostic, QString *error,
-    KisPageWriteSelection *selected, bool *storageRefused)
+    KisPageWriteSelection *selected, bool *storageRefused, KisPreparedPrivateTarget *prepared)
 {
     if (storageRefused) *storageRefused = false;
     auto *entry = &value;
     const bool alias = intent.inputKind == KisPageWriteInputKind::Semantic;
-    auto *previous = pageFor(entry);
-    Q_ASSERT(alias || !static_cast<Page *>(entry->coldPage()));
+    auto *previous = prepared ? nullptr : pageFor(entry);
+    Q_ASSERT(alias || prepared || !static_cast<Page *>(entry->coldPage()));
     if (alias && entry->hasAcceptedAlias()) return {previous};
 
     auto initialization = entry->initializationSource();
@@ -1435,12 +1436,13 @@ KisPageMutationSession::Private::prepareTarget(
     auto discardUnprepared = qScopeGuard([&] {
         if (!page->reserved) discardUnpreparedPageLocked(*entry, lock);
     });
-    KisPreparedPrivateTarget preparedNative;
-    if (!previous) {
+    KisPreparedPrivateTarget localPreparation;
+    auto *preparedNative = prepared ? prepared : &localPreparation;
+    if (!previous && !prepared) {
         lock.unlock();
-        const bool prepared = owner->metadata.preparePrivateTarget(*selected, page, &preparedNative, error);
+        const bool ready = owner->metadata.preparePrivateTarget(*selected, page, preparedNative, error);
         lock.relock();
-        if (!prepared) {
+        if (!ready) {
             if (storageRefused) *storageRefused = true;
             return {};
         }
@@ -1474,7 +1476,7 @@ KisPageMutationSession::Private::prepareTarget(
         reused = owner->writeCoordinator.tryAcquireReusedTargetLocked(
             transaction, intent, targetProvider,
             {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, *selected,
-            owner->publicationCoordinator, std::exchange(idle, {}), lock, nullptr, page->writable, diagnostic, &preparedNative);
+            owner->publicationCoordinator, std::exchange(idle, {}), lock, nullptr, page->writable, diagnostic, preparedNative);
     } catch (const std::bad_alloc &) {
         if (storageRefused) *storageRefused = true;
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation write plan storage is unavailable"));
@@ -2117,28 +2119,43 @@ bool KisPageMutationExecution::overwritePage(const KisPageKey &key, const KisCpu
 bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect &rect,
     const KisCpuPagePayload &payload, QString *error)
 {
-    if (!d) return false;
+    const FinalRect input{key, rect, payload};
+    return writeFinalRects(&input, 1, error);
+}
+
+bool KisPageMutationExecution::writeFinalRects(const FinalRect *inputs, size_t count, QString *error)
+{
+    if (!d || !inputs || !count || count > 16) return false;
     QMutexLocker executionLock(&d->mutex);
     auto *scope = d->scope.get();
     QMutexLocker scopeLock(&scope->mutex);
-    auto *bound = d->find(key);
-    if (!bound || !d->linked || d->finished || d->thread != QThread::currentThreadId()
-        || scope->state != KisPageMutationSession::Private::State::Active
-        || !bound->entry->acceptsMutableInput()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("final CPU input requires an unexposed mutable target"));
-        return false;
-    }
-    KisPageStoreDiagnosticTimer diagnostic(scope->diagnosticOwner, KisPageStoreDiagnosticPhase::WriteAcquire, 1);
-    auto *entry = bound->entry;
-    auto *page = bound->page;
-    void *data = nullptr;
-    bool initialized = false;
-    QRect affected = rect;
     const auto fail = [&] {
         scope->state = KisPageMutationSession::Private::State::Failed;
         return false;
     };
-    const auto validRect = [&](const KisPageAllocationDescriptor &descriptor) {
+    struct Work {
+        Private::BoundEntry *bound = nullptr;
+        KisPageWriteSelection selection;
+        KisPageWriteIntent intent;
+        KisPreparedPrivateTarget prepared;
+        QRect affected;
+        bool same = false;
+        bool created = false;
+    };
+    std::array<Work, 16> workset;
+    for (size_t i = 0; i < count; ++i) {
+        auto *bound = d->find(inputs[i].key);
+        if (!bound || !d->linked || d->finished || d->thread != QThread::currentThreadId()
+            || scope->state != KisPageMutationSession::Private::State::Active
+            || !bound->entry->acceptsMutableInput()) {
+            KisPageStoreDetail::setError(error, QStringLiteral("final CPU input requires an unexposed mutable target"));
+            return false; // Invalid use does not cancel a previously completed result.
+        }
+        for (size_t j = 0; j < i; ++j) if (workset[j].bound == bound) return false;
+        workset[i].bound = bound;
+        workset[i].affected = inputs[i].rect;
+    }
+    const auto validRect = [&](QRect &affected, const KisCpuPagePayload &payload, const KisPageAllocationDescriptor &descriptor) {
         if (affected.isEmpty()) affected = QRect(QPoint(), descriptor.pageExtent);
         const quint64 rowBytes = quint64(affected.width()) * descriptor.format.pixelStride;
         // Internal uniform fill borrows one immutable row (stride zero).
@@ -2148,19 +2165,27 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
             && quint64(payload.rowStride) <= std::numeric_limits<quint64>::max() / quint64(affected.height())
             && payload.byteSize >= 0 && quint64(payload.byteSize) >= quint64(affected.height()-1) * payload.rowStride + rowBytes;
     };
-    if (!page) {
+
+    // Claims retain each exact source. Compare before creating ANY private
+    // result: a borrowed range does not imply that its pixels will change.
+    for (size_t i = 0; i < count; ++i) {
+        auto &work = workset[i];
+        if (work.bound->page) continue;
+        const auto &key = inputs[i].key;
+        const auto &payload = inputs[i].payload;
+        auto &affected = work.affected;
         QMutexLocker ownerLock(&scope->owner->mutex);
         if (!scope->selectCpuProviderLocked(error)) return fail();
-        KisPageWriteIntent intent;
+        auto &intent = work.intent;
         intent.key = key;
         intent.mode = KisPageWriteMode::PreserveContents;
         intent.inputKind = KisPageWriteInputKind::FinalPayload;
-        KisPageWriteSelection selection;
+        auto &selection = work.selection;
         if (!scope->owner->publicationCoordinator.selectWriteBaseLocked(scope->transaction, intent, &selection, error)) return fail();
         auto &selected = selection.write;
         auto *binding = selected.source.binding().get();
         const auto &descriptor = selection.descriptor();
-        if (!validRect(descriptor)) {
+        if (!validRect(affected, payload, descriptor)) {
             KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
             return fail();
         }
@@ -2219,54 +2244,94 @@ bool KisPageMutationExecution::writeFinalRect(const KisPageKey &key, const QRect
                 ownerLock.unlock();
                 same = matches(read->cpuData());
             }
-            if (same) { KisPageStoreDetail::setError(error, {}); return true; }
+            if (same) { work.same = true; continue; }
         }
         const bool full = affected == QRect(QPoint(), descriptor.pageExtent);
         if (full) { intent.mode = selected.writeMode = KisPageWriteMode::DiscardContents; }
-        const auto target = scope->prepareTarget(*entry, intent, full && payload.rowStride ? &payload : nullptr,
-            d->counters, ownerLock, diagnostic, error, &selection);
-        if (!target.page) return fail();
-        page = bound->page = target.page;
-        data = target.data;
-        initialized = target.payloadInitialized;
     }
-    if (!entry->hasPrivateResult()) {
-        if (!validRect(*page->descriptor())) {
-            KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
-            return fail();
+    // Every prepared cell belongs to the original row; a refusal ends at its
+    // original cancellation/destruction, including partially prepared groups.
+    const auto discardUnused = qScopeGuard([&] {
+        QMutexLocker ownerLock(&scope->owner->mutex);
+        for (size_t i = 0; i < count; ++i) {
+            auto &work = workset[i];
+            auto *page = work.created ? scope->pageFor(work.bound->entry) : nullptr;
+            if (page && !page->reserved) {
+                scope->discardUnpreparedPageLocked(*work.bound->entry, ownerLock);
+                work.bound->page = nullptr;
+            }
         }
-        if (!data) data = scope->pinWritable(page->writable, d->counters);
-        if (!data) {
-            KisPageStoreDetail::setError(error, QStringLiteral("final CPU input cannot pin its mutable target"));
-            return fail();
-        }
-        // Fallback/handoff retains its real physical permission, but no
-        // public guard or Exposed transition is needed for controlled input.
-        ++d->counters.pinsAcquired;
-        d->counters.maximumPins = qMax(d->counters.maximumPins, d->counters.activePins + 1);
-        if (!initialized) {
-            diagnostic.next(KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
-            const auto pixelStride = page->descriptor()->format.pixelStride;
-            const auto targetRowStride = page->targetLayout().rowStride;
-            const auto rowBytes = quint64(affected.width()) * pixelStride;
-            const int rows = affected.height();
-            for (int row = 0; row < rows; ++row)
-                std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * targetRowStride
-                                + quint64(affected.x()) * pixelStride,
-                            static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes));
-            d->counters.payloadCopyBytes += rowBytes * rows;
-        }
-        page->writable.unpin();
-        ++d->counters.pinsReleased;
-        // Controlled input is now immutable in the original entry. Its
-        // unpublished result has no metadata consumer until alias preparation
-        // or sealing; that consumer registers completion under its own gate.
-        scope->owner->writeCoordinator.recordPrivateCompletion(*entry);
+    });
+    std::array<KisPrivateTargetInput, 16> preparations;
+    size_t prepareCount = 0;
+    for (size_t i = 0; i < count; ++i) {
+        auto &work = workset[i];
+        if (work.same || work.bound->page) continue;
+        auto *page = scope->ensurePage(*work.bound->entry);
+        if (!page) return fail();
+        work.created = true;
+        preparations[prepareCount++] = {&work.selection, page, &work.prepared};
     }
-    entry->setInitializationSource({});
-    entry->setRemoval(false);
-    page->resetPixel.clear();
-    d->markTouched(size_t(bound - d->entries()));
+    if (prepareCount && !scope->owner->metadata.preparePrivateTargets(preparations.data(), prepareCount, error)) return fail();
+    for (size_t i = 0; i < count; ++i) {
+        auto &work = workset[i];
+        if (work.same) continue;
+        auto *bound = work.bound;
+        auto *entry = bound->entry;
+        auto *page = bound->page;
+        auto &affected = work.affected;
+        const auto &payload = inputs[i].payload;
+        void *data = nullptr;
+        bool initialized = false;
+        KisPageStoreDiagnosticTimer diagnostic(scope->diagnosticOwner, KisPageStoreDiagnosticPhase::WriteAcquire, 1);
+        if (!page) {
+            const bool full = affected == QRect(QPoint(), work.selection.descriptor().pageExtent);
+            QMutexLocker ownerLock(&scope->owner->mutex);
+            const auto target = scope->prepareTarget(*entry, work.intent, full && payload.rowStride ? &payload : nullptr,
+                d->counters, ownerLock, diagnostic, error, &work.selection, nullptr, &work.prepared);
+            if (!target.page) return fail();
+            page = bound->page = target.page;
+            data = target.data;
+            initialized = target.payloadInitialized;
+        }
+        if (!entry->hasPrivateResult()) {
+            if (!validRect(affected, payload, *page->descriptor())) {
+                KisPageStoreDetail::setError(error, QStringLiteral("final CPU rectangle layout is invalid"));
+                return fail();
+            }
+            if (!data) data = scope->pinWritable(page->writable, d->counters);
+            if (!data) {
+                KisPageStoreDetail::setError(error, QStringLiteral("final CPU input cannot pin its mutable target"));
+                return fail();
+            }
+            // Fallback/handoff retains its real physical permission, but no
+            // public guard or Exposed transition is needed for controlled input.
+            ++d->counters.pinsAcquired;
+            d->counters.maximumPins = qMax(d->counters.maximumPins, d->counters.activePins + 1);
+            if (!initialized) {
+                diagnostic.next(KisPageStoreDiagnosticPhase::MutationPayloadCopy, 1);
+                const auto pixelStride = page->descriptor()->format.pixelStride;
+                const auto targetRowStride = page->targetLayout().rowStride;
+                const auto rowBytes = quint64(affected.width()) * pixelStride;
+                const int rows = affected.height();
+                for (int row = 0; row < rows; ++row)
+                    std::memcpy(static_cast<quint8 *>(data) + quint64(row + affected.y()) * targetRowStride
+                                    + quint64(affected.x()) * pixelStride,
+                                static_cast<const quint8 *>(payload.data) + row * payload.rowStride, size_t(rowBytes));
+                d->counters.payloadCopyBytes += rowBytes * rows;
+            }
+            page->writable.unpin();
+            ++d->counters.pinsReleased;
+            // Controlled input is now immutable in the original entry. Its
+            // unpublished result has no metadata consumer until alias preparation
+            // or sealing; that consumer registers completion under its own gate.
+            scope->owner->writeCoordinator.recordPrivateCompletion(*entry);
+        }
+        entry->setInitializationSource({});
+        entry->setRemoval(false);
+        page->resetPixel.clear();
+        d->markTouched(size_t(bound - d->entries()));
+    }
     KisPageStoreDetail::setError(error, {});
     return true;
 }

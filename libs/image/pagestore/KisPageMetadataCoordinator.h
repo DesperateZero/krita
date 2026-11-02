@@ -41,6 +41,13 @@ private:
     friend class KisPageWriteCoordinator;
 };
 
+// Borrowed actual-change inputs. No range/no-op result is precharged.
+struct KisPrivateTargetInput {
+    const struct KisPageWriteSelection *selection = nullptr;
+    struct KisPagePrivateWrite *row = nullptr;
+    KisPreparedPrivateTarget *prepared = nullptr;
+};
+
 class KisImageEpochRootSnapshot;
 class KisCpuResidentBinding;
 struct KisPagePrivateWrite;
@@ -322,8 +329,9 @@ private:
     // Original-result acceptance of an unlocked provider validation. The
     // retained location, registered writer and issuer are checked together;
     // no exported capability is produced or decoded by this internal handoff.
-    bool freezePrivateValues(KisPagePublicationRows, KisPageTransactionId,
-                          quint64 issuer, bool complete = false);
+    bool completePrivatePublication(KisPagePublicationRows, KisPageTransactionId,
+        quint64 issuer, bool complete, void *producer,
+        bool (*prepare)(void *, KisPagePrivateWrite &), bool *grouped = nullptr);
     bool cpuPreparedAuthority(const KisPagePublicationIdentity &, quint64 issuer,
         KisReplicaHandle *authority, std::shared_ptr<const KisPageAllocationDescriptor> *descriptor,
         std::shared_ptr<KisCpuResidentBinding> *binding) const;
@@ -333,6 +341,9 @@ private:
     // original edit retains its exact slot and both index admissions until
     // acceptance or cancellation; publication never replaces an old value.
     bool preparePrivateValue(const KisPageWriteSelection &, KisPagePrivateWrite *, QString *error);
+    // At most 16 distinct original rows. Partial refusal leaves funded cells
+    // owned by their original edits; the caller cancels the whole input cut.
+    bool preparePrivateTargets(const KisPrivateTargetInput *, size_t count, QString *error);
     bool preparePrivateTarget(const KisPageWriteSelection &, KisPagePrivateWrite *,
         KisPreparedPrivateTarget *, QString *error);
     void discardPrivateValue(KisPagePrivateWrite *);

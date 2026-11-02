@@ -286,7 +286,7 @@ public:
             bool prepared = false;
             bool installed = false;
             bool canonical = false;
-            bool freshlyGrouped = false; // One unchanged freeze-to-accept attempt.
+            bool freshlyGrouped = false; // One unchanged producer-completion-to-accept attempt.
         };
         std::optional<Data> data;
         void cancel() noexcept;

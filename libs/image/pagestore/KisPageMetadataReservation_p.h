@@ -37,6 +37,17 @@ public:
 
     bool isValid() const { return m_owner && m_remaining > 0; }
     qsizetype remaining() const { return m_remaining; }
+    // Partition one funded reservation without changing the owner's total.
+    // Each returned part has exactly one ordinary consume/cancel endpoint.
+    KisPageMetadataReservation take(qsizetype count) noexcept
+    {
+        if (!m_owner || count <= 0 || count > m_remaining) return {};
+        auto *owner = m_owner;
+        m_remaining -= count;
+        if (!m_remaining) m_owner = nullptr;
+        return KisPageMetadataReservation(owner, count);
+    }
+
 
 private:
     explicit KisPageMetadataReservation(Owner *owner, qsizetype remaining)

@@ -2530,61 +2530,40 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
 bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     KisPageTransactionId transaction, QString *error, bool complete, bool *grouped)
 {
-    if (grouped) *grouped = false;
-    if (!transaction.isValid() || (rows.size() && !rows)) return false;
-    const KisPagePrivateWrite *firstPending = nullptr;
-    for (const auto &row : rows) {
-        if (row.replacement.removal) continue;
-        const auto *result = row.replacement.native;
-        if (!result || !result->reserved || (!result->completed && !complete)
-            || !result->location.page || !result->location.shard) return false;
-        if (result->isSealed()) {
-            if (!(result->sealedBy() == transaction)) return false;
-        } else if (!firstPending) firstPending = result;
-    }
-    if (!firstPending) { KisPageStoreDetail::setError(error, {}); return true; }
-
     KisPageMetadataCoordinator *metadata;
     quint64 issuer;
-    std::shared_ptr<KisPageReplicaProvider> authorityProvider;
-    const auto firstTarget = firstPending->target();
-    ProviderKey selected = providerKey(firstTarget.provider, firstTarget.providerEpoch);
     {
         QMutexLocker locker(&d->mutex);
         metadata = d->cpuMetadata;
         issuer = d->cpuProofIssuer;
-        const auto registered = d->registeredProvider(selected);
-        if (registered) authorityProvider = registered->provider;
-        if (!metadata) return false;
     }
-    auto *nativeProvider = dynamic_cast<const KisTiles3PageReplicaProvider *>(authorityProvider.get());
-    // Provider preparation establishes provenance/layout/custom policy.
-    // Final binding identity/revocation is consumed at the actual cut.
-    for (auto &row : rows) {
-        auto *result = row.replacement.native;
-        if (row.replacement.removal || result->isSealed()) continue;
-        const auto target = result->target();
+    if (!metadata) return false;
+    struct Producer {
+        KisPageOwnerLedger *owner;
+        std::shared_ptr<KisPageReplicaProvider> provider;
+        const KisTiles3PageReplicaProvider *native = nullptr;
+        ProviderKey key;
+    } producer{this, {}, nullptr, {}};
+    const auto prepare = [](void *context, KisPagePrivateWrite &result) {
+        auto &p = *static_cast<Producer *>(context);
+        const auto target = result.target();
         const auto key = providerKey(target.provider, target.providerEpoch);
-        if (!authorityProvider || key != selected) {
-            authorityProvider = provider(target.provider, target.providerEpoch);
-            selected = key;
-            nativeProvider = dynamic_cast<const KisTiles3PageReplicaProvider *>(authorityProvider.get());
+        if (!p.provider || key != p.key) {
+            p.provider = p.owner->provider(target.provider, target.providerEpoch);
+            p.key = key;
+            p.native = dynamic_cast<const KisTiles3PageReplicaProvider *>(p.provider.get());
         }
-        const auto admitted = result->descriptorAdmission();
-        if (!result->descriptor() || !authorityProvider
-            || !(nativeProvider && admitted
-                ? nativeProvider->prepareCpuPublication(target, admitted, result->binding())
-                : authorityProvider->prepareCpuPublication(target, *result->descriptor(), result->binding()))) {
-            KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
-            return false;
-        }
-    }
-    if (!metadata->freezePrivateValues(rows, transaction, issuer, complete)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("CPU original results changed during freezing"));
+        const auto admitted = result.descriptorAdmission();
+        return result.descriptor() && p.provider
+            && (p.native && admitted
+                ? p.native->prepareCpuPublication(target, admitted, result.binding())
+                : p.provider->prepareCpuPublication(target, *result.descriptor(), result.binding()));
+    };
+    if (!metadata->completePrivatePublication(rows, transaction, issuer, complete,
+                                               &producer, prepare, grouped)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("CPU original result completion was refused"));
         return false;
     }
-    if (grouped) *grouped = std::none_of(rows.begin(), rows.end(),
-        [](const auto &row) { return row.replacement.removal; });
     KisPageStoreDetail::setError(error, {});
     return true;
 }

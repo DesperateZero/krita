@@ -3778,7 +3778,10 @@ try {
             || (input.superseded.version.key.isValid() && !input.superseded.isValid())) return {};
         if (published ? input.replacement.removal : !input.hasMutation()) continue;
         auto *native = input.replacement.native;
-        if (native && (!native->reserved || !native->completed || !native->isSealed()
+        // Grouped native inputs are the original producer-completed rows,
+        // protected by the session's sealing cut. Dynamic shard/Resource
+        // facts are still revalidated at final installation.
+        if (!grouped && native && (!native->reserved || !native->completed || !native->isSealed()
             || !(native->sealedBy() == transaction.id))) return {};
         ++mutations;
         if (!grouped) {
@@ -3787,7 +3790,7 @@ try {
                 : kisStablePageKeyHash(input.mutationVersion().key) % d->shards.size();
             work.shard = native ? Private::registeredShard(d, *native) : d->shards[work.shardIndex].get();
         }
-        if (!work.shard || (grouped && work.shard != Private::registeredShard(d, *native))) return {};
+        if (!work.shard) return {};
         ordered &= i + 1 == mutations && (!previous || !before(work, *previous));
         previous = &work;
         if (published) {
@@ -5344,76 +5347,121 @@ KisPagePrivateWrite::~KisPagePrivateWrite()
 
 bool KisPageMetadataCoordinator::preparePrivateValue(const KisPageWriteSelection &selection,
     KisPagePrivateWrite *native, QString *error)
-try {
-    const auto &write = selection.write;
-    const auto &location = selection.base;
-    auto *core = m_core.load(std::memory_order_acquire);
-    if (!core || core->shards.empty() || !write.version.isValid() || !write.transaction.isValid()
-        || !native || native->reserved || native->location.value.isValid()
-        || !location.node || location.shardIndex >= core->shards.size()
-        || location.shard != core->shards[location.shardIndex].get()) return false;
-    const size_t index = location.shardIndex;
-    auto *shard = core->shards[index].get();
-    const auto storage = core->budgetAuthority->storage<char>();
-    native->edit.retain(core->shards[index], storage);
-    MetadataArenaGrowth growth(storage.borrowed());
-    QMutexLocker lock(&shard->mutex);
-    auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
-    if (!(node->first == write.version.key) || !(write.source.version.key == write.version.key)) return false;
-    auto *page = &node->second;
-    const auto valid = [&] {
-        const auto *base = shard->records.version(location.value);
-        return page->revisionCanAdvance() && !page->activity.hasWriter()
-            && !page->activity.publicationClaim && page->nextGeneration == write.version.generation
-            && (base ? base->version == write.source.version
-                : !write.baseWasPrepared && write.source.version.isDefaultPixel() && !write.source.isValid());
-    };
-    if (!valid()) return false;
-    const MetadataArenaDemand demand{1, 0, 0};
-    if (growMetadataArenasOutsideLock(shard, demand, &growth, &lock, valid, error)
-        != MetadataGrowthResult::Ready) return false;
-    ShardRecordStore::ReservationSet reservation;
-    const auto cancel = qScopeGuard([&] { reservation.cancel(&shard->records); });
-    if (!shard->records.reserve(demand, 1, 1, &reservation)) {
-        KisPageStoreDetail::setError(error, QStringLiteral("final value storage budget was refused"));
-        return false;
-    }
-    const auto slot = shard->arenas.versions.emplaceReserved(&reservation.arenas.versions);
-    const auto replica = kisInlineReplicaSlot(slot);
-    Q_ASSERT(slot.isValid());
-    auto *value = shard->arenas.versions.get(slot);
-    value->slot = slot;
-    value->version = write.version;
-    value->firstReplica = value->authorityReplica = replica;
-    value->replicaCount = 1;
-    value->primaryReplica.ownerVersion = slot;
-    native->location.shard = shard;
-    native->location.page = page;
-    native->location.shardIndex = index;
-    native->location.value = slot;
-    native->value = value;
-    value->frameHeld = true;
-    value->attachLifetime();
-    ++native->edit.m_values;
-    native->location.exact = std::move(reservation.exactVersions);
-    native->location.physical = std::move(reservation.physicalSlots);
-    ++shard->nativeValuesPrepared;
-    KisPageStoreDetail::setError(error, {});
-    return true;
-} catch (const std::bad_alloc &) {
-    KisPageStoreDetail::setError(error, QStringLiteral("final value storage budget was refused"));
-    return false;
+{
+    const KisPrivateTargetInput input{&selection, native, nullptr};
+    return preparePrivateTargets(&input, 1, error);
 }
 
 bool KisPageMetadataCoordinator::preparePrivateTarget(const KisPageWriteSelection &selection,
     KisPagePrivateWrite *native, KisPreparedPrivateTarget *prepared, QString *error)
 {
-    if (!prepared || prepared->owner || !preparePrivateValue(selection, native, error)) return false;
-    prepared->owner = this;
-    prepared->selection = &selection;
-    prepared->row = native;
-    prepared->value = native->value;
+    if (!prepared) return false;
+    const KisPrivateTargetInput input{&selection, native, prepared};
+    return preparePrivateTargets(&input, 1, error);
+}
+
+bool KisPageMetadataCoordinator::preparePrivateTargets(
+    const KisPrivateTargetInput *inputs, size_t count, QString *error)
+try {
+    auto *core = m_core.load(std::memory_order_acquire);
+    if (!core || core->shards.empty() || !inputs || !count || count > 16) return false;
+    std::array<const KisPrivateTargetInput *, 16> ordered;
+    for (size_t i = 0; i < count; ++i) {
+        const auto &input = inputs[i];
+        if (!input.selection || !input.row || (input.prepared && input.prepared->owner)) return false;
+        const auto &write = input.selection->write;
+        const auto &location = input.selection->base;
+        if (!write.version.isValid() || !write.transaction.isValid() || input.row->reserved
+            || input.row->location.value.isValid() || !location.node
+            || location.shardIndex >= core->shards.size()
+            || location.shard != core->shards[location.shardIndex].get()) return false;
+        ordered[i] = &input;
+    }
+    std::sort(ordered.begin(), ordered.begin() + count, [](const auto *a, const auto *b) {
+        return a->selection->base.shardIndex != b->selection->base.shardIndex
+            ? a->selection->base.shardIndex < b->selection->base.shardIndex
+            : MetadataKeyLess{}(a->selection->write.version.key, b->selection->write.version.key);
+    });
+    for (size_t i = 1; i < count; ++i)
+        if (ordered[i-1]->selection->write.version.key == ordered[i]->selection->write.version.key) return false;
+    const auto storage = core->budgetAuthority->storage<char>();
+    for (size_t first = 0; first < count;) {
+        const size_t index = ordered[first]->selection->base.shardIndex;
+        size_t end = first + 1;
+        while (end < count && ordered[end]->selection->base.shardIndex == index) ++end;
+        auto *shard = core->shards[index].get();
+        for (size_t i = first; i < end; ++i) {
+            auto &edit = ordered[i]->row->edit;
+            bool retained = false;
+            for (size_t j = first; j < i; ++j) retained |= &ordered[j]->row->edit == &edit;
+            if (!retained) edit.retain(core->shards[index], storage);
+        }
+        MetadataArenaGrowth growth(storage.borrowed());
+        QMutexLocker lock(&shard->mutex);
+        const auto valid = [&] {
+            for (size_t i = first; i < end; ++i) {
+                const auto &selection = *ordered[i]->selection;
+                const auto &write = selection.write;
+                const auto *node = static_cast<decltype(shard->pages)::value_type *>(selection.base.node);
+                if (!(node->first == write.version.key) || !(write.source.version.key == write.version.key)) return false;
+                const auto &page = node->second;
+                const auto *base = shard->records.version(selection.base.value);
+                if (!page.revisionCanAdvance() || page.activity.hasWriter() || page.activity.publicationClaim
+                    || !(page.nextGeneration == write.version.generation)
+                    || !(base ? base->version == write.source.version
+                        : !write.baseWasPrepared && write.source.version.isDefaultPixel() && !write.source.isValid())) return false;
+            }
+            return true;
+        };
+        if (!valid()) return false;
+        const qsizetype groupCount = qsizetype(end - first);
+        const MetadataArenaDemand demand{quint64(groupCount), 0, 0};
+        if (growMetadataArenasOutsideLock(shard, demand, &growth, &lock, valid, error)
+            != MetadataGrowthResult::Ready) return false;
+        ShardRecordStore::ReservationSet reservation;
+        const auto cancel = qScopeGuard([&] { reservation.cancel(&shard->records); });
+        if (!shard->records.reserve(demand, groupCount, groupCount, &reservation)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("final value storage budget was refused"));
+            return false;
+        }
+        // No failure/allocator/provider boundary within the funded group.
+        for (size_t i = first; i < end; ++i) {
+            const auto &input = *ordered[i];
+            auto *native = input.row;
+            const auto slot = shard->arenas.versions.emplaceReserved(&reservation.arenas.versions);
+            const auto replica = kisInlineReplicaSlot(slot);
+            Q_ASSERT(slot.isValid());
+            auto *value = shard->arenas.versions.get(slot);
+            value->slot = slot;
+            value->version = input.selection->write.version;
+            value->firstReplica = value->authorityReplica = replica;
+            value->replicaCount = 1;
+            value->primaryReplica.ownerVersion = slot;
+            native->location.shard = shard;
+            native->location.page = &static_cast<decltype(shard->pages)::value_type *>(input.selection->base.node)->second;
+            native->location.shardIndex = index;
+            native->location.value = slot;
+            native->value = value;
+            value->frameHeld = true;
+            value->attachLifetime();
+            ++native->edit.m_values;
+            native->location.exact = reservation.exactVersions.take(1);
+            native->location.physical = reservation.physicalSlots.take(1);
+            ++shard->nativeValuesPrepared;
+            if (auto *prepared = input.prepared) {
+                prepared->owner = this;
+                prepared->selection = input.selection;
+                prepared->row = native;
+                prepared->value = value;
+            }
+        }
+        first = end;
+    }
+    KisPageStoreDetail::setError(error, {});
     return true;
+} catch (const std::bad_alloc &) {
+    KisPageStoreDetail::setError(error, QStringLiteral("final value storage budget was refused"));
+    return false;
 }
 
 namespace {
@@ -5669,12 +5717,14 @@ bool KisPageMetadataCoordinator::cancelPrivateResult(KisPagePrivateWrite *native
     return true;
 }
 
-bool KisPageMetadataCoordinator::freezePrivateValues(KisPagePublicationRows rows,
-    KisPageTransactionId transaction, quint64 issuer, bool complete)
+bool KisPageMetadataCoordinator::completePrivatePublication(KisPagePublicationRows rows,
+    KisPageTransactionId transaction, quint64 issuer, bool complete,
+    void *producer, bool (*prepare)(void *, KisPagePrivateWrite &), bool *grouped)
 {
+    if (grouped) *grouped = false;
     auto *core = m_core.load(std::memory_order_acquire);
     if (!core || !issuer || core->cpuProofIssuer.load() != issuer || !transaction.isValid()
-        || (rows.size() && !rows)) return false;
+        || !prepare || (rows.size() && !rows)) return false;
     size_t count = 0;
     for (auto &row : rows) {
         auto &work = row.metadataAcceptance;
@@ -5682,7 +5732,13 @@ bool KisPageMetadataCoordinator::freezePrivateValues(KisPagePublicationRows rows
         if (row.replacement.removal) continue;
         auto *value = row.replacement.native;
         auto *shard = value ? Private::registeredShard(core, *value) : nullptr;
-        if (!shard || !value->reserved || !value->location.page) return false;
+        if (!shard || !value->reserved || !value->location.page
+            || (!value->completed && !complete)
+            || (value->isSealed() && !(value->sealedBy() == transaction))) return false;
+        // Producer-specific provenance/policy executes once, outside V. The
+        // original row carries the result directly into its grouped commit;
+        // no independent freeze input or duplicate prevalidation pass.
+        if (!value->isSealed() && !prepare(producer, *value)) return false;
         work.input = &row;
         work.shard = shard;
         work.page = value->location.page;
@@ -5720,6 +5776,7 @@ bool KisPageMetadataCoordinator::freezePrivateValues(KisPagePublicationRows rows
         }
         first = end;
     }
+    if (grouped) *grouped = count == rows.size();
     return true;
 }
 

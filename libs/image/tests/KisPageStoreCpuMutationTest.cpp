@@ -10335,24 +10335,50 @@ void KisPageStoreCpuMutationTest::nativeFinalRect()
     const auto readsBefore = f.provider->readAccessCalls.load();
     auto old = f.store->captureReadView();
     const auto tx = f.store->beginCurrentTransaction(); auto segment = f.begin(tx);
-    auto execution = segment.borrowExecution({1}, {{0,0}}, &f.error); QVERIFY(execution.isActive());
+    KisPageSnapshotArray<KisLogicalPageId> pages;
+    for (int i = 0; i < 16; ++i) pages.append({i, 0});
+    auto execution = segment.borrowExecution({1}, pages, &f.error); QVERIFY(execution.isActive());
     const QRect rect = partial ? QRect(13,17,31,23) : QRect(0,0,64,64);
     const qsizetype stride = repeatRow ? 0 : rect.width() * bpp + 7;
     const QByteArray input((rect.height()-1) * stride + rect.width()*bpp, char(noop ? 0x31 : 0x73));
-    QVERIFY2(execution.writeFinalRect(key(), rect, {input.constData(), stride, input.size()}, &f.error), qPrintable(f.error));
+    std::array<KisPageMutationExecution::FinalRect, 16> batch;
+    for (size_t i = 0; i < batch.size(); ++i)
+        batch[i] = {key(int(i)), rect, {input.constData(), stride, input.size()}};
+    QVERIFY2(execution.writeFinalRects(batch.data(), batch.size(), &f.error), qPrintable(f.error));
+
     if (generic) QVERIFY(f.provider->readAccessCalls.load() > readsBefore);
-    QVector<KisLogicalPageId> changed; changed.reserve(1);
-    QCOMPARE(execution.finishPreparedWrites(&changed), qsizetype(!noop));
+    QVector<KisLogicalPageId> changed; changed.reserve(16);
+    QCOMPARE(execution.finishPreparedWrites(&changed), qsizetype(noop ? 15 : 16));
     QVERIFY(execution.finish());
     QVERIFY2(segment.seal(&f.error), qPrintable(f.error));
-    if (noop) QVERIFY(f.store->abort(tx));
-    else QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    QVERIFY(f.store->commit(tx, f.store->preparedPages(tx)).isValid());
+    // Repeating the whole actual input is a true no-op, including cold/default
+    // pages from the first call. It must not issue any new final Value rights.
+    const auto repeatTx = f.store->beginCurrentTransaction();
+    auto repeated = f.begin(repeatTx);
+    auto repeatExecution = repeated.borrowExecution({1}, pages, &f.error);
+    QVERIFY(repeatExecution.isActive());
+    const auto beforeRepeat = kisPageStoreMetadataFootprint(*f.store);
+    QVERIFY2(repeatExecution.writeFinalRects(batch.data(), batch.size(), &f.error), qPrintable(f.error));
+    const auto afterRepeat = kisPageStoreMetadataFootprint(*f.store);
+    QCOMPARE(afterRepeat.exactVersionIndex.reservationBatches, beforeRepeat.exactVersionIndex.reservationBatches);
+    QCOMPARE(afterRepeat.versionArena.usedSlots, beforeRepeat.versionArena.usedSlots);
+    QVector<KisLogicalPageId> repeatedChanges; repeatedChanges.reserve(16);
+    QCOMPARE(repeatExecution.finishPreparedWrites(&repeatedChanges), qsizetype(0));
+    QVERIFY(repeatExecution.finish()); QVERIFY(repeated.cancel()); repeated = {};
+    QVERIFY(f.store->abort(repeatTx));
     f.provider->rejectBindingFor = {};
     auto current = f.store->captureReadView(); auto read = current.readResidentPage(key()); QVERIFY(read.isValid());
     const auto *bytes = static_cast<const quint8 *>(read.data());
     for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x)
         for (int c = 0; c < bpp; ++c)
             QCOMPARE(bytes[y*read.rowStride()+x*bpp+c], quint8(!noop && rect.contains(x,y) ? 0x73 : 0x31));
+    for (int i = 1; i < 16; ++i) {
+        auto other = current.readResidentPage(key(i)); QVERIFY(other.isValid());
+        const auto *pixels = static_cast<const quint8 *>(other.data());
+        QCOMPARE(pixels[rect.y() * other.rowStride() + rect.x() * bpp], quint8(noop ? 0x31 : 0x73));
+        if (partial) QCOMPARE(pixels[0], quint8(0x2a));
+    }
     f.provider->rejectBindingFor = {};
     auto before = old.readResidentPage(key()); QVERIFY(before.isValid());
     QCOMPARE(static_cast<const quint8 *>(before.data())[0], quint8(0x31));
@@ -10479,21 +10505,43 @@ void KisPageStoreCpuMutationTest::completePayloadProviderFailure_data()
 void KisPageStoreCpuMutationTest::completePayloadProviderFailure()
 {
     QFETCH(int,fault);
-    Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
-    const auto tx=f.store->beginCurrentTransaction(); auto segment=f.begin(tx);
-    QByteArray input(64*64*f.bpp,char(0x77));
-    f.provider->rejectWrite=fault==0; f.provider->rejectNativeBinding=fault==1;
-    if (fault==2) f.provider->validationsUntilFailure=0;
-    const auto work=f.provider->p->payloadWork();
-    const bool prepared=segment.overwritePage(key(),{input.constData(),64*f.bpp,input.size()},&f.error);
-    // Provider validation is a seal boundary, not part of synchronous allocation.
-    QCOMPARE(prepared,fault==2);
-    QVERIFY(!segment.seal()); QVERIFY(f.store->abort(tx));
-    f.provider->rejectWrite=f.provider->rejectNativeBinding=false; f.provider->validationsUntilFailure=-1;
-    QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages-work.payloadInitializedPages,quint64(fault ? 1 : 0));
-    QCOMPARE(f.provider->p->payloadWork().defaultInitializedPages,work.defaultInitializedPages);
-    QCOMPARE(f.pixel(),QByteArray(f.bpp,char(0x31))); QVERIFY(f.store->closeSession());
-    QCOMPARE(f.provider->memoryUsage().committedBytes,quint64(0));
+    for (int count : {1,16}) {
+        Fixture f; QVERIFY(f.init()); QVERIFY(f.fill(0x31));
+        const auto tx=f.store->beginCurrentTransaction(); auto segment=f.begin(tx);
+        QByteArray input(64*64*f.bpp,char(0x77));
+        const int acceptedBeforeFailure = count == 1 ? 0 : 7;
+        int attempts = 0;
+        f.provider->beforeCpuPayload = [&] {
+            if (attempts++ == acceptedBeforeFailure) {
+                f.provider->rejectWrite=fault==0;
+                f.provider->rejectNativeBinding=fault==1;
+            }
+        };
+        if (fault==2) f.provider->validationsUntilFailure=acceptedBeforeFailure;
+        const auto work=f.provider->p->payloadWork();
+        KisPageSnapshotArray<KisLogicalPageId> pages;
+        std::array<KisPageMutationExecution::FinalRect,16> batch;
+        for (int i=0;i<count;++i) {
+            pages.append({i,0});
+            batch[size_t(i)]={key(i), {}, {input.constData(),64*f.bpp,input.size()}};
+        }
+        auto execution=segment.borrowExecution({1},pages,&f.error); QVERIFY(execution.isActive());
+        const bool prepared=execution.writeFinalRects(batch.data(),size_t(count),&f.error);
+        // A mid-batch refusal must cancel both accepted results and cells
+        // prepared for later pages. No subset may become visible.
+        QCOMPARE(prepared,fault==2);
+        execution.finish(); execution={};
+        QVERIFY(!segment.seal()); QVERIFY(f.store->abort(tx));
+        f.provider->beforeCpuPayload={};
+        f.provider->rejectWrite=f.provider->rejectNativeBinding=false; f.provider->validationsUntilFailure=-1;
+        QCOMPARE(f.provider->p->payloadWork().payloadInitializedPages-work.payloadInitializedPages,
+                 quint64(fault==2 ? count : acceptedBeforeFailure+(fault==1)));
+        QCOMPARE(f.provider->p->payloadWork().defaultInitializedPages,work.defaultInitializedPages);
+        QCOMPARE(f.pixel(),QByteArray(f.bpp,char(0x31)));
+        for (int i=1;i<count;++i) QCOMPARE(f.pixel({},i),QByteArray(f.bpp,char(i<2 ? 0x31 : 0x2a)));
+        QVERIFY(f.store->closeSession());
+        QCOMPARE(f.provider->memoryUsage().committedBytes,quint64(0));
+    }
 }
 
 void KisPageStoreCpuMutationTest::accessSessionUsesOneNativeSegment()
