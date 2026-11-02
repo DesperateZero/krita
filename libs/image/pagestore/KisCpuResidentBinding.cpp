@@ -61,10 +61,12 @@ bool KisCpuResidentBinding::prepareHandoff(const KisPageWriteSource &source,
             : source.matches(allocationIdentityLocked(), m_domain, m_layout,
                 {m_key, m_generation, m_defaultPixelRevision})) ||
         m_readers || m_writeState != WriteState::Idle ||
-        source.domain() != KisPageAccessDomain::CpuRam || !source.layout().matches(descriptor) ||
-        !target.isValid() || !(target.key == source.version.key) ||
-        target.generation.value <= source.version.generation.value ||
-        source.allocationIdentity().allocation.generation == std::numeric_limits<quint64>::max()) return false;
+        // Successful matching above establishes these exact binding facts.
+        // Do not project the source's physical representation a second time.
+        m_domain != KisPageAccessDomain::CpuRam || !m_layout.matches(descriptor) ||
+        !target.isValid() || !(target.key == m_key) ||
+        target.generation.value <= m_generation.value ||
+        m_incarnation == std::numeric_limits<quint64>::max()) return false;
     *incarnation = m_incarnation;
     return true;
 }

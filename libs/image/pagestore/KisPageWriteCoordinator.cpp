@@ -3428,7 +3428,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     if (!validateWriteBase(write, bool(native))) return false;
     if (!physical.tryClaim()) return false;
     const bool installed = native
-        ? metadata->acceptPrivateTarget(selection, acceptedSource, targetReplica, native, transientLimit, nullptr,
+        ? metadata->acceptPrivateTarget(selection, acceptedSource, physical, native, transientLimit,
               reuseCapacity ? std::shared_ptr<KisCpuResidentBinding>{} : prepared->beforeBinding)
         : reuseCapacity
         ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)

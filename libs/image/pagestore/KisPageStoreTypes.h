@@ -595,12 +595,15 @@ struct KRITAIMAGE_EXPORT KisReplicaLayout
     {
         if (!admitted) return false;
         const auto &descriptor = admitted.get();
-        return isValid() &&
-               layoutRevision == descriptor.layoutRevision &&
+        // Equality with the admitted descriptor proves the logical geometry,
+        // nonzero revision/format and nonempty contained rectangle. Only the
+        // provider's physical stride and extent still need validation here.
+        return layoutRevision == descriptor.layoutRevision &&
                formatId == descriptor.format.formatId &&
                pageExtent == descriptor.pageExtent &&
                validRect == descriptor.validRect &&
                rowStride >= descriptor.minimumRowBytes() &&
+               byteSize >= quint64(rowStride) * quint64(pageExtent.height()) &&
                rowStride % descriptor.rowAlignment == 0 &&
                rowStride % descriptor.format.pixelAlignment == 0;
     }

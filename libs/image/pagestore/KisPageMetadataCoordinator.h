@@ -28,6 +28,7 @@ class KisCpuResidentBinding;
 struct KisPagePrivateWrite;
 struct KisPageWriteInput;
 class KisPageWriteSource;
+class KisCpuBackingHandoff;
 struct KisPageWriteSelection;
 struct KisPagePublicationChange;
 struct KisPageCpuPublicationResource;
@@ -325,6 +326,15 @@ private:
                              const KisReplicaHandle &target, KisPagePrivateWrite *, quint32 limit,
         QString *error = nullptr, const std::shared_ptr<KisCpuResidentBinding> &before = {},
         bool complete = false, std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);
+    // The claimed handoff itself issues the target; callers cannot substitute
+    // unchecked target geometry or an unrelated allocation.
+    bool acceptPrivateTarget(const KisPageWriteSelection &, const KisPageWriteSource &,
+        const KisCpuBackingHandoff &, KisPagePrivateWrite *, quint32 limit,
+        const std::shared_ptr<KisCpuResidentBinding> &before);
+    bool acceptPrivateTargetValidated(const KisPageWriteSelection &, const KisPageWriteSource &,
+        const KisReplicaHandle &, KisPagePrivateWrite *, quint32, QString *,
+        const std::shared_ptr<KisCpuResidentBinding> &, bool,
+        std::shared_ptr<KisCpuResidentBinding> *);
     bool completePrivateWrite(KisPagePrivateWrite *);
     bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &,
                              std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);

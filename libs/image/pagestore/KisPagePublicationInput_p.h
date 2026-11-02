@@ -139,7 +139,12 @@ struct KisPagePublicationChange {
         KisPagePublicationChange *input = nullptr;
         void *shard = nullptr;
         void *page = nullptr;
-        void *prepared = nullptr;
+        union {
+            void *prepared = nullptr; // External input's deferred references.
+            // Native mutation only: issued by final validation, consumed
+            // while that page's publication claim (or shard gate) is held.
+            const KisPageValueCell *checkedSource;
+        };
         KisVersionSlotId replacementSlot;
         quint16 shardIndex = 0; // configure() permits at most 4096 shards.
     } metadataAcceptance;

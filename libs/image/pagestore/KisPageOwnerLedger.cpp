@@ -2450,7 +2450,8 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     KisPageMetadataCoordinator *metadata;
     quint64 issuer;
     std::shared_ptr<KisPageReplicaProvider> authorityProvider;
-    ProviderKey selected = providerKey(firstPending->target().provider, firstPending->target().providerEpoch);
+    const auto firstTarget = firstPending->target();
+    ProviderKey selected = providerKey(firstTarget.provider, firstTarget.providerEpoch);
     {
         QMutexLocker locker(&d->mutex);
         metadata = d->cpuMetadata;
@@ -2465,17 +2466,18 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     for (auto &row : rows) {
         auto *result = row.replacement.native;
         if (row.replacement.removal || result->isSealed()) continue;
-        const auto key = providerKey(result->target().provider, result->target().providerEpoch);
+        const auto target = result->target();
+        const auto key = providerKey(target.provider, target.providerEpoch);
         if (!authorityProvider || key != selected) {
-            authorityProvider = provider(result->target().provider, result->target().providerEpoch);
+            authorityProvider = provider(target.provider, target.providerEpoch);
             selected = key;
             nativeProvider = dynamic_cast<const KisTiles3PageReplicaProvider *>(authorityProvider.get());
         }
         const auto admitted = result->descriptorAdmission();
         if (!result->descriptor() || !authorityProvider
             || !(nativeProvider && admitted
-                ? nativeProvider->prepareCpuPublication(result->target(), admitted, result->binding())
-                : authorityProvider->prepareCpuPublication(result->target(), *result->descriptor(), result->binding()))) {
+                ? nativeProvider->prepareCpuPublication(target, admitted, result->binding())
+                : authorityProvider->prepareCpuPublication(target, *result->descriptor(), result->binding()))) {
             KisPageStoreDetail::setError(error, QStringLiteral("CPU private authority failed provider validation"));
             return false;
         }
