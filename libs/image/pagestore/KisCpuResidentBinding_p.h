@@ -662,6 +662,7 @@ public:
                                         const KisReplicaHandle &source, const KisPageVersion &target,
                                         const KisPageAllocationDescriptor &descriptor,
                                         std::shared_ptr<KisCpuResidentBinding> binding = {});
+    const std::shared_ptr<KisCpuResidentBinding> &binding() const { return m_binding; }
     bool isValid() const { return bool(m_binding); }
     bool isClaimed() const { return m_claimed; }
     // Project for external metadata/ledger consumers before consuming this
@@ -671,6 +672,11 @@ public:
     KisCpuWriteBindingReservation commit() noexcept;
     void reset() noexcept;
 private:
+    friend class KisPageWriteCoordinator;
+    bool prepareInto(const std::shared_ptr<KisPageReplicaProvider> &provider,
+        const KisPageWriteSource &source, const KisPageVersion &target,
+        KisValidatedPageDescriptor descriptor, std::shared_ptr<KisCpuResidentBinding> binding,
+        bool retainProvider = true);
     std::shared_ptr<KisPageReplicaProvider> m_provider;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
     quint64 m_incarnation = 0;

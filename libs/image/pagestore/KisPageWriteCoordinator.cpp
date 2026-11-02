@@ -3295,8 +3295,11 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     KisPageWriteSelection &selection, KisPagePublicationCoordinator &publication,
     KisPageIdleCapacity capacity,
     QMutexLocker<QMutex> &locker, KisReplicaHandle *target, KisCpuWriteBindingReservation &writable,
-    KisPageStoreDiagnosticTimer &diagnostic, KisPagePrivateWrite *native)
+    KisPageStoreDiagnosticTimer &diagnostic, KisPreparedPrivateTarget *preparedNative)
 {
+    auto *native = preparedNative ? preparedNative->row : nullptr;
+    Q_ASSERT(!preparedNative || (preparedNative->owner == metadata
+        && preparedNative->selection == &selection && native && native->value == preparedNative->value));
     auto &write = selection.write;
     const auto &descriptor = selection.descriptor();
     const auto *before = selection.recoverableBefore ? &*selection.recoverableBefore : nullptr;
@@ -3318,10 +3321,10 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     if (intent.inputKind == KisPageWriteInputKind::Semantic || !provider
         || (intent.flags & quint8(KisPageWriteIntentFlag::SourceInitialization))
         || access.domain != KisPageAccessDomain::CpuRam || access.kind != KisPageAccessKind::CpuPointer
-        || write.source.domain() != KisPageAccessDomain::CpuRam
-        || write.source.version.isDefaultPixel() || !write.source.isValid()
-        || !(provider->providerId() == write.source.provider())
-        || !(provider->providerEpoch() == write.source.providerEpoch())
+        || write.source.version.isDefaultPixel()
+        || (!native && (write.source.domain() != KisPageAccessDomain::CpuRam || !write.source.isValid()
+            || !(provider->providerId() == write.source.provider())
+            || !(provider->providerEpoch() == write.source.providerEpoch())))
         || writable.isValid()) return false;
 
     const auto transientLimit = budget->maxTransientVersionsPerPage();
@@ -3357,7 +3360,9 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     std::optional<Prepared> prepared;
     // Even rejected metadata candidates can own real arena/index storage.
     // Destroy them, the before pin and provider references outside owner gates.
+    bool acceptedWithoutColdCleanup = false;
     const auto cleanup = qScopeGuard([&] {
+        if (acceptedWithoutColdCleanup) return;
         // Preparation may throw while the gate is already open. Qt's locker
         // requires a held lock for unlock(); always restore it for the caller.
         if (locker.isLocked()) locker.unlock();
@@ -3376,11 +3381,9 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         ? KisPageWriteSource::borrowedNative(spare.version, capacity.binding.get(), spare.allocation.generation)
         : KisPageWriteSource(spare);
     const auto &handoffSource = reuseCapacity ? capacitySource : write.source;
-    physical = native
-        ? KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, native->descriptorAdmission(),
-            reuseCapacity ? std::move(capacity.binding) : write.source.binding())
-        : KisCpuBackingHandoff::prepare(provider, handoffSource, write.version, descriptor,
-            reuseCapacity ? std::move(capacity.binding) : write.source.binding());
+    physical.prepareInto(provider, handoffSource, write.version,
+        native ? native->descriptorAdmission() : KisValidatedPageDescriptor::checked(descriptor),
+        reuseCapacity ? std::move(capacity.binding) : write.source.binding(), !native);
     if (!physical.isValid()) return false;
     const auto targetReplica = physical.target();
     prepared.emplace();
@@ -3406,7 +3409,7 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     // All stable selection facts stay in the original input. Only the source
     // may differ for recovery; the target is owned by physical until accepted.
     const auto &acceptedSource = reuseCapacity ? write.source : *before;
-    prepared->accounting = ownerLedger->prepareBackingHandoff(handoffSource,
+    ownerLedger->prepareBackingHandoffInto(prepared->accounting, handoffSource,
         targetReplica, nullptr, reuseCapacity ? capacity.original : nullptr);
     if (prepared->accounting.isValid() && !native) {
         auto &publicationPreparation = prepared->publication.emplace();
@@ -3428,7 +3431,8 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
     if (!validateWriteBase(write, bool(native))) return false;
     if (!physical.tryClaim()) return false;
     const bool installed = native
-        ? metadata->acceptPrivateTarget(selection, acceptedSource, physical, native, transientLimit,
+        ? metadata->acceptPreparedPrivateTarget(*preparedNative, acceptedSource, targetReplica,
+              physical.binding(), transientLimit,
               reuseCapacity ? std::shared_ptr<KisCpuResidentBinding>{} : prepared->beforeBinding)
         : reuseCapacity
         ? metadata->installLeaseWrite(std::move(prepared->publication->metadata), transaction, nullptr, &prepared->publication->cleanup)
@@ -3478,6 +3482,11 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         *target = targetReplica; // Original preallocated request is the owner.
     }
     if (!reuseCapacity) write.source = std::move(*selection.recoverableBefore);
+    // Successful native idle transfer retains the target in Value/writer and
+    // the provider in the session. No pin, last reference or claim remains in
+    // this call state. Cold recovery still releases its real before outside S.
+    acceptedWithoutColdCleanup = native && !prepared->beforePinned
+        && !prepared->beforeProvider && !prepared->beforeBinding;
     return true;
 }
 

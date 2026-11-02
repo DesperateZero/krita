@@ -10038,7 +10038,7 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         selected.write = KisPageWriteInput(input);
         selected.write.baseWasPrepared = i != 0;
         if (!f.metadata.preparePrivateValue(selected, &value, &f.error)) return false;
-        value.descriptor() = std::make_shared<KisPageAllocationDescriptor>(descriptor);
+        if (!value.setDescriptor(std::make_shared<KisPageAllocationDescriptor>(descriptor))) return false;
         value.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
         const bool accepted = f.metadata.acceptPrivateTarget(selected, input.source, result.replica, &value, 64, &f.error)
             && f.metadata.completePrivateWrite(&value) && validateOriginalWrite(f.owner, value, tx.id, &f.error);
@@ -10177,8 +10177,8 @@ void KisPageStoreCpuMutationTest::capacityDispositionBudgetPlan()
             KisPageMetadataCoordinator::MutationBaseSelection::Selected);
         selected.write = KisPageWriteInput(acquire);
         QVERIFY(f.metadata.preparePrivateValue(selected, &native, &f.error));
-        native.descriptor() = std::allocate_shared<const KisPageAllocationDescriptor>(
-            KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor());
+        QVERIFY(native.setDescriptor(std::allocate_shared<const KisPageAllocationDescriptor>(
+            KisMutationStorageAllocator<KisPageAllocationDescriptor>(&f.budget), surface.allocationDescriptor())));
         native.exchangeBinding(f.physical.provider->cpuResidentBinding(result.replica), result.replica);
         QVERIFY(f.metadata.acceptPrivateTarget(selected, acquire.source, acquire.target, &native, 64, &f.error));
         QVERIFY(f.metadata.completePrivateWrite(&native));
@@ -13617,8 +13617,10 @@ void KisPageStoreCpuMutationTest::cleanDomainJournalSkipsSnapshots()
     QVERIFY(ledger.registerProvider(f.provider, &f.error));
     QVERIFY(!f.provider->mayHaveBackingDomainChanges());
     const auto before = f.provider->domainJournalCalls.load();
-    for (int i = 0; i < 1000; ++i)
+    for (int i = 0; i < 1000; ++i) {
+        if (i == 500) QVERIFY(ledger.freezeProviderRegistration());
         QVERIFY2(ledger.synchronizeBackingDomains(&f.error), qPrintable(f.error));
+    }
     QCOMPARE(f.provider->domainJournalCalls.load(), before);
 
     // The base contract is conservative for providers that cannot expose a
@@ -13632,6 +13634,7 @@ void KisPageStoreCpuMutationTest::cleanDomainJournalSkipsSnapshots()
     KisPageOwnerLedger missingBudget;
     QVERIFY(missingBudget.configure(f.completions, &f.error));
     QVERIFY(missingBudget.registerProvider(f.provider, &f.error));
+    QVERIFY(!missingBudget.freezeProviderRegistration());
     QVERIFY(!missingBudget.synchronizeBackingDomains(&f.error));
     QVERIFY(f.error.contains(QStringLiteral("budget")));
     QVERIFY(f.store->closeSession());
@@ -13657,6 +13660,7 @@ void KisPageStoreCpuMutationTest::dirtyDomainJournalRetainsUnregistered()
     QVERIFY(ledger.configure(f.completions, &f.error));
     ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider, &f.error));
+    QVERIFY(ledger.freezeProviderRegistration());
     QVERIFY(KisTileDataStore::instance()->trySwapTileData(tile));
     QVERIFY(f.provider->mayHaveBackingDomainChanges());
     const auto cold = f.provider->backingFootprint(handle);
@@ -13714,15 +13718,16 @@ void KisPageStoreCpuMutationTest::ledgerProviderRegistrationPreparedBeforeAdmiss
     QCOMPARE(live(), limits.metadataArenaBytes);
     freeTestStoragePressure(&budget, std::exchange(filler, nullptr), fillerBytes, 1);
 
-    bool pendingHidden = false, duplicateRejected = false;
+    bool pendingHidden = false, duplicateRejected = false, pendingFreezeRejected = false;
     f.provider->beforeDomainAdmission = [&] {
         pendingHidden = !ledger->provider(f.provider->providerId(), f.provider->providerEpoch())
             && !ledger->providerFor(cpu);
         duplicateRejected = !ledger->registerProvider(f.provider);
+        pendingFreezeRejected = !ledger->freezeProviderRegistration();
     };
     f.provider->rejectDomainAdmission = true;
     QVERIFY(!ledger->registerProvider(f.provider, &f.error));
-    QVERIFY(pendingHidden && duplicateRejected);
+    QVERIFY(pendingHidden && duplicateRejected && pendingFreezeRejected);
     QCOMPARE(live(), baseline); // The pending node was unlinked and freed.
     f.provider->rejectDomainAdmission = false;
     f.provider->beforeDomainAdmission = [] { throw std::bad_alloc(); };
@@ -13744,7 +13749,9 @@ void KisPageStoreCpuMutationTest::ledgerProviderRegistrationPreparedBeforeAdmiss
     // allocation even with no remaining MetadataArena capacity.
     QVERIFY(ledger->providerFor(cpu) == f.provider);
     QVERIFY(ledger->provider(f.provider->providerId(), f.provider->providerEpoch()) == f.provider);
-    QVERIFY(!ledger->registerProvider(f.provider));
+    QVERIFY(ledger->freezeProviderRegistration());
+    QVERIFY(!ledger->registerProvider(f.provider, &f.error));
+    QVERIFY(f.error.contains(QStringLiteral("frozen")));
     QCOMPARE(live(), limits.metadataArenaBytes);
     f.provider->beforeDomainAdmission = {};
     ledger.reset();
@@ -13801,6 +13808,7 @@ void KisPageStoreCpuMutationTest::domainJournalSynchronizationRejectsAtCapacity(
     KisBackingBudgetController budget(limits);
     KisPageOwnerLedger ledger; QVERIFY(ledger.configure(f.completions)); ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider));
+    QVERIFY(ledger.freezeProviderRegistration());
     KisBackingBudgetDelta delta; delta.bucket(size_t(KisBackingBudgetClass::Current)).cpuRam = handle.layout.byteSize;
     auto reservation = budget.reserve(delta, &f.error); QVERIFY(reservation.isValid());
     QVERIFY(ledger.registerBacking(handle, reservation, KisBackingBudgetClass::Current, &f.error));
@@ -13956,6 +13964,7 @@ void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
     QVERIFY(ledger.configure(f.completions, &f.error));
     ledger.attachBackingBudget(budget);
     QVERIFY(ledger.registerProvider(f.provider, &f.error));
+    QVERIFY(ledger.freezeProviderRegistration());
     const auto initialFootprint = f.provider->backingFootprint(handle);
     QVERIFY(initialFootprint.isValid());
     KisBackingBudgetDelta delta;
@@ -14114,6 +14123,7 @@ void KisPageStoreCpuMutationTest::backingDomainRejectsStaleSnapshot()
     unadmittedLedger.attachBackingBudget(unadmittedBudget);
     f.provider->forwardDomainAdmission = false;
     QVERIFY(unadmittedLedger.registerProvider(f.provider, &f.error));
+    QVERIFY(unadmittedLedger.freezeProviderRegistration());
     f.provider->forwardDomainAdmission = true;
     auto unadmittedReservation = unadmittedBudget.reserve(delta, &f.error);
     QVERIFY2(unadmittedReservation.isValid(), qPrintable(f.error));

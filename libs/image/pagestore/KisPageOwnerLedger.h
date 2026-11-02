@@ -108,6 +108,7 @@ public:
     bool retainRetirementDebtReservation(const KisReplicaHandle &replica,
                                          KisBackingBudgetReservation &reservation,
                                          QString *error = nullptr);
+    bool freezeProviderRegistration();
     bool synchronizeBackingDomains(QString *error = nullptr);
     enum class BackingAcceptance { FeesRefused, InstallRejected, Accepted };
     // Freeze a sole, resident physical owner and reserve its real transition
@@ -122,6 +123,9 @@ public:
     KisBackingHandoffReservation prepareBackingHandoff(
         const KisReplicaHandle &source, const KisReplicaHandle &target,
         QString *error = nullptr, KisPageRetirementRecord *originalIdle = nullptr);
+    bool prepareBackingHandoffInto(KisBackingHandoffReservation &,
+        const KisPageWriteSource &, const KisReplicaHandle &, QString *error = nullptr,
+        KisPageRetirementRecord *originalIdle = nullptr);
     // Caller has installed logical detachment and consumed physical retag under
     // its admission gate. Reuses the existing index node; no provider call or
     // allocation. Keeps any admitted debt headroom until ordinary publication

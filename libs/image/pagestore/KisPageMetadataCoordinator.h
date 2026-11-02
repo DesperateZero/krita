@@ -23,6 +23,24 @@
 #include "KisCompletionRegistry.h"
 #include "KisPageStateMachine.h"
 
+class KisPageMetadataCoordinator;
+struct KisPageValueCell;
+// Call-local borrow of the creator's final Value. The session must retain its
+// edit and page claim and must not discard/reprepare this row while borrowed.
+class KisPreparedPrivateTarget {
+public:
+    KisPreparedPrivateTarget() = default;
+    KisPreparedPrivateTarget(const KisPreparedPrivateTarget &) = delete;
+    KisPreparedPrivateTarget &operator=(const KisPreparedPrivateTarget &) = delete;
+private:
+    const KisPageMetadataCoordinator *owner = nullptr;
+    const struct KisPageWriteSelection *selection = nullptr;
+    struct KisPagePrivateWrite *row = nullptr;
+    const KisPageValueCell *value = nullptr;
+    friend class KisPageMetadataCoordinator;
+    friend class KisPageWriteCoordinator;
+};
+
 class KisImageEpochRootSnapshot;
 class KisCpuResidentBinding;
 struct KisPagePrivateWrite;
@@ -315,6 +333,8 @@ private:
     // original edit retains its exact slot and both index admissions until
     // acceptance or cancellation; publication never replaces an old value.
     bool preparePrivateValue(const KisPageWriteSelection &, KisPagePrivateWrite *, QString *error);
+    bool preparePrivateTarget(const KisPageWriteSelection &, KisPagePrivateWrite *,
+        KisPreparedPrivateTarget *, QString *error);
     void discardPrivateValue(KisPagePrivateWrite *);
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
@@ -328,13 +348,13 @@ private:
         bool complete = false, std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);
     // The claimed handoff itself issues the target; callers cannot substitute
     // unchecked target geometry or an unrelated allocation.
-    bool acceptPrivateTarget(const KisPageWriteSelection &, const KisPageWriteSource &,
-        const KisCpuBackingHandoff &, KisPagePrivateWrite *, quint32 limit,
-        const std::shared_ptr<KisCpuResidentBinding> &before);
+    bool acceptPreparedPrivateTarget(KisPreparedPrivateTarget &, const KisPageWriteSource &,
+        const KisReplicaHandle &issuedTarget, const std::shared_ptr<KisCpuResidentBinding> &,
+        quint32 limit, const std::shared_ptr<KisCpuResidentBinding> &before);
     bool acceptPrivateTargetValidated(const KisPageWriteSelection &, const KisPageWriteSource &,
         const KisReplicaHandle &, KisPagePrivateWrite *, quint32, QString *,
         const std::shared_ptr<KisCpuResidentBinding> &, bool,
-        std::shared_ptr<KisCpuResidentBinding> *);
+        std::shared_ptr<KisCpuResidentBinding> *, const KisPreparedPrivateTarget * = nullptr);
     bool completePrivateWrite(KisPagePrivateWrite *);
     bool replacePrivateWrite(KisPagePrivateWrite *, const KisReplicaHandle &,
                              std::shared_ptr<KisCpuResidentBinding> *targetBinding = nullptr);

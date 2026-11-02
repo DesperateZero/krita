@@ -1435,9 +1435,10 @@ KisPageMutationSession::Private::prepareTarget(
     auto discardUnprepared = qScopeGuard([&] {
         if (!page->reserved) discardUnpreparedPageLocked(*entry, lock);
     });
+    KisPreparedPrivateTarget preparedNative;
     if (!previous) {
         lock.unlock();
-        const bool prepared = owner->metadata.preparePrivateValue(*selected, page, error);
+        const bool prepared = owner->metadata.preparePrivateTarget(*selected, page, &preparedNative, error);
         lock.relock();
         if (!prepared) {
             if (storageRefused) *storageRefused = true;
@@ -1473,7 +1474,7 @@ KisPageMutationSession::Private::prepareTarget(
         reused = owner->writeCoordinator.tryAcquireReusedTargetLocked(
             transaction, intent, targetProvider,
             {KisPageAccessDomain::CpuRam, KisPageAccessKind::CpuPointer}, *selected,
-            owner->publicationCoordinator, std::exchange(idle, {}), lock, nullptr, writable, diagnostic, page);
+            owner->publicationCoordinator, std::exchange(idle, {}), lock, nullptr, page->writable, diagnostic, &preparedNative);
     } catch (const std::bad_alloc &) {
         if (storageRefused) *storageRefused = true;
         KisPageStoreDetail::setError(error, QStringLiteral("CPU mutation write plan storage is unavailable"));
@@ -1582,7 +1583,7 @@ KisPageMutationSession::Private::prepareTarget(
     }
     Q_ASSERT(page->descriptor());
     if (!previous) {
-        page->writable = std::move(writable);
+        if (!reused) page->writable = std::move(writable);
         if (!page->binding()) page->exchangeBinding(page->writable.binding(), page->target());
         owner->writeCoordinator.recordTarget(*entry, intent, acquire, alias
             ? KisMutationPageEntryState::AliasAccepted
@@ -4546,6 +4547,10 @@ bool KisPageStore::finalizeInitialization(QString *error)
             KisPageStoreDetail::setError(error, QStringLiteral("PageStore initial manifest is not fully adopted"));
             return false;
         }
+    }
+    if (!d->owner.freezeProviderRegistration()) {
+        KisPageStoreDetail::setError(error, QStringLiteral("provider registration is still active"));
+        return false;
     }
     d->operational = true;
     d->historyCollector.startLocked();

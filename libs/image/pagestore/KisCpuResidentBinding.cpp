@@ -153,15 +153,24 @@ KisCpuBackingHandoff KisCpuBackingHandoff::prepare(
     std::shared_ptr<KisCpuResidentBinding> binding)
 {
     KisCpuBackingHandoff result;
-    if (!provider) return result;
-    if (binding && source.binding() && binding != source.binding()) return result;
-    if (!binding) binding = source.binding();
-    if (!binding) binding = provider->cpuResidentBinding(source.handle()); // Actual unbound external input.
-    if (!binding || !binding->prepareHandoff(source, target, descriptor, &result.m_incarnation)) return result;
-    result.m_provider = provider;
-    result.m_binding = std::move(binding);
-    result.m_targetVersion = target;
+    result.prepareInto(provider, source, target, descriptor, std::move(binding));
     return result;
+}
+
+bool KisCpuBackingHandoff::prepareInto(
+    const std::shared_ptr<KisPageReplicaProvider> &provider, const KisPageWriteSource &source,
+    const KisPageVersion &target, KisValidatedPageDescriptor descriptor,
+    std::shared_ptr<KisCpuResidentBinding> binding, bool retainProvider)
+{
+    Q_ASSERT(!m_binding && !m_provider && !m_claimed);
+    if (!provider || (binding && source.binding() && binding != source.binding())) return false;
+    if (!binding) binding = source.binding();
+    if (!binding) binding = provider->cpuResidentBinding(source.handle());
+    if (!binding || !binding->prepareHandoff(source, target, descriptor, &m_incarnation)) return false;
+    if (retainProvider) m_provider = provider;
+    m_binding = std::move(binding);
+    m_targetVersion = target;
+    return true;
 }
 
 KisReplicaHandle KisCpuBackingHandoff::target() const

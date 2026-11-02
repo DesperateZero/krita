@@ -679,6 +679,7 @@ public:
     quint64 cpuProofIssuer = 0;
     ProviderIndex providers;
     quint64 providerRevision = 0;
+    std::atomic_bool providersFrozen{false};
     OperationIndex operations;
     KisMutationStorageAllocator<KisPageProviderOperationNode> operationStorage;
     ProofIndex sealedProofs;
@@ -1540,9 +1541,30 @@ catch (const std::bad_alloc &) {
     return false;
 }
 
+bool KisPageOwnerLedger::freezeProviderRegistration()
+{
+    QMutexLocker lock(&d->mutex);
+    if (!d->completions || !d->backingBudget) return false;
+    for (const auto &record : d->providers) if (!record.acceptedRevision) return false;
+    d->providersFrozen.store(true, std::memory_order_release);
+    return true;
+}
+
 bool KisPageOwnerLedger::synchronizeBackingDomains(QString *error)
 try
 {
+    if (d->providersFrozen.load(std::memory_order_acquire)) {
+        bool empty = true;
+        for (const auto &record : std::as_const(d->providers)) {
+            if (record.provider->mayHaveBackingDomainChanges()) { empty = false; break; }
+        }
+        if (empty) {
+            KisPageStoreDetail::setError(error, {});
+            return true;
+        }
+        // Unknown/dirty hints require the original complete sync exactly once.
+        // Do not retry this hint after sync: unknown providers may always say true.
+    }
     struct Probe {
         std::shared_ptr<KisPageReplicaProvider> provider;
         KisReplicaBackingDomainChange change;
@@ -1740,6 +1762,16 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
     const KisPageWriteSource &source, const KisReplicaHandle &target, QString *error,
     KisPageRetirementRecord *originalIdle)
 {
+    KisBackingHandoffReservation result;
+    prepareBackingHandoffInto(result, source, target, error, originalIdle);
+    return result;
+}
+
+bool KisPageOwnerLedger::prepareBackingHandoffInto(KisBackingHandoffReservation &result,
+    const KisPageWriteSource &source, const KisReplicaHandle &target, QString *error,
+    KisPageRetirementRecord *originalIdle)
+{
+    Q_ASSERT(!result.isValid());
     if (!source.isValid() || !target.isValid()
         || source.domain() != KisPageAccessDomain::CpuRam || target.domain != source.domain()
         || !(source.provider() == target.provider) || !(source.providerEpoch() == target.providerEpoch)
@@ -1821,18 +1853,17 @@ KisBackingHandoffReservation KisPageOwnerLedger::prepareBackingHandoff(
         reservation = d->backingBudget->reserveChange(change, error);
         if (!reservation.isValid()) return {};
     }
-    KisBackingHandoffReservation result;
     result.m_source = backing;
     result.m_physical = physical;
     result.m_targetGeneration = target.version.generation;
     result.m_targetDefaultRevision = target.version.defaultPixelRevision;
-    result.m_budget = std::move(reservation);
+    if (reservation.isValid()) result.m_budget = std::move(reservation);
     result.m_cpuOptionalFee = cpuOptionalFee;
     physical->classClaim = HandoffClaim;
     ++d->activeHandoffs;
     result.m_owner = this;
     KisPageStoreDetail::setError(error, {});
-    return result;
+    return true;
 }
 
 bool KisPageOwnerLedger::commitBackingHandoff(
@@ -1939,8 +1970,8 @@ try
     LedgerNode<ProviderRegistration> candidate;
     {
         QMutexLocker locker(&d->mutex);
-        if (!d->completions) {
-            KisPageStoreDetail::setError(error, QStringLiteral("owner ledger is not configured"));
+        if (!d->completions || d->providersFrozen.load(std::memory_order_relaxed)) {
+            KisPageStoreDetail::setError(error, QStringLiteral("owner ledger is not configured or its providers are frozen"));
             return false;
         }
         if (d->providers.find(key, ProviderLess{}) != d->providers.end()) {

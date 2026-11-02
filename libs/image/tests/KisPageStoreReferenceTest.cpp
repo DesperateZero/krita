@@ -7626,12 +7626,13 @@ void KisPageStoreReferenceTest::editValuesGroupLifetimeAndPressure()
     const auto capacity = edit.storageBytes();
     int disposed = 0;
     for (size_t i : {size_t(0), size_t(1)}) {
-        rows[i]->descriptor() = std::shared_ptr<const KisPageAllocationDescriptor>(
+        auto terminalDescriptor = std::shared_ptr<const KisPageAllocationDescriptor>(
             new KisPageAllocationDescriptor, [&](const auto *value) {
                 // This locks the shards: the terminal reference must already
                 // have left every group gate before its last destructor.
                 metadata->metrics(); ++disposed; delete value;
             });
+        rows[i]->exchangeDescriptor(terminalDescriptor);
     }
     for (auto &row : rows) metadata->discardPrivateValue(row.get());
     KisPagePrivateWrite *first[] = {rows[6].get(), rows[0].get(), rows[5].get(), rows[1].get()};

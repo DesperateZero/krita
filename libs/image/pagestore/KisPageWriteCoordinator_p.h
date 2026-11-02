@@ -52,6 +52,7 @@ class KisCpuResidentBinding;
 class KisCpuReplicaPreparation;
 struct KisPageTransition;
 struct KisPagePrivateWrite;
+class KisPreparedPrivateTarget;
 struct KisPageWriteSelection;
 enum class KisPageTransitionKind : quint8;
 struct KisPageMetadataTransitionResult;
@@ -393,7 +394,7 @@ public:
         KisPageIdleCapacity idleCapacity,
         QMutexLocker<QMutex> &, KisReplicaHandle *target,
         KisCpuWriteBindingReservation &, KisPageStoreDiagnosticTimer &,
-        KisPagePrivateWrite *native = nullptr);
+        KisPreparedPrivateTarget *preparedNative = nullptr);
     KisPageMetadataTransitionResult publishLeaseWrite(KisPageTransition);
     KisReplicaOperation prepareFreshReplica(const KisPageWriteIntent &,
         KisPageReplicaProvider &, const KisPageWriteSelection &,

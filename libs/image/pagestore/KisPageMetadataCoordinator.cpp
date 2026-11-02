@@ -5246,6 +5246,17 @@ try {
     return false;
 }
 
+bool KisPageMetadataCoordinator::preparePrivateTarget(const KisPageWriteSelection &selection,
+    KisPagePrivateWrite *native, KisPreparedPrivateTarget *prepared, QString *error)
+{
+    if (!prepared || prepared->owner || !preparePrivateValue(selection, native, error)) return false;
+    prepared->owner = this;
+    prepared->selection = &selection;
+    prepared->row = native;
+    prepared->value = native->value;
+    return true;
+}
+
 namespace {
 // The unpublished cell has not entered a view or either lookup index. Its
 // creator owns this one cancellation route, including provider refusal.
@@ -5282,50 +5293,66 @@ bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection
         error, before, complete, targetBinding);
 }
 
-bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection &selection,
-    const KisPageWriteSource &source, const KisCpuBackingHandoff &handoff,
-    KisPagePrivateWrite *native, quint32 limit, const std::shared_ptr<KisCpuResidentBinding> &before)
+bool KisPageMetadataCoordinator::acceptPreparedPrivateTarget(KisPreparedPrivateTarget &prepared,
+    const KisPageWriteSource &source, const KisReplicaHandle &target,
+    const std::shared_ptr<KisCpuResidentBinding> &binding, quint32 limit,
+    const std::shared_ptr<KisCpuResidentBinding> &before)
 {
-    if (!handoff.isClaimed()) return false;
-    // prepare checked layout and non-overflowing incarnation; claim rechecked
-    // that same incarnation and obtained physical exclusion. Its immutable
-    // layout and issued next identity remain valid through this accept cut.
-    const auto target = handoff.target();
-    if (!target.allocationIdentity().isValid()) return false;
-    return acceptPrivateTargetValidated(selection, source, target, native,
-        limit, nullptr, before, false, nullptr);
+    if (prepared.owner != this || !prepared.row || prepared.row->value != prepared.value
+        || prepared.row->reserved) return false;
+    // The coordinator passes the one target issued by its claimed Resource.
+    // Retain the final binding exactly once, at the actual metadata consumer.
+    auto retained = binding;
+    const bool accepted = acceptPrivateTargetValidated(*prepared.selection, source, target,
+        prepared.row, limit, nullptr, before, false, &retained, &prepared);
+    if (accepted) prepared.owner = nullptr;
+    return accepted;
 }
 
 bool KisPageMetadataCoordinator::acceptPrivateTargetValidated(const KisPageWriteSelection &selection,
     const KisPageWriteSource &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
     const std::shared_ptr<KisCpuResidentBinding> &before, bool complete,
-    std::shared_ptr<KisCpuResidentBinding> *targetBinding)
+    std::shared_ptr<KisCpuResidentBinding> *targetBinding, const KisPreparedPrivateTarget *prepared)
 {
     const auto &write = selection.write;
-    auto *core = m_core.load(std::memory_order_acquire);
-    if (!core || !write.version.key.isValid() || core->shards.empty()) return false;
     const auto &location = selection.base;
-    if (!native || !native->location.value.isValid()
-        || native->location.shardIndex >= core->shards.size()
-        || !location.node || location.shardIndex != native->location.shardIndex) return false;
-    const size_t shardIndex = native->location.shardIndex;
-    auto *shard = core->shards[shardIndex].get();
-    if (native->location.shard != shard || location.shard != shard || native->reserved
-        || !(write.source.version.key == write.version.key)
-        || !(target.version == write.version) || !write.transaction.isValid()) return false;
+    MetadataShard *shard = nullptr;
+    MetadataPage *page = nullptr;
+    size_t shardIndex = 0;
+    if (prepared) {
+        // Original creator/editor lifetime keeps these cells in place. Only
+        // this synchronous caller can discard an unpublished prepared Value.
+        shardIndex = native->location.shardIndex;
+        shard = static_cast<MetadataShard *>(native->location.shard);
+        page = static_cast<MetadataPage *>(native->location.page);
+        Q_ASSERT(prepared->selection == &selection && prepared->row == native
+            && prepared->value == native->value && native->value->frameHeld
+            && !native->value->indexed && native->value->version == write.version);
+    } else {
+        auto *core = m_core.load(std::memory_order_acquire);
+        if (!core || !write.version.key.isValid() || core->shards.empty()) return false;
+        if (!native || !native->location.value.isValid()
+            || native->location.shardIndex >= core->shards.size()
+            || !location.node || location.shardIndex != native->location.shardIndex) return false;
+        shardIndex = native->location.shardIndex;
+        shard = core->shards[shardIndex].get();
+        if (native->location.shard != shard || location.shard != shard || native->reserved
+            || !(write.source.version.key == write.version.key)
+            || !(target.version == write.version) || !write.transaction.isValid()) return false;
+        page = static_cast<MetadataPage *>(native->location.page);
+    }
     QMutexLocker lock(&shard->mutex);
-    const auto *preparedValue = native->location.shard == shard
-        ? shard->arenas.versions.get(native->location.value) : nullptr;
-    if (!preparedValue || preparedValue != native->value || preparedValue->indexed
-        || !(preparedValue->version == write.version)) return false;
+    if (!prepared) {
+        const auto *value = shard->arenas.versions.get(native->location.value);
+        auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
+        if (!value || value != native->value || value->indexed || !(value->version == write.version)
+            || !(node->first == write.version.key) || &node->second != page) return false;
+    }
     const KisVersionSlotId baseSlot = location.value;
     auto *base = shard->records.version(baseSlot);
-    auto *node = static_cast<decltype(shard->pages)::value_type *>(location.node);
     const bool originalSource = base ? base->version == write.source.version
         : !write.baseWasPrepared && write.source.version.isDefaultPixel() && !source.isValid();
-    if (!originalSource || !(node->first == write.version.key)
-        || &node->second != native->location.page) return false;
-    auto *page = &node->second;
+    if (!originalSource) return false;
     KisPageVersion physicalOwner;
     if (!page->revisionCanAdvance()
         || page->activity.publicationClaim || page->activity.hasWriter()
