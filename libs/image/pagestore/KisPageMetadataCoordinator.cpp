@@ -927,21 +927,6 @@ struct ShardRecordStore {
         return findVersion(identity, &slot) && setPublication(page, version(slot), publication, preparedBy);
     }
 
-    void unindexPhysical(const KisPageValueCell &record)
-    {
-        for (KisReplicaSlotId slot = record.firstReplica; slot.isValid();) {
-            const KisPageReplicaState *stored = replica(slot);
-            Q_ASSERT(stored);
-            if (!stored)
-                break;
-            const bool erased = physicalSlots.eraseExact(
-                replicaHandle(*stored, record.version).physicalSlotIdentity(), slot);
-            Q_ASSERT(erased);
-            Q_UNUSED(erased);
-            slot = stored->nextReplica;
-        }
-    }
-
     void eraseOverflowChain(KisMetadataOverflowSlotId head)
     {
         for (KisMetadataOverflowSlotId slot = head; slot.isValid();) {
@@ -955,26 +940,6 @@ struct ShardRecordStore {
             Q_UNUSED(erased);
             slot = next;
         }
-    }
-
-    void eraseChildren(KisPageValueCell *record)
-    {
-        Q_ASSERT(record);
-        for (KisReplicaSlotId slot = record->firstReplica; slot.isValid();) {
-            KisPageReplicaState *stored = replica(slot);
-            Q_ASSERT(stored);
-            if (!stored)
-                break;
-            const KisReplicaSlotId next = stored->nextReplica;
-            eraseOverflowChain(stored->overflow);
-            const bool erased = eraseReplica(slot);
-            Q_ASSERT(erased);
-            Q_UNUSED(erased);
-            slot = next;
-        }
-        record->firstReplica = {};
-        record->authorityReplica = {};
-        record->replicaCount = 0;
     }
 
     template<class Snapshots>
@@ -1534,29 +1499,38 @@ struct ShardRecordStore {
 
     const KisPageValueCell *unusedRecord(const KisPageValueCell *record) const
     {
-        if (!record || record->version.isDefaultPixel()) return nullptr;
-        const auto *facts = &record->native;
-        const auto *cpu = replica(record->authorityReplica);
+        if (!record) return nullptr;
         const bool accepted = record->publication == KisPagePublicationState::Historical
-            || (record->publication == KisPagePublicationState::Prepared && facts->sealedBy.isValid());
-        return accepted && !record->readEdges
-            && record->replicaCount == 1 && cpu && cpu->domain() == KisPageAccessDomain::CpuRam
+            || (record->publication == KisPagePublicationState::Prepared && record->native.sealedBy.isValid());
+        return accepted && unprotectedCpuValue(*record) ? record : nullptr;
+    }
+
+    bool unprotectedCpuValue(const KisPageValueCell &record) const
+    {
+        if (record.version.isDefaultPixel() || record.readEdges || record.replicaCount != 1) return false;
+        // The checked Value already owns its inline member. Only an actual
+        // out-of-line authority needs a second arena resolution.
+        const auto *cpu = record.authorityReplica == kisInlineReplicaSlot(record.slot)
+            ? &record.primaryReplica : replica(record.authorityReplica);
+        return cpu && cpu->domain() == KisPageAccessDomain::CpuRam
             && cpu->validity == KisReplicaValidity::Valid && !cpu->pinCount
-            && !cpu->overflow.isValid() && !cpu->activeOperation.isValid() ? record : nullptr;
+            && !cpu->overflow.isValid() && !cpu->activeOperation.isValid();
     }
 
     bool canDetachSelected(const KisPageValueCell *selected) const
     {
         return selected && selected->publication == KisPagePublicationState::Historical
-            && unusedRecord(selected);
+            && unprotectedCpuValue(*selected);
     }
 
-    bool canDetachPrepared(const KisPageValueCell *checked) const
+    bool canDetachPrepared(const KisPageValueCell *checked, bool nativeSource) const
     {
-        // Only the immediately preceding locked validation issues this pointer.
-        // Retention and replica eligibility are still checked here.
-        const auto *record = unusedRecord(checked);
-        return record && record->publication == KisPagePublicationState::Prepared;
+        // Both callers just obtained this source from validDetachment under
+        // the same gate. Native source sealing was checked there as well;
+        // external Prepared inputs still need a real sealed CPU value.
+        Q_ASSERT(!checked || checked->publication == KisPagePublicationState::Prepared);
+        return checked && (nativeSource || checked->native.sealedBy.isValid())
+            && unprotectedCpuValue(*checked);
     }
 
     void remove(MetadataPage *page, const KisPageVersion &identity,
@@ -1577,7 +1551,6 @@ struct ShardRecordStore {
     {
         const auto slot = record->slot;
         const auto identity = record->version;
-        unindexPhysical(*record);
         unindexPublication(page, record);
         unlinkVersion(page, record);
         // Original root/overlay references can outlive the logical cut just
@@ -1585,10 +1558,33 @@ struct ShardRecordStore {
         // keeping the Resource alive after its existing release handover.
         const bool retainIdentity = record->frameHeld
             || (record->viewMemoryState.load(std::memory_order_relaxed) & ~KisPageViewValue::OriginalLifetime);
-        auto primary = record->primaryReplica;
-        if (retainIdentity) primary.detachResource(record->version);
-        eraseChildren(record);
-        if (retainIdentity) record->primaryReplica = primary;
+        if (retainIdentity) record->primaryReplica.detachResource(identity);
+        // Physical removal and child retirement consume each original member
+        // once. Keep a terminal primary in place for the later capacity handover;
+        // no copy/clear/restore, and no repeated resolution of this same Value.
+        const auto inlineSlot = kisInlineReplicaSlot(slot);
+        for (auto child = record->firstReplica; child.isValid();) {
+            const bool primary = child == inlineSlot;
+            auto *stored = primary ? &record->primaryReplica : replica(child);
+            Q_ASSERT(stored);
+            if (!stored) break;
+            const auto next = stored->nextReplica;
+            const auto physical = stored->identity();
+            const bool unindexed = physicalSlots.eraseExact(
+                {physical.provider, physical.providerEpoch, physical.allocation.slot}, child);
+            Q_ASSERT(unindexed); Q_UNUSED(unindexed);
+            eraseOverflowChain(stored->overflow);
+            if (primary) {
+                if (!retainIdentity) *stored = {};
+            } else {
+                const bool erased = arenas->replicas.erase(child);
+                Q_ASSERT(erased); Q_UNUSED(erased);
+            }
+            child = next;
+        }
+        record->firstReplica = {};
+        record->authorityReplica = {};
+        record->replicaCount = 0;
         const bool indexErased = exactVersions.eraseExact(identity, slot);
         auto *facts = &record->native;
         Q_ASSERT(facts);
@@ -3771,7 +3767,7 @@ try {
                         || (published ? !shard->validPublication(*page, input, work, transaction.id, minimumEpoch)
                             : !shard->validDetachment(*page, input, transaction.id, &checkedSource))) return {};
                     if (!published) input.detachesSuperseded = input.detachesSuperseded
-                        && shard->records.canDetachPrepared(checkedSource);
+                        && shard->records.canDetachPrepared(checkedSource, input.superseded.native);
                     if (published || input.detachesSuperseded) {
                         if (published) {
                             auto *references = result.m_acceptanceReferences->appendCanonical();
@@ -3912,7 +3908,7 @@ bool KisPageMetadataCoordinator::installAcceptance(PreparedPublication &&prepare
             const auto *current = published ? shard->records.version(work.input->superseded.metadataSlot) : nullptr;
             const bool available = !input.detachesSuperseded
                 || (published ? shard->records.canDetachSelected(current)
-                              : shard->records.canDetachPrepared(checkedSource));
+                              : shard->records.canDetachPrepared(checkedSource, input.superseded.native));
             if (!available) {
                 if (!retentionChanged) ++shard->nativeRetentionRevalidations;
                 retentionChanged = true;

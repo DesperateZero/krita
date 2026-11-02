@@ -198,7 +198,19 @@ private:
     size_t hash(const Key &key) const
     {
         using ::qHash;
-        return qHash(key, m_seed);
+        if constexpr (std::is_same_v<Key, KisPageVersion>) {
+            // This private lookup index needs equality-consistent mixing,
+            // not the byte-wise stable hash used to assign metadata shards.
+            // Keep all identity words, including signed coordinate bits and
+            // the default revision; public hashes and shard selection stay put.
+            size_t seed = qHash(key.key.surface.value, m_seed);
+            seed = qHash((quint64(quint32(key.key.page.column)) << 32)
+                | quint32(key.key.page.row), seed);
+            seed = qHash(key.generation.value, seed);
+            return qHash(key.defaultPixelRevision, seed);
+        } else {
+            return qHash(key, m_seed);
+        }
     }
 
     size_t findBucket(const Key &key) const
