@@ -4371,7 +4371,7 @@ void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
     auto footprint = coordinator.footprint();
     QCOMPARE(footprint.pages, quint64(1));
     QCOMPARE(footprint.pageActivities, quint64(0));
-    QCOMPARE(footprint.metadataPageBytes, quint64(168));
+    QCOMPARE(footprint.metadataPageBytes, quint64(192)); // Includes head and funded late-promotion right.
     QCOMPARE(footprint.metadataPageActivityBytes, quint64(0));
 
     KisPageTransition acquire;
@@ -4482,7 +4482,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         const quint64 records = quint64(sample.pages) * quint64(sample.history + 1);
         QCOMPARE(sample.footprint.pages, quint64(sample.pages));
         QCOMPARE(sample.footprint.pageActivities, quint64(0));
-        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(168));
+        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(192));
         QCOMPARE(sample.footprint.metadataPageActivityBytes, quint64(0));
         QCOMPARE(sample.footprint.versions, records);
         QCOMPARE(sample.footprint.replicas, records);
@@ -7334,6 +7334,10 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
                 metadata->finishAcceptance({&birth, 1});
                 QVERIFY(row->acceptedSlot().isValid());
                 QCOMPARE(row->value->native.exportedStamp, quint64(0));
+                const auto accepted = metadata->footprint();
+                QCOMPARE(accepted.exactVersionIndex.outstandingReservations, quint64(1));
+                QCOMPARE(accepted.versions, accepted.exactVersionIndex.entries + 1);
+                QCOMPARE(row->value->residence, KisPageValueState::Residence::Head);
             }
             QCOMPARE(row->value, originalValue);
             QCOMPARE(row->target(), input.target);
@@ -7696,7 +7700,7 @@ void KisPageStoreReferenceTest::viewRootsShareFinalValueIdentity()
         auto *identity = root.selectedValue(version.key);
         QVERIFY(identity); QCOMPARE(identity->version, version);
         auto *staged = static_cast<KisPageValueCell *>(identity);
-        QVERIFY(staged->initialIdentity); QVERIFY(!staged->indexed);
+        QVERIFY(staged->initialIdentity); QVERIFY(!staged->hasContent());
         QCOMPARE(metadata->pageCount(), qsizetype(0));
         // Runtime implicit registration cannot consume the real manifest's
         // not-yet-adopted cell or replace its already active root identity.
@@ -7706,7 +7710,7 @@ void KisPageStoreReferenceTest::viewRootsShareFinalValueIdentity()
         QVERIFY(!metadata->cpuReadReplica(version).isValid());
         QCOMPARE(metadata->footprint().versionArena.usedSlots, quint64(1));
         QVERIFY(metadata->registerPage(page));
-        QVERIFY(staged->indexed); QVERIFY(!staged->initialIdentity);
+        QVERIFY(staged->hasContent()); QVERIFY(!staged->initialIdentity);
         auto *found = values->pin(version);
         QCOMPARE(found, identity); values->release(found);
         QCOMPARE(metadata->footprint().versionArena.usedSlots, quint64(2));

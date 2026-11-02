@@ -3698,6 +3698,11 @@ KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store)
     return store.d->metadata.metrics();
 }
 
+KisPageMetadataFootprint kisPageStoreMetadataFootprint(const KisPageStore &store)
+{
+    return store.d->metadata.footprint();
+}
+
 KisPageStore::KisPageStore()
     : KisPageStore(KisMutationStorageAllocator<KisPageStore>{})
 {

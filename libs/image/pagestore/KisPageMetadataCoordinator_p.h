@@ -245,7 +245,10 @@ struct KisPageValueState {
     // The original edit holds memory, not a history/read protection edge.
     // Removing a view may detach the value before its Frame finishes delivery.
     bool frameHeld = false;
-    bool indexed = false;
+    enum class Residence : quint8 { Private, Head, Indexed, Detached };
+    Residence residence = Residence::Private;
+    bool hasContent() const noexcept
+    { return residence == Residence::Head || residence == Residence::Indexed; }
     bool initialIdentity = false;
     // Layout and readiness belong to this value. They
     // have no independent slot identity, allocation, or reservation lifetime.
@@ -274,6 +277,22 @@ struct KisPageCpuPublicationResource {
     const KisPageReplicaState *replica = nullptr;
 };
 
+
+template<>
+struct KisSlotIdFor<KisPageReplicaState> {
+    using Type = KisReplicaSlotId;
+};
+
+// Generic placement names an arena replica. Native placement names the
+// original paid retirement record, whose association changes without rekeying.
+// Neither form owns pixels or a second Resource state machine.
+struct KisMetadataPhysicalPosition {
+    KisReplicaSlotId replica;
+    KisPageRetirementRecord *native = nullptr;
+    bool isValid() const { return native || replica.isValid(); }
+    bool operator==(const KisMetadataPhysicalPosition &other) const
+    { return native == other.native && replica == other.replica; }
+};
 
 // The stable original edit row borrows its one final Value. It never owns a
 // second target/layout/binding/proof and cannot be copied into another writer.
@@ -317,7 +336,7 @@ struct KisPagePrivateWrite {
     bool isSealed() const { return value && value->native.sealedBy.isValid(); }
     KisPageTransactionId sealedBy() const { return value ? value->native.sealedBy : KisPageTransactionId{}; }
     KisVersionSlotId valueSlot() const { return value ? value->slot : KisVersionSlotId{}; }
-    KisVersionSlotId acceptedSlot() const { return value && value->indexed ? value->slot : KisVersionSlotId{}; }
+    KisVersionSlotId acceptedSlot() const { return value && value->hasContent() ? value->slot : KisVersionSlotId{}; }
     bool matchesProof(const KisPreparedPageProof &candidate, const KisCompletionTicket &completion) const
     {
         return isSealed() && sealedBy() == candidate.transaction
@@ -326,7 +345,7 @@ struct KisPagePrivateWrite {
     }
     struct Location {
         using ExactIndex = KisShardSlotIndex<KisPageVersion, KisVersionSlotId>;
-        using PhysicalIndex = KisShardSlotIndex<KisReplicaPhysicalSlotIdentity, KisReplicaSlotId>;
+        using PhysicalIndex = KisShardSlotIndex<KisReplicaPhysicalSlotIdentity, KisMetadataPhysicalPosition>;
         void *shard = nullptr; // arena lifetime belongs to the original edit
         void *page = nullptr;
         size_t shardIndex = 0;
@@ -364,11 +383,6 @@ static_assert(sizeof(KisMetadataOverflowNode) <= 64);
 template<>
 struct KisSlotIdFor<KisPageValueCell> {
     using Type = KisVersionSlotId;
-};
-
-template<>
-struct KisSlotIdFor<KisPageReplicaState> {
-    using Type = KisReplicaSlotId;
 };
 
 template<>

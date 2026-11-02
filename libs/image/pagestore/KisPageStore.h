@@ -34,6 +34,7 @@ class KisTiles3PageReplicaProvider;
 class KisTiledDataManagerPageStoreBackend;
 class KisTiledDataManagerPageStoreWriteBatch;
 struct KisPageMetadataMetrics;
+struct KisPageMetadataFootprint;
 struct KisPageBackingLimits;
 struct KisPageBackingUsage;
 struct KisCpuReadBinding;
@@ -705,6 +706,7 @@ private:
     friend class KisCapturedReadView;
     friend class KisPageMutationSession;
     friend KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store);
+    friend KisPageMetadataFootprint kisPageStoreMetadataFootprint(const KisPageStore &store);
 
     // Memento retention uses the original immutable root without exporting
     // its manifest. Restore/release never infer scope from a memento delta.

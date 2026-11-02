@@ -9811,6 +9811,21 @@ void KisPageStoreCpuMutationTest::sharedIdleWarmQuantities()
             if (!overlay) tx = f.store->beginCurrentTransaction();
             QVERIFY2(write(tx), qPrintable(f.error));
             if (!overlay) QVERIFY(f.store->commitPreparedTransaction(tx));
+            const auto metadata = kisPageStoreMetadataFootprint(*f.store);
+            QCOMPARE(metadata.exactVersionIndex.outstandingReservations, overlay ? quint64(16) : quint64(0));
+            QCOMPARE(metadata.versions, metadata.exactVersionIndex.entries + (overlay ? 16 : 0));
+            // Final cells still change each write. Native physical members
+            // remain on the original capacities, including the idle half.
+            QVERIFY(metadata.physicalSlotIndex.entries <= quint64(48));
+            if (overlay) {
+                // A known range is not a known mutation set. Identical input
+                // must not create another head, latent right or physical member.
+                QVERIFY2(write(tx), qPrintable(f.error));
+                const auto unchanged = kisPageStoreMetadataFootprint(*f.store);
+                QCOMPARE(unchanged.exactVersionIndex.reservationBatches, metadata.exactVersionIndex.reservationBatches);
+                QCOMPARE(unchanged.physicalSlotIndex.entries, metadata.physicalSlotIndex.entries);
+                QCOMPARE(unchanged.versionArena.usedSlots, metadata.versionArena.usedSlots);
+            }
             const auto view = overlay ? KisPageReadView::transactionOverlay(tx.id) : KisPageReadView{};
             auto captured = f.store->captureReadRange({1}, QRect(0, 0, 16, 1), view, &f.error);
             QVERIFY(captured.isValid());

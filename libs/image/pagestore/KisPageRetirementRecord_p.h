@@ -419,6 +419,11 @@ struct KisPageRetirementRecord : boost::intrusive::list_base_hook<>
     KRITAIMAGE_EXPORT KisPagePhysicalBackingPointer retainPhysicalEndpoint() noexcept;
     std::atomic<unsigned> storageReferences{1};
     KisMutationStorageAllocator<KisPageRetirementRecord> storage;
+    // Metadata membership follows this original physical lifetime, including
+    // idle checkout. This retains only shard storage, never the pixel binding.
+    std::shared_ptr<void> metadataOwner;
+    quint64 metadataMember = 0;
+    void (*releaseMetadataMember)(void *, KisPageRetirementRecord *) noexcept = nullptr;
     // Registration, idle handoff and terminal consumption share this one
     // identity. Taking terminal ownership freezes it; no second handle is made.
     KisReplicaHandle replica() const noexcept { return backingNode.second.replica(); }

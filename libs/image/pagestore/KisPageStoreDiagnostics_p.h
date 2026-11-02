@@ -14,6 +14,8 @@ class KisPageStore;
 // change to the public SessionStats return layout used by old fixtures.
 struct KisPageMetadataMetrics;
 KRITAIMAGE_EXPORT KisPageMetadataMetrics kisPageStoreMetadataMetrics(const KisPageStore &store);
+struct KisPageMetadataFootprint;
+KRITAIMAGE_EXPORT KisPageMetadataFootprint kisPageStoreMetadataFootprint(const KisPageStore &store);
 
 // The process storage root pays for the fixed opt-in diagnostic presence
 // counter. Profiling TLS belongs to the caller's enabled diagnostic scope.

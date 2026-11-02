@@ -48,6 +48,12 @@ void KisPageRetirementRecordDeleter::operator()(KisPageRetirementRecord *record)
 {
     if (!record) return;
     Q_ASSERT(!record->backingNode.is_linked() && !record->operationNode.is_linked());
+    if (record->releaseMetadataMember) {
+        record->releaseMetadataMember(record->metadataOwner.get(), record);
+        record->releaseMetadataMember = nullptr;
+        record->metadataMember = 0;
+        record->metadataOwner.reset();
+    }
     // The physical account may still serve another alias. End the consumed
     // terminal's actual references now, independently of its allocation tail.
     record->wait.reset();
