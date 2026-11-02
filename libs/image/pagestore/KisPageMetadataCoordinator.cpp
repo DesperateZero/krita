@@ -668,6 +668,7 @@ struct ShardRecordStore {
     MetadataArenas *arenas = nullptr;
     const MetadataMap<KisPageKey, MetadataPage> *pages = nullptr;
     ExactIndex exactVersions;
+    ExactIndex::Reservation unusedExact; // funded index capacity, not a second page identity
     PhysicalIndex physicalSlots;
     // Borrowed only while this shard is admitted by its original facade.
     // Detach clears it under V before an escaped shard can outlive the core.
@@ -712,15 +713,21 @@ struct ShardRecordStore {
             return false;
         }
         if (exactInsertions > 0) {
-            const qsizetype required = exactVersions.requiredCapacity(exactInsertions);
-            if (!required || !exactVersions.prepareCapacity(required)) {
-                reservation->cancel(this);
-                return false;
-            }
-            reservation->exactVersions = exactVersions.reserveInsertions(exactInsertions);
-            if (!reservation->exactVersions.isValid()) {
-                reservation->cancel(this);
-                return false;
+            const auto borrowed = std::min(exactInsertions, unusedExact.remaining());
+            reservation->exactVersions = unusedExact.take(borrowed);
+            const auto missing = exactInsertions - borrowed;
+            if (missing) {
+                const auto required = exactVersions.requiredCapacity(missing);
+                if (!required || !exactVersions.prepareCapacity(required)) {
+                    reservation->cancel(this);
+                    return false;
+                }
+                auto added = exactVersions.reserveInsertions(missing);
+                if (!added.isValid()) {
+                    reservation->cancel(this);
+                    return false;
+                }
+                reservation->exactVersions.absorb(std::move(added));
             }
         }
         if (physicalInsertions > 0) {
@@ -879,6 +886,15 @@ struct ShardRecordStore {
     static KisVersionSlotId nextMutableValue(const MetadataPage &page, const KisPageValueCell &value)
     { return value.residence == KisPageValueState::Residence::Head ? KisVersionSlotId{}
         : value.nextMutable.isValid() ? value.nextMutable : page.preparedHead; }
+
+    void recycleExact(ExactIndex::Reservation &right)
+    {
+        // Capacity is fungible within its original index. Every real caller
+        // consumes this pool before requesting growth; it cannot exclude a
+        // different page or require a directory sweep. Live head rights stay
+        // separate and cannot be reclaimed by another caller.
+        unusedExact.absorb(std::move(right));
+    }
 
     // The right was reserved before the head became visible. Promotion never
     // allocates and preserves the original cell, pins and identity references.
@@ -1600,7 +1616,7 @@ struct ShardRecordStore {
                 // The original member never left this physical index during
                 // idle. Only its association moves to the incoming Value.
                 backing.metadataMember = packedReplica(cpuSlot);
-                physicalSlots.cancelReservation(&native.location.physical);
+                Q_ASSERT(!native.location.physical.isValid());
             } else {
                 KisMetadataPhysicalPosition old;
                 if (physicalSlots.findExact(key, &old)) {
@@ -1691,7 +1707,7 @@ struct ShardRecordStore {
         if (hot) {
             Q_ASSERT(page->preparedHead == record->slot);
             page->preparedHead = {};
-            exactVersions.cancelReservation(&page->headInsertion);
+            recycleExact(page->headInsertion);
             --page->versionCount;
             --page->mutableCount;
         } else {
@@ -5304,7 +5320,7 @@ void KisPageEditValues::release(KisPagePrivateWrite **rows, size_t count) noexce
                     auto &row = *rows[end];
                     auto *value = row.value;
                     Q_ASSERT(value->frameHeld);
-                    shard->records.exactVersions.cancelReservation(&row.location.exact);
+                    shard->records.recycleExact(row.location.exact);
                     shard->records.physicalSlots.cancelReservation(&row.location.physical);
                     value->frameHeld = false;
                     if (!value->hasContent()) {
@@ -5420,7 +5436,7 @@ try {
             != MetadataGrowthResult::Ready) return false;
         ShardRecordStore::ReservationSet reservation;
         const auto cancel = qScopeGuard([&] { reservation.cancel(&shard->records); });
-        if (!shard->records.reserve(demand, groupCount, groupCount, &reservation)) {
+        if (!shard->records.reserve(demand, groupCount, 0, &reservation)) {
             KisPageStoreDetail::setError(error, QStringLiteral("final value storage budget was refused"));
             return false;
         }
@@ -5428,12 +5444,11 @@ try {
         for (size_t i = first; i < end; ++i) {
             const auto &input = *ordered[i];
             auto *native = input.row;
-            const auto slot = shard->arenas.versions.emplaceReserved(&reservation.arenas.versions);
+            const auto slot = shard->arenas.versions.emplaceReserved(&reservation.arenas.versions, input.selection->write.version);
             const auto replica = kisInlineReplicaSlot(slot);
             Q_ASSERT(slot.isValid());
             auto *value = shard->arenas.versions.get(slot);
             value->slot = slot;
-            value->version = input.selection->write.version;
             value->firstReplica = value->authorityReplica = replica;
             value->replicaCount = 1;
             value->primaryReplica.ownerVersion = slot;
@@ -5442,11 +5457,8 @@ try {
             native->location.shardIndex = index;
             native->location.value = slot;
             native->value = value;
-            value->frameHeld = true;
-            value->attachLifetime();
             ++native->edit.m_values;
-            native->location.exact = reservation.exactVersions.take(1);
-            native->location.physical = reservation.physicalSlots.take(1);
+            if (!native->location.exact.isValid()) native->location.exact = reservation.exactVersions.take(1);
             ++shard->nativeValuesPrepared;
             if (auto *prepared = input.prepared) {
                 prepared->owner = this;
@@ -5471,7 +5483,7 @@ void discardPrivateValueLocked(MetadataShard &shard, KisPagePrivateWrite &native
 {
     if (!native.value) return;
     Q_ASSERT(native.value->frameHeld && !native.value->hasContent());
-    shard.records.exactVersions.cancelReservation(&native.location.exact);
+    shard.records.recycleExact(native.location.exact);
     shard.records.physicalSlots.cancelReservation(&native.location.physical);
     // The original Frame consumes target/terminal identity after cancellation.
     // It destroys this same value outside the owner/shard gates at row cleanup.
@@ -5490,12 +5502,43 @@ void KisPageMetadataCoordinator::discardPrivateValue(KisPagePrivateWrite *native
     discardPrivateValueLocked(*shard, *native);
 }
 
+// Called before claiming a physical writer. A stable member already owns
+// its index place; only an actual new/replacement member needs an insertion.
+bool KisPageMetadataCoordinator::preparePrivatePhysical(KisPagePrivateWrite &native,
+    KisPageRetirementRecord *member, QString *error)
+{
+    auto *core = m_core.load(std::memory_order_acquire);
+    const auto &location = native.location;
+    if (!core || !native.value || !location.page || native.isSealed()
+        || location.shardIndex >= core->shards.size()) return false;
+    auto *shard = core->shards[location.shardIndex].get();
+    if (location.shard != shard) return false;
+    if (!member && native.location.physical.isValid()) return true;
+    QMutexLocker lock(&shard->mutex);
+    if (member && member->releaseMetadataMember && member->metadataOwner.get() == shard) {
+        // A failed previous attempt may have prepared a different member.
+        // The ordinary stable-member path has no right to issue or cancel.
+        if (native.location.physical.isValid())
+            shard->records.physicalSlots.cancelReservation(&native.location.physical);
+        return true;
+    }
+    if (native.location.physical.isValid()) return true;
+    auto &index = shard->records.physicalSlots;
+    const auto required = index.requiredCapacity(1);
+    if (!required || !index.prepareCapacity(required)) {
+        KisPageStoreDetail::setError(error, QStringLiteral("physical membership storage budget was refused"));
+        return false;
+    }
+    native.location.physical = index.reserveInsertions(1);
+    return native.location.physical.isValid();
+}
+
 bool KisPageMetadataCoordinator::acceptPrivateTarget(const KisPageWriteSelection &selection,
     const KisPageWriteSource &source, const KisReplicaHandle &target, KisPagePrivateWrite *native, quint32 limit, QString *error,
     const std::shared_ptr<KisCpuResidentBinding> &before, bool complete,
     std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
-    if (!target.isValid()) return false;
+    if (!target.isValid() || !native || !preparePrivatePhysical(*native, nullptr, error)) return false;
     return acceptPrivateTargetValidated(selection, source, target, native, limit,
         error, before, complete, targetBinding);
 }
@@ -5677,7 +5720,8 @@ bool KisPageMetadataCoordinator::completePrivateWrite(KisPagePrivateWrite *nativ
 bool KisPageMetadataCoordinator::replacePrivateWrite(KisPagePrivateWrite *result,
     const KisReplicaHandle &target, std::shared_ptr<KisCpuResidentBinding> *targetBinding)
 {
-    if (!result || !result->hasValue() || !target.isValid() || !(target.version == result->version())) return false;
+    if (!result || !result->hasValue() || !target.isValid() || !(target.version == result->version())
+        || !preparePrivatePhysical(*result, nullptr, nullptr)) return false;
     auto *shard = Private::registeredShard(m_core.load(std::memory_order_acquire), *result);
     if (!shard) return false;
     QMutexLocker lock(&shard->mutex);

@@ -2546,18 +2546,19 @@ bool KisPageOwnerLedger::preparePrivatePublication(KisPagePublicationRows rows,
     } producer{this, {}, nullptr, {}};
     const auto prepare = [](void *context, KisPagePrivateWrite &result) {
         auto &p = *static_cast<Producer *>(context);
-        const auto target = result.target();
-        const auto key = providerKey(target.provider, target.providerEpoch);
+        const auto identity = result.value->primaryReplica.identity();
+        const auto key = providerKey(identity.provider, identity.providerEpoch);
         if (!p.provider || key != p.key) {
-            p.provider = p.owner->provider(target.provider, target.providerEpoch);
+            p.provider = p.owner->provider(identity.provider, identity.providerEpoch);
             p.key = key;
             p.native = dynamic_cast<const KisTiles3PageReplicaProvider *>(p.provider.get());
         }
         const auto admitted = result.descriptorAdmission();
         return result.descriptor() && p.provider
-            && (p.native && admitted
-                ? p.native->prepareCpuPublication(target, admitted, result.binding())
-                : p.provider->prepareCpuPublication(target, *result.descriptor(), result.binding()));
+            && (p.native && admitted && result.binding()
+                && result.value->primaryReplica.nativeResource() == result.binding().get()
+                ? p.native->prepareCpuPublication(admitted, result.binding().get())
+                : p.provider->prepareCpuPublication(result.target(), *result.descriptor(), result.binding()));
     };
     if (!metadata->completePrivatePublication(rows, transaction, issuer, complete,
                                                &producer, prepare, grouped)) {

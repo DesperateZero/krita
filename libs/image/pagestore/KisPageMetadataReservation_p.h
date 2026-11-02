@@ -35,6 +35,16 @@ public:
     KisPageMetadataReservation(const KisPageMetadataReservation &) = delete;
     KisPageMetadataReservation &operator=(const KisPageMetadataReservation &) = delete;
 
+    // Join unused rights of the same original owner; no new capacity or
+    // reservation is issued and the owner's outstanding total is unchanged.
+    void absorb(KisPageMetadataReservation &&other) noexcept
+    {
+        if (!other.isValid()) return;
+        Q_ASSERT(!m_owner || m_owner == other.m_owner);
+        m_owner = std::exchange(other.m_owner, nullptr);
+        m_remaining += std::exchange(other.m_remaining, 0);
+    }
+
     bool isValid() const { return m_owner && m_remaining > 0; }
     qsizetype remaining() const { return m_remaining; }
     // Partition one funded reservation without changing the owner's total.

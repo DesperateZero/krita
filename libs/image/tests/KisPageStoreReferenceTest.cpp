@@ -7336,7 +7336,7 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
                 QVERIFY(row->acceptedSlot().isValid());
                 QCOMPARE(row->value->native.exportedStamp, quint64(0));
                 const auto accepted = metadata->footprint();
-                QCOMPARE(accepted.exactVersionIndex.outstandingReservations, quint64(1));
+                QCOMPARE(accepted.exactVersionIndex.outstandingReservations, quint64(i + 1));
                 QCOMPARE(accepted.versions, accepted.exactVersionIndex.entries + 1);
                 QCOMPARE(row->value->residence, KisPageValueState::Residence::Head);
             }
@@ -7345,6 +7345,17 @@ void KisPageStoreReferenceTest::nativeValueFrameLifetime()
             QCOMPARE(metadata->footprint().replicaArena.usedSlots, quint64(0));
         }
         if (!cancel) {
+            // The old head's unused index place belongs to the shard, not its
+            // key. An unrelated generic registration consumes it without a
+            // new issuance; the live head keeps its own promotion guarantee.
+            const auto before = metadata->footprint().exactVersionIndex;
+            const auto unrelated = pageVersion(1, 1);
+            QVERIFY(metadata->registerPage(initialPageState(unrelated, replica(unrelated, 1, 1, 999))));
+            const auto after = metadata->footprint().exactVersionIndex;
+            QCOMPARE(after.capacity, before.capacity);
+            QCOMPARE(after.reservationBatches, before.reservationBatches);
+            QCOMPARE(after.entries, before.entries + 1);
+            QCOMPARE(after.outstandingReservations, quint64(1));
             KisPageMetadataCoordinator::VersionInfo old;
             QVERIFY(metadata->versionSnapshot(rows[0]->version(), &old));
             QVERIFY(!old.version.isValid());

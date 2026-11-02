@@ -15,6 +15,11 @@ struct KisPagePrivateWrite;
 // Once a cell has an identity, replacing its mutable placement/state must not
 // reconstruct this header or reset references held by an immutable tree.
 struct KisPageViewValue {
+    KisPageViewValue() noexcept = default;
+    // Construction precedes publication of any pointer. Initial ownership is
+    // initialized once, not acquired through an atomic read/modify/write.
+    KisPageViewValue(const KisPageVersion &identity, quint64 initialMemory) noexcept
+        : version(identity), viewMemoryState(initialMemory) {}
     KisPageVersion version;
     KisVersionSlotId slot;
     // The existing indexed/Frame/read lifetime suppresses pointless last-view

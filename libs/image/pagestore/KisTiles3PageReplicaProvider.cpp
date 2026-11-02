@@ -1328,15 +1328,13 @@ bool KisTiles3PageReplicaProvider::prepareCpuPublication(const KisReplicaHandle 
         && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor);
 }
 
-bool KisTiles3PageReplicaProvider::prepareCpuPublication(const KisReplicaHandle &replica,
-    KisValidatedPageDescriptor descriptor,
-    const std::shared_ptr<KisCpuResidentBinding> &binding) const
+bool KisTiles3PageReplicaProvider::prepareCpuPublication(KisValidatedPageDescriptor descriptor,
+    const KisCpuResidentBinding *binding) const
 {
-    if (!descriptor) return false;
-    if (!binding) return validate(replica, descriptor.get());
-    const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding.get());
+    if (!descriptor || !binding) return false;
+    const auto *original = dynamic_cast<const Tiles3ResidentBinding *>(binding);
     return original && original->belongsTo(&d->handoffAdmission)
-        && supportsNativeTileLayout(descriptor) && replica.layout.matches(descriptor);
+        && supportsNativeTileLayout(descriptor) && binding->m_layout.matches(descriptor);
 }
 
 KisReplicaOperation KisTiles3PageReplicaProvider::retire(

@@ -3507,6 +3507,8 @@ bool KisPageWriteCoordinator::tryAcquireReusedTargetLocked(
         publicationPreparation.metadata = reuseCapacity ? metadata->prepareLeaseWrite(transaction, lease)
             : metadata->prepareRecoverableWrite(transaction, lease);
     }
+    if (native && prepared->accounting.isValid()
+        && !metadata->preparePrivatePhysical(*native, prepared->accounting.originalRecord(), nullptr)) return false;
     diagnostic.next(KisPageStoreDiagnosticPhase::RecoverablePrepared, 1);
     locker.relock();
     if (!prepared->accounting.isValid()

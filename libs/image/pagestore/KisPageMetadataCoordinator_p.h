@@ -267,6 +267,8 @@ struct KisPageValueState {
 
 struct KisPageValueCell : KisPageViewValue, KisPageValueState {
     KisPageValueCell() noexcept {} // Arena value initialization must also skip inactive storage.
+    explicit KisPageValueCell(const KisPageVersion &identity) noexcept
+        : KisPageViewValue(identity, OriginalLifetime) { frameHeld = true; }
 };
 
 // Borrowed only for one synchronous acceptance under the Store owner gate.

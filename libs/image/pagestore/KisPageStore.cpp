@@ -1521,6 +1521,12 @@ KisPageMutationSession::Private::prepareTarget(
             if (storageRefused) *storageRefused = true;
             return {};
         }
+        // Fresh/alias now denotes a real new member. Fund it before invoking
+        // the producer; a warm Resource never traverses this issuance.
+        if (!owner->metadata.preparePrivatePhysical(*page, nullptr, error)) {
+            if (storageRefused) *storageRefused = true;
+            return {};
+        }
         bool nativeReady = false;
         try {
             KisPageStoreDiagnosticTimer prepare(diagnosticOwner, alias

@@ -9809,10 +9809,19 @@ void KisPageStoreCpuMutationTest::sharedIdleWarmQuantities()
         for (int i = 0; i < 16; ++i) {
             input.fill(char(0x60 + i));
             if (!overlay) tx = f.store->beginCurrentTransaction();
+            const auto before = kisPageStoreMetadataFootprint(*f.store);
             QVERIFY2(write(tx), qPrintable(f.error));
             if (!overlay) QVERIFY(f.store->commitPreparedTransaction(tx));
             const auto metadata = kisPageStoreMetadataFootprint(*f.store);
-            QCOMPARE(metadata.exactVersionIndex.outstandingReservations, overlay ? quint64(16) : quint64(0));
+            // Live heads retain their promotion guarantees; unused rights
+            // remain fungible shard capacity. They never exceed the old
+            // simultaneous head + incoming-value demand.
+            QVERIFY(metadata.exactVersionIndex.outstandingReservations >= (overlay ? quint64(16) : quint64(0)));
+            QVERIFY(metadata.exactVersionIndex.outstandingReservations <= quint64(32));
+            if (overlay && i >= 2) {
+                QCOMPARE(metadata.exactVersionIndex.reservationBatches, before.exactVersionIndex.reservationBatches);
+                QCOMPARE(metadata.physicalSlotIndex.reservationBatches, before.physicalSlotIndex.reservationBatches);
+            }
             QCOMPARE(metadata.versions, metadata.exactVersionIndex.entries + (overlay ? 16 : 0));
             // Final cells still change each write. Native physical members
             // remain on the original capacities, including the idle half.

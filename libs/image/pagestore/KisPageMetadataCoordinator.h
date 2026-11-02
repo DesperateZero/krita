@@ -347,6 +347,7 @@ private:
     bool preparePrivateTarget(const KisPageWriteSelection &, KisPagePrivateWrite *,
         KisPreparedPrivateTarget *, QString *error);
     void discardPrivateValue(KisPagePrivateWrite *);
+    bool preparePrivatePhysical(KisPagePrivateWrite &, KisPageRetirementRecord *, QString *error);
     // Called while the original physical write claim is held. A nonempty
     // independent before binding permits reclaiming the current authority's
     // physical slot; the final value already exists and no lease is invented.
