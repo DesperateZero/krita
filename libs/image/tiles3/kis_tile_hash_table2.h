@@ -165,6 +165,8 @@ public:
         qint32 col() const { return m_col; }
         qint32 row() const { return m_row; }
         bool removesTile() const { return m_update == Update::Absent; }
+        // The original prepared row may expose writable intent before install.
+        TileTypeSP tile() const { return m_tile; }
     private:
         friend class KisTileHashTableTraits2<T>;
         enum class State : quint8 { Prepared, Inserted, Consumed };

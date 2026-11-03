@@ -20,6 +20,7 @@ struct State {
         quint64 pageSlots = 0, physicalResources = 0, resourceCapacity = 0;
         quint64 activeResults = 0, logicalViews = 0, domainMoves = 0, terminalRegistrations = 0;
         quint64 reservedEdges = 0, rowCapacity = 0;
+        quint64 acceptedEpoch = 0, historyEdges = 0;
     };
 struct Layout { size_t page, resource, body, row, retentionEdge, view; };
 

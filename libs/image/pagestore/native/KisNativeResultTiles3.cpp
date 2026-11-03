@@ -79,14 +79,14 @@ struct KisNativeResultProtocol::Impl::WriteLease final : KisTilePageStoreLease {
 TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Access access, TileLease *cache)
 {
     if (access == Access::Write) {
-        Body *body = iteratorBody();
-        if (body && body->failed) return {};
+        Body *body = iteratorBody(IteratorAccess::Borrow);
         const bool shared = body != nullptr;
         auto cancel = qScopeGuard([&] {
             if (!body) return;
-            if (shared) body->failed = true;
+            if (shared) { body->failed = true; finishRaw(body); }
             else { body->deferredOwner.reset(); cancelBody(body); }
         });
+        if (body && body->failed) return {};
         try {
             std::unique_ptr<WriteLease> result;
             if (cache && *cache) {
@@ -106,22 +106,26 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
             }
             if (index == body->rows.size()) {
                 const QRect rect(col * 64, row * 64, 64, 64);
-                if (!bindRows(*body, rect, nullptr, true) ||
-                    !prepareTargets(*body, nullptr, rect, 0, nullptr, nullptr, index)) return {};
+                if (!bindRows(*body, rect, nullptr, true)) return {};
             }
+            if (!body->rows[index].target && !prepareTargets(*body, nullptr,
+                QRect(col * 64, row * 64, 64, 64), 0, nullptr, nullptr, index, index + 1)) return {};
             result->owner = shared_from_this(); result->body = body; result->tile = body->rows[index].target->tile;
-            ++body->borrows; body = nullptr;
+            if (!shared) { QMutexLocker lock(&gate); ++body->borrows; }
+            body = nullptr;
             return TileLease(result.release());
         } catch (const std::bad_alloc &) { return {}; }
     }
-    if (auto *b = iteratorBody()) {
+    if (auto *b = iteratorBody(IteratorAccess::Borrow)) {
+        auto release = qScopeGuard([&] { if (b) finishRaw(b); });
         Resource *target = nullptr;
         { QMutexLocker lock(&gate); auto it = pages.find({row, col});
           if (it != pages.end() && it->second.writer == b) target = b->rows[it->second.writerIndex].target; }
         if (target) {
             auto lease = std::make_unique<WriteLease>();
             lease->owner = shared_from_this(); lease->body = b; lease->tile = target->tile; lease->writes = false;
-            ++b->borrows; return TileLease(lease.release());
+            b = nullptr;
+            return TileLease(lease.release());
         }
     }
     std::shared_ptr<KisCpuResidentBinding> binding;
@@ -178,19 +182,28 @@ void *KisNativeResultProtocol::IteratorSession::operator new(size_t n) { return 
 void KisNativeResultProtocol::IteratorSession::operator delete(void *p) noexcept { kisFreePageProcessStorage(p, sizeof(IteratorSession), alignof(IteratorSession)); }
 KisNativeResultProtocol::IteratorSession::~IteratorSession() { if (body) owner->finishIterator(std::exchange(body, nullptr), false); }
 bool KisNativeResultProtocol::IteratorSession::finish() { return !body || owner->finishIterator(std::exchange(body, nullptr), true); }
-bool KisNativeResultProtocol::IteratorSession::isActive() const { return body && !body->failed && !owner->closing; }
+bool KisNativeResultProtocol::IteratorSession::isActive() const
+{
+    if (!body) return false;
+    QMutexLocker lock(&owner->gate);
+    return !body->failed && !owner->closing;
+}
 
 std::unique_ptr<KisTiledDataManagerIteratorWriteScope> KisNativeResultProtocol::beginIterator(QString *why)
 try {
     auto session = std::make_unique<IteratorSession>(); session->owner = d;
-    auto *b = d->iteratorBody();
+    auto *b = d->iteratorBody(Impl::IteratorAccess::Client);
+    session->body = b;
     if (b && b->failed) { error(why, "original iterator has failed"); return {}; }
     if (!b) {
         b = d->checkout(); if (!b) return {};
-        b->iterator = true; b->thread = QThread::currentThreadId(); b->iteratorOwner = d.get(); b->deferredOwner = d;
-        b->iteratorNext = Impl::iteratorHead; Impl::iteratorHead = b;
+        b->iterator = true; b->thread = QThread::currentThreadId(); b->deferredOwner = d;
+        QMutexLocker lock(&d->gate);
+        b->clients = 1;
+        b->iteratorNext = d->iteratorHead.load(std::memory_order_relaxed);
+        d->iteratorHead.store(b, std::memory_order_release);
     }
-    ++b->clients; session->body = b;
+    session->body = b;
     return KisTiledDataManagerIteratorWriteScope::fromNative(std::move(session));
 } catch (const std::bad_alloc &) { error(why, "iterator storage refused"); return {}; }
 
@@ -206,6 +219,30 @@ try {
         intent->m_pageStoreNativeReadReady.storeRelease(1);
         return intent;
     };
+    if (auto *body = d->iteratorBody(Impl::IteratorAccess::Borrow)) {
+        auto release = qScopeGuard([&] { Impl::finishRaw(body); });
+        if (body->failed) return {};
+        size_t index = body->rows.size();
+        {
+            QMutexLocker lock(&d->gate);
+            auto it = d->pages.find({row, col});
+            if (it != d->pages.end() && it->second.writer == body) index = it->second.writerIndex;
+        }
+        if (index != body->rows.size() && body->rows[index].adapter)
+            return body->rows[index].adapter.tile();
+        if (!table.getExistingTileForPreparedUpdate(col, row)) {
+            if (index == body->rows.size() && !d->bindRows(*body, QRect(col * 64, row * 64, 64, 64), why, true)) return {};
+            auto &entry = body->rows[index];
+            entry.adapter = table.prepareTileUpdate(col, row);
+            auto intent = entry.adapter.tile();
+            if (!intent) return {};
+            intent->setPageStoreBridge(d.get(), false);
+            body->rawDirty = true;
+            // The same original row owns this wrapper until the all-D cut.
+            // Decoding and iterators cannot recursively publish cold presence.
+            return intent;
+        }
+    }
     if (auto tile = table.getExistingTileForPreparedUpdate(col, row)) {
         QMutexLocker gate(&tile->m_swapBarrierLock);
         if (!tile->m_lockCounter || tile->m_pageStoreWriteLockCount) return tile;
@@ -214,14 +251,9 @@ try {
         // its existing public last-unlock semantics.
         return intentFor(tile->m_tileData);
     }
-    if (d->iteratorBody()) {
-        // A missing public wrapper is an intent, not a visible result. Its
-        // original Body creates the target at lockForWrite; final acceptance
-        // installs the canonical table member. No empty result is published.
-        auto *defaultTile = table.refAndFetchDefaultTileData();
-        auto release = qScopeGuard([&] { defaultTile->deref(); });
-        return intentFor(defaultTile);
-    }
+    // Public writable acquisition establishes explicit presence, even before
+    // pixels are exposed. Keep that accepted wrapper stable for reacquisition;
+    // the iterator's later writable result still uses its original Body.
     Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return {};
     if (!d->bindRows(*p.body, QRect(col * 64, row * 64, 64, 64), why)) return {};
     auto &entry = p.body->rows.front();
@@ -267,11 +299,13 @@ try {
     KisPageStoreDiagnosticTimer phase(nullptr, KisPageStoreDiagnosticPhase::PixelOperationPreflight, pageCount);
     phase.next(KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, pageCount);
     Prepared p;
-    auto *body = d->iteratorBody();
-    if (body && body->failed) { error(why, "original producer has failed"); return false; }
+    auto *body = d->iteratorBody(Impl::IteratorAccess::Client);
+    if (body && body->failed) {
+        d->finishIterator(body, false);
+        error(why, "original producer has failed"); return false;
+    }
     const bool joined = body != nullptr;
-    if (joined) ++body->clients;
-    else { p.owner = d; p.body = d->checkout(); body = p.body; if (!body) return false; }
+    if (!joined) { p.owner = d; p.body = d->checkout(); body = p.body; if (!body) return false; }
     bool succeeded = false, entered = false;
     auto releaseJoined = qScopeGuard([&] {
         if (joined && body) d->finishIterator(body, succeeded);

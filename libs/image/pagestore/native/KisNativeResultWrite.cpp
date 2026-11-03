@@ -66,7 +66,6 @@ struct KisNativeResultProtocol::Async {
     }
 };
 
-thread_local KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::iteratorHead = nullptr;
 
 void KisNativeResultProtocol::Impl::ensureEdges(size_t n)
 {
@@ -105,7 +104,7 @@ void KisNativeResultProtocol::Impl::returnBody(Body *b) noexcept
     // Candidate destruction can release real adapter/GC storage; never do it
     // under S or the manager gate.
     Q_ASSERT(!b->clients && !b->borrows);
-    b->iterator = b->raw = b->revoked = false; b->thread = nullptr; b->iteratorOwner = nullptr; b->iteratorNext = nullptr;
+    b->iterator = b->raw = b->revoked = false; b->thread = nullptr; b->iteratorNext = nullptr;
     b->rows.clear(); b->moves.clear(); b->defaultReaders.clear(); b->history.reset();
     if (b->defaultTile) { b->defaultTile->deref(); b->defaultTile = nullptr; }
     b->defaultPixel.clear();
@@ -154,20 +153,31 @@ void KisNativeResultProtocol::Impl::finishProducer(Body &b) noexcept
     b.ready = true;
 }
 
-KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::iteratorBody() const
+KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::iteratorBody(IteratorAccess access)
 {
-    for (auto *b = iteratorHead; b; b = b->iteratorNext)
-        if (b->iteratorOwner == this && !b->revoked) return b;
+    if (!iteratorHead.load(std::memory_order_acquire)) return nullptr;
+    QMutexLocker lock(&gate);
+    const auto thread = QThread::currentThreadId();
+    for (auto *b = iteratorHead.load(std::memory_order_relaxed); b; b = b->iteratorNext) {
+        if (b->thread != thread || b->revoked) continue;
+        if (access == IteratorAccess::Client) ++b->clients;
+        if (access == IteratorAccess::Borrow) ++b->borrows;
+        return b;
+    }
     return nullptr;
 }
 
 void KisNativeResultProtocol::Impl::detachIterator(Body *b)
 {
-    auto **link = &iteratorHead;
+    // Called with gate held. Removing the last client from any thread must
+    // remove its original registry link before that Body can return to the pool.
+    auto *head = iteratorHead.load(std::memory_order_relaxed);
+    auto **link = &head;
     while (*link && *link != b) link = &(*link)->iteratorNext;
     Q_ASSERT(*link == b);
     if (*link) *link = b->iteratorNext;
     b->iteratorNext = nullptr;
+    iteratorHead.store(head, std::memory_order_release);
 }
 
 bool KisNativeResultProtocol::Impl::finishRawResult(Body *body) noexcept
@@ -176,28 +186,65 @@ bool KisNativeResultProtocol::Impl::finishRawResult(Body *body) noexcept
     if (!body->rawDirty || body->failed) {
         const bool ok = !body->failed || body->revoked; owner->cancelBody(body); return ok;
     }
-    owner->finishProducer(*body);
     QString failure;
+    try {
+        if (!owner->preparePresence(*body, &failure)) {
+            KisStrokeJobFailureContext::reportFailure(failure);
+            owner->cancelBody(body); return false;
+        }
+    } catch (const std::bad_alloc &) {
+        KisStrokeJobFailureContext::reportFailure(QStringLiteral("Native writable presence refused"));
+        owner->cancelBody(body); return false;
+    }
+    owner->finishProducer(*body);
     if (owner->acceptBody(*body, nullptr, &failure)) { owner->returnBody(body); return true; }
     KisStrokeJobFailureContext::reportFailure(failure.isEmpty()
         ? QStringLiteral("Native raw result acceptance failed") : failure);
     owner->cancelBody(body); return false;
 }
 
+bool KisNativeResultProtocol::Impl::preparePresence(Body &b, QString *why)
+{
+    for (auto &row : b.rows) if (row.adapter && !row.changed && !row.before.resource) {
+        {
+            QMutexLocker lock(&gate);
+            if (row.page->nextGeneration == std::numeric_limits<quint64>::max()) return false;
+            row.after.generation = row.page->nextGeneration++;
+        }
+        auto source = provider->captureCompletedTileSource(descriptor, defaultBacking, why);
+        if (!source) return false;
+        row.target = fresh(*row.page, {row.page->key, {row.after.generation}}, nullptr, 0, nullptr,
+                           QRect(0, 0, 64, 64), why, source);
+        if (!row.target) return false;
+        row.ownsTarget = row.changed = true; row.after.resource = row.target;
+    }
+    return true;
+}
+
 void KisNativeResultProtocol::Impl::finishRaw(void *opaque) noexcept
 {
     auto *body = static_cast<Body *>(opaque);
-    Q_ASSERT(body->borrows);
-    if (--body->borrows == 0 && !body->clients) body->deferredOwner->finishRawResult(body);
+    auto *owner = body->deferredOwner.get();
+    bool final;
+    {
+        QMutexLocker lock(&owner->gate);
+        Q_ASSERT(body->borrows);
+        final = --body->borrows == 0 && !body->clients;
+    }
+    if (final) owner->finishRawResult(body);
 }
 
 bool KisNativeResultProtocol::Impl::finishIterator(Body *b, bool success)
 {
-    b->failed |= !success;
-    Q_ASSERT(b->clients);
-    if (--b->clients) return !b->failed || b->revoked;
-    detachIterator(b);
-    return b->borrows ? (!b->failed || b->revoked) : finishRawResult(b);
+    {
+        QMutexLocker lock(&gate);
+        if (!success) b->failed = true;
+        Q_ASSERT(b->clients);
+        if (--b->clients) return !b->failed || b->revoked;
+        detachIterator(b);
+        if (b->borrows) return !b->failed || b->revoked;
+    }
+    return finishRawResult(b);
 }
 
 bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString *why, bool append)
@@ -298,7 +345,9 @@ bool KisNativeResultProtocol::Impl::prepareTargets(Body &b, const quint8 *data,
         const auto local = row.local;
         const auto *payload = payloadFor(row);
         const auto *source = row.before.resource;
-        bool same = !producer;
+        // A public write establishes explicit presence even when all bytes
+        // equal the implicit default. Only an existing result can be a no-op.
+        bool same = !producer && source;
         if (!producer && source) {
             const auto *before = static_cast<const quint8 *>(source->binding->acquireRead(source->handle.allocationIdentity(), false));
             if (!before) { error(why, "source pin refused"); return false; }
@@ -306,11 +355,6 @@ bool KisNativeResultProtocol::Impl::prepareTargets(Body &b, const quint8 *data,
                 same = std::memcmp(before + ((local.y() + y) * 64 + local.x()) * bpp,
                                    payload + y * stride, size_t(local.width() * bpp)) == 0;
             source->binding->releaseRead();
-        } else if (!producer) {
-            const auto *pixel = descriptor.format.defaultPixel.constData();
-            for (int y = 0; y < local.height() && same; ++y)
-                for (int x = 0; x < local.width() && same; ++x)
-                    same = std::memcmp(payload + y * stride + x * bpp, pixel, size_t(bpp)) == 0;
         }
         if (same) continue;
         QMutexLocker lock(&gate);

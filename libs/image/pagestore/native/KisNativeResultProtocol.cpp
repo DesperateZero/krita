@@ -153,6 +153,8 @@ KisNativeResultProtocol::State KisNativeResultProtocol::state() const
         out.pageSlots = d->pages.size(); out.physicalResources = d->physical.size();
         out.resourceCapacity = d->resources.size(); out.activeResults = d->active;
         out.logicalViews = d->views.size(); out.domainMoves = d->domainMoves; out.reservedEdges = d->edgeReserved;
+        out.acceptedEpoch = d->epoch;
+        for (const auto &page : d->pages) out.historyEdges += page.second.history.size();
         for (const auto &body : d->bodies) out.rowCapacity += body.rows.capacity();
     }
     { QMutexLocker lock(&d->terminalGate); out.terminalRegistrations = d->terminalCount; }

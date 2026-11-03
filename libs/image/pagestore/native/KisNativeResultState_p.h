@@ -219,15 +219,19 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     void returnBody(Body *) noexcept;
     void cancelBody(Body *) noexcept;
     void finishProducer(Body &) noexcept;
+    bool preparePresence(Body &, QString *);
     static void finishRaw(void *) noexcept;
     bool bindRows(Body &, const QRect &, QString *, bool append = false);
-    static thread_local Body *iteratorHead;
-    Body *iteratorBody() const;
+    // Owner-local original bodies can be unlinked by a final foreign-thread
+    // release. The atomic head only skips empty lookup; gate protects the list.
+    enum class IteratorAccess { Observe, Client, Borrow };
+    std::atomic<Body *> iteratorHead{nullptr};
+    Body *iteratorBody(IteratorAccess access = IteratorAccess::Observe);
     void detachIterator(Body *);
     bool finishIterator(Body *, bool success);
     bool finishRawResult(Body *) noexcept;
     bool prepareAdapter(Body &, QString *);
-    bool prepareDefault(Body &, const QByteArray &, QString *);
+    bool prepareDefault(Body &, const QByteArray &, QString *, KisTileData *retained = nullptr);
     Selection viewSelection(const View &, Key) const;
     bool prepareTargets(Body &, const quint8 *, const QRect &, qsizetype, const Faults *, QString *, size_t first = 0, size_t last = std::numeric_limits<size_t>::max());
     bool acceptBody(Body &, const Faults *, QString *);
@@ -300,9 +304,9 @@ struct KisNativeResultProtocol::Body {
     Vec<Impl::Move> moves;
     Vec<KisTileSP> defaultReaders;
     Body *next = nullptr, *iteratorNext = nullptr;
-    Impl *iteratorOwner = nullptr;
     size_t clients = 0, borrows = 0;
-    bool iterator = false, raw = false, revoked = false;
+    bool iterator = false, raw = false;
+    std::atomic<bool> revoked{false}, failed{false}, rawDirty{false};
     Qt::HANDLE thread = nullptr;
     std::shared_ptr<Impl> deferredOwner;
     std::shared_ptr<KisNativeHistory> history;
@@ -310,8 +314,8 @@ struct KisNativeResultProtocol::Body {
     KisTileData *defaultTile = nullptr;
     size_t edgeBudget = 0;
     quint64 cutEpoch = 0;
-    bool ready = false, accepted = false, restore = false, rawDirty = false;
-    bool asyncPending = false, abandoned = false, failed = false, adapterReady = false;
+    bool ready = false, accepted = false, restore = false;
+    bool asyncPending = false, abandoned = false, adapterReady = false;
     explicit Body(KisBackingBudgetController *b) : rows(Alloc<Row>(b)), moves(Alloc<Impl::Move>(b)), defaultReaders(Alloc<KisTileSP>(b)) {}
     ~Body() { if (defaultTile) defaultTile->deref(); }
 };

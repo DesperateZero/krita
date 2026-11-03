@@ -85,7 +85,8 @@ try {
         row.adapter = table.prepareTileUpdate(row.page->key.page.column, row.page->key.page.row,
             row.after.resource ? KisTileHashTable::Update::Present : KisTileHashTable::Update::Absent, &row.location);
     }
-    if (s.d->defaultPixel != d->descriptor.format.defaultPixel && !d->prepareDefault(b, s.d->defaultPixel, why)) return false;
+    if (s.d->defaultPixel != d->descriptor.format.defaultPixel &&
+        !d->prepareDefault(b, s.d->defaultPixel, why, s.d->defaultBacking)) return false;
     b.ready = true; return accept(p, why);
 } catch (const std::bad_alloc &) { error(why, "restore preparation refused"); return false; }
 
@@ -181,7 +182,8 @@ bool KisNativeResultProtocol::readCurrent(quint8 *bytes, const QRect &pixels, qs
     // the authority for this new current read. Consume PageSlot directly.
     QReadLocker adapterGate(&KisNativeResultAdapter::gate(d->adapter));
     const auto bpp = d->descriptor.format.pixelStride;
-    auto *live = d->iteratorBody();
+    auto *live = d->iteratorBody(Impl::IteratorAccess::Borrow);
+    auto releaseLive = qScopeGuard([&] { if (live) Impl::finishRaw(live); });
     for (int y = floorTile(pixels.top()); y <= floorTile(pixels.bottom()); ++y)
         for (int x = floorTile(pixels.left()); x <= floorTile(pixels.right()); ++x) {
             Impl::Selection selected; const quint8 *pending = nullptr;
@@ -315,7 +317,6 @@ try {
     Impl::Selection selected;
     { QMutexLocker lock(&d->gate); selected = d->viewSelection(*view.d, {row, col}); }
     if (present) *present = selected.resource != nullptr;
-    KisTileData *tile = nullptr;
     if (auto *r = selected.resource) {
         if (!r->binding->acquireRead(r->handle.allocationIdentity(), false)) return {};
         auto unpin = qScopeGuard([&] { r->binding->releaseRead(); });
@@ -357,7 +358,8 @@ KisPageVersion KisNativeResultProtocol::Snapshot::versionAt(qint32 col, qint32 r
     if (!d) return {};
     QMutexLocker lock(&d->owner->gate);
     const auto selection = d->owner->viewSelection(*d, {row, col});
-    return {{{1}, {col, row}}, {selection.generation}, d->defaultRevision};
+    return {{{1}, {col, row}}, {selection.resource ? selection.generation : d->defaultRevision},
+            selection.resource ? 0 : d->defaultRevision};
 }
 
 KisNativeResultProtocol::ReadAccess KisNativeResultProtocol::Snapshot::readPage(
@@ -370,7 +372,8 @@ KisNativeResultProtocol::ReadAccess KisNativeResultProtocol::Snapshot::readPage(
     { QMutexLocker lock(&d->owner->gate); selection = d->owner->viewSelection(*d, {row, col}); }
     result.owner = d->owner;
     result.stride = 64 * d->owner->descriptor.format.pixelStride;
-    result.selected = {{{1}, {col, row}}, {selection.generation}, d->defaultRevision};
+    result.selected = {{{1}, {col, row}}, {selection.resource ? selection.generation : d->defaultRevision},
+                       selection.resource ? 0 : d->defaultRevision};
     if (auto *r = selection.resource) {
         result.binding = r->binding;
         result.pixels = static_cast<const quint8 *>(r->binding->acquireRead(r->handle.allocationIdentity(), false));

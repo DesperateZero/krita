@@ -76,6 +76,7 @@ public:
         qint32 col() const { return m_col; }
         qint32 row() const { return m_row; }
         bool removesTile() const { return m_update == Update::Absent; }
+        TileTypeSP tile() const { return m_tile; }
     private:
         friend class KisTileHashTableTraits<T>;
         enum class State : quint8 { Prepared, Inserted, Consumed };

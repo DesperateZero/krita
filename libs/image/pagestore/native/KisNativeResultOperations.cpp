@@ -54,7 +54,7 @@ try {
     b.ready = true; return accept(p, why);
 } catch (const std::bad_alloc &) { error(why, "remove preparation refused"); return false; }
 
-bool KisNativeResultProtocol::Impl::prepareDefault(Body &b, const QByteArray &pixel, QString *why)
+bool KisNativeResultProtocol::Impl::prepareDefault(Body &b, const QByteArray &pixel, QString *why, KisTileData *retained)
 {
     if (pixel.size() != descriptor.format.pixelStride) return false;
     {
@@ -65,7 +65,10 @@ bool KisNativeResultProtocol::Impl::prepareDefault(Body &b, const QByteArray &pi
         defaultWriter = &b;
     }
     b.defaultPixel = pixel;
-    b.defaultTile = KisTileDataStore::instance()->createDefaultTileData(pixel.size(), reinterpret_cast<const quint8 *>(pixel.constData()));
+    // Restore consumes the backing already retained by its actual View. A
+    // changed default created by the caller still needs a new real allocation.
+    b.defaultTile = retained ? retained : KisTileDataStore::instance()->createDefaultTileData(
+        pixel.size(), reinterpret_cast<const quint8 *>(pixel.constData()));
     if (!b.defaultTile) { error(why, "real default storage refused"); return false; }
     b.defaultTile->ref(); return true;
 }
@@ -88,7 +91,13 @@ try {
     {
         QMutexLocker lock(&d->gate);
         if (count != d->pages.size()) { error(why, "clone page index changed; retry capture"); return {}; }
-        for (const auto &p : d->pages) if (d->selection(p.second, view.d->epoch).resource) keys.push_back(p.first);
+        for (const auto &p : d->pages) {
+            const auto *writer = p.second.writer;
+            if (writer && (writer->raw || writer->iterator) && writer->rawDirty) {
+                error(why, "clone source has an exposed mutable capability"); return {};
+            }
+            if (d->selection(p.second, view.d->epoch).resource) keys.push_back(p.first);
+        }
     }
     auto branchDescriptor = d->descriptor; branchDescriptor.format.defaultPixel = view.d->defaultPixel;
     auto result = std::make_unique<KisNativeResultProtocol>(adapter, branchDescriptor);
@@ -190,6 +199,7 @@ try {
     const bool removeCovered = !sparseDefault.isEmpty() && sparseDefault == d->descriptor.format.defaultPixel;
     for (auto &row : b.rows) {
         const bool full = row.local == QRect(0, 0, 64, 64);
+        row.selectionOnly = removeCovered && !row.before.resource;
         row.remove = full && removeCovered; row.discard = full && discardCovered;
     }
     if (!d->prepareTargets(b, nullptr, rect, 0, nullptr, why)) return false;
