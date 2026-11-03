@@ -229,6 +229,7 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     std::shared_ptr<KisTiles3PageReplicaProvider> provider;
     std::shared_ptr<Admission> admission;
     QMutex gate, growthGate, bodyGate, asyncGate;
+    QRecursiveMutex historyGate; // Public history sequencing; never taken by page execution.
     QMutex terminalGate; // Never held across S, B, provider calls or job execution.
     KisPageReclamationJobPointer terminalJob;
     KisPageReclamationDelay terminalDelay;
@@ -2158,6 +2159,7 @@ std::unique_ptr<KisNativeResultProtocol> KisNativeResultProtocol::createProduct(
 
 KisMementoSP KisNativeResultProtocol::beginHistory(QString *why)
 try {
+    QMutexLocker historySequence(&d->historyGate);
     {
         QMutexLocker lock(&d->gate);
         if (d->currentHistory) return d->currentHistory;
@@ -2169,8 +2171,8 @@ try {
     KisMementoSP result = KisMemento::createPageStoreMemento();
     result->saveOldDefaultPixel(reinterpret_cast<const quint8 *>(history->before.d->defaultPixel.constData()),
                                d->descriptor.format.pixelStride);
-    // History calls are sequenced by the public owner. Capacity precedes the
-    // final owner gate; weak entries never extend pixel/Selection lifetimes.
+    // The original history gate sequences public memento calls. Capacity
+    // precedes S; weak entries never extend pixel/Selection lifetimes.
     d->history.reserve(d->history.size() + 1);
     {
         QMutexLocker lock(&d->gate);
@@ -2184,6 +2186,7 @@ try {
 
 bool KisNativeResultProtocol::commitHistory(QString *why)
 try {
+    QMutexLocker historySequence(&d->historyGate);
     KisMementoSP current;
     {
         QMutexLocker lock(&d->gate); current = d->currentHistory;
@@ -2208,6 +2211,7 @@ try {
 
 bool KisNativeResultProtocol::abortHistory(const KisMementoSP &current, QString *why)
 {
+    QMutexLocker historySequence(&d->historyGate);
     { QMutexLocker lock(&d->gate);
       if (!current || current != d->currentHistory || !current->m_nativeHistory) return false;
       current->m_nativeHistory->phase = KisNativeHistory::Phase::ClosingAbort;
@@ -2220,6 +2224,7 @@ bool KisNativeResultProtocol::abortHistory(const KisMementoSP &current, QString 
 
 bool KisNativeResultProtocol::restoreHistory(const KisMementoSP &memento, bool before, QString *why)
 {
+    QMutexLocker historySequence(&d->historyGate);
     if (!memento || !memento->m_nativeHistory || !memento->m_nativeHistory->before.d
         || memento->m_nativeHistory->before.d->owner != d || !commitHistory(why)) return false;
     return restore(before ? memento->m_nativeHistory->before : memento->m_nativeHistory->after, why);
@@ -2230,6 +2235,7 @@ bool KisNativeResultProtocol::hasHistory() const
 
 void KisNativeResultProtocol::purgeHistory(const KisMementoSP &oldest)
 {
+    QMutexLocker historySequence(&d->historyGate);
     if (!oldest || !oldest->m_nativeHistory || !oldest->m_nativeHistory->before.d
         || oldest->m_nativeHistory->before.d->owner != d) return;
     const auto through = oldest->m_nativeHistory->sequence;

@@ -276,6 +276,15 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
     const QRect one(0, 0, 64, 64);
     const QByteArray a(16384, char(0x19)), b(16384, char(0x53));
     {
+        Fixture f; f.write(f.a);
+        std::array<KisMementoSP, 4> owners; std::vector<std::thread> threads;
+        for (size_t i = 0; i < owners.size(); ++i) threads.emplace_back([&, i] { owners[i] = f.protocol.beginHistory(); });
+        for (auto &thread : threads) thread.join();
+        for (const auto &owner : owners) require(owner && owner == owners[0], "concurrent public history returns one owner");
+        require(f.protocol.commitHistory(&why), "one concurrent history commit");
+        owners = {}; require(f.protocol.close(&why), "concurrent history close"); requireDrained(f.protocol);
+    }
+    {
         KisPageBackingLimits limits; limits.maxTransientVersionsPerPage = 1;
         Fixture f(limits);
         require(f.protocol.write(data(a), one, 256, &why), "transient seed");
