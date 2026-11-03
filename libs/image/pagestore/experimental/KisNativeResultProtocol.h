@@ -163,12 +163,21 @@ public:
     std::shared_ptr<const KisPageStoreIteratorReadScope> captureIteratorScope(bool writable,
         std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}, QString *error = nullptr);
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope> beginIterator(QString *error = nullptr);
+    KisTileSP selectReadTile(KisTileSP candidate, bool *present, QString *error = nullptr);
     KisTileSP writableTile(qint32 column, qint32 row, QString *error = nullptr);
     bool purge(const QRect &, QString *error = nullptr);
     bool beginHistoryMutation(const KisMementoSP &, QString *error = nullptr);
     bool checkpointHistoryMutation(const KisMementoSP &, QString *error = nullptr);
     bool pixelOperation(const QVector<QRect> &, const std::function<bool(KisPixelWriteCursor *)> &,
                         const KisMementoSP &history, QString *error = nullptr);
+    struct State {
+        quint64 pageSlots = 0, physicalResources = 0, resourceCapacity = 0;
+        quint64 activeResults = 0, logicalViews = 0, domainMoves = 0, terminalRegistrations = 0;
+        quint64 reservedEdges = 0, rowCapacity = 0;
+    };
+    struct Layout { size_t page, resource, body, row, retentionEdge, view; };
+    State state() const;
+    static Layout layout();
     Counts counts() const;
     KisPageBackingUsage usage() const;
 

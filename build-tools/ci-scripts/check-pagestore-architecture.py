@@ -42,7 +42,7 @@ INVENTORY_ROOTS = ("libs/image", "libs/vulkanbackend")
 EXCLUDED_PARTS = {".git", "_build-br0-cpu", "_build-cpu", "build"}
 
 PAGESTORE_IDENTIFIER_RE = re.compile(
-    r"\b(?:KisPageStore\w*|KisCapturedReadView|KisCpuWriteGuard|"
+    r"\b(?:KisNativeResult\w*|KisNativeHistory|KisPageStore\w*|KisCapturedReadView|KisCpuWriteGuard|"
     r"KisCpuMutationSession|KisPageMutationSession|KisTilePageStore\w*|"
     r"KisTiledDataManagerPageStore\w*)\b"
 )
@@ -877,6 +877,39 @@ def source_line_count(path: Path) -> int:
     return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
 
 
+def metadata_directory_replaced(text: str) -> bool:
+    # A non-owning records.pages pointer and a pointer declaration are not
+    # replacement of the original directory. Its actual mutations still fail.
+    text = re.sub(r"\b[\w:<>]+\s*\*\s*pages\s*=[^;]*;", "", text)
+    return bool(re.search(r"\bpages\s*\.\s*(?:erase|clear|extract|swap)\s*\(|"
+        r"(?:shard(?:->|\.)pages|(?<![.*\w])pages)\s*=(?!=)", text))
+
+
+def validate_native_protocol(source: str, manager: str, tile: str, cmake: str) -> list[str]:
+    errors = []
+    for name in ("KisPageMetadataCoordinator", "KisPagePublicationCoordinator", "KisPageMutationSession",
+                 "KisPageWriteCoordinator", "KisTiledDataManagerPageStoreBackend", "retryRetirements", "KisTiledDataManagerTest"):
+        if re.search(rf"\b{re.escape(name)}\b", source):
+            errors.append("native protocol restored an old internal service/bridge: " + name)
+    for fact in ("struct Selection", "struct Resource", "struct Page", "struct KisNativeResultProtocol::Body",
+                 "samePlan(b)", "KisNativeResultProtocol::validateNative", "b.cutEpoch", "fee.commit(change)",
+                 "watchRetirementReadiness", "kisEnqueuePageStoreReclamation", "i < 32", "terminalSerial",
+                 "KisStrokeJobFailureContext::reportFailure", "body->deferredOwner", "writerIndex",
+                 "kisDerivePageStoreProductPolicy", "kisAcquireProductNonPayloadBudget", "maxTransientVersionsPerPage",
+                 "std::swap(defaultBacking, b.defaultTile)", "NativeInstallAudit", "installAudit.begin()", "installAudit.end()"):
+        if fact not in source: errors.append("native complete responsibility is missing: " + fact)
+    for entry in ("m_nativeResult->write(", "m_nativeResult->readCurrent(", "m_nativeResult->beginIterator(",
+                  "m_nativeResult->pixelOperation(", "m_nativeResult->purge(", "m_nativeResult->selectReadTile(",
+                  "m_nativeResult->beginHistory(", "m_nativeResult->commitHistory(", "m_nativeResult->abortHistory(",
+                  "m_nativeResult->copyFrom(", "m_nativeResult->trim(", "m_nativeResult->mutate("):
+        if entry not in manager: errors.append("native public consumer is not migrated: " + entry)
+    if "if (write->reusableReadCache()) read = std::move(write)" not in tile:
+        errors.append("native escaped raw capability lost its original lifetime owner")
+    if "pagestore/experimental/KisNativeResultProtocol.cpp" not in cmake:
+        errors.append("native protocol is not in the actual image library")
+    return errors
+
+
 def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     ratchet = baseline.get("ratchet")
@@ -890,7 +923,13 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         current_usage = pagestore_external_usage()
         new_files = sorted(set(current_usage) - set(frozen_usage))
         for path_name in new_files:
-            errors.append(f"new PageStore intrusion file is not allowlisted: {path_name}")
+            reviewed = manifest.get("reviewed_ratchet_ceiling", {}).get(path_name)
+            declared = any(e.get("path") == path_name for e in manifest.get("entries", []))
+            if not isinstance(reviewed, dict) or not declared or not reviewed.get("reason") or any(
+                current_usage[path_name][field] > reviewed.get(field, -1)
+                for field in ("identifier_occurrences", "direct_includes")
+            ):
+                errors.append(f"new PageStore intrusion file is not explicitly reviewed: {path_name}")
         for path_name, current in sorted(current_usage.items()):
             frozen = frozen_usage.get(path_name)
             if not isinstance(frozen, dict):
@@ -1447,7 +1486,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "struct ShardRecordStore",
             "struct ReservationSet",
             "KisShardSlotIndex<KisPageVersion, KisVersionSlotId>",
-            "KisShardSlotIndex<PhysicalSlot, KisReplicaSlotId>",
+            "KisShardSlotIndex<PhysicalSlot, KisMetadataPhysicalPosition>",
             "KisVersionSlotId firstVersion",
             "void reconsiderHistory(KisPageValueCell *value)",
             "KisPageViewValue *firstReclaim = nullptr",
@@ -1466,7 +1505,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
-            "static_assert(sizeof(MetadataPage) == 168)",
+            "static_assert(sizeof(MetadataPage) == 192)",
             "static_assert(sizeof(MetadataPageActivity) <= 104)",
             "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
@@ -1550,7 +1589,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         # Prepared rows retain their shard and the append-only page node.
         # Revisions/claims remain dynamic; recovering the key is not another
         # validity check. Changing directory lifetime requires a new proof.
-        if re.search(r"\bpages\s*\.\s*(?:erase|clear|extract|swap)\s*\(|\bpages\s*=(?!=)", metadata_text):
+        if metadata_directory_replaced(metadata_text):
             errors.append("metadata original-page lifetime lost its append-only directory")
         for obsolete in ("bool hasWriter(const KisPageKey &", "publicationClaim(const KisPageKey &",
                          "setPublicationClaim(", "acceptedPage"):
@@ -1731,7 +1770,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         owner_source = code_only((page_store_source.parent / "KisPageOwnerLedger.cpp").read_text())
         if "nextProviderInCut" in owner_source:
             errors.append("provider traversal restored one registration lookup per provider")
-        for required in ("freezePrivateValues", "activity.nativeWrite != &value", "(!value.completed && !complete)",
+        for required in ("freezeAuthorities", "activity.nativeWrite != &value", "(!value.completed && !complete)",
                          "activity.writerTransaction == transaction"):
             if required not in metadata_text:
                 errors.append("native validation no longer consumes the original result: " + required)
@@ -1928,6 +1967,12 @@ def main() -> int:
     errors.extend(check_baseline_shape(baseline, manifest))
     errors.extend(validate_callgraph(callgraph, manifest, ownership, census, baseline))
     errors.extend(validate_ratchet(baseline, manifest))
+    native = REPOSITORY_ROOT / "libs/image/pagestore/experimental/KisNativeResultProtocol.cpp"
+    if native.exists():
+        errors.extend(validate_native_protocol(code_only(native.read_text()),
+            code_only((REPOSITORY_ROOT / "libs/image/tiles3/kis_tiled_data_manager.cc").read_text()),
+            code_only((REPOSITORY_ROOT / "libs/image/tiles3/kis_tile.cc").read_text()),
+            (REPOSITORY_ROOT / "libs/image/CMakeLists.txt").read_text()))
     if errors:
         for error in errors:
             print(f"PageStore architecture violation: {error}", file=sys.stderr)

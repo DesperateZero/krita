@@ -1,3 +1,8 @@
+#ifdef NR104_INSTALL_AUDIT
+#include <dlfcn.h>
+#endif
+#include <atomic>
+#include <vector>
 #include "kis_datamanager.h"
 #include "tiles3/kis_hline_iterator.h"
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
@@ -7,6 +12,7 @@
 #include "pagestore/experimental/KisNativeResultProtocol.h"
 #include "tiles3/kis_tiled_data_manager.h"
 #include "pagestore/KisPageStoreReclamation_p.h"
+#include "pagestore/KisPageStoreProductPolicy_p.h"
 #include <QApplication>
 #include "KisStrokeJobFailureContext.h"
 #include <QByteArray>
@@ -53,7 +59,15 @@ struct Fixture {
     }
 };
 
-static void publicContracts() {
+class NativeResultProtocolContractTest {
+public:
+    static void publicContracts();
+    static void concurrentContracts();
+    static void pressureIdentityContracts();
+    static void freshControlContracts();
+    static void stoppedRuntimeContract();
+};
+void NativeResultProtocolContractTest::publicContracts() {
     qputenv("KRITA_NATIVE_RESULT_PROTOCOL", "104");
     const QByteArray zero(4, 0), blue(4, char(0x35)), green(4, char(0x57));
     const QRect rect(-64, 0, 192, 64);
@@ -66,6 +80,8 @@ static void publicContracts() {
         KisDataManager m(4, data(zero));
         m.KisTiledDataManager::clear(rect, data(blue));
         const QByteArray blueImage(rect.width() * rect.height() * 4, char(0x35));
+        auto oldRaw = m.getTile(-1, 0, false); require(oldRaw && oldRaw->lockForRead(), "old public raw read");
+        const auto *oldBytes = oldRaw->data();
         auto fixed = m.capturePageStoreReadScope(false); require(fixed && fixed->isValid(), "fixed public selection");
         auto history = m.getMemento(); require(bool(history), "public history");
         require(m.getMemento() == history, "one history owner");
@@ -81,6 +97,9 @@ static void publicContracts() {
         require(fixed->readPage(-1, 0, false).data()[0] == 0x35, "captured read remains old");
         QByteArray expected = blueImage; std::memset(expected.data(), 0x57, 192 * 4);
         expect(m, expected, rect);
+        auto freshRaw = m.getTile(-1, 0, false); require(freshRaw && freshRaw->lockForRead(), "fresh public raw read");
+        require(freshRaw->data()[0] == 0x57 && oldBytes[0] == 0x35, "fresh selection separates old raw pin");
+        freshRaw->unlockForRead(); freshRaw.clear(); oldRaw->unlockForRead(); oldRaw.clear();
         require(m.tryCommit(&why), "public commit");
         m.rollback(history); expect(m, blueImage, rect);
         m.rollforward(history); expect(m, expected, rect);
@@ -100,7 +119,7 @@ static void publicContracts() {
         std::memset(tile->data(), 0x35, 16384);
         m.clear(); require(!scope->isActive(), "clear revokes original iterator");
         tile->unlockForWrite(); tile.clear();
-        require(!scope->finish(), "revoked iterator never accepts");
+        require(scope->finish(), "revoked iterator finishes as a successful no-op");
         expect(m, QByteArray(16384, 0), QRect(0, 0, 64, 64));
         auto newer = m.beginIteratorWriteScope(); require(newer && newer->isActive(), "new scope after barrier");
         auto replacement = m.getTile(0, 0, true); require(replacement && replacement->lockForWrite(), "new write after barrier");
@@ -148,13 +167,248 @@ static void publicContracts() {
         }, &why);
         require(result == KisPageStoreWriteOperationResult::Failed, "pixel callback failure does not replay");
         expect(m, QByteArray(128 * 4, char(0x35)), QRect(0, 0, 128, 1));
+        auto failedOwner = m.getMemento(); require(m.beginStrokeMutation(failedOwner, &why), "failed stroke owns original history");
+        const auto changed = [&](KisPixelWriteCursor *cursor) {
+            cursor->moveTo(0, 0); if (!cursor->rawData()) return false;
+            std::memcpy(cursor->rawData(), green.constData(), 4); return true;
+        };
+        require(m.writePageStoreOperation({QRect(0, 0, 1, 1)}, changed, &why, failedOwner) == KisPageStoreWriteOperationResult::Succeeded, "first actual stroke result");
+        require(m.writePageStoreOperation({QRect(0, 0, 1, 1)}, [](KisPixelWriteCursor *) { return false; }, &why, failedOwner) == KisPageStoreWriteOperationResult::Failed, "failed stroke callback");
+        int replay = 0;
+        require(m.writePageStoreOperation({}, [&](KisPixelWriteCursor *) { ++replay; return true; }, &why, failedOwner) == KisPageStoreWriteOperationResult::Failed && !replay,
+            "failed original history cannot accept later producer");
+        require(!m.tryCommit(&why) && !m.beginStrokeMutation(failedOwner, &why), "failure poisons commit and reopen");
+        require(m.tryAbort(failedOwner, &why), "actual abort restores original before");
+        expect(m, QByteArray(128 * 4, char(0x35)), QRect(0, 0, 128, 1));
     }
     qunsetenv("KRITA_NATIVE_RESULT_PROTOCOL");
     std::fprintf(stderr, "NATIVE_PUBLIC_CONTRACTS_OK\n");
 }
+
+static void requireDrained(KisNativeResultProtocol &protocol) {
+    kisDrainPageStoreReclamation();
+    const auto state = protocol.state();
+    require(!state.activeResults && !state.domainMoves && !state.terminalRegistrations && !state.reservedEdges,
+        "no outstanding original work or terminal registrations");
+    const auto usage = protocol.usage();
+    for (size_t i = 0; i < size_t(KisBackingBudgetClass::Count); ++i) {
+        const auto &bucket = usage.buckets[i];
+        require(!bucket.reserved.cpuRam && !bucket.reserved.ssd && !bucket.reserved.discreteVram && !bucket.reserved.umaShared,
+            "all category reservations returned");
+        if (i == size_t(KisBackingBudgetClass::ActivePending) || i == size_t(KisBackingBudgetClass::InFlight) ||
+            i == size_t(KisBackingBudgetClass::RetirementDebt))
+            require(!bucket.live.cpuRam && !bucket.live.ssd && !bucket.live.discreteVram && !bucket.live.umaShared,
+                "no transient or retirement live debt");
+    }
+}
+
+void NativeResultProtocolContractTest::concurrentContracts() {
+    {
+        Fixture f; std::atomic<bool> failed{false}; std::vector<std::thread> threads;
+        for (int worker = 0; worker < 4; ++worker) threads.emplace_back([&, worker] {
+            QString error;
+            const QRect area(worker * 128, 0, 128, 64);
+            for (int i = 0; i < 32; ++i) {
+                QByteArray bytes(128 * 64 * 4, char(worker + i + 1));
+                auto pending = f.protocol.prepareWrite(data(bytes), area, 128 * 4, &error);
+                if (!pending) { std::fprintf(stderr, "CONCURRENT_PREP %s\n", qPrintable(error)); failed = true; return; }
+                bool accepted = false;
+                for (int attempt = 0; attempt < 64 && !accepted; ++attempt) {
+                    accepted = f.protocol.accept(pending, &error);
+                    if (!accepted) std::this_thread::yield();
+                }
+                if (!accepted) { std::fprintf(stderr, "CONCURRENT_ACCEPT %s\n", qPrintable(error)); failed = true; return; }
+                QByteArray out(bytes.size(), 0);
+                if (!f.protocol.readCurrent(reinterpret_cast<quint8 *>(out.data()), area, 512, &error) || out != bytes) { failed = true; return; }
+            }
+        });
+        for (auto &thread : threads) thread.join();
+        require(!failed, "disjoint writers and actual capacity growth");
+        require(f.protocol.close(&why), "concurrent owner closes"); requireDrained(f.protocol);
+        require(!f.protocol.state().physicalResources, "concurrent physical release");
+    }
+    {
+        Fixture f; f.rect = QRect(0, 0, 64 * 80, 64);
+        f.a = QByteArray(64 * 80 * 64 * 4, char(0x19)); f.b = QByteArray(f.a.size(), char(0x53)); f.c = QByteArray(f.a.size(), char(0x6d));
+        require(f.protocol.write(data(f.a), f.rect, f.rect.width() * 4, &why), "many pinned pages initial");
+        auto view = f.protocol.capture(&why);
+        std::vector<KisNativeResultProtocol::ReadAccess> pins;
+        for (int x = 0; x < 80; ++x) { pins.push_back(view.readPage(x, 0, &why)); require(pins.back().data(), "actual late pin"); }
+        view = {};
+        require(f.protocol.write(data(f.b), f.rect, f.rect.width() * 4, &why), "many pins second write");
+        require(f.protocol.write(data(f.c), f.rect, f.rect.width() * 4, &why), "many pins third write");
+        kisDrainPageStoreReclamation();
+        require(f.protocol.state().terminalRegistrations >= 64, "actual deferred set exceeds one bounded pass");
+        std::vector<std::thread> release;
+        for (int worker = 0; worker < 4; ++worker) release.emplace_back([&, worker] {
+            for (int x = worker; x < 80; x += 4) pins[x] = {};
+        });
+        for (auto &thread : release) thread.join();
+        require(f.protocol.close(&why), "many terminals close"); requireDrained(f.protocol);
+        require(!f.protocol.state().physicalResources, "all notified physical resources retired");
+    }
+    {
+        KisNativeResultProtocol::ReadAccess pin;
+        {
+            auto f = std::make_unique<Fixture>(); f->write(f->a);
+            auto view = f->protocol.capture(&why); pin = view.readPage(0, 0, &why); view = {};
+            require(f->protocol.close(&why), "facade closes before raw capability");
+            require(pin.data() && pin.data()[0] == 0x19, "late capability remains readable");
+        }
+        require(pin.data()[0] == 0x19, "capability survives actual adapter destruction"); pin = {};
+        kisDrainPageStoreReclamation();
+    }
+    {
+        Fixture f; f.write(f.a);
+        auto pending = f.protocol.prepareProducer(QRect(0, 0, 64, 64), &why);
+        auto done = f.protocol.deferProducer(pending, &why); require(bool(done), "async original producer");
+        require(!f.protocol.close(&why), "pending producer owns funded close tail");
+        f.protocol.cancel(pending); require(done.finish(false), "real completion cancels late original work");
+        require(f.protocol.close(&why), "async late close completion"); requireDrained(f.protocol);
+    }
+    const auto layout = KisNativeResultProtocol::layout();
+    std::fprintf(stderr, "NATIVE_LAYOUT page=%zu resource=%zu body=%zu row=%zu edge=%zu view=%zu\n",
+        layout.page, layout.resource, layout.body, layout.row, layout.retentionEdge, layout.view);
+    std::fprintf(stderr, "NATIVE_CONCURRENT_TERMINAL_OK\n");
+}
+
+void NativeResultProtocolContractTest::pressureIdentityContracts() {
+    const QRect one(0, 0, 64, 64);
+    const QByteArray a(16384, char(0x19)), b(16384, char(0x53));
+    {
+        KisPageBackingLimits limits; limits.maxTransientVersionsPerPage = 1;
+        Fixture f(limits);
+        require(f.protocol.write(data(a), one, 256, &why), "transient seed");
+        auto p = f.protocol.prepareWrite(data(b), one, 256, &why); require(bool(p), "one original unpublished result");
+        auto retained = f.protocol.capturePrepared(p, &why); require(bool(retained), "actual unpublished consumer");
+        f.protocol.cancel(p);
+        require(!f.protocol.prepareWrite(data(b), one, 256, &why), "retained unpublished result enforces transient bound");
+        retained = {};
+        require(f.protocol.write(data(b), one, 256, &why), "last actual unpublished consumer releases allowance");
+        require(f.protocol.close(&why), "transient close"); requireDrained(f.protocol);
+    }
+    {
+        KisPageBackingLimits limits; limits.metadataArenaBytes = 512 * 1024;
+        Fixture f(limits); f.write(f.a);
+        // The original operation row capacity alone exceeds this allowance.
+        require(!f.protocol.prepareProducer(QRect(0, 0, 4096, 4096), &why), "real cold storage admission refusal");
+        f.current(f.a);
+        require(!f.protocol.state().activeResults && !f.protocol.state().reservedEdges, "growth refusal returns original owner and edge credits");
+        f.write(f.b); f.current(f.b);
+    }
+    {
+        Fixture source, destination;
+        require(source.protocol.write(data(a), one, 256, &why), "cross-provider source");
+        auto view = source.protocol.capture(&why);
+        require(source.protocol.alias(view, one, QPoint(64, 0), &why), "source stable alias");
+        view = source.protocol.capture(&why);
+        require(!destination.protocol.restore(view, &why), "foreign owner cannot restore authority");
+        require(!destination.protocol.alias(view, one, QPoint(0, 0), &why), "foreign capability cannot become native selection");
+        require(destination.protocol.copyFrom(view, QRect(0, 0, 128, 64), &why), "foreign real provider import");
+        require(destination.protocol.state().physicalResources == 1, "foreign alias topology charged once");
+        require(destination.protocol.write(data(b), one, 256, &why), "destination independent COW");
+        QByteArray read(16384, 0);
+        require(view.read(reinterpret_cast<quint8 *>(read.data()), one, 256, &why) && read == a, "cross-provider source isolation");
+        auto desc = descriptor(8);
+        KisTiledDataManager adapter(8, data(desc.format.defaultPixel), KisTiledDataManager::SelectionAuthority::ExternalProtocol);
+        KisNativeResultProtocol mismatch(adapter, desc);
+        require(!mismatch.copyFrom(view, one, &why), "incompatible stride refused before import");
+        require(!source.protocol.write(data(a), QRect(std::numeric_limits<int>::max()-63, 0, 64, 64), 256, &why), "unsupported public coordinate rejected");
+    }
+    {
+        KisPageStoreProductPolicy policy; require(kisDerivePageStoreProductPolicy(&policy, &why), "actual product policy");
+        auto parent = kisAcquireProductNonPayloadBudget(policy, &why);
+        const auto before = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+        {
+            Fixture first; first.write(first.a);
+            const auto afterFirst = parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam;
+            Fixture second; second.write(second.a);
+            require(kisAcquireProductNonPayloadBudget(policy, &why) == parent, "two native documents use shared product parent");
+            require(afterFirst > before && parent->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)].live.cpuRam > afterFirst,
+                "both actual native documents charge shared parent");
+            KisBackingBudgetDelta oversized; oversized.bucket(KisBackingBudgetClass::MetadataArena).cpuRam = qint64(policy.limits.metadataArenaBytes);
+            require(!parent->reserve(oversized, &why).isValid(), "combined product metadata ceiling enforced");
+        }
+        kisDrainPageStoreReclamation();
+    }
+    // Fixed K=1; only the surrounding current/history population changes.
+    // Diagnostics verify real touched work, not a time or instruction claim.
+    for (int n : {1, 64, 256}) for (int h : {0, 8}) {
+        Fixture f;
+        QByteArray image(n * 16384, char(0x19));
+        require(f.protocol.write(data(image), QRect(0, 0, n * 64, 64), n * 256, &why), "scaled population setup");
+        std::vector<KisNativeResultProtocol::Snapshot> views;
+        for (int i = 0; i < h; ++i) {
+            views.push_back(f.protocol.capture(&why));
+            require(f.protocol.write(data(i % 2 ? a : b), one, 256, &why), "scaled real retained generation");
+        }
+        const auto before = f.protocol.counts();
+        require(f.protocol.write(data(b), QRect(1, 1, 1, 1), 4, &why), "fixed K original result");
+        const auto after = f.protocol.counts();
+#ifdef NR104_CENSUS
+        require(after.results - before.results <= 1 && after.adapterInstalled - before.adapterInstalled <= 1,
+            "fixed K never installs unrelated population");
+#endif
+        std::fprintf(stderr, "NATIVE_SCALE K=1 N=%d H=%d slots=%llu liveViews=%llu results=%llu installs=%llu\n",
+            n, h, f.protocol.state().pageSlots, f.protocol.state().logicalViews,
+            after.results-before.results, after.adapterInstalled-before.adapterInstalled);
+    }
+    std::fprintf(stderr, "NATIVE_PRESSURE_IDENTITY_OK\n");
+}
+
+void NativeResultProtocolContractTest::freshControlContracts() {
+    const auto previous = qgetenv("KRITA_NATIVE_RESULT_FORCE_FRESH");
+    qputenv("KRITA_NATIVE_RESULT_FORCE_FRESH", "1");
+    for (int k : {1, 16}) {
+        Fixture f; f.write(f.a);
+        const auto before = f.protocol.counts();
+        QByteArray patch(64 * k * 4, char(0x35));
+        for (int i = 0; i < 4; ++i) {
+            patch.fill(char(0x35 + i));
+            require(f.protocol.write(data(patch), QRect(0, 0, 64 * k, 1), patch.size(), &why), "protected fresh partial write");
+            QByteArray read(patch.size(), 0);
+            require(f.protocol.readCurrent(reinterpret_cast<quint8 *>(read.data()), QRect(0, 0, 64 * k, 1), patch.size(), &why) && read == patch, "protected fresh visible bytes");
+        }
+        const auto after = f.protocol.counts();
+#ifdef NR104_CENSUS
+        require(after.fresh - before.fresh == quint64(4 * k) && after.handoff == before.handoff, "protected native fresh never silently uses handoff");
+#endif
+        require(f.protocol.close(&why), "protected fresh close"); requireDrained(f.protocol);
+        std::fprintf(stderr, "NATIVE_FRESH_CONTROL K=%d fresh=%llu handoff=%llu\n", k, after.fresh-before.fresh, after.handoff-before.handoff);
+    }
+    if (previous.isNull()) qunsetenv("KRITA_NATIVE_RESULT_FORCE_FRESH"); else qputenv("KRITA_NATIVE_RESULT_FORCE_FRESH", previous);
+}
+
+void NativeResultProtocolContractTest::stoppedRuntimeContract() {
+    KisNativeResultProtocol::ReadAccess late;
+    {
+        auto f = std::make_unique<Fixture>(); f->write(f->a);
+        auto view = f->protocol.capture(&why); late = view.readPage(0, 0, &why); view = {};
+        require(f->protocol.close(&why), "stop owner closes with real pin");
+        kisDrainPageStoreReclamation();
+    }
+    kisStopPageStoreReclamation();
+    require(late.data() && late.data()[0] == 0x19, "late real pin after permanent stop");
+    late = {};
+    std::fprintf(stderr, "NATIVE_STOP_LATE_RELEASE_OK\n");
+}
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    publicContracts();
+#ifdef NR104_INSTALL_AUDIT
+    struct Counts { size_t allocations, bytes, frees; };
+    auto start = reinterpret_cast<void (*)()>(dlsym(RTLD_DEFAULT, "auditStart"));
+    auto stop = reinterpret_cast<Counts (*)()>(dlsym(RTLD_DEFAULT, "auditStop"));
+    require(start && stop, "real allocation interposer loaded");
+    start(); void *allocation = std::malloc(173);
+    asm volatile("" : "+r"(allocation) : : "memory"); std::free(allocation);
+    const auto control = stop();
+    require(control.allocations > 0 && control.frees > 0, "real allocator positive control");
+    std::fprintf(stderr, "NATIVE_INSTALL_POSITIVE_CONTROL_OK\n");
+#endif
+    NativeResultProtocolContractTest::publicContracts();
+    NativeResultProtocolContractTest::concurrentContracts();
+    NativeResultProtocolContractTest::pressureIdentityContracts();
+    NativeResultProtocolContractTest::freshControlContracts();
     {
         Fixture f; f.write(f.a); auto initial = f.protocol.capture(&why); require(bool(initial), "capture");
         for (int i = 0; i < 16; ++i) { const auto &v = i % 2 ? f.c : f.b; f.write(v); f.current(v); }
@@ -396,5 +650,6 @@ int main(int argc, char **argv) {
         require(failure.failed(), "raw final rejection reaches actual job context"); f.current(f.a);
     }
     kisDrainPageStoreReclamation();
+    NativeResultProtocolContractTest::stoppedRuntimeContract();
     std::fprintf(stderr, "NATIVE104_CONTRACT_OK\n");
 }

@@ -50,7 +50,7 @@ SCANNED_SUFFIXES = SOURCE_SUFFIXES | HEADER_SUFFIXES
 
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', re.MULTILINE)
 PAGESTORE_TOKEN_RE = re.compile(
-    r"\b(?:KisPageStore\w*|KisCapturedReadView|KisCpu(?:Resident|Read|Write)\w*|"
+    r"\b(?:KisNativeResult\w*|KisNativeHistory|KisPageStore\w*|KisCapturedReadView|KisCpu(?:Resident|Read|Write)\w*|"
     r"KisPageMutationSession|KisTilePageStore\w*|KisTiles3PageReplicaProvider|"
     r"KisTiledDataManagerPageStore\w*|KisVulkanPageReplicaProvider)\b"
 )

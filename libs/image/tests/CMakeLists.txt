@@ -223,3 +223,11 @@ endif()
 add_executable(NativeResultProtocolContractTest NativeResultProtocolContractTest.cpp)
 target_link_libraries(NativeResultProtocolContractTest PRIVATE kritaimage)
 add_test(NAME NativeResultProtocolContractTest COMMAND NativeResultProtocolContractTest)
+
+if(KRITA_NATIVE_RESULT_INSTALL_AUDIT)
+    target_compile_definitions(NativeResultProtocolContractTest PRIVATE NR104_INSTALL_AUDIT)
+endif()
+
+if(KRITA_NATIVE_RESULT_CENSUS)
+    target_compile_definitions(NativeResultProtocolContractTest PRIVATE NR104_CENSUS)
+endif()

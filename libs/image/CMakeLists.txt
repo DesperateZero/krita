@@ -469,3 +469,14 @@ set_target_properties(kritaimage PROPERTIES
     VERSION ${GENERIC_KRITA_LIB_VERSION} SOVERSION ${GENERIC_KRITA_LIB_SOVERSION}
 )
 install(TARGETS kritaimage  ${INSTALL_TARGETS_DEFAULT_ARGS})
+
+option(KRITA_NATIVE_RESULT_INSTALL_AUDIT "Instrument native result cuts with the test allocator interposer" OFF)
+option(KRITA_NATIVE_RESULT_CENSUS "Count original native result events in contract builds only" OFF)
+set(_native_contract_definitions "")
+if(KRITA_NATIVE_RESULT_INSTALL_AUDIT)
+    list(APPEND _native_contract_definitions NR104_INSTALL_AUDIT)
+endif()
+if(KRITA_NATIVE_RESULT_CENSUS)
+    list(APPEND _native_contract_definitions NR104_CENSUS)
+endif()
+set_source_files_properties(pagestore/experimental/KisNativeResultProtocol.cpp PROPERTIES COMPILE_DEFINITIONS "${_native_contract_definitions}")

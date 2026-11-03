@@ -628,6 +628,11 @@ KisTileSP KisTiledDataManager::getReadOnlyTileLazy(
     qint32 col, qint32 row, bool &existingTile)
 {
     KisTileSP tile = m_hashTable->getReadOnlyTileLazy(col, row, existingTile);
+    if (tile && m_nativeResult) {
+        QString failure; tile = m_nativeResult->selectReadTile(tile, &existingTile, &failure);
+        if (!tile) { existingTile = false; KisStrokeJobFailureContext::reportFailure(failure); }
+        return tile;
+    }
     if (tile && m_pageStoreBackend && m_pageStoreBackend->isOperational()) {
         tile->setPageStoreBridge(m_pageStoreBackend, false);
         tile = m_pageStoreBackend->selectCurrentReadTile(*this, tile, &existingTile);

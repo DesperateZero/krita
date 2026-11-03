@@ -544,6 +544,32 @@
         "KisVulkanFoundationContractsTest::pageProviderFailsClosedBeforeBr3"
       ],
       "status": "deferred"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "Selected native authority directly owns Page/Selection/Resource/Body/View. Public tile leases, scope and memento consume those facts. Actual result state counts are separate from cost and qualification; original matrix controls validation.",
+      "id": "native104-public-authority",
+      "manifest-entries": [
+        "BR1-NATIVE104-KIS-TILE-H",
+        "BR1-NATIVE104-KIS-TILED-DATA-MANAGER-H",
+        "BR1-NATIVE104-KIS-TILED-DATA-MANAGER-CC",
+        "BR1-NATIVE104-KIS-MEMENTO-H"
+      ],
+      "metrics-source": "NativeResult::state and diagnostic-only original event counters; actual image library contract tests",
+      "representative-tests": [
+        "NativeResultProtocolContractTest::publicContracts",
+        "NativeResultProtocolContractTest::concurrentContracts",
+        "NativeResultProtocolContractTest::pressureIdentityContracts",
+        "NativeResultProtocolContractTest::stoppedRuntimeContract"
+      ],
+      "status": "static-only"
     }
   ],
   "milestone": "BR1-R3-M5B",

@@ -752,6 +752,82 @@
         "original cancellation/failure removes an unstarted cancellable checkpoint while preserving required children",
         "rejection consumes data for invalid contract, cancelled stroke, dispatched finish or a retained stroke no longer in the queue"
       ]
+    },
+    {
+      "creation-paths": [
+        "bindRows/fresh/capture original facts"
+      ],
+      "current-writers": [
+        "KisNativeResultProtocol::Impl"
+      ],
+      "fact": "NativeResult selected logical generation, physical allocation and retained intervals",
+      "id": "BR1-NATIVE104-SELECTION",
+      "lock-or-claim": "Native owner gate for fact transitions; physical Binding gates for exact storage; terminalGate only notification ownership, never held across provider services",
+      "read-only-observers": [
+        "DataManager raw/iterator/packed/undo consumers"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisNativeResultProtocol::Impl",
+      "terminal-paths": [
+        "acceptBody consumes original rows; releaseView and real terminal free physical service before refund"
+      ]
+    },
+    {
+      "creation-paths": [
+        "checkout with actual client scope and source row positions"
+      ],
+      "current-writers": [
+        "KisNativeResultProtocol::Body"
+      ],
+      "fact": "NativeResult operation, iterator clients, raw borrows and outcome",
+      "id": "BR1-NATIVE104-BODY",
+      "lock-or-claim": "Native owner gate for fact transitions; physical Binding gates for exact storage; terminalGate only notification ownership, never held across provider services",
+      "read-only-observers": [
+        "DataManager raw/iterator/packed/undo consumers"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisNativeResultProtocol::Body",
+      "terminal-paths": [
+        "finishRawResult/accept/cancel; no old mutation/publication conversion"
+      ]
+    },
+    {
+      "creation-paths": [
+        "Original real birth reserves terminal credit; only actual blocked release registers readiness"
+      ],
+      "current-writers": [
+        "KisNativeResultProtocol::Impl::Resource"
+      ],
+      "fact": "NativeResult funded physical retirement eligibility and notification",
+      "id": "BR1-NATIVE104-TERMINAL",
+      "lock-or-claim": "Native owner gate for fact transitions; physical Binding gates for exact storage; terminalGate only notification ownership, never held across provider services",
+      "read-only-observers": [
+        "DataManager raw/iterator/packed/undo consumers"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisNativeResultProtocol::Impl::Resource",
+      "terminal-paths": [
+        "One bounded executor consumer per original record; event serial, runtime stop and final owner drain"
+      ]
+    },
+    {
+      "creation-paths": [
+        "Prepare actual default bytes/backing outside install; snapshots retain that original backing"
+      ],
+      "current-writers": [
+        "KisNativeResultProtocol::Impl"
+      ],
+      "fact": "NativeResult immutable default bytes and actual backing",
+      "id": "BR1-NATIVE104-DEFAULT",
+      "lock-or-claim": "Native owner gate for fact transitions; physical Binding gates for exact storage; terminalGate only notification ownership, never held across provider services",
+      "read-only-observers": [
+        "DataManager raw/iterator/packed/undo consumers"
+      ],
+      "status": "canonical",
+      "target-authoritative-owner": "KisNativeResultProtocol::Impl",
+      "terminal-paths": [
+        "all-D swaps the original backing and bytes; old references release after cut"
+      ]
     }
   ],
   "milestone": "BR1-R3-M5B",

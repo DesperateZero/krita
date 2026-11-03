@@ -121,8 +121,8 @@ bool KisTile::releasePageStoreLeasesLocked(TileLeaseRelease &afterUnlock) const
     auto &write = m_pageStoreLeases[WriteLease];
     if (write) {
         KIS_SAFE_ASSERT_RECOVER_NOOP(write->finish(&afterUnlock));
-        read = write->takeReadCache();
-        write.reset();
+        if (write->reusableReadCache()) read = std::move(write);
+        else { read = write->takeReadCache(); write.reset(); }
     }
     for (KisTileData *tileData : m_oldTileData) {
         tileData->unblockSwapping();
