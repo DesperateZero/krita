@@ -571,23 +571,34 @@ void KisCompletionRegistryTest::preparedCompletionsAtCapacity()
     void *filler = allocateTestStoragePressure(process.get(), fillerBytes, 1);
     const auto release = qScopeGuard([&] { freeTestStoragePressure(process.get(), filler, fillerBytes, 1); });
     QCOMPARE(live(), limits.metadataArenaBytes);
+    // Exhaust already-paid interval capacity before expecting a new physical
+    // block to be refused. Budget pressure does not revoke admitted slots.
+    std::vector<KisCompletionTicket> spare;
+    for (int i = 0; i < 64; ++i) {
+        const auto ticket = registry.allocatePending(source);
+        if (!ticket.isValid()) break;
+        spare.push_back(ticket);
+        QCOMPARE(live(), limits.metadataArenaBytes);
+    }
+    QVERIFY(spare.size() < 64);
     QVERIFY(!registry.allocatePending(source).isValid());
     QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), quint64(0));
-    QCOMPARE(registry.sourceStatistics(source).allocatedTickets, quint64(5));
+    QCOMPARE(registry.sourceStatistics(source).allocatedTickets, quint64(5 + spare.size()));
     QCOMPARE(registry.sourceStatistics(source).readinessWaiters, quint64(2));
     // Isolated ranges, a bridge, then closing the gap: every terminal kind
     // completes from the original nodes while admission is actually refused.
     for (const auto index : {2, 4, 3}) registry.completePrepared(tickets[index], status);
     registry.completePrepared(tickets[1], KisCompletionStatus::Succeeded);
     registry.completePrepared(tickets[0], status);
+    for (const auto &ticket : spare) registry.completePrepared(ticket, KisCompletionStatus::Succeeded);
     QCOMPARE(calls, 2);
     QCOMPARE(registry.sourceStatistics(source).pendingTickets, quint64(0));
-    QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5));
+    QCOMPARE(registry.sourceStatistics(source).terminalTickets, quint64(5 + spare.size()));
     QVERIFY(live() < limits.metadataArenaBytes);
     for (const auto &ticket : tickets) QVERIFY(!registry.complete(ticket, KisCompletionStatus::Cancelled));
     freeTestStoragePressure(process.get(), std::exchange(filler, nullptr), fillerBytes, 1);
     const auto next = registry.allocatePending(source);
-    QCOMPARE(next.value(), quint64(6)); // Refusal issued no hidden identity.
+    QCOMPARE(next.value(), quint64(6 + spare.size())); // Refusal issued no hidden identity.
     QVERIFY(registry.complete(next, KisCompletionStatus::Succeeded));
     QCOMPARE(registry.registerSource(KisCompletionDomain::CpuJob), source + 1);
 }
