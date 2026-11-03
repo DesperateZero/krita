@@ -798,7 +798,8 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
         bool copied = false;
         if (srcDM->m_nativeResult) {
             auto selected = useOldSrcData ? srcDM->m_nativeResult->captureOldData(&error) : srcDM->m_nativeResult->capture(&error);
-            copied = selected && m_nativeResult->copyFrom(selected, rect, &error);
+            auto *liveSource = useOldSrcData && srcDM->m_nativeResult->hasHistory() ? nullptr : srcDM;
+            copied = selected && m_nativeResult->copyFrom(selected, rect, liveSource, &error);
         } else {
             // A real external source boundary, not a route through the old
             // destination private/seal/publication pipeline.

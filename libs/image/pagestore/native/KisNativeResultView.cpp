@@ -243,8 +243,9 @@ try {
         auto &phase = current->m_nativeHistory->phase;
         if (phase == KisNativeHistory::Phase::Failed || phase == KisNativeHistory::Phase::ClosingAbort) return false;
         phase = KisNativeHistory::Phase::ClosingCommit;
-        if (d->active) return false;
+        if (current->m_nativeHistory->workers || d->active != current->m_nativeHistory->pendingCount) return false;
     }
+    if (!d->finishHistorySegment(current->m_nativeHistory, why)) return false;
     auto after = capture(why); if (!after) return false;
     current->saveNewDefaultPixel(reinterpret_cast<const quint8 *>(after.d->defaultPixel.constData()),
                                 d->descriptor.format.pixelStride);
@@ -264,7 +265,8 @@ bool KisNativeResultProtocol::abortHistory(const KisMementoSP &current, QString 
     { QMutexLocker lock(&d->gate);
       if (!current || current != d->currentHistory || !current->m_nativeHistory) return false;
       current->m_nativeHistory->phase = KisNativeHistory::Phase::ClosingAbort;
-      if (d->active) return false; }
+      if (current->m_nativeHistory->workers || d->active != current->m_nativeHistory->pendingCount) return false; }
+    d->cancelHistorySegment(current->m_nativeHistory);
     if (!current->m_nativeHistory || !restore(current->m_nativeHistory->before, why)) return false;
     { QMutexLocker lock(&d->gate); d->currentHistory = {}; }
     auto mutableCurrent = current; mutableCurrent->m_nativeHistory.reset();
@@ -391,7 +393,8 @@ KisNativeResultProtocol::ReadAccess KisNativeResultProtocol::Snapshot::readPage(
 bool KisNativeResultProtocol::beginHistoryMutation(const KisMementoSP &memento, QString *why)
 {
     QMutexLocker lock(&d->gate);
-    if (!memento || memento != d->currentHistory || d->active || d->closing) {
+    if (!memento || memento != d->currentHistory || !memento->m_nativeHistory || d->closing
+        || memento->m_nativeHistory->workers || d->active != memento->m_nativeHistory->pendingCount) {
         error(why, "native history mutation owner unavailable"); return false;
     }
     auto &phase = memento->m_nativeHistory->phase;
@@ -401,12 +404,62 @@ bool KisNativeResultProtocol::beginHistoryMutation(const KisMementoSP &memento, 
 
 bool KisNativeResultProtocol::checkpointHistoryMutation(const KisMementoSP &memento, QString *why)
 {
-    QMutexLocker lock(&d->gate);
-    if (!memento || memento != d->currentHistory || memento->m_nativeHistory->phase != KisNativeHistory::Phase::Open || d->active || d->closing) {
-        error(why, "native history checkpoint owner unavailable"); return false;
+    QMutexLocker historySequence(&d->historyGate);
+    std::shared_ptr<KisNativeHistory> history;
+    {
+        QMutexLocker lock(&d->gate);
+        if (!memento || memento != d->currentHistory || !memento->m_nativeHistory
+            || memento->m_nativeHistory->phase != KisNativeHistory::Phase::Open
+            || memento->m_nativeHistory->workers || d->active != memento->m_nativeHistory->pendingCount || d->closing) {
+            error(why, "native history checkpoint owner unavailable"); return false;
+        }
+        history = memento->m_nativeHistory; history->phase = KisNativeHistory::Phase::Sealing;
     }
-    // Each successful original result already crossed the single all-D cut.
-    // Checkpoint consumes that fact; it neither republishes nor reprojects it.
+    const auto reopen = qScopeGuard([&] {
+        QMutexLocker lock(&d->gate);
+        if (history->phase == KisNativeHistory::Phase::Sealing) history->phase = KisNativeHistory::Phase::Open;
+    });
+    return d->finishHistorySegment(history, why);
+}
+
+bool KisNativeResultProtocol::Impl::finishHistorySegment(const std::shared_ptr<KisNativeHistory> &history, QString *why)
+try {
+    auto *body = history->pending;
+    if (!body) return true;
+    Q_ASSERT(!history->workers);
+    size_t total = 0;
+    for (auto *part = body; part; part = part->next) total += part->rows.size();
+    // There is no live row consumer at this real observer boundary. Move the
+    // original rows once, without rebuilding targets, identities or fees.
+    body->rows.reserve(total); body->moves.reserve(2 * total);
+    while (auto *part = body->next) {
+        {
+            QMutexLocker lock(&gate);
+            body->next = part->next; part->next = nullptr;
+            for (auto &row : part->rows) {
+                row.page->writer = body; row.page->writerIndex = body->rows.size();
+                body->rows.push_back(std::move(row));
+            }
+            part->rows.clear(); --history->pendingCount;
+            body->adapterReady = false;
+        }
+        returnBody(part);
+    }
+    finishProducer(*body);
+    if (!acceptBody(*body, nullptr, why)) return false;
+    { QMutexLocker lock(&gate); history->pending = nullptr; history->pendingCount = 0; }
+    returnBody(body);
     return true;
+} catch (const std::bad_alloc &) { error(why, "history checkpoint capacity refused; original rows retained"); return false; }
+
+void KisNativeResultProtocol::Impl::cancelHistorySegment(const std::shared_ptr<KisNativeHistory> &history) noexcept
+{
+    Body *pending;
+    {
+        QMutexLocker lock(&gate);
+        Q_ASSERT(!history->workers);
+        pending = std::exchange(history->pending, nullptr); history->pendingCount = 0;
+    }
+    while (auto *body = pending) { pending = body->next; body->next = nullptr; cancelBody(body); }
 }
 

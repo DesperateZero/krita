@@ -84,13 +84,24 @@ bool KisNativeResultProtocol::close(QString *why)
 {
     if (!d) return true;
     KisMementoSP unfinished;
-    { QMutexLocker lock(&d->gate); unfinished = d->currentHistory; d->currentHistory = {}; }
+    bool cancelHistory = false, initiateClose = false;
+    {
+        QMutexLocker historySequence(&d->historyGate);
+        {
+            QMutexLocker lock(&d->gate); unfinished = d->currentHistory; d->currentHistory = {};
+            initiateClose = !d->closing; d->closing = true;
+            if (unfinished && unfinished->m_nativeHistory) {
+                unfinished->m_nativeHistory->phase = KisNativeHistory::Phase::ClosingAbort;
+                cancelHistory = !unfinished->m_nativeHistory->workers;
+            }
+        }
+        if (cancelHistory) d->cancelHistorySegment(unfinished->m_nativeHistory);
+    }
     unfinished = {};
     Impl::Resource *releasedIdle = nullptr;
     {
         QMutexLocker lock(&d->gate);
-        if (!d->closing) {
-            d->closing = true;
+        if (initiateClose) {
             // Detach the original idle chains under their owning gate. Active
             // births may still be growing the Resource arena; never scan it
             // unlocked or discover pending work through physical capacity.

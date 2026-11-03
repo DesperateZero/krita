@@ -279,11 +279,10 @@ bool KisNativeResultProtocol::pixelOperation(const QVector<QRect> &rects,
     const std::function<bool(KisPixelWriteCursor *)> &operation, const KisMementoSP &history, QString *why)
 try {
     if (!operation) return false;
+    if (history) return historyPixelOperation(rects, operation, history, why);
     {
         QMutexLocker lock(&d->gate);
-        if ((history && (history != d->currentHistory || !history->m_nativeHistory
-                || history->m_nativeHistory->phase != KisNativeHistory::Phase::Open))
-            || (!history && d->currentHistory && d->currentHistory->m_nativeHistory->phase != KisNativeHistory::Phase::None)) {
+        if (d->currentHistory && d->currentHistory->m_nativeHistory->phase != KisNativeHistory::Phase::None) {
             error(why, "pixel operation has no open native history owner"); return false;
         }
     }
@@ -306,23 +305,9 @@ try {
     }
     const bool joined = body != nullptr;
     if (!joined) { p.owner = d; p.body = d->checkout(); body = p.body; if (!body) return false; }
-    bool succeeded = false, entered = false;
+    bool succeeded = false;
     auto releaseJoined = qScopeGuard([&] {
         if (joined && body) d->finishIterator(body, succeeded);
-    });
-    {
-        QMutexLocker lock(&d->gate);
-        if (history) {
-            if (history != d->currentHistory || !history->m_nativeHistory
-                || history->m_nativeHistory->phase != KisNativeHistory::Phase::Open) return false;
-            body->history = history->m_nativeHistory;
-        }
-    }
-    auto poison = qScopeGuard([&] {
-        if (succeeded || !entered || !body || !body->history) return;
-        QMutexLocker lock(&d->gate);
-        if (body->history->phase != KisNativeHistory::Phase::ClosingAbort)
-            body->history->phase = KisNativeHistory::Phase::Failed;
     });
     QRegion missing = pages;
     if (joined) {
@@ -355,10 +340,6 @@ try {
         }
         quint8 *rawData() override {
             if (!row || failed || body.failed) return nullptr;
-            if (body.history) {
-                const auto phase = body.history->phase.load(std::memory_order_acquire);
-                if (phase == KisNativeHistory::Phase::ClosingAbort || phase == KisNativeHistory::Phase::Failed) { failed = true; return nullptr; }
-            }
             if (!row->target) {
                 const auto index = size_t(row - body.rows.data());
                 const QRect rect(row->page->key.page.column * 64, row->page->key.page.row * 64, 64, 64);
@@ -373,7 +354,7 @@ try {
         qint32 x() const override { return px; }
         qint32 y() const override { return py; }
     } cursor(*d, *body, pixels, why);
-    phase.next(KisPageStoreDiagnosticPhase::PixelOperationBody, 1); entered = true;
+    phase.next(KisPageStoreDiagnosticPhase::PixelOperationBody, 1);
     if (!operation(&cursor) || cursor.failed) { error(why, "native pixel producer failed"); return false; }
     phase.next(KisPageStoreDiagnosticPhase::PixelOperationFinish, pageCount);
     if (joined) {
@@ -385,6 +366,154 @@ try {
     if (succeeded) body = nullptr;
     return succeeded;
 } catch (const std::bad_alloc &) { error(why, "native pixel operation storage refused"); return false; }
+
+bool KisNativeResultProtocol::historyPixelOperation(const QVector<QRect> &rects,
+    const std::function<bool(KisPixelWriteCursor *)> &operation, const KisMementoSP &memento, QString *why)
+try {
+    auto owner = d;
+    std::shared_ptr<KisNativeHistory> history;
+    {
+        QMutexLocker lock(&owner->gate);
+        if (!memento || memento != owner->currentHistory || owner->closing
+            || !memento->m_nativeHistory || memento->m_nativeHistory->phase != KisNativeHistory::Phase::Open) {
+            error(why, "history producer has no open owner"); return false;
+        }
+        history = memento->m_nativeHistory; ++history->workers;
+    }
+    Prepared freshRows;
+    Vec<Body::Row *> rows{Alloc<Body::Row *>(&owner->budget)};
+    bool entered = false, succeeded = false;
+    const auto release = qScopeGuard([&] {
+        // A callback keeps permission/identity, not a RAM pin between jobs.
+        // The same reserved target is repinned by the next real consumer.
+        for (auto *row : rows) if (row->pixels) {
+            row->writable.unpin(); row->pixels = nullptr;
+        }
+        {
+            QMutexLocker lock(&owner->gate);
+            for (auto *row : rows) row->producerBusy = false;
+            if (entered && !succeeded && history->phase != KisNativeHistory::Phase::ClosingAbort)
+                history->phase = KisNativeHistory::Phase::Failed;
+        }
+        if (freshRows.body) {
+            owner->cancelBody(std::exchange(freshRows.body, nullptr)); freshRows.owner.reset();
+        }
+        bool closeLast;
+        {
+            QMutexLocker lock(&owner->gate);
+            Q_ASSERT(history->workers); --history->workers;
+            closeLast = owner->closing && !history->workers;
+        }
+        if (closeLast) { owner->cancelHistorySegment(history); owner->finishClosing(); }
+    });
+    QRegion pixels, pages;
+    for (const auto &rect : rects) if (!rect.isEmpty()) {
+        pixels += rect;
+        pages += QRect(QPoint(floorTile(rect.left()), floorTile(rect.top())),
+                       QPoint(floorTile(rect.right()), floorTile(rect.bottom())));
+    }
+    if (pixels.isEmpty()) { succeeded = true; return true; }
+    quint64 count = 0;
+    for (const auto &part : pages) {
+        if (!KisTileHashTable::supportsCoordinates(part.left(), part.top())
+            || !KisTileHashTable::supportsCoordinates(part.right(), part.bottom())) return false;
+        count += quint64(part.width()) * quint64(part.height());
+    }
+    if (count > std::numeric_limits<quint32>::max()) return false;
+    KisPageStoreDiagnosticTimer phase(nullptr, KisPageStoreDiagnosticPhase::PixelOperationPreflight, count);
+    phase.next(KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, count);
+    rows.reserve(size_t(count));
+    QRegion missing = pages;
+    {
+        QMutexLocker lock(&owner->gate);
+        for (const auto &part : pages) for (int y = part.top(); y <= part.bottom(); ++y)
+            for (int x = part.left(); x <= part.right(); ++x) {
+                auto it = owner->pages.find({y, x});
+                if (it == owner->pages.end() || !it->second.writer) continue;
+                auto *body = it->second.writer;
+                if (body->history != history) { error(why, "history range has a foreign writer"); return false; }
+                auto &row = body->rows[it->second.writerIndex];
+                if (row.producerBusy) { error(why, "history range already has a producer"); return false; }
+                row.producerBusy = true; rows.push_back(&row);
+            }
+    }
+    for (const auto *row : rows) missing -= QRect(row->page->key.page.column, row->page->key.page.row, 1, 1);
+    if (!missing.isEmpty()) {
+        freshRows.owner = owner; freshRows.body = owner->checkout();
+        if (!freshRows.body) return false;
+        auto *body = freshRows.body;
+        for (const auto &part : missing)
+            if (!owner->bindRows(*body, QRect(part.x() * 64, part.y() * 64, part.width() * 64, part.height() * 64), why, true)) return false;
+        {
+            QMutexLocker lock(&owner->gate);
+            for (auto &row : body->rows) { row.producerBusy = true; rows.push_back(&row); }
+            body->history = history;
+            body->next = history->pending; history->pending = body; ++history->pendingCount;
+        }
+        freshRows.body = nullptr; freshRows.owner.reset();
+    }
+    // These pointers are a temporary admitted range, not a second result or
+    // page index. Original row storage cannot move while any worker is live.
+    std::sort(rows.begin(), rows.end(), [](const auto *a, const auto *b) {
+        const auto &x = a->page->key.page; const auto &y = b->page->key.page;
+        return Key{x.row, x.column} < Key{y.row, y.column};
+    });
+    class Cursor final : public KisPixelWriteCursor {
+    public:
+        Impl &owner; Vec<Body::Row *> &rows; const QRegion &declared;
+        const std::shared_ptr<KisNativeHistory> &history; QString *why;
+        Body::Row *row = nullptr; qint32 px = 0, py = 0; bool failed = false;
+        Cursor(Impl &o, Vec<Body::Row *> &r, const QRegion &p,
+               const std::shared_ptr<KisNativeHistory> &h, QString *w)
+            : owner(o), rows(r), declared(p), history(h), why(w) {}
+        void moveTo(qint32 x, qint32 y) override {
+            px = x; py = y; row = nullptr;
+            if (!declared.contains(QPoint(x, y))) { failed = true; return; }
+            const Key key{floorTile(y), floorTile(x)};
+            auto it = std::lower_bound(rows.begin(), rows.end(), key, [](const auto *r, Key k) {
+                return Key{r->page->key.page.row, r->page->key.page.column} < k;
+            });
+            if (it != rows.end() && Key{(*it)->page->key.page.row, (*it)->page->key.page.column} == key) row = *it;
+            else failed = true;
+        }
+        quint8 *rawData() override {
+            if (!row || failed) return nullptr;
+            const auto phase = history->phase.load(std::memory_order_acquire);
+            if (phase == KisNativeHistory::Phase::ClosingAbort || phase == KisNativeHistory::Phase::Failed) {
+                failed = true; return nullptr;
+            }
+            if (!row->target) {
+                auto *body = row->page->writer;
+                const auto index = row->page->writerIndex;
+                const QRect rect(row->page->key.page.column * 64, row->page->key.page.row * 64, 64, 64);
+                if (!owner.prepareTargets(*body, nullptr, rect, 0, nullptr, why, index, index + 1)) { failed = true; return nullptr; }
+            } else if (!row->pixels) {
+                if (!row->writable.isValid()) row->writable = KisCpuWriteBindingReservation::acquire(
+                    row->target->binding, row->target->handle.allocationIdentity());
+                row->pixels = static_cast<quint8 *>(row->writable.pinResident());
+                if (!row->pixels) row->pixels = static_cast<quint8 *>(row->writable.materialize());
+                if (!row->pixels) { failed = true; return nullptr; }
+            }
+            return row->pixels + ((py - row->page->key.page.row * 64) * 64
+                + px - row->page->key.page.column * 64) * owner.descriptor.format.pixelStride;
+        }
+        qint32 numContiguousColumns(qint32 x) const override { return 64 - (x - floorTile(x) * 64); }
+        qint32 numContiguousRows(qint32 y) const override { return 64 - (y - floorTile(y) * 64); }
+        qint32 rowStride(qint32, qint32) const override { return 64 * owner.descriptor.format.pixelStride; }
+        qint32 x() const override { return px; }
+        qint32 y() const override { return py; }
+    } cursor(*owner, rows, pixels, history, why);
+    phase.next(KisPageStoreDiagnosticPhase::PixelOperationBody, 1);
+    entered = true;
+    if (!operation(&cursor) || cursor.failed
+        || history->phase == KisNativeHistory::Phase::ClosingAbort
+        || history->phase == KisNativeHistory::Phase::Failed) {
+        error(why, "history pixel producer failed"); return false;
+    }
+    succeeded = true;
+    phase.next(KisPageStoreDiagnosticPhase::PixelOperationFinish, count);
+    return true;
+} catch (const std::bad_alloc &) { error(why, "history original-row admission refused"); return false; }
 
 KisTileSP KisNativeResultProtocol::selectReadTile(KisTileSP candidate, bool *present, QString *why)
 try {

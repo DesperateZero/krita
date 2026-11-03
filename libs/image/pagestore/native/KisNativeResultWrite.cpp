@@ -296,7 +296,7 @@ bool KisNativeResultProtocol::Impl::prepareAdapter(Body &b, QString *why)
         ++changed;
         if (row.after.resource) range |= QRect(row.page->key.page.column, row.page->key.page.row, 1, 1);
     }
-    if (!b.edgeBudget && changed) { ensureEdges(changed); b.edgeBudget = changed; }
+    if (changed > b.edgeBudget) { ensureEdges(changed - b.edgeBudget); b.edgeBudget = changed; }
     if (!range.isEmpty() && !KisNativeResultAdapter::extent(adapter).prepareTileRange(range)) {
         error(why, "adapter extent capacity refused; Ready retained"); return false;
     }

@@ -3255,6 +3255,71 @@ void KisTiledDataManagerTest::testPageStoreHistoryMutation()
     }
 }
 
+void KisTiledDataManagerTest::testNativeHistoryConcurrentRows()
+{
+    const quint8 blank = 0x13;
+    KisTiledDataManager dm(1, &blank);
+    const auto history = dm.getMemento(); QVERIFY(dm.beginStrokeMutation(history));
+    const auto result = dm.writePageStoreOperation({QRect(0, 0, 128, 1)}, [](KisPixelWriteCursor *c) {
+        c->moveTo(0, 0); if (!c->rawData()) return false; *c->rawData() = 0x31;
+        c->moveTo(64, 0); if (!c->rawData()) return false; *c->rawData() = 0x32;
+        return true;
+    }, nullptr, history);
+    QCOMPARE(result, KisPageStoreWriteOperationResult::Succeeded);
+    QSemaphore entered, release;
+    std::array<bool, 3> success{};
+    std::array<std::thread, 3> workers;
+    const auto join = qScopeGuard([&] { release.release(3); for (auto &t : workers) if (t.joinable()) t.join(); });
+    for (size_t i = 0; i < workers.size(); ++i) workers[i] = std::thread([&, i] {
+        success[i] = dm.writePageStoreOperation({QRect(int(i) * 64, 0, 1, 1)}, [&](KisPixelWriteCursor *c) {
+            c->moveTo(int(i) * 64, 0); auto *p = c->rawData();
+            entered.release(); release.acquire();
+            if (!p) return false;
+            *p = quint8(0x51 + i); return true;
+        }, nullptr, history) == KisPageStoreWriteOperationResult::Succeeded;
+    });
+    QVERIFY(entered.tryAcquire(3, 5000));
+    QVERIFY(!dm.checkpointStrokeMutation(history));
+    quint8 before[129]; dm.readBytes(before, 0, 0, 129, 1);
+    for (int x : {0, 64, 128}) QCOMPARE(before[x], blank);
+    release.release(3); for (auto &t : workers) t.join();
+    for (const bool ok : success) QVERIFY(ok);
+    QVERIFY(dm.checkpointStrokeMutation(history));
+    quint8 after[129]; dm.readBytes(after, 0, 0, 129, 1);
+    for (int i = 0; i < 3; ++i) QCOMPARE(after[i * 64], quint8(0x51 + i));
+    QVERIFY(dm.tryAbort(history));
+    dm.readBytes(after, 0, 0, 129, 1);
+    for (int x : {0, 64, 128}) QCOMPARE(after[x], blank);
+    QCOMPARE(KisNativeResultTestAccess::state(*dm.m_nativeResult).activeResults, quint64(0));
+}
+
+void KisTiledDataManagerTest::testNativeHistoryCheckpointRetry()
+{
+    const quint8 blank = 0x13;
+    KisTiledDataManager dm(1, &blank);
+    const auto history = dm.getMemento(); QVERIFY(dm.beginStrokeMutation(history));
+    int producerCalls = 0;
+    QCOMPARE(dm.writePageStoreOperation({QRect(0, 0, 1, 1)}, [&](KisPixelWriteCursor *c) {
+        ++producerCalls; c->moveTo(0, 0); auto *p = c->rawData();
+        if (!p) return false; *p = 0x71; return true;
+    }, nullptr, history), KisPageStoreWriteOperationResult::Succeeded);
+    kisDrainPageStoreReclamation();
+    auto process = kisAcquirePageStoreBootstrapBudget(); QVERIFY(process);
+    const auto used = process->usage().buckets[size_t(KisBackingBudgetClass::MetadataArena)];
+    const size_t count = size_t(kisPageProcessStorageLimit() - used.live.cpuRam - used.reserved.cpuRam);
+    void *filler = allocateTestProcessStoragePressure(count, 1); QVERIFY(filler);
+    const auto free = qScopeGuard([&] { if (filler) freeTestProcessStoragePressure(filler, count, 1); });
+    QVERIFY(!dm.checkpointStrokeMutation(history));
+    freeTestProcessStoragePressure(std::exchange(filler, nullptr), count, 1);
+    quint8 actual = 0; dm.readBytes(&actual, 0, 0, 1, 1); QCOMPARE(actual, blank);
+    QVERIFY(dm.checkpointStrokeMutation(history)); QCOMPARE(producerCalls, 1);
+    dm.readBytes(&actual, 0, 0, 1, 1); QCOMPARE(actual, quint8(0x71));
+    QVERIFY(dm.tryCommit()); dm.rollback(history);
+    dm.readBytes(&actual, 0, 0, 1, 1); QCOMPARE(actual, blank);
+    dm.purgeHistory(history);
+    QCOMPARE(KisNativeResultTestAccess::state(*dm.m_nativeResult).activeResults, quint64(0));
+}
+
 void KisTiledDataManagerTest::testPageStoreHistoryMutationFailure_data()
 {
     QTest::addColumn<int>("bpp"); QTest::addColumn<bool>("cut");
@@ -3408,15 +3473,15 @@ void KisTiledDataManagerTest::testPageStoreHistoryMutationFailure()
         }, nullptr, owner);
     };
     QCOMPARE(write(0x51, true), KisPageStoreWriteOperationResult::Succeeded);
-    KisCapturedReadView frozen; if (cut) { QVERIFY(dm.checkpointStrokeMutation(owner)); frozen = dm.m_pageStoreBackend->captureReadView(); QVERIFY(frozen.isValid()); }
+    KisNativeResultProtocol::Snapshot frozen; if (cut) { QVERIFY(dm.checkpointStrokeMutation(owner)); frozen = dm.m_nativeResult->capture(); QVERIFY(bool(frozen)); }
     QCOMPARE(write(0x71, false), KisPageStoreWriteOperationResult::Failed);
     QCOMPARE(write(0x91, true), KisPageStoreWriteOperationResult::Failed);
     QVERIFY(!dm.tryCommit()); QVERIFY(!dm.tryCommit()); QVERIFY(!dm.beginStrokeMutation(owner));
     QVERIFY(dm.tryAbort(owner)); QByteArray actual(bpp, 0);
     dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 0, 0, 1, 1); QCOMPARE(actual, initial);
     if (cut) {
-        auto read = frozen.readResidentPage({dm.m_pageStoreBackend->surface(), {0, 0}}); QVERIFY(read.isValid());
-        QCOMPARE(QByteArray(static_cast<const char *>(read.data()), bpp), QByteArray(bpp, char(0x51)));
+        auto read = frozen.readPage(0, 0); QVERIFY(bool(read.data()));
+        QCOMPARE(QByteArray(reinterpret_cast<const char *>(read.data()), bpp), QByteArray(bpp, char(0x51)));
     }
 }
 

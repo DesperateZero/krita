@@ -127,6 +127,8 @@ private Q_SLOTS:
     void testPageStoreHistorySegmentDelivery();
     void testPageStoreHistorySegmentRefusal_data();
     void testPageStoreHistorySegmentRefusal();
+    void testNativeHistoryConcurrentRows();
+    void testNativeHistoryCheckpointRetry();
     void testPageStoreHistoryMutationFailure_data();
     void testPageStoreHistoryMutationFailure();
     void testPageStoreHistoryMutationClosing_data();

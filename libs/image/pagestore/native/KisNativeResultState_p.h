@@ -77,13 +77,7 @@ inline bool bounds(const quint8 *data, const QRect &rect, qsizetype stride, int 
 }
 using namespace KisNativeResultDetail;
 
-class KisNativeHistory {
-public:
-    KisNativeResultProtocol::Snapshot before, after;
-    quint64 sequence = 0;
-    enum class Phase { None, Open, ClosingCommit, ClosingAbort, Failed, Sealed };
-    std::atomic<Phase> phase{Phase::None};
-};
+class KisNativeHistory;
 
 struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTilePageStoreBridge {
     struct Page;
@@ -220,6 +214,8 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     void cancelBody(Body *) noexcept;
     void finishProducer(Body &) noexcept;
     bool preparePresence(Body &, QString *);
+    bool finishHistorySegment(const std::shared_ptr<KisNativeHistory> &, QString *);
+    void cancelHistorySegment(const std::shared_ptr<KisNativeHistory> &) noexcept;
     static void finishRaw(void *) noexcept;
     bool bindRows(Body &, const QRect &, QString *, bool append = false);
     // Owner-local original bodies can be unlinked by a final foreign-thread
@@ -299,6 +295,7 @@ struct KisNativeResultProtocol::Body {
         KisCpuWriteBindingReservation writable;
         quint8 *pixels = nullptr;
         bool changed = false, ownsTarget = false, remove = false, discard = false, selectionOnly = false;
+        bool producerBusy = false; // one admitted history callback owns this original row
     };
     Vec<Row> rows;
     Vec<Impl::Move> moves;
@@ -314,12 +311,23 @@ struct KisNativeResultProtocol::Body {
     KisTileData *defaultTile = nullptr;
     size_t edgeBudget = 0;
     quint64 cutEpoch = 0;
-    bool ready = false, accepted = false, restore = false;
+    std::atomic<bool> ready{false};
+    bool accepted = false, restore = false;
     bool asyncPending = false, abandoned = false, adapterReady = false;
     explicit Body(KisBackingBudgetController *b) : rows(Alloc<Row>(b)), moves(Alloc<Impl::Move>(b)), defaultReaders(Alloc<KisTileSP>(b)) {}
     ~Body() { if (defaultTile) defaultTile->deref(); }
 };
 
+
+class KisNativeHistory {
+public:
+    KisNativeResultProtocol::Snapshot before, after;
+    quint64 sequence = 0;
+    KisNativeResultProtocol::Body *pending = nullptr;
+    size_t pendingCount = 0, workers = 0; // protected by the original selection gate
+    enum class Phase { None, Open, Sealing, ClosingCommit, ClosingAbort, Failed, Sealed };
+    std::atomic<Phase> phase{Phase::None};
+};
 
 inline KisNativeResultProtocol::View *KisNativeResultProtocol::Impl::retentionOwner(quint64 begin, quint64 end) const
 {

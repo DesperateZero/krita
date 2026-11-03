@@ -29,6 +29,8 @@ class KisNativeResultTestAccess;
 class KRITAIMAGE_EXPORT KisNativeResultProtocol final
 {
     friend class KisNativeResultTestAccess;
+    friend class KisNativeHistory;
+    friend class KisTiledDataManager;
     using Counts = KisNativeResultDiagnostics::Counts;
     using Faults = KisNativeResultDiagnostics::Faults;
     using State = KisNativeResultDiagnostics::State;
@@ -174,6 +176,9 @@ public:
     KisPageBackingUsage usage() const;
 
 private:
+    bool copyFrom(const Snapshot &, const QRect &, KisTiledDataManager *liveSource, QString *);
+    bool historyPixelOperation(const QVector<QRect> &, const std::function<bool(KisPixelWriteCursor *)> &,
+                               const KisMementoSP &, QString *);
     // Fault injection and internal census are accessible only to contract tests.
     Prepared prepareWrite(const quint8 *, const QRect &, qsizetype, QString *, const Faults *);
     bool accept(Prepared &, QString *, const Faults *);

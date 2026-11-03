@@ -221,17 +221,56 @@ bool KisNativeResultProtocol::fill(const QRect &rect, const QByteArray &pixel, Q
 }
 
 bool KisNativeResultProtocol::copyFrom(const Snapshot &source, const QRect &rect, QString *why)
+{
+    return copyFrom(source, rect, nullptr, why);
+}
+
+bool KisNativeResultProtocol::copyFrom(const Snapshot &source, const QRect &rect,
+    KisTiledDataManager *liveSource, QString *why)
 try {
     if (!source.d || source.d->owner->descriptor.format.pixelStride != d->descriptor.format.pixelStride) return false;
+    if (liveSource && liveSource != &source.d->owner->adapter) return false;
     if (rect.isEmpty()) return true;
     Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
     auto &b = *p.body; if (!d->bindRows(b, rect, why)) return false;
     const auto bpp = d->descriptor.format.pixelStride;
-    using Imported = std::map<Impl::Resource *, Impl::Resource *, std::less<Impl::Resource *>,
-        Alloc<std::pair<Impl::Resource *const, Impl::Resource *>>>;
-    Imported imported(std::less<Impl::Resource *>{}, Alloc<std::pair<Impl::Resource *const, Impl::Resource *>>(&d->budget));
+    using Imported = std::map<KisTileData *, Impl::Resource *, std::less<KisTileData *>,
+        Alloc<std::pair<KisTileData *const, Impl::Resource *>>>;
+    Imported imported(std::less<KisTileData *>{}, Alloc<std::pair<KisTileData *const, Impl::Resource *>>(&d->budget));
+    const bool liveIterator = liveSource && source.d->owner->iteratorBody();
+    const auto liveTile = [&](const Body::Row &row) -> KisTileSP {
+        if (!liveSource) return {};
+        const auto key = row.page->key.page;
+        auto tile = KisNativeResultAdapter::table(*liveSource).getExistingTileForPreparedUpdate(key.column, key.row);
+        if (!liveIterator && (!tile || !tile->hasPageStoreWriteIntent())) return {};
+        bool present;
+        return liveSource->getReadOnlyTileLazy(key.column, key.row, present);
+    };
     for (auto &row : b.rows) {
         if (row.local != QRect(0, 0, 64, 64)) continue;
+        if (auto tile = liveTile(row)) {
+            // Real public raw ABI: the locked legacy producer input is a COW
+            // user, not an immutable native Snapshot. Keep this exception at
+            // the actual bitBlt boundary and adopt through the same paid row.
+            if (!tile->lockForRead()) return false;
+            const auto unpin = qScopeGuard([&] { tile->unlockForRead(); });
+            auto *backing = tile->tileData(); if (!backing) return false;
+            { QMutexLocker lock(&d->gate);
+              if (row.page->nextGeneration == std::numeric_limits<quint64>::max()) return false;
+              row.after.generation = row.page->nextGeneration++; }
+            auto node = imported.try_emplace(backing, nullptr).first;
+            if (!node->second) {
+                auto input = d->provider->captureCompletedTileSource(d->descriptor, backing, why);
+                if (!input) return false;
+                row.target = d->fresh(*row.page, {row.page->key, {row.after.generation}}, nullptr, 0, nullptr,
+                                     QRect(0, 0, 64, 64), why, input);
+                if (!row.target) return false;
+                row.ownsTarget = true; node->second = row.target;
+            }
+            row.target = row.after.resource = node->second;
+            row.changed = row.selectionOnly = true;
+            continue;
+        }
         Impl::Selection selected;
         { QMutexLocker lock(&source.d->owner->gate);
           selected = source.d->owner->viewSelection(*source.d, {row.page->key.page.row, row.page->key.page.column}); }
@@ -243,7 +282,7 @@ try {
         auto *r = selected.resource;
         if (source.d->owner == d) row.after.resource = r;
         else {
-            auto node = imported.try_emplace(r, nullptr).first;
+            auto node = imported.try_emplace(r->tile, nullptr).first;
             if (!node->second) {
                 if (!r->binding->acquireRead(r->handle.allocationIdentity(), false)) return false;
                 auto unpin = qScopeGuard([&] { r->binding->releaseRead(); });
@@ -262,7 +301,14 @@ try {
     for (auto &row : b.rows) if (row.pixels) {
         const auto local = row.local;
         const QRect hit = local.translated(row.page->key.page.column * 64, row.page->key.page.row * 64);
-        if (!source.read(row.pixels + local.y() * 64 * bpp + local.x() * bpp, hit, 64 * bpp, why)) return false;
+        if (auto tile = liveTile(row)) {
+            if (!tile->lockForRead()) return false;
+            const auto unpin = qScopeGuard([&] { tile->unlockForRead(); });
+            const auto *data = tile->data(); if (!data) return false;
+            for (int y = local.top(); y <= local.bottom(); ++y)
+                std::memcpy(row.pixels + (y * 64 + local.x()) * bpp,
+                            data + (y * 64 + local.x()) * bpp, local.width() * bpp);
+        } else if (!source.read(row.pixels + local.y() * 64 * bpp + local.x() * bpp, hit, 64 * bpp, why)) return false;
     }
     d->finishProducer(b); return accept(p, why);
 } catch (const std::bad_alloc &) { error(why, "copy admission refused"); return false; }
