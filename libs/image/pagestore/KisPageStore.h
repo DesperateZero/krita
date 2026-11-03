@@ -31,8 +31,6 @@ class KisCpuDefaultReadBuffer;
 class KisCpuWriteGuard;
 class KisCapturedReadView;
 class KisTiles3PageReplicaProvider;
-class KisTiledDataManagerPageStoreBackend;
-class KisTiledDataManagerPageStoreWriteBatch;
 struct KisPageMetadataMetrics;
 struct KisPageMetadataFootprint;
 struct KisPageBackingLimits;
@@ -158,7 +156,6 @@ private:
     boost::intrusive_ptr<Private> d;
     friend class KisPageMutationSession;
     friend class KisPageStore;
-    friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest;
     // Adapter-only result export into unique storage prepared before pixels.
     // A null output queries the count; -1 rejects an unavailable execution or
@@ -210,8 +207,7 @@ public:
         }
     private:
         friend class KisPageMutationSession;
-        friend class KisTiledDataManagerPageStoreBackend;
-        using Visitor = bool (*)(const void *, const KisPageKey &, bool, void *&);
+            using Visitor = bool (*)(const void *, const KisPageKey &, bool, void *&);
         using ForEach = bool (*)(const void *, const void *, Visitor);
         AdapterChanges(const void *changes, ForEach forEach) : m_changes(changes), m_forEach(forEach) {}
         bool forEachImpl(const void *, Visitor) const;
@@ -308,8 +304,6 @@ private:
     beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error,
                    const boost::intrusive_ptr<KisPageMutationExecution::Private> &execution = {});
     friend class KisTiledDataManagerPageStoreLease;
-    friend class KisTiledDataManagerPageStoreBackend;
-    friend class KisTiledDataManagerPageStoreWriteBatch;
     friend class KisPageStoreCpuMutationTest; // Account stable control separately from transferable capacity.
     class Private;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
@@ -432,7 +426,6 @@ private:
     boost::intrusive_ptr<Private> d;
     friend class KisPageStore;
     friend class KisCpuReadGuard;
-    friend class KisTiledDataManagerPageStoreBackend;
 };
 
 class KRITAIMAGE_EXPORT KisCpuReadGuard
@@ -693,7 +686,6 @@ private:
     KisCapturedReadView captureReadRange(KisSurfaceId surface, const QRect &pages,
         const KisPageReadView &selector, QString *error,
         KisCpuReadBinding *firstBindings = nullptr, size_t bindingCount = 0);
-    friend class KisTiledDataManagerPageStoreBackend;
     friend class KisPageStoreCpuMutationTest; // Exercise the original private shared-budget boundary.
     // Product composition prepares the real facade/root storage before its
     // internal controller is configured. Reference construction stays valid.

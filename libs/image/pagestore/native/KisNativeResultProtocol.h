@@ -17,19 +17,28 @@ class KisPageStoreIteratorReadScope;
 class KisTiledDataManagerIteratorWriteScope;
 class KisPixelWriteCursor;
 
-// Isolated complete-result construction. No PageStore private/publication
-// coordinator is an internal consumer of this protocol.
+namespace KisNativeResultDiagnostics {
+struct Counts;
+struct Faults;
+struct State;
+struct Layout;
+}
+class KisNativeResultTestAccess;
+
+// One result authority from original row through visibility and final release.
 class KRITAIMAGE_EXPORT KisNativeResultProtocol final
 {
+    friend class KisNativeResultTestAccess;
+    using Counts = KisNativeResultDiagnostics::Counts;
+    using Faults = KisNativeResultDiagnostics::Faults;
+    using State = KisNativeResultDiagnostics::State;
+    using Layout = KisNativeResultDiagnostics::Layout;
     struct Impl;
     struct View;
     struct Body;
     struct Async;
 public:
-    struct Counts {
-        quint64 fresh = 0, handoff = 0, results = 0, retainedEdges = 0;
-        quint64 cancelled = 0, retried = 0, retired = 0, adapterInstalled = 0;
-    };
+
     class IteratorSession {
     public:
         ~IteratorSession();
@@ -97,15 +106,7 @@ public:
         std::shared_ptr<Async> d;
         friend class KisNativeResultProtocol;
     };
-    struct Faults {
-        // Contract witnesses only, never enabled by the ordinary price run.
-        int rejectAfterTargets = -1;
-        bool rejectAdapter = false;
-        bool rejectAccept = false;
-        int rejectAcceptAt = -1;
-        bool rejectPhysical = false;
-        std::function<void()> beforeAccept;
-    };
+
 
     KisNativeResultProtocol(KisTiledDataManager &adapter,
         const KisPageAllocationDescriptor &descriptor,
@@ -116,17 +117,17 @@ public:
     KisNativeResultProtocol &operator=(const KisNativeResultProtocol &) = delete;
 
     Prepared prepareWrite(const quint8 *bytes, const QRect &pixels, qsizetype stride,
-                           QString *error = nullptr, const Faults *faults = nullptr);
+                           QString *error = nullptr);
     // Raw/custom/asynchronous CPU producers own the very same original rows.
     // Accept is closed until every exposed physical pin has been returned.
     Prepared prepareProducer(const QRect &pixels, QString *error = nullptr);
     quint8 *producerPage(Prepared &, qint32 column, qint32 row, quint32 *stride = nullptr);
     bool finishProducer(Prepared &, bool success, QString *error = nullptr);
     ProducerCompletion deferProducer(Prepared &, QString *error = nullptr);
-    bool accept(Prepared &, QString *error = nullptr, const Faults *faults = nullptr);
+    bool accept(Prepared &, QString *error = nullptr);
     void cancel(Prepared &) noexcept;
     bool write(const quint8 *bytes, const QRect &pixels, qsizetype stride,
-               QString *error = nullptr, const Faults *faults = nullptr);
+               QString *error = nullptr);
     Snapshot capture(QString *error = nullptr);
     Snapshot captureRange(const QRect &pixels, QString *error = nullptr);
     Snapshot capturePrepared(const Prepared &, QString *error = nullptr);
@@ -140,7 +141,6 @@ public:
     bool readCurrent(quint8 *bytes, const QRect &pixels, qsizetype stride,
                      QString *error = nullptr) const;
     bool configureLimits(const KisPageBackingLimits &, QString *error = nullptr);
-    bool swapIdleForTest(QString *error = nullptr);
     bool close(QString *error = nullptr);
     // Actual DataManager/undo public boundary. These use the same Selection,
     // snapshots and all-D acceptance, never a private/publication conversion.
@@ -170,18 +170,18 @@ public:
     bool checkpointHistoryMutation(const KisMementoSP &, QString *error = nullptr);
     bool pixelOperation(const QVector<QRect> &, const std::function<bool(KisPixelWriteCursor *)> &,
                         const KisMementoSP &history, QString *error = nullptr);
-    struct State {
-        quint64 pageSlots = 0, physicalResources = 0, resourceCapacity = 0;
-        quint64 activeResults = 0, logicalViews = 0, domainMoves = 0, terminalRegistrations = 0;
-        quint64 reservedEdges = 0, rowCapacity = 0;
-    };
-    struct Layout { size_t page, resource, body, row, retentionEdge, view; };
-    State state() const;
-    static Layout layout();
-    Counts counts() const;
+
     KisPageBackingUsage usage() const;
 
 private:
+    // Fault injection and internal census are accessible only to contract tests.
+    Prepared prepareWrite(const quint8 *, const QRect &, qsizetype, QString *, const Faults *);
+    bool accept(Prepared &, QString *, const Faults *);
+    bool write(const quint8 *, const QRect &, qsizetype, QString *, const Faults *);
+    bool swapIdleForTest(QString *);
+    State state() const;
+    static Layout layout();
+    Counts counts() const;
     std::shared_ptr<Impl> d;
     static KisCpuWriteBindingReservation claimNative(
         const std::shared_ptr<KisCpuResidentBinding> &, quint64 incarnation,

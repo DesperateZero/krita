@@ -33,7 +33,7 @@
 #include "kis_memento.h"
 #include "KisTiledExtentManager.h"
 #include "pagestore/KisPageStoreWriteOperation_p.h"
-#include "pagestore/experimental/KisNativeResultProtocol.h"
+#include "pagestore/native/KisNativeResultProtocol.h"
 
 class KisTiledDataManager;
 typedef KisSharedPtr<KisTiledDataManager> KisTiledDataManagerSP;
@@ -42,7 +42,6 @@ class KisTiledIterator;
 class KisTiledRandomAccessor;
 class KisPaintDeviceWriter;
 class QIODevice;
-class KisTiledDataManagerPageStoreBackend;
 class KisPageStoreIteratorReadScope;
 struct KisLogicalPageId;
 
@@ -64,10 +63,8 @@ public:
     bool isActive() const;
 
 private:
-    friend class KisTiledDataManagerPageStoreBackend;
-    KisTiledDataManagerIteratorWriteScope();
-    class Private;
-    std::unique_ptr<Private> d;
+    KisTiledDataManagerIteratorWriteScope() = default;
+    std::unique_ptr<KisNativeResultProtocol::IteratorSession> m_session;
 };
 
 /**
@@ -99,7 +96,7 @@ public:
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel);
     // Isolated protocol construction: the caller owns selection and publication;
     // this manager supplies the real tile table, read adapter and extent only.
-    enum class SelectionAuthority { InternalPageStore, ExternalProtocol, NativeResult };
+    enum class SelectionAuthority { ExternalProtocol, NativeResult };
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel, SelectionAuthority);
     virtual ~KisTiledDataManager();
     KisTiledDataManager(const KisTiledDataManager &dm);
@@ -113,7 +110,7 @@ public:
         bool writable, std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
         beginIteratorWriteScope();
-    bool requiresIteratorWriteScope() const { return m_nativeResult || m_pageStoreBackend; }
+    bool requiresIteratorWriteScope() const { return bool(m_nativeResult); }
     KisPageStoreWriteOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
         QString *error = nullptr, const KisMementoSP &historyOwner = {});
@@ -135,8 +132,7 @@ protected:
     friend class KisStressJob;
     friend class KisTiledDataManagerTest;
     friend class KisNativeResultAdapter;
-    friend class KisTiledDataManagerPageStoreBackend;
-
+    friend class KisNativeResultTestAccess;
 public:
     void setDefaultPixel(const quint8 *defPixel);
     const quint8 *defaultPixel() const {
@@ -340,11 +336,7 @@ public:
 
 private:
     KisTileHashTable *m_hashTable;
-    // Only the active history holds this compatibility default backing.
-    // It is a physical reference, not a second history or write authority.
-    KisTileData *m_historyDefaultTileData = nullptr;
     KisMementoManager *m_mementoManager;
-    KisTiledDataManagerPageStoreBackend *m_pageStoreBackend;
     // The legacy fallback shares one immutable uniform backing and recognizes
     // repeated whole-tile fills by identity. Writers still COW because this
     // reference keeps the backing shared; native PageStore has its own source.
@@ -373,16 +365,9 @@ private:
     }
 
 private:
-    struct PreparedHistoryAbort;
     KisMementoSP getMementoLocked();
-    bool abortPageStoreHistoryLocked(const KisMementoSP &memento,
-                                    PreparedHistoryAbort &prepared, QString *error);
     void installDefaultPixel(const quint8 *defPixel, KisTileData *tile);
-    void releaseHistoryDefaultTile();
     void restoreHistory(KisMementoSP memento, bool before);
-    bool copyNeedsLiveLegacySource(const QRect &rect, bool oldData) const;
-    KisPageStoreWriteOperationResult copyPageStore(KisTiledDataManager *source, QRect &rect,
-                                      bool oldSource, bool rough, QString *error);
 
     bool writeTilesHeader(KisPaintDeviceWriter &store, quint32 numTiles);
     bool processTilesHeader(QIODevice *stream, quint32 &numTiles);

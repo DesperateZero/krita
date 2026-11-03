@@ -70,7 +70,6 @@ public:
     bool close(QString *error = nullptr);
 
 private:
-    friend class KisTiledDataManagerPageStoreBackend;
     KisImageEpochCommitTicket restore(
         const KisPageStoreMemento &memento,
         bool before,

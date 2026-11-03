@@ -4,7 +4,7 @@
 
 #include <memory>
 #include "KisPageStore.h"
-#include "experimental/KisNativeResultProtocol.h"
+#include "native/KisNativeResultProtocol.h"
 #include <array>
 #include <optional>
 
@@ -52,25 +52,20 @@ public:
     bool isValid() const;
     bool beforeOnly() const { return m_beforeOnly; }
     bool beforeAliasesWrite() const
-    { return m_nativeIdentity ? m_beforeOnly && !m_nativeBefore : m_store && m_beforeOnly && !m_before.isValid(); }
+    { return m_nativeIdentity && m_beforeOnly && !m_nativeBefore; }
     // Live legacy writer pointers cannot be revoked by a read constructor.
     // Such a traversal still uses tiles3 and is not an immutable epoch view.
     bool observesLiveLegacyWriter() const
-    { return m_nativeLiveWriter || (m_store && !m_beforeOnly && !m_current.isValid() && !m_before.isValid()); }
+    { return m_nativeLiveWriter; }
     bool beforeMatches(const KisPageVersion &version) const;
     KisPageStoreReadPage readPage(qint32 column, qint32 row, bool before,
                                   QString *error = nullptr) const;
 private:
-    friend class KisTiledDataManagerPageStoreBackend;
     friend class KisNativeResultProtocol;
     const void *m_nativeIdentity = nullptr;
     bool m_nativeLiveWriter = false;
     KisNativeResultProtocol::Snapshot m_nativeCurrent, m_nativeBefore;
-    KisPageStore *m_store = nullptr;
-    KisSurfaceId m_surface;
     bool m_beforeOnly = false;
-    KisCapturedReadView m_current;
-    KisCapturedReadView m_before;
 };
 
 struct KisPageStoreReadPair

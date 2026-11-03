@@ -246,7 +246,7 @@ void KisPainterTest::testFixedCursor()
 
 // Explicit experimental authority: old private-seal event counts are not
 // evidence about NativeResult's direct visible acceptance.
-static bool nativeResultAuthority() { return qEnvironmentVariableIntValue("KRITA_NATIVE_RESULT_PROTOCOL") == 104; }
+static bool nativeResultAuthority() { return true; }
 static KisPageStoreDiagnosticPhase resultAcceptancePhase() {
     return nativeResultAuthority() ? KisPageStoreDiagnosticPhase::WritePublishHost
         : KisPageStoreDiagnosticPhase::MutationSealPrivatePublish;

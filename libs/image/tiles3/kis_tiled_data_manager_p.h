@@ -7,9 +7,7 @@
 
 
 
-#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
-#include "pagestore/KisPageStoreDiagnostics_p.h"
 #include <QScopeGuard>
 #include <limits>
 #include <optional>
@@ -298,15 +296,6 @@ QVector<quint8*> KisTiledDataManager::readPlanarBytesBody(QVector<qint32> channe
     }
     if (!width || !height) { cleanup.dismiss(); return planes; }
 
-    const bool nativeRead = m_pageStoreBackend && !m_pageStoreBackend->hasCurrentThreadIteratorWrites();
-    auto *store = nativeRead ? m_pageStoreBackend->store() : nullptr;
-    KisPageStoreDiagnosticTimer diagnostic(store, KisPageStoreDiagnosticPhase::ReadPlanarCapture, 1);
-    KisCapturedReadView view;
-    if (nativeRead) {
-        view = m_pageStoreBackend->captureReadView();
-        KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(view.isValid(), QVector<quint8 *>());
-    }
-
     qint32 dataY = 0;
     qint32 imageY = y;
     qint32 rowsRemaining = height;
@@ -330,24 +319,12 @@ QVector<quint8*> KisTiledDataManager::readPlanarBytesBody(QVector<qint32> channe
                                         columnsRemaining);
 
             const qsizetype dataIdx = dataX + qsizetype(dataY) * width;
-            diagnostic.next(KisPageStoreDiagnosticPhase::ReadPlanarPage, 1);
-            KisPageStoreReadPage page;
-            std::optional<KisTileDataWrapper> legacy;
-            const quint8 *tileItStart = nullptr;
-            qint32 tileRowStride = 0;
-            if (nativeRead) {
-                const qint32 column = xToCol(imageX), row = yToRow(imageY);
-                page = KisPageStoreReadPage(store, view, {m_pageStoreBackend->surface(), {column, row}});
-                KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(page.data(), QVector<quint8 *>());
-                tileRowStride = page.rowStride();
-                tileItStart = page.data() + (qint64(imageY) - qint64(row) * KisTileData::HEIGHT) * tileRowStride +
-                    (qint64(imageX) - qint64(column) * KisTileData::WIDTH) * pixelSize;
-            } else {
-                legacy.emplace(const_cast<KisTiledDataManager *>(this), imageX, imageY, KisTileDataWrapper::READ);
-                tileItStart = legacy->data();
-                KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(tileItStart, QVector<quint8 *>());
-                tileRowStride = rowStride(imageX, imageY);
-            }
+            // readPlanarBytes holds the manager read gate for this traversal;
+            // the real tile lease pins the currently installed backing.
+            KisTileDataWrapper tile(const_cast<KisTiledDataManager *>(this), imageX, imageY, KisTileDataWrapper::READ);
+            const quint8 *tileItStart = tile.data();
+            KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(tileItStart, QVector<quint8 *>());
+            const qint32 tileRowStride = rowStride(imageX, imageY);
             forEachChannel(i, channelSize) {
                 for (qint32 row = 0; row < rowsToWork; row++) {
                     const quint8 *tileIt = tileItStart + qsizetype(row) * tileRowStride;
@@ -370,7 +347,6 @@ QVector<quint8*> KisTiledDataManager::readPlanarBytesBody(QVector<qint32> channe
         rowsRemaining -= rowsToWork;
         if (rowsRemaining) imageY += rowsToWork;
     }
-    diagnostic.next(KisPageStoreDiagnosticPhase::ReadPlanarRelease, 1);
     cleanup.dismiss();
     return planes;
 }

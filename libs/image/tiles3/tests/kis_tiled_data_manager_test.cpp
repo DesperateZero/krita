@@ -26,7 +26,7 @@
 #include "kis_wrapped_hline_iterator.h"
 #include "kis_wrapped_vline_iterator.h"
 #include "kis_repeat_iterators_pixel.h"
-#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
+#include "pagestore/native/KisNativeResultDiagnostics_p.h"
 #include "pagestore/KisTiles3PageReplicaProvider.h"
 #include "KisPageStoreCpuSurfaceOps.h"
 #include "KisPageStoreStoragePressure.h"
@@ -324,8 +324,6 @@ void KisTiledDataManagerTest::testPageStoreWritablePresence()
     const QByteArray blank(bpp, char(0x13)), other(bpp, char(0x29));
     auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
     KisTiledDataManager dm(bpp, bytes(blank));
-    auto *store = dm.m_pageStoreBackend->store();
-    const auto before = store->mutationStatistics();
     auto batch = mode ? dm.beginIteratorWriteScope() : nullptr;
     QVERIFY(!mode || batch);
     auto tile = dm.getTile(0, 0, true); QVERIFY(tile);
@@ -338,12 +336,10 @@ void KisTiledDataManagerTest::testPageStoreWritablePresence()
         QCOMPARE(dm.getTile(0, 0, true), tile); // Reacquisition preserves private bytes.
     }
     if (batch) { QVERIFY(batch->finish()); batch.reset(); }
-    // This counter covers CPU target preparation, not semantic alias adoption.
-    QCOMPARE(store->mutationStatistics().generationsReserved - before.generationsReserved, quint64(mode == 2));
-    KisPageVersion version;
-    QVERIFY(store->resolvePageVersion({dm.m_pageStoreBackend->surface(), {0, 0}}, KisPageReadView{}, &version));
-    QVERIFY(!version.isDefaultPixel());
-    QCOMPARE(store->mutationStatistics().writablePinsAcquired - before.writablePinsAcquired, quint64(mode == 2));
+    auto selected = dm.m_nativeResult->capture();
+    QVERIFY(selected);
+    QVERIFY(!selected.versionAt(0, 0).isDefaultPixel());
+    selected = {};
     QCOMPARE(dm.extent(), QRect(0, 0, 64, 64));
     KisTiledDataManager clone(dm);
     dm.setDefaultPixel(bytes(other));
@@ -355,8 +351,8 @@ void KisTiledDataManagerTest::testPageStoreWritablePresence()
     dm.readBytes(reinterpret_cast<quint8 *>(actual.data()), 128, 0, 1, 1); QCOMPARE(actual, other);
     tile = {}; dm.clear();
     QVERIFY(dm.extent().isEmpty());
-    QCOMPARE(store->sessionStats().activeTransactions, qsizetype(0));
-    QCOMPARE(store->sessionStats().activeCpuWritePages, qsizetype(0));
+    QCOMPARE(KisNativeResultTestAccess::state(*dm.m_nativeResult).activeResults, quint64(0));
+
 }
 
 void KisTiledDataManagerTest::testPageStoreKnownWriterRefusal_data()
@@ -1393,9 +1389,7 @@ void KisTiledDataManagerTest::testLegacyClearFailure()
     DefaultBudgetScope budget;
     const QByteArray blank(4, char(0x13)), color(4, char(0x57));
     auto bytes = [](const QByteArray &p) { return reinterpret_cast<const quint8 *>(p.constData()); };
-    KisTiledDataManager dm(4, bytes(blank));
-    dm.m_mementoManager->setPageStoreBridge(nullptr);
-    delete dm.m_pageStoreBackend; dm.m_pageStoreBackend = nullptr;
+    KisTiledDataManager dm(4, bytes(blank), KisTiledDataManager::SelectionAuthority::ExternalProtocol);
     kisDrainPageStoreReclamation();
     budget.saturate(4, bytes(blank));
     {
@@ -1429,17 +1423,14 @@ void KisTiledDataManagerTest::testPageStoreAbortUnderBudgetPressure()
     const auto memento = manager.getMemento();
     QVERIFY(memento);
     manager.setDefaultPixel(bytes(newPixel));
-    auto *store = manager.m_pageStoreBackend->store();
-    const auto commits = store->sessionStats().committedTransactions;
     budget.saturate(bpp, bytes(oldPixel));
     QString error;
     QVERIFY2(manager.tryAbort(memento, &error), qPrintable(error));
     QVERIFY(!manager.hasCurrentMemento());
-    QCOMPARE(store->sessionStats().committedTransactions, commits);
     QCOMPARE(QByteArray(reinterpret_cast<const char *>(manager.defaultPixel()), bpp), oldPixel);
-    KisSurfaceEpochState state;
-    QVERIFY(store->resolveSurfaceState(manager.m_pageStoreBackend->surface(), {}, &state));
-    QCOMPARE(state.format.defaultPixel, oldPixel);
+    QByteArray selected(bpp, 0);
+    manager.readBytes(reinterpret_cast<quint8 *>(selected.data()), 0, 0, 1, 1);
+    QCOMPARE(selected, oldPixel);
     QVERIFY(!manager.tryAbort(memento, &error)); // stale capability never aborts a later stroke
     budget.release();
     const auto next = manager.getMemento();
@@ -1862,19 +1853,16 @@ void KisTiledDataManagerTest::testCloneCanonicalOrLegacySource()
 {
     QFETCH(int, bpp); QFETCH(bool, native);
     const QByteArray blank(bpp, char(0x13)), initial(bpp, char(0x31));
-    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()));
-    if (!native) {
-        source.m_mementoManager->setPageStoreBridge(nullptr);
-        delete source.m_pageStoreBackend;
-        source.m_pageStoreBackend = nullptr;
-    }
+    KisTiledDataManager source(bpp, reinterpret_cast<const quint8 *>(blank.constData()),
+        native ? KisTiledDataManager::SelectionAuthority::NativeResult
+               : KisTiledDataManager::SelectionAuthority::ExternalProtocol);
     source.writeBytes(reinterpret_cast<const quint8 *>(initial.constData()), -65, 2, 1, 1);
     KisTiledDataManager clone(source);
     QByteArray actual(bpp, Qt::Uninitialized);
     clone.readBytes(reinterpret_cast<quint8 *>(actual.data()), -65, 2, 1, 1);
     QCOMPARE(actual, initial);
     QCOMPARE(clone.extent(), source.extent());
-    QCOMPARE(bool(clone.m_pageStoreBackend), native);
+    QCOMPARE(bool(clone.m_nativeResult), native);
 }
 
 void KisTiledDataManagerTest::testUndoSetDefaultPixel()

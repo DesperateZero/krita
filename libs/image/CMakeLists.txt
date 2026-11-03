@@ -62,8 +62,12 @@ set(kritaimage_LIB_SRCS
    pagestore/KisResidencyController.cpp
    pagestore/KisSurfaceRegistry.cpp
    pagestore/KisSurfaceCodecRegistry.cpp
-   pagestore/KisTiledDataManagerPageStoreBackend.cpp
-   pagestore/experimental/KisNativeResultProtocol.cpp
+   pagestore/native/KisNativeResultProtocol.cpp
+    pagestore/native/KisNativeResultWrite.cpp
+    pagestore/native/KisNativeResultResource.cpp
+    pagestore/native/KisNativeResultView.cpp
+    pagestore/native/KisNativeResultTiles3.cpp
+    pagestore/native/KisNativeResultOperations.cpp
    pagestore/KisUnifiedSsdPageStore.cpp
    tiles3/kis_tile.cc
    tiles3/kis_tile_data.cc
@@ -479,4 +483,9 @@ endif()
 if(KRITA_NATIVE_RESULT_CENSUS)
     list(APPEND _native_contract_definitions NR104_CENSUS)
 endif()
-set_source_files_properties(pagestore/experimental/KisNativeResultProtocol.cpp PROPERTIES COMPILE_DEFINITIONS "${_native_contract_definitions}")
+set_source_files_properties(pagestore/native/KisNativeResultProtocol.cpp
+    pagestore/native/KisNativeResultWrite.cpp
+    pagestore/native/KisNativeResultResource.cpp
+    pagestore/native/KisNativeResultView.cpp
+    pagestore/native/KisNativeResultTiles3.cpp
+    pagestore/native/KisNativeResultOperations.cpp PROPERTIES COMPILE_DEFINITIONS "${_native_contract_definitions}")

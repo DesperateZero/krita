@@ -9,7 +9,8 @@
 #include "kis_paint_device_writer.h"
 #include <QBuffer>
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#include "pagestore/experimental/KisNativeResultProtocol.h"
+#include "pagestore/native/KisNativeResultProtocol.h"
+#include "pagestore/native/KisNativeResultDiagnostics_p.h"
 #include "tiles3/kis_tiled_data_manager.h"
 #include "pagestore/KisPageStoreReclamation_p.h"
 #include "pagestore/KisPageStoreProductPolicy_p.h"
@@ -68,7 +69,6 @@ public:
     static void stoppedRuntimeContract();
 };
 void NativeResultProtocolContractTest::publicContracts() {
-    qputenv("KRITA_NATIVE_RESULT_PROTOCOL", "104");
     const QByteArray zero(4, 0), blue(4, char(0x35)), green(4, char(0x57));
     const QRect rect(-64, 0, 192, 64);
     const auto expect = [&](KisTiledDataManager &m, const QByteArray &want, const QRect &where) {
@@ -181,13 +181,12 @@ void NativeResultProtocolContractTest::publicContracts() {
         require(m.tryAbort(failedOwner, &why), "actual abort restores original before");
         expect(m, QByteArray(128 * 4, char(0x35)), QRect(0, 0, 128, 1));
     }
-    qunsetenv("KRITA_NATIVE_RESULT_PROTOCOL");
     std::fprintf(stderr, "NATIVE_PUBLIC_CONTRACTS_OK\n");
 }
 
 static void requireDrained(KisNativeResultProtocol &protocol) {
     kisDrainPageStoreReclamation();
-    const auto state = protocol.state();
+    const auto state = KisNativeResultTestAccess::state(protocol);
     require(!state.activeResults && !state.domainMoves && !state.terminalRegistrations && !state.reservedEdges,
         "no outstanding original work or terminal registrations");
     const auto usage = protocol.usage();
@@ -225,7 +224,7 @@ void NativeResultProtocolContractTest::concurrentContracts() {
         for (auto &thread : threads) thread.join();
         require(!failed, "disjoint writers and actual capacity growth");
         require(f.protocol.close(&why), "concurrent owner closes"); requireDrained(f.protocol);
-        require(!f.protocol.state().physicalResources, "concurrent physical release");
+        require(!KisNativeResultTestAccess::state(f.protocol).physicalResources, "concurrent physical release");
     }
     {
         Fixture f; f.rect = QRect(0, 0, 64 * 80, 64);
@@ -238,14 +237,14 @@ void NativeResultProtocolContractTest::concurrentContracts() {
         require(f.protocol.write(data(f.b), f.rect, f.rect.width() * 4, &why), "many pins second write");
         require(f.protocol.write(data(f.c), f.rect, f.rect.width() * 4, &why), "many pins third write");
         kisDrainPageStoreReclamation();
-        require(f.protocol.state().terminalRegistrations >= 64, "actual deferred set exceeds one bounded pass");
+        require(KisNativeResultTestAccess::state(f.protocol).terminalRegistrations >= 64, "actual deferred set exceeds one bounded pass");
         std::vector<std::thread> release;
         for (int worker = 0; worker < 4; ++worker) release.emplace_back([&, worker] {
             for (int x = worker; x < 80; x += 4) pins[x] = {};
         });
         for (auto &thread : release) thread.join();
         require(f.protocol.close(&why), "many terminals close"); requireDrained(f.protocol);
-        require(!f.protocol.state().physicalResources, "all notified physical resources retired");
+        require(!KisNativeResultTestAccess::state(f.protocol).physicalResources, "all notified physical resources retired");
     }
     {
         KisNativeResultProtocol::ReadAccess pin;
@@ -266,7 +265,7 @@ void NativeResultProtocolContractTest::concurrentContracts() {
         f.protocol.cancel(pending); require(done.finish(false), "real completion cancels late original work");
         require(f.protocol.close(&why), "async late close completion"); requireDrained(f.protocol);
     }
-    const auto layout = KisNativeResultProtocol::layout();
+    const auto layout = KisNativeResultTestAccess::layout();
     std::fprintf(stderr, "NATIVE_LAYOUT page=%zu resource=%zu body=%zu row=%zu edge=%zu view=%zu\n",
         layout.page, layout.resource, layout.body, layout.row, layout.retentionEdge, layout.view);
     std::fprintf(stderr, "NATIVE_CONCURRENT_TERMINAL_OK\n");
@@ -302,7 +301,7 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
         // The original operation row capacity alone exceeds this allowance.
         require(!f.protocol.prepareProducer(QRect(0, 0, 4096, 4096), &why), "real cold storage admission refusal");
         f.current(f.a);
-        require(!f.protocol.state().activeResults && !f.protocol.state().reservedEdges, "growth refusal returns original owner and edge credits");
+        require(!KisNativeResultTestAccess::state(f.protocol).activeResults && !KisNativeResultTestAccess::state(f.protocol).reservedEdges, "growth refusal returns original owner and edge credits");
         f.write(f.b); f.current(f.b);
     }
     {
@@ -314,7 +313,7 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
         require(!destination.protocol.restore(view, &why), "foreign owner cannot restore authority");
         require(!destination.protocol.alias(view, one, QPoint(0, 0), &why), "foreign capability cannot become native selection");
         require(destination.protocol.copyFrom(view, QRect(0, 0, 128, 64), &why), "foreign real provider import");
-        require(destination.protocol.state().physicalResources == 1, "foreign alias topology charged once");
+        require(KisNativeResultTestAccess::state(destination.protocol).physicalResources == 1, "foreign alias topology charged once");
         require(destination.protocol.write(data(b), one, 256, &why), "destination independent COW");
         QByteArray read(16384, 0);
         require(view.read(reinterpret_cast<quint8 *>(read.data()), one, 256, &why) && read == a, "cross-provider source isolation");
@@ -351,15 +350,15 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
             views.push_back(f.protocol.capture(&why));
             require(f.protocol.write(data(i % 2 ? a : b), one, 256, &why), "scaled real retained generation");
         }
-        const auto before = f.protocol.counts();
+        const auto before = KisNativeResultTestAccess::counts(f.protocol);
         require(f.protocol.write(data(b), QRect(1, 1, 1, 1), 4, &why), "fixed K original result");
-        const auto after = f.protocol.counts();
+        const auto after = KisNativeResultTestAccess::counts(f.protocol);
 #ifdef NR104_CENSUS
         require(after.results - before.results <= 1 && after.adapterInstalled - before.adapterInstalled <= 1,
             "fixed K never installs unrelated population");
 #endif
         std::fprintf(stderr, "NATIVE_SCALE K=1 N=%d H=%d slots=%llu liveViews=%llu results=%llu installs=%llu\n",
-            n, h, f.protocol.state().pageSlots, f.protocol.state().logicalViews,
+            n, h, KisNativeResultTestAccess::state(f.protocol).pageSlots, KisNativeResultTestAccess::state(f.protocol).logicalViews,
             after.results-before.results, after.adapterInstalled-before.adapterInstalled);
     }
     std::fprintf(stderr, "NATIVE_PRESSURE_IDENTITY_OK\n");
@@ -370,7 +369,7 @@ void NativeResultProtocolContractTest::freshControlContracts() {
     qputenv("KRITA_NATIVE_RESULT_FORCE_FRESH", "1");
     for (int k : {1, 16}) {
         Fixture f; f.write(f.a);
-        const auto before = f.protocol.counts();
+        const auto before = KisNativeResultTestAccess::counts(f.protocol);
         QByteArray patch(64 * k * 4, char(0x35));
         for (int i = 0; i < 4; ++i) {
             patch.fill(char(0x35 + i));
@@ -378,7 +377,7 @@ void NativeResultProtocolContractTest::freshControlContracts() {
             QByteArray read(patch.size(), 0);
             require(f.protocol.readCurrent(reinterpret_cast<quint8 *>(read.data()), QRect(0, 0, 64 * k, 1), patch.size(), &why) && read == patch, "protected fresh visible bytes");
         }
-        const auto after = f.protocol.counts();
+        const auto after = KisNativeResultTestAccess::counts(f.protocol);
 #ifdef NR104_CENSUS
         require(after.fresh - before.fresh == quint64(4 * k) && after.handoff == before.handoff, "protected native fresh never silently uses handoff");
 #endif
@@ -424,17 +423,17 @@ int main(int argc, char **argv) {
         auto final = f.protocol.capture(&why); f.historical(initial, f.a);
         require(f.protocol.restore(initial, &why), "undo"); f.current(f.a);
         require(f.protocol.restore(final, &why), "redo"); f.current(f.c);
-        auto n = f.protocol.counts();
+        auto n = KisNativeResultTestAccess::counts(f.protocol);
         std::fprintf(stderr, "H1_CONTRACT fresh=%llu reuse=%llu results=%llu retained=%llu\n",
             n.fresh, n.handoff, n.results, n.retainedEdges);
     }
     {
         Fixture f; f.write(f.a);
-        KisNativeResultProtocol::Faults fail; fail.rejectAfterTargets = 7;
-        require(!f.protocol.prepareWrite(data(f.b), f.rect, 1024, &why, &fail), "producer failure"); f.current(f.a);
+        KisNativeResultTestAccess::Faults fail; fail.rejectAfterTargets = 7;
+        require(!KisNativeResultTestAccess::prepareWrite(f.protocol, data(f.b), f.rect, 1024, &why, &fail), "producer failure"); f.current(f.a);
         auto ready = f.protocol.prepareWrite(data(f.b), f.rect, 1024, &why); require(bool(ready), "prepare");
         fail = {}; fail.rejectAccept = true;
-        require(!f.protocol.accept(ready, &why, &fail), "final reject"); f.current(f.a);
+        require(!KisNativeResultTestAccess::accept(f.protocol, ready, &why, &fail), "final reject"); f.current(f.a);
         require(f.protocol.accept(ready, &why), "Ready retry"); f.current(f.b);
         ready = f.protocol.prepareWrite(data(f.c), f.rect, 1024, &why);
         auto late = f.protocol.capture(&why);
@@ -450,13 +449,13 @@ int main(int argc, char **argv) {
         Fixture f; f.write(f.a); f.write(f.b);
         // Destination-domain positive admission retains the source until swap
         // commits: a full idle allowance must reject without changing pixels.
-        require(!f.protocol.swapIdleForTest(&why), "domain positive peak refusal");
+        require(!KisNativeResultTestAccess::swapIdle(f.protocol, &why), "domain positive peak refusal");
         f.current(f.b);
     }
     {
         KisPageBackingLimits limits; limits.idleCapacityBytes = 512 * 1024;
         Fixture f(limits); f.write(f.a); f.write(f.b);
-        require(f.protocol.swapIdleForTest(&why), "real SSD swap");
+        require(KisNativeResultTestAccess::swapIdle(f.protocol, &why), "real SSD swap");
         f.write(f.c); f.current(f.c);
         auto held = f.protocol.capture(&why);
         require(f.protocol.close(&why), "close with snapshot"); f.historical(held, f.c);
@@ -544,12 +543,12 @@ int main(int argc, char **argv) {
         Fixture f; f.write(f.a);
         auto p = f.protocol.prepareWrite(data(f.b), f.rect, 1024, &why); require(bool(p), "all-D preparation");
         for (int i = 0; i < 16; ++i) {
-            KisNativeResultProtocol::Faults fault; fault.rejectAcceptAt = i;
-            require(!f.protocol.accept(p, &why, &fault), "each final target refusal"); f.current(f.a);
+            KisNativeResultTestAccess::Faults fault; fault.rejectAcceptAt = i;
+            require(!KisNativeResultTestAccess::accept(f.protocol, p, &why, &fault), "each final target refusal"); f.current(f.a);
         }
         KisNativeResultProtocol::Snapshot late;
-        KisNativeResultProtocol::Faults lateCapture; lateCapture.beforeAccept = [&] { late = f.protocol.capture(&why); };
-        require(!f.protocol.accept(p, &why, &lateCapture), "late capture changes real fee plan"); f.current(f.a);
+        KisNativeResultTestAccess::Faults lateCapture; lateCapture.beforeAccept = [&] { late = f.protocol.capture(&why); };
+        require(!KisNativeResultTestAccess::accept(f.protocol, p, &why, &lateCapture), "late capture changes real fee plan"); f.current(f.a);
         require(f.protocol.accept(p, &why), "replan reuses Ready pixels"); f.current(f.b); f.historical(late, f.a);
     }
     {
@@ -607,8 +606,8 @@ int main(int argc, char **argv) {
         for (int y = 0; y < 63; ++y) std::memset(all.data() + ((y + 33) * 128 + 31) * bpp, 0x53, 65 * bpp);
         require(protocol.readCurrent(reinterpret_cast<quint8 *>(out.data()), QRect(0, 0, 128, 128), 128 * bpp, &why), "format adapter read");
         require(out == all, "partial copy independent bytes");
-        const auto old = protocol.counts(); require(protocol.write(data(all), QRect(0, 0, 128, 128), 128 * bpp, &why), "no-op");
-        const auto now = protocol.counts(); require(old.results == now.results && old.fresh == now.fresh && old.handoff == now.handoff, "no-op has no result services");
+        const auto old = KisNativeResultTestAccess::counts(protocol); require(protocol.write(data(all), QRect(0, 0, 128, 128), 128 * bpp, &why), "no-op");
+        const auto now = KisNativeResultTestAccess::counts(protocol); require(old.results == now.results && old.fresh == now.fresh && old.handoff == now.handoff, "no-op has no result services");
     }
     {
         auto desc = descriptor();
@@ -619,7 +618,7 @@ int main(int argc, char **argv) {
         auto held = protocol.capture(&why);
         for (int i = 0; i < 16; ++i) require(protocol.write(data(i % 2 ? b : c), QRect(0, 0, 512, 512), 2048, &why), "64-page pressure write");
 #ifdef NR104_CENSUS
-        const auto counts = protocol.counts(); require(counts.fresh == 864 && counts.handoff == 224, "real pressure F/H counts");
+        const auto counts = KisNativeResultTestAccess::counts(protocol); require(counts.fresh == 864 && counts.handoff == 224, "real pressure F/H counts");
 #endif
     }
     {

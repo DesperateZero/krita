@@ -60,14 +60,10 @@ KisPageVersion KisPageStoreReadPage::version() const
   return m_native.isValid() ? m_native.version() : m_lease ? m_lease->version() : KisPageVersion{}; }
 
 bool KisPageStoreIteratorReadScope::isValid() const
-{ if (m_nativeIdentity) return m_beforeOnly || bool(m_nativeCurrent);
-  return m_store && m_surface.isValid() && (m_beforeOnly || m_current.isValid()); }
+{ return m_nativeIdentity && (m_beforeOnly || bool(m_nativeCurrent)); }
 bool KisPageStoreIteratorReadScope::beforeMatches(const KisPageVersion &version) const
 {
-    if (m_nativeIdentity) return !m_nativeBefore || m_nativeBefore.versionAt(version.key.page.column, version.key.page.row) == version;
-    if (!m_before.isValid()) return true;
-    KisPageVersion before;
-    return m_before.resolvePageVersion(version.key, &before) && before == version;
+    return !m_nativeBefore || m_nativeBefore.versionAt(version.key.page.column, version.key.page.row) == version;
 }
 KisPageStoreReadPage KisPageStoreIteratorReadScope::readPage(
     qint32 column, qint32 row, bool before, QString *error) const
@@ -75,13 +71,9 @@ KisPageStoreReadPage KisPageStoreIteratorReadScope::readPage(
     if (!isValid() || beforeAliasesWrite() || (m_beforeOnly && !before)) {
         KisPageStoreDetail::setError(error, QStringLiteral("iterator read visibility is unavailable")); return {};
     }
-    if (m_nativeIdentity) {
-        KisPageStoreReadPage result;
-        result.m_nativeResult.emplace((before && m_nativeBefore ? m_nativeBefore : m_nativeCurrent).readPage(column, row, error));
-        return result;
-    }
-    return {m_store, before && m_before.isValid() ? m_before : m_current,
-            {m_surface, {column, row}}, error};
+    KisPageStoreReadPage result;
+    result.m_nativeResult.emplace((before && m_nativeBefore ? m_nativeBefore : m_nativeCurrent).readPage(column, row, error));
+    return result;
 }
 KisPageStoreReadCursor::KisPageStoreReadCursor(std::shared_ptr<const KisPageStoreIteratorReadScope> scope)
     : m_scope(std::move(scope)) {}
