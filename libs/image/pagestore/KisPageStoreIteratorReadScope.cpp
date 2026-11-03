@@ -39,6 +39,7 @@ KisPageStoreReadPage &KisPageStoreReadPage::operator=(KisPageStoreReadPage &&oth
         reset();
         m_store = std::exchange(other.m_store, nullptr);
         m_native = std::move(other.m_native);
+        m_nativeResult = std::move(other.m_nativeResult); other.m_nativeResult.reset();
         if (other.m_lease) { m_lease.emplace(std::move(*other.m_lease)); other.m_lease.reset(); }
     }
     return *this;
@@ -46,19 +47,24 @@ KisPageStoreReadPage &KisPageStoreReadPage::operator=(KisPageStoreReadPage &&oth
 void KisPageStoreReadPage::reset()
 {
     if (m_lease && m_lease->isValid()) m_store->release(std::move(*m_lease));
-    m_lease.reset(); m_native = {}; m_store = nullptr;
+    m_lease.reset(); m_native = {}; m_nativeResult.reset(); m_store = nullptr;
 }
 const quint8 *KisPageStoreReadPage::data() const
-{ return static_cast<const quint8 *>(m_native.isValid() ? m_native.data() : m_lease ? m_lease->cpuData() : nullptr); }
+{ if (m_nativeResult) return m_nativeResult->data();
+  return static_cast<const quint8 *>(m_native.isValid() ? m_native.data() : m_lease ? m_lease->cpuData() : nullptr); }
 quint32 KisPageStoreReadPage::rowStride() const
-{ return m_native.isValid() ? m_native.rowStride() : m_lease ? m_lease->rowStride() : 0; }
+{ if (m_nativeResult) return m_nativeResult->rowStride();
+  return m_native.isValid() ? m_native.rowStride() : m_lease ? m_lease->rowStride() : 0; }
 KisPageVersion KisPageStoreReadPage::version() const
-{ return m_native.isValid() ? m_native.version() : m_lease ? m_lease->version() : KisPageVersion{}; }
+{ if (m_nativeResult) return m_nativeResult->version();
+  return m_native.isValid() ? m_native.version() : m_lease ? m_lease->version() : KisPageVersion{}; }
 
 bool KisPageStoreIteratorReadScope::isValid() const
-{ return m_store && m_surface.isValid() && (m_beforeOnly || m_current.isValid()); }
+{ if (m_nativeIdentity) return m_beforeOnly || bool(m_nativeCurrent);
+  return m_store && m_surface.isValid() && (m_beforeOnly || m_current.isValid()); }
 bool KisPageStoreIteratorReadScope::beforeMatches(const KisPageVersion &version) const
 {
+    if (m_nativeIdentity) return !m_nativeBefore || m_nativeBefore.versionAt(version.key.page.column, version.key.page.row) == version;
     if (!m_before.isValid()) return true;
     KisPageVersion before;
     return m_before.resolvePageVersion(version.key, &before) && before == version;
@@ -68,6 +74,11 @@ KisPageStoreReadPage KisPageStoreIteratorReadScope::readPage(
 {
     if (!isValid() || beforeAliasesWrite() || (m_beforeOnly && !before)) {
         KisPageStoreDetail::setError(error, QStringLiteral("iterator read visibility is unavailable")); return {};
+    }
+    if (m_nativeIdentity) {
+        KisPageStoreReadPage result;
+        result.m_nativeResult.emplace((before && m_nativeBefore ? m_nativeBefore : m_nativeCurrent).readPage(column, row, error));
+        return result;
     }
     return {m_store, before && m_before.isValid() ? m_before : m_current,
             {m_surface, {column, row}}, error};

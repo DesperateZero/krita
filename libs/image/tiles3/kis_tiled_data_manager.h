@@ -33,6 +33,7 @@
 #include "kis_memento.h"
 #include "KisTiledExtentManager.h"
 #include "pagestore/KisPageStoreWriteOperation_p.h"
+#include "pagestore/experimental/KisNativeResultProtocol.h"
 
 class KisTiledDataManager;
 typedef KisSharedPtr<KisTiledDataManager> KisTiledDataManagerSP;
@@ -55,6 +56,8 @@ public:
     ~KisTiledDataManagerIteratorWriteScope();
     static void *operator new(size_t bytes);
     static void operator delete(void *data) noexcept;
+    static std::unique_ptr<KisTiledDataManagerIteratorWriteScope> fromNative(
+        std::unique_ptr<KisNativeResultProtocol::IteratorSession>);
     bool finish();
     // A clear barrier revokes further acquisition, but keeps borrowed raw
     // storage alive until the iterator releases its original tile locks.
@@ -96,7 +99,7 @@ public:
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel);
     // Isolated protocol construction: the caller owns selection and publication;
     // this manager supplies the real tile table, read adapter and extent only.
-    enum class SelectionAuthority { InternalPageStore, ExternalProtocol };
+    enum class SelectionAuthority { InternalPageStore, ExternalProtocol, NativeResult };
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel, SelectionAuthority);
     virtual ~KisTiledDataManager();
     KisTiledDataManager(const KisTiledDataManager &dm);
@@ -110,6 +113,7 @@ public:
         bool writable, std::shared_ptr<const KisPageStoreIteratorReadScope> existing = {}) const;
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope>
         beginIteratorWriteScope();
+    bool requiresIteratorWriteScope() const { return m_nativeResult || m_pageStoreBackend; }
     KisPageStoreWriteOperationResult writePageStoreOperation(
         const QVector<QRect> &targetRects, const KisPageStorePixelOperation &operation,
         QString *error = nullptr, const KisMementoSP &historyOwner = {});
@@ -130,6 +134,7 @@ protected:
     friend class KisRandomAccessor2;
     friend class KisStressJob;
     friend class KisTiledDataManagerTest;
+    friend class KisNativeResultAdapter;
     friend class KisTiledDataManagerPageStoreBackend;
 
 public:
@@ -351,6 +356,7 @@ private:
     KisTiledExtentManager m_extentManager;
 
     mutable QReadWriteLock m_lock;
+    std::unique_ptr<class KisNativeResultProtocol> m_nativeResult;
 
 private:
     // Allow compression routines to calculate (col,row) coordinates

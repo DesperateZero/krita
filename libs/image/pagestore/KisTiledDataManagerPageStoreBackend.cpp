@@ -12,6 +12,7 @@
 #include "KisPageWriteCoordinator_p.h"
 #include "KisTiles3PageReplicaProvider.h"
 #include "KisStrokeJobFailureContext.h"
+#include "KisPageStoreProductPolicy_p.h"
 #include "kis_image_config.h"
 #include "tiles3/kis_tiled_data_manager.h"
 #include "tiles3/kis_tile_data.h"
@@ -69,11 +70,6 @@ qint32 pageCoordinate(qint32 pixel, qint32 pageExtent)
     return coordinate;
 }
 
-struct ProductBackingPolicy
-{
-    quint64 providerBytes = 0;
-    KisPageBackingLimits limits;
-};
 
 void prepareChangedPageOutput(QVector<KisLogicalPageId> *output, const QRect &rect)
 {
@@ -87,72 +83,6 @@ void prepareChangedPageOutput(QVector<KisLogicalPageId> *output, const QRect &re
     if (quint64(output->capacity()) < columns * rows) throw std::bad_alloc();
 }
 
-bool configMiBToBytes(int value, quint64 *bytes,
-                      QString *error)
-{
-    constexpr quint64 bytesPerMiB = quint64(1) << 20;
-    if (!bytes || value < 0
-        || quint64(value) > std::numeric_limits<quint64>::max() / bytesPerMiB) {
-        KisPageStoreDetail::setError(
-            error, QStringLiteral("PageStore configured memory limit is invalid"));
-        return false;
-    }
-    *bytes = quint64(value) * bytesPerMiB;
-    return true;
-}
-
-bool deriveProductBackingPolicy(ProductBackingPolicy *policy, QString *error)
-{
-    if (!policy) {
-        KisPageStoreDetail::setError(
-            error, QStringLiteral("PageStore backing policy output is missing"));
-        return false;
-    }
-    const KisImageConfig config(true);
-    quint64 ramBytes = 0;
-    quint64 poolBytes = 0;
-    quint64 swapBytes = 0;
-    if (!configMiBToBytes(config.tilesHardLimit(), &ramBytes, error)
-        || !configMiBToBytes(config.poolLimit(), &poolBytes, error)
-        || !configMiBToBytes(config.maxSwapSize(), &swapBytes, error)) {
-        return false;
-    }
-    if (swapBytes > std::numeric_limits<quint64>::max() - ramBytes
-        || poolBytes > std::numeric_limits<quint64>::max() - ramBytes) {
-        KisPageStoreDetail::setError(
-            error, QStringLiteral("PageStore configured memory limits overflow"));
-        return false;
-    }
-    const quint64 logicalBytes = ramBytes + swapBytes;
-    const quint64 internalCpuBytes = ramBytes + poolBytes;
-    ProductBackingPolicy result;
-    result.providerBytes = logicalBytes;
-    result.limits.logicalCurrentBytes = logicalBytes;
-    result.limits.retainedHistoryBytes = logicalBytes;
-    result.limits.residentCurrentBytes = {ramBytes, 0, 0, swapBytes};
-    result.limits.residentHistoryBytes = result.limits.residentCurrentBytes;
-    result.limits.activePendingBytes = ramBytes;
-    // BR1 has no GPU transfer provider. Rejecting this bucket prevents a
-    // finite product configuration from advertising unimplemented capacity.
-    result.limits.inFlightReplicaBytes = 0;
-    result.limits.retirementDebtBytes = logicalBytes;
-    // These allocations are outside the tiles payload allocator. Their class
-    // ceilings therefore use the configured RAM total (tiles plus pool). The
-    // default zero-sized pool must not disable required default-page reads.
-    result.limits.optionalCacheBytes = internalCpuBytes;
-    result.limits.metadataArenaBytes = internalCpuBytes;
-    result.limits.durableStoreCapacity = swapBytes;
-    *policy = result;
-    KisPageStoreDetail::setError(error, {});
-    return true;
-}
-
-std::shared_ptr<KisBackingBudgetController> acquireProductNonPayloadBudget(
-    const ProductBackingPolicy &policy,
-    QString *error)
-{
-    return kisAcquirePageStoreProcessBudget(policy.limits.metadataArenaBytes, error);
-}
 
 }
 
@@ -225,10 +155,10 @@ public:
     bool prepareStore(const KisImageEpochSnapshot &initial, QString *error)
     try
     {
-        ProductBackingPolicy policy;
-        if (!deriveProductBackingPolicy(&policy, error))
+        KisPageStoreProductPolicy policy;
+        if (!kisDerivePageStoreProductPolicy(&policy, error))
             return false;
-        const auto sharedNonPayloadBudget = acquireProductNonPayloadBudget(policy, error);
+        const auto sharedNonPayloadBudget = kisAcquireProductNonPayloadBudget(policy, error);
         if (!sharedNonPayloadBudget)
             return false;
         KisBackingBudgetController coldStorage;
@@ -596,6 +526,7 @@ class KisTiledDataManagerIteratorWriteScope::Private : public KisPageProcessStor
 {
 public:
     std::unique_ptr<KisTiledDataManagerPageStoreWriteBatch> batch;
+    std::unique_ptr<KisNativeResultProtocol::IteratorSession> native;
 };
 
 KisTiledDataManagerIteratorWriteScope::KisTiledDataManagerIteratorWriteScope()
@@ -614,13 +545,23 @@ void KisTiledDataManagerIteratorWriteScope::operator delete(void *data) noexcept
     KisPageProcessStorageObject::operator delete(data);
 }
 
+std::unique_ptr<KisTiledDataManagerIteratorWriteScope> KisTiledDataManagerIteratorWriteScope::fromNative(
+    std::unique_ptr<KisNativeResultProtocol::IteratorSession> session)
+{
+    std::unique_ptr<KisTiledDataManagerIteratorWriteScope> result(new KisTiledDataManagerIteratorWriteScope);
+    result->d->native = std::move(session);
+    return result;
+}
+
 bool KisTiledDataManagerIteratorWriteScope::finish()
 {
+    if (d && d->native) return d->native->finish();
     return d && d->batch && d->batch->finish();
 }
 
 bool KisTiledDataManagerIteratorWriteScope::isActive() const
 {
+    if (d && d->native) return d->native->isActive();
     if (!d || !d->batch || !d->batch->d) return false;
     const auto &batch = d->batch->d;
     QMutexLocker lock(&batch->leaseMutex);

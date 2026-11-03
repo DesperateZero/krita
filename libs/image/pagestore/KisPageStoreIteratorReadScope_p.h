@@ -4,6 +4,7 @@
 
 #include <memory>
 #include "KisPageStore.h"
+#include "experimental/KisNativeResultProtocol.h"
 #include <array>
 #include <optional>
 
@@ -26,6 +27,7 @@ public:
     quint32 rowStride() const;
     quint64 byteSize() const
     {
+        if (m_nativeResult) return quint64(m_nativeResult->rowStride()) * 64;
         return m_native.isValid() ? m_native.byteSize()
                                   : m_lease ? m_lease->byteSize() : 0;
     }
@@ -33,6 +35,8 @@ public:
     const KisCpuReadGuard &nativeGuard() const { return m_native; }
     const KisReadLease *genericLease() const { return m_lease ? &*m_lease : nullptr; }
 private:
+    friend class KisPageStoreIteratorReadScope;
+    std::optional<KisNativeResultProtocol::ReadAccess> m_nativeResult;
     KisPageStore *m_store = nullptr;
     KisCpuReadGuard m_native;
     std::optional<KisReadLease> m_lease;
@@ -48,16 +52,20 @@ public:
     bool isValid() const;
     bool beforeOnly() const { return m_beforeOnly; }
     bool beforeAliasesWrite() const
-    { return m_store && m_beforeOnly && !m_before.isValid(); }
+    { return m_nativeIdentity ? m_beforeOnly && !m_nativeBefore : m_store && m_beforeOnly && !m_before.isValid(); }
     // Live legacy writer pointers cannot be revoked by a read constructor.
     // Such a traversal still uses tiles3 and is not an immutable epoch view.
     bool observesLiveLegacyWriter() const
-    { return m_store && !m_beforeOnly && !m_current.isValid() && !m_before.isValid(); }
+    { return m_nativeLiveWriter || (m_store && !m_beforeOnly && !m_current.isValid() && !m_before.isValid()); }
     bool beforeMatches(const KisPageVersion &version) const;
     KisPageStoreReadPage readPage(qint32 column, qint32 row, bool before,
                                   QString *error = nullptr) const;
 private:
     friend class KisTiledDataManagerPageStoreBackend;
+    friend class KisNativeResultProtocol;
+    const void *m_nativeIdentity = nullptr;
+    bool m_nativeLiveWriter = false;
+    KisNativeResultProtocol::Snapshot m_nativeCurrent, m_nativeBefore;
     KisPageStore *m_store = nullptr;
     KisSurfaceId m_surface;
     bool m_beforeOnly = false;

@@ -217,3 +217,9 @@ if(APPLE)
 
     macos_test_fixrpath(KisRandomGenerator2DDemo)
 endif()
+
+# New protocol contracts run against the actual image library, never an
+# executable-private replacement implementation or old protocol bridge.
+add_executable(NativeResultProtocolContractTest NativeResultProtocolContractTest.cpp)
+target_link_libraries(NativeResultProtocolContractTest PRIVATE kritaimage)
+add_test(NAME NativeResultProtocolContractTest COMMAND NativeResultProtocolContractTest)

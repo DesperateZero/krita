@@ -17,6 +17,9 @@
 #include <kis_shared.h>
 #include <kis_shared_ptr.h>
 #include <cstddef>
+#include <memory>
+class KisNativeHistory;
+class KisNativeResultProtocol;
 
 
 class KisMementoManager;
@@ -95,6 +98,7 @@ private:
     }
 
     friend class KisMementoManager;
+    friend class KisNativeResultProtocol;
 
     inline void updateExtent(qint32 col, qint32 row, QMutex *currentMementoExtentLock) {
         const qint32 tileMinX = col * KisTileData::WIDTH;
@@ -128,6 +132,7 @@ private:
     qint32 m_extentMinY;
     qint32 m_extentMaxY;
     bool m_pageStoreStorage = false;
+    std::shared_ptr<KisNativeHistory> m_nativeHistory;
 };
 
 #endif // KIS_MEMENTO_H_

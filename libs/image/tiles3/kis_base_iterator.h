@@ -29,6 +29,7 @@ protected:
         m_completeListener = listener;
         if (m_writable) {
             m_writeScope = m_dataManager->beginIteratorWriteScope();
+            m_writeScopeFailed = !m_writeScope && m_dataManager->requiresIteratorWriteScope();
         }
         m_readScope = m_dataManager->capturePageStoreReadScope(_writable, std::move(scope));
         if (m_readScope && m_readScope->observesLiveLegacyWriter()) m_readScope.reset();
@@ -49,6 +50,7 @@ protected:
     KisTiledDataManager *m_dataManager;
     qint32 m_pixelSize;        // bytes per pixel
     bool m_writable;
+    bool m_writeScopeFailed = false;
     std::shared_ptr<const KisPageStoreIteratorReadScope> m_readScope;
     std::optional<KisPageStoreReadCursor> m_readCursor;
     inline bool lockTile(KisTileSP &tile) {
@@ -73,7 +75,7 @@ protected:
 
     template<typename TileInfo>
     void fetchTileDataForCache(TileInfo &info, qint32 column, qint32 row) {
-        if (m_writeScope && !m_writeScope->isActive()) {
+        if (m_writeScopeFailed || (m_writeScope && !m_writeScope->isActive())) {
             info.data = nullptr;
             info.oldData = nullptr;
             return;

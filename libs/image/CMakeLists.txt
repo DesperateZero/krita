@@ -63,6 +63,7 @@ set(kritaimage_LIB_SRCS
    pagestore/KisSurfaceRegistry.cpp
    pagestore/KisSurfaceCodecRegistry.cpp
    pagestore/KisTiledDataManagerPageStoreBackend.cpp
+   pagestore/experimental/KisNativeResultProtocol.cpp
    pagestore/KisUnifiedSsdPageStore.cpp
    tiles3/kis_tile.cc
    tiles3/kis_tile_data.cc
