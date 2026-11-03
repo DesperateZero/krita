@@ -76,8 +76,7 @@ class NativeContractGateTest(unittest.TestCase):
             self.assertTrue(self.gate.metadata_directory_replaced(text))
 
     def native_inputs(self):
-        return [(self.root / p).read_text() for p in [
-            "libs/image/pagestore/experimental/KisNativeResultProtocol.cpp",
+        return [self.gate.native_protocol_source()] + [(self.root / p).read_text() for p in [
             "libs/image/tiles3/kis_tiled_data_manager.cc", "libs/image/tiles3/kis_tile.cc", "libs/image/CMakeLists.txt"]]
 
     def test_actual_native_responsibilities_remain_mapped(self):
@@ -92,6 +91,17 @@ class NativeContractGateTest(unittest.TestCase):
         for required in ["watchRetirementReadiness", "KisStrokeJobFailureContext::reportFailure", "m_nativeResult->copyFrom("]:
             inputs = [text.replace(required, "missing_native_responsibility") for text in self.native_inputs()]
             self.assertTrue(self.gate.validate_native_protocol(*inputs))
+
+    def test_superseded_default_or_fallback_is_rejected(self):
+        for old in ["m_pageStoreBackend", "KRITA_NATIVE_RESULT_PROTOCOL", "ScopedPageStoreWriteBatch"]:
+            source, manager, tile, cmake = self.native_inputs()
+            self.assertTrue(self.gate.validate_native_protocol(source, manager + "\n" + old, tile, cmake))
+
+    def test_missing_responsibility_translation_unit_is_rejected(self):
+        for name in ["Write", "Resource", "View", "Tiles3", "Operations"]:
+            source, manager, tile, cmake = self.native_inputs()
+            self.assertTrue(self.gate.validate_native_protocol(source, manager, tile,
+                cmake.replace("KisNativeResult" + name + ".cpp", "missing.cpp")))
 
 
 if __name__ == "__main__":

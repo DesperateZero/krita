@@ -368,11 +368,7 @@ def build_baseline(manifest: dict[str, Any], build_dir: Path) -> dict[str, Any]:
                     encoding="utf-8", errors="replace"
                 )
             )),
-            "backend_duplicate_state": sorted(set(BACKEND_DUPLICATE_STATE_RE.findall(
-                (REPOSITORY_ROOT / "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp").read_text(
-                    encoding="utf-8", errors="replace"
-                )
-            ))),
+            "backend_duplicate_state": [],  # Superseded CPU adapter is deleted, checked below.
         },
     }
 
@@ -905,9 +901,24 @@ def validate_native_protocol(source: str, manager: str, tile: str, cmake: str) -
         if entry not in manager: errors.append("native public consumer is not migrated: " + entry)
     if "if (write->reusableReadCache()) read = std::move(write)" not in tile:
         errors.append("native escaped raw capability lost its original lifetime owner")
-    if "pagestore/experimental/KisNativeResultProtocol.cpp" not in cmake:
+    if "pagestore/native/KisNativeResultProtocol.cpp" not in cmake:
         errors.append("native protocol is not in the actual image library")
+    for unit in ("Write", "Resource", "View", "Tiles3", "Operations"):
+        if f"pagestore/native/KisNativeResult{unit}.cpp" not in cmake:
+            errors.append("native responsibility is not compiled: " + unit)
+    for retired in ("KRITA_NATIVE_RESULT_PROTOCOL", "m_pageStoreBackend", "PreparedTileUpdates",
+                    "ScopedPageStoreWriteBatch", "SelectionAuthority::InternalPageStore"):
+        if retired in manager:
+            errors.append("product retains superseded CPU protocol routing: " + retired)
+    if "SelectionAuthority::NativeResult" not in manager:
+        errors.append("native result authority is not the ordinary CPU constructor")
     return errors
+
+
+def native_protocol_source() -> str:
+    directory = REPOSITORY_ROOT / "libs/image/pagestore/native"
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(directory.iterdir())
+                     if path.suffix in (".cpp", ".h"))
 
 
 def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
@@ -956,35 +967,13 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
     for field in sorted(current_tile_fields - frozen_tile_fields):
         errors.append(f"new KisTile PageStore compatibility field: {field}")
 
-    backend_path = REPOSITORY_ROOT / "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp"
-    current_backend_state = set(BACKEND_DUPLICATE_STATE_RE.findall(
-        backend_path.read_text(encoding="utf-8", errors="replace")
-    ))
-    frozen_backend_state = set(ratchet.get("backend_duplicate_state", []))
-    backend_text = code_only(backend_path.read_text(encoding="utf-8"))
-    backend_header = code_only(backend_path.with_suffix(".h").read_text(encoding="utf-8"))
-    for retired in ("beginMutationBatchImpl", "finishOperationBatch", "finishForAdapterDelivery",
-                    "prepareMutationBatch", "promoteLegacy", "cpuMutationBatches", "operationFrames",
-                    "currentOperationLocked", "std::shared_ptr<Private>",
-                    "std::shared_ptr<KisTiledDataManagerPageStoreWriteBatch::Private>"):
-        if retired in backend_text or retired in backend_header:
-            errors.append("managed adapter restored a superseded batch protocol: " + retired)
-    for required in ("class KisTiledDataManagerPageStoreBackend::OperationFrame", "OperationIndex operations",
-                     "operations.find(QThread::currentThreadId())", "constant_time_size<false>",
-                     "original.sealForAdapterDelivery", "delivery->m_frame = std::move(original)",
-                     "prepared->mutation = std::move(original)", "currentOperation()", "if (accepted) leave()",
-                     "operations.replace_node(", "while (count && !body->references.compare_exchange_weak(",
-                     "TileLeaseRelease(batch.detach()",
-                     "session().reserveLegacyMutationPage(key, error, present)", "reserveLegacyPage(key,",
-                     "activeFrame->legacyForPage("):
-        if required not in backend_text:
-            errors.append("managed adapter lost original Frame ownership/admission: " + required)
-    trim = backend_text[backend_text.find("bool KisTiledDataManagerPageStoreBackend::trimToRect("):]
-    trim = trim[:trim.find("KisTiledDataManagerPageStoreBackend::allocatedPages()")]
-    if "acquireTile(" in trim or "lease->markDirty" in trim:
-        errors.append("managed trim restored a generic lease around its original execution")
-    for symbol in sorted(current_backend_state - frozen_backend_state):
-        errors.append(f"new backend duplicate writer/admission state: {symbol}")
+    # The old Frame/batch installation rules have no surviving CPU consumer.
+    # Replace that representation-specific ratchet with complete deletion and
+    # the native original-row/physical/fee/failure/terminal invariants above.
+    current_backend_state = set()
+    for suffix in (".cpp", ".h"):
+        if (REPOSITORY_ROOT / ("libs/image/pagestore/KisTiledDataManagerPageStoreBackend" + suffix)).exists():
+            errors.append("superseded CPU backend returned")
 
     manifest_symbols = {
         symbol
@@ -1967,9 +1956,9 @@ def main() -> int:
     errors.extend(check_baseline_shape(baseline, manifest))
     errors.extend(validate_callgraph(callgraph, manifest, ownership, census, baseline))
     errors.extend(validate_ratchet(baseline, manifest))
-    native = REPOSITORY_ROOT / "libs/image/pagestore/experimental/KisNativeResultProtocol.cpp"
+    native = REPOSITORY_ROOT / "libs/image/pagestore/native/KisNativeResultProtocol.cpp"
     if native.exists():
-        errors.extend(validate_native_protocol(code_only(native.read_text()),
+        errors.extend(validate_native_protocol(code_only(native_protocol_source()),
             code_only((REPOSITORY_ROOT / "libs/image/tiles3/kis_tiled_data_manager.cc").read_text()),
             code_only((REPOSITORY_ROOT / "libs/image/tiles3/kis_tile.cc").read_text()),
             (REPOSITORY_ROOT / "libs/image/CMakeLists.txt").read_text()))
