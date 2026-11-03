@@ -94,6 +94,10 @@ protected:
 public:
     // Throws std::bad_alloc if the default backing cannot be admitted.
     KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel);
+    // Isolated protocol construction: the caller owns selection and publication;
+    // this manager supplies the real tile table, read adapter and extent only.
+    enum class SelectionAuthority { InternalPageStore, ExternalProtocol };
+    KisTiledDataManager(quint32 pixelSize, const quint8 *defPixel, SelectionAuthority);
     virtual ~KisTiledDataManager();
     KisTiledDataManager(const KisTiledDataManager &dm);
     KisTiledDataManager & operator=(const KisTiledDataManager &dm);

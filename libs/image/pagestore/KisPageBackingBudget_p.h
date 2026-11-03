@@ -207,6 +207,7 @@ private:
     quint64 sharedCookie = 0;
 
     friend class KisBackingBudgetController;
+    friend class KisNativeResultProtocol;
     friend class KisPageWriteCoordinator;
     friend class KisPageOwnerLedger;
     friend class KisPageDefaultStorage;
@@ -375,6 +376,7 @@ private:
     // backing. Moving it creates no payload or additional durable allocation.
     void moveRetirementHeadroom(quint64 cookie, KisPageAccessDomain source,
                                 KisPageAccessDomain target, quint64 bytes) noexcept;
+    friend class KisNativeResultProtocol;
     void release(quint64 cookie) noexcept;
     bool reservationCovers(quint64 cookie, KisBackingBudgetClass,
                            KisPageAccessDomain, quint64 bytes) const;

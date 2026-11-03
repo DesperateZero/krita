@@ -474,6 +474,11 @@ private:
 
 KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
                                          const quint8 *defaultPixel)
+    : KisTiledDataManager(pixelSize, defaultPixel, SelectionAuthority::InternalPageStore)
+{}
+
+KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
+    const quint8 *defaultPixel, SelectionAuthority authority)
 {
     // Budget rejection has the same construction contract as allocation
     // failure: no partially initialized manager may escape to a caller.
@@ -488,7 +493,7 @@ KisTiledDataManager::KisTiledDataManager(quint32 pixelSize,
     hashTable->setDefaultTileData(defaultTile.get());
     mementoManager->setDefaultTileData(defaultTile.get());
 
-    auto backend = preparePageStoreBackend(this);
+    auto backend = authority == SelectionAuthority::InternalPageStore ? preparePageStoreBackend(this) : nullptr;
     QString pageStoreError;
     try {
         if (!backend || !backend->configure(pixelSize, defaultPixel, &pageStoreError)

@@ -75,6 +75,7 @@ protected:
     virtual void finishStorageHandoff(bool writable) noexcept { Q_UNUSED(writable); }
 
 private:
+    friend class KisNativeResultProtocol;
     friend class KisPageMetadataCoordinator;
     friend struct KisPageReplicaState;
     friend struct KisPageBackingRecord;
@@ -628,6 +629,7 @@ public:
     void unpin();
     void reset();
 private:
+    friend class KisNativeResultProtocol;
     friend class KisCpuBackingHandoff;
     std::shared_ptr<KisCpuResidentBinding> m_binding;
 };
