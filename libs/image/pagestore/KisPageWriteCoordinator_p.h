@@ -60,15 +60,12 @@ struct KisPageMetadataTransitionResult;
 // Stored once in the stable PageControl. Only the containing Store gate
 // protects these fields; metadata's shard gate protects the surrounding page.
 struct KisPageWriteClaim {
-    enum class Origin : quint8 { NativeSession, ManagedRange, LegacyAdapter, GenericWrite };
+    enum class Origin : quint8 { NativeSession, GenericWrite };
     quint64 token = 0;
     Qt::HANDLE thread = nullptr;
     KisPageWriteClaim *previous = nullptr;
     KisPageWriteClaim *next = nullptr;
     Origin origin = Origin::NativeSession;
-    // Non-owning adapter fact under this original page claim. Unlink clears
-    // it before another Frame can acquire this PageControl. No second owner.
-    void *adapterLocation = nullptr;
 };
 
 enum class KisPageWriteInputKind : quint8 {
@@ -156,7 +153,6 @@ private:
 public:
     // Reuse the original PageControl claim, avoiding growth of every Frame
     // row and of the inline single-page Frame allocation.
-    void *&adapterLocation() const { Q_ASSERT(writeClaim && writeClaim->token); return writeClaim->adapterLocation; }
 private:
     quint32 slotIndex = 0;
     friend class KisPageWriteAdmission;
@@ -256,27 +252,7 @@ class KRITAIMAGE_EXPORT KisPageWriteAdmission final
 {
 public:
     using ClaimOrigin = KisPageWriteClaim::Origin;
-    enum class Conflict : quint8 {
-        None,
-        ManagedOtherThread,
-        ManagedSameThread,
-        LegacyBorrower,
-        LegacySameThread,
-        WriterOtherThread,
-        WriterSameThread
-    };
     enum class Result : quint8 { Acquired, Contended, Failed };
-
-    class LegacyInspection final
-    {
-    public:
-        explicit operator bool() const { return owner; }
-    private:
-        const KisPageWriteAdmission *owner = nullptr;
-        const KisPageKey *key = nullptr; // Original caller input stays alive until claimOne.
-        KisPageWriteClaim *location = nullptr;
-        friend class KisPageWriteAdmission;
-    };
 
     class ClaimSet final
     {
@@ -289,10 +265,6 @@ public:
         ClaimSet &operator=(const ClaimSet &) = delete;
 
         bool isValid() const;
-        // No further execution/delivery may consume the original write rows.
-        // Stable PageControls retain the claims; this owner retains their chain.
-        void retainClaimsForTerminal() noexcept;
-        bool isTerminal() const { return isValid() && !writeSet; }
         void release() noexcept;
         void releaseLocked() noexcept;
 
@@ -310,28 +282,18 @@ public:
                           const bool *operational = nullptr);
     qsizetype activeNativeClaimCountLocked() const;
     qsizetype activeGenericClaimCountLocked() const;
-    Conflict conflictLocked(const KisPageKey &, Qt::HANDLE requester) const;
-    // Store-gated original row keeps the location for the subsequent claim.
-    Conflict conflictLocked(KisMutationPageEntry &, Qt::HANDLE requester) const;
     bool pageClaimedLocked(const KisPageKey &) const;
-    // One legacy entry inspection, before fallible operation preparation.
-    // A null location means a real first key, not authority to skip the
-    // final claim. Store admission and original metadata lifetime are held.
-    LegacyInspection inspectLegacyClaimLocked(const KisPageKey &, QString *error) const;
     // Growth temporarily releases ownerLock. The caller retains the original
     // owner/transaction and serializes its write set independently (session
     // mutex or a private range). Never pass a mutable unprotected write set.
     bool claimDirectLocked(const KisPageKey &, quint64 ownerToken, QMutexLocker<QMutex> &, QString *error = nullptr);
     void releaseDirectLocked(const KisPageKey &, quint64 ownerToken) noexcept;
     ClaimSet beginClaimSet(KisMutationWriteSet &);
-    bool claimOne(ClaimSet &, KisMutationWriteSet::EntryHandle, QMutexLocker<QMutex> &, QString *error,
-                  ClaimOrigin origin = ClaimOrigin::NativeSession,
-                  const LegacyInspection *inspection = nullptr);
+    bool claimOne(ClaimSet &, KisMutationWriteSet::EntryHandle, QMutexLocker<QMutex> &, QString *error);
     bool releaseOneLocked(ClaimSet &, KisMutationWriteSet::EntryHandle) noexcept;
     // Contention observed across growth remains distinct from real storage
     // refusal, even if that writer releases while unused growth is freed.
-    Result claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error,
-                  ClaimOrigin origin = ClaimOrigin::NativeSession);
+    Result claimAll(ClaimSet &, QMutexLocker<QMutex> &, QString *error);
     // Borrow the existing execution bindings; no copied keys or second row directory.
     struct Rows {
         const void *data;
@@ -345,11 +307,10 @@ public:
 
 private:
     template<class Visit> Result claimEntries(ClaimSet &, Visit &&, QMutexLocker<QMutex> &,
-                                             QString *, ClaimOrigin);
-    static Conflict classify(const KisPageWriteClaim *, Qt::HANDLE requester);
+                                             QString *);
     bool valid(const ClaimSet &) const;
     bool owned(const KisPageWriteClaim *, quint64 token, bool generic = false) const;
-    void attach(ClaimSet &, KisPageWriteClaim &, ClaimOrigin);
+    void attach(ClaimSet &, KisPageWriteClaim &);
     void unlink(ClaimSet &, KisPageWriteClaim &) noexcept;
     KisPageWriteClaim *locate(const KisPageKey &, QMutexLocker<QMutex> &, QString *, bool *unlocked = nullptr);
     void release(ClaimSet &, bool lockOwner) noexcept;

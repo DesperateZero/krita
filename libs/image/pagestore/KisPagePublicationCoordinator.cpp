@@ -234,14 +234,6 @@ private:
     size_t backingCapacity = 0;
 };
 
-const KisPagePublicationChange *
-KisPagePublicationCoordinator::KisPreparedPagePublication::Data::findChange(const KisPageKey &key) const
-{
-    const auto found = std::lower_bound(changes.cbegin(), changes.cend(), key,
-        [](const Change &change, const KisPageKey &value) { return overlayKeyLess(change.replacement.key(), value); });
-    return found != changes.cend() && found->replacement.key() == key ? &*found : nullptr;
-}
-
 KisPagePublicationCoordinator::KisPreparedPagePublication::
     KisPreparedPagePublication() = default;
 

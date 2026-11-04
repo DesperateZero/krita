@@ -3991,11 +3991,23 @@ void KisTiledDataManagerTest::testPageStoreRestoreDeliveryAllowsTileReader()
     } bridge;
     bridge.backend=&KisNativeResultTestAccess::tiles(*dm.m_nativeResult);
     tile->setPageStoreBridge(&bridge, false); tile->invalidatePageStoreReadCache();
-    std::thread reader; bool entered = false, refused = false;
+    QSemaphore startReader;
+    std::atomic<bool> readRequested{false};
+    bool entered = false, refused = false;
+    // Allocate the witness before the funded installation window. The phase
+    // callback only releases this already existing reader.
+    std::thread reader([&] {
+        startReader.acquire();
+        if (readRequested.load()) refused = !tile->lockForRead();
+    });
+    const auto joinReader = qScopeGuard([&] {
+        startReader.release();
+        if (reader.joinable()) reader.join();
+    });
     KisPageStoreDiagnosticRecorder recorder(true);
     recorder.setPhaseObserver([&](KisPageStoreDiagnosticPhase phase) {
-        if (phase != KisPageStoreDiagnosticPhase::NativeSelectionInstalled || reader.joinable()) return;
-        reader = std::thread([&] { refused = !tile->lockForRead(); });
+        if (phase != KisPageStoreDiagnosticPhase::NativeSelectionInstalled || readRequested.exchange(true)) return;
+        startReader.release();
         entered = bridge.entered.tryAcquire(1, 5000);
     });
     dm.rollback(history);
@@ -6584,9 +6596,22 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
     };
     int sealed = 0, committed = 0, installed = 0, presenceResolutions = 0;
     bool publicationBlocked = false, publicationCoherent = false;
-    QSemaphore publicationReady, publicationDone;
-    std::thread publicationReader;
+    QSemaphore publicationStart, publicationReady, publicationDone;
+    std::atomic<bool> publicationRequested{false};
+    std::thread publicationReader([&] {
+        publicationStart.acquire();
+        if (!publicationRequested.load()) return;
+        const auto view = backend->capture();
+        auto selected = view.readPage(0, 0);
+        const bool canonical = selected.data() &&
+            QByteArray(reinterpret_cast<const char *>(selected.data()), bpp) == value &&
+            pixel(dm.getTile(0, 0, false)) == value;
+        publicationReady.release();
+        publicationCoherent = canonical && dm.extent() == QRect(0, 0, 64, 64);
+        publicationDone.release();
+    });
     const auto joinPublication = qScopeGuard([&] {
+        publicationStart.release();
         if (publicationReader.joinable()) publicationReader.join();
     });
     KisPageStoreDiagnosticRecorder recorder(true);
@@ -6598,16 +6623,8 @@ void KisTiledDataManagerTest::testPageStoreFreshReadSelection()
         }
         if (phase == KisPageStoreDiagnosticPhase::NativeSelectionInstalled) {
             ++committed;
-            publicationReader = std::thread([&] {
-                const auto view = backend->capture();
-                auto selected = view.readPage(0, 0);
-                const bool canonical = selected.data() &&
-                    QByteArray(reinterpret_cast<const char *>(selected.data()), bpp) == value &&
-                    pixel(dm.getTile(0, 0, false)) == value;
-                publicationReady.release();
-                publicationCoherent = canonical && dm.extent() == QRect(0, 0, 64, 64);
-                publicationDone.release();
-            });
+            publicationRequested.store(true);
+            publicationStart.release();
             QVERIFY(publicationReady.tryAcquire(1, 5000));
             publicationBlocked = !publicationDone.tryAcquire(1, 50);
         }

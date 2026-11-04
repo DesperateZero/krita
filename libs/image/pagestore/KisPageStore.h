@@ -182,40 +182,6 @@ private:
 class KRITAIMAGE_EXPORT KisPageMutationSession
 {
 public:
-    // Borrowed only during synchronous adapter hooks. Preparation consumes
-    // the original ordered overlay candidate. A private batch's final install
-    // may instead visit its retained sealed entries in the original frozen D.
-    // Both expose unique actual changes without exporting another key array.
-    class KRITAIMAGE_EXPORT AdapterChanges {
-    public:
-        AdapterChanges(const AdapterChanges &) = delete;
-        template<class Visit>
-        bool forEach(const Visit &visit) const
-        {
-            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present, void *&) {
-                return (*static_cast<const Visit *>(visitor))(key, present);
-            });
-        }
-        // The adapter may bind its non-owning location while the original
-        // row's admission protects it, then consume it during installation.
-        template<class Visit>
-        bool forEachLocated(const Visit &visit) const
-        {
-            return forEachImpl(&visit, [](const void *visitor, const KisPageKey &key, bool present, void *&location) {
-                return (*static_cast<const Visit *>(visitor))(key, present, location);
-            });
-        }
-    private:
-        friend class KisPageMutationSession;
-            using Visitor = bool (*)(const void *, const KisPageKey &, bool, void *&);
-        using ForEach = bool (*)(const void *, const void *, Visitor);
-        AdapterChanges(const void *changes, ForEach forEach) : m_changes(changes), m_forEach(forEach) {}
-        bool forEachImpl(const void *, Visitor) const;
-        const void *m_changes; // Original owner stays private; this view retains nothing.
-        ForEach m_forEach;
-    };
-    using AdapterPreparation = std::function<bool(const AdapterChanges &, QString *)>;
-    using AdapterInstallation = std::function<void(const AdapterChanges &)>;
     KisPageMutationSession() = default;
     ~KisPageMutationSession();
     KisPageMutationSession(KisPageMutationSession &&) noexcept = default;
@@ -267,43 +233,12 @@ public:
     bool cancel();
 
 private:
-    // The bridge transfers its private transaction to this existing scope.
-    // Failed physical cancellation and abort remain on the same orphan link;
-    // borrowed history transactions never acquire this responsibility.
-    void takeTransactionOwnership();
-    KisPageTransaction transaction() const;
-    bool ownsTransaction() const;
-    bool finishOwnedTransaction(bool publish);
-    // A shared legacy tile may perform its final unlock on a reader thread.
-    // Only the bridge can hand off terminal sealing; no active guard or new
-    // write access is permitted at this boundary.
-    bool sealForLegacyUnlock(QString *error = nullptr,
-        const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
-    bool checkpointForAdapterDelivery(QString *error,
-        const AdapterPreparation &prepareAdapter, const AdapterInstallation &installAdapter);
-    bool sealForLegacyAdapterDelivery(QString *error = nullptr);
-    // Seal the original segment but retain its original admission/write set
-    // until this session is destroyed after adapter delivery. No writable
-    // access survives seal, and the transaction activity still ends normally.
-    bool sealForAdapterDelivery(QString *error = nullptr, const AdapterPreparation &prepareAdapter = {});
-    AdapterChanges frozenAdapterChanges() const;
-    AdapterChanges admittedAdapterPages() const;
-    static AdapterChanges executionAdapterChanges(const KisPageMutationExecution &, bool changedOnly = true);
-    enum class SealMode { Final, LegacyFinal, AdapterDelivery, LegacyAdapterDelivery, Checkpoint };
-    bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr,
-        const AdapterPreparation &prepareAdapter = {}, const AdapterInstallation &installAdapter = {});
+    enum class SealMode { Final, Checkpoint };
+    bool sealImpl(SealMode mode, QString *error, KisCapturedReadView *checkpoint = nullptr);
     void returnTerminalCapacity();
-    // The original final batch owns this quiescent segment exclusively.
-    // Freeze failed input before invoking adapters outside every session/
-    // Store gate. The original entries/claims remain until cancel or release.
-    bool visitAdapterPages(const std::function<void(const KisPageVersion &, void *)> &visit);
-    KisMutationPageEntry *reserveLegacyMutationPage(const KisPageKey &key, QString *error, bool *present = nullptr);
-    // Original parked target only; never selects current or prepares a page.
-    KisPageVersion legacyMutationPageVersion(const KisPageKey &key) const;
     KisCpuWriteGuard
     beginWriteImpl(const KisPageKey &key, KisPageWriteMode mode, const KisCpuPagePayload *payload, QString *error,
                    const boost::intrusive_ptr<KisPageMutationExecution::Private> &execution = {});
-    friend class KisTiledDataManagerPageStoreLease;
     friend class KisPageStoreCpuMutationTest; // Account stable control separately from transferable capacity.
     class Private;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
@@ -419,7 +354,6 @@ private:
                 (*static_cast<const Visitor *>(context))(data, stride);
             }, status);
     }
-    void selectReadWindow(size_t first, size_t count, quint32 *indices, KisCpuReadBinding *bindings) const;
     class Private;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_add_ref(Private *) noexcept;
     friend KRITAIMAGE_EXPORT void intrusive_ptr_release(Private *) noexcept;
@@ -656,20 +590,6 @@ private:
     bool commitPreparedTransaction(const KisPageTransaction &transaction,
                                    KisRetainedImageEpochSnapshot *retainedAfter = nullptr);
     KisCompletionTicket finishWrite(KisWriteLease lease, const KisCompletionTicket &completion);
-    // Adapter-only scratch prepared before pixels. On failure scratch may
-    // contain a partial classification and must not be consumed. This grants
-    // no view/pin and never classifies unsealed pending bytes.
-    bool resolvePagePresenceInto(KisSurfaceId, const QVector<KisLogicalPageId> &,
-                                 const KisPageReadView &, quint8 *scratch, qsizetype capacity) const;
-    // Adapter-only: the original inert scope owns the whole range before
-    // selecting a transaction after any wait. Activation retains the same
-    // entries and claims; an inactive result exposes no write capability.
-    KisPageMutationSession reserveManagedRange(
-        KisSurfaceId surface, const KisPageSnapshotArray<KisLogicalPageId> &targets,
-        bool legacyIntent, bool *borrowed, QString *error, bool initialExecution);
-    KisPageMutationSession reserveLegacyPage(const KisPageKey &, QString *error);
-    KisPageMutationSession beginMutation(const KisPageTransaction &,
-        KisPageMutationSession reservation, KisPageMutationExecution *execution, QString *error);
     // Internal finite selection. It cannot be used as a whole-image snapshot.
     KisCapturedReadView captureReadRange(KisSurfaceId surface, const QRect &pages,
         const KisPageReadView &selector, QString *error,

@@ -181,7 +181,6 @@ class KisPagePublicationCoordinator final
         }
         bool hasStorage() const noexcept { return entries.has_value(); }
         bool empty() const noexcept { return !entries || entries->empty(); }
-        size_t size() const noexcept { return entries ? entries->size() : 0; }
         size_t capacity() const noexcept { return entries ? entries->capacity() : 0; }
         static size_t internal_capacity() { return Entries::internal_capacity(); }
         void reserve(size_t count) { Q_ASSERT(entries); entries->reserve(count); }
@@ -261,7 +260,6 @@ public:
                 if (state) for (auto &row : changes)
                     state->values->release(std::exchange(row.acceptedValue, nullptr));
             }
-            const Change *findChange(const KisPageKey &) const;
             void releaseCapacity() noexcept
             {
                 // A moved-from header no longer owns the reservation.

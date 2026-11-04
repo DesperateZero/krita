@@ -1492,16 +1492,16 @@ private Q_SLOTS:
     void mutationWriteSetRejectsLiveResourceErasure();
     void writeAdmissionReleasesSubsetClaims();
     void pageControlClaimsPreserveContentAndOwnership();
-    void legacyInspectionRevalidatesOriginalClaim();
+    void claimRejectsForeignOrContendedRows();
     void viewRootsShareFinalValueIdentity();
     void viewMemoryDoesNotExtendPrivateAuthority();
-    void terminalAdmissionOutlivesWriteRows_data()
+    void admissionReleasePrecedesWriteRows_data()
     {
         QTest::addColumn<int>("count");
         for (int count : {1, 16, 65})
             QTest::newRow(qPrintable(QString::number(count))) << count;
     }
-    void terminalAdmissionOutlivesWriteRows();
+    void admissionReleasePrecedesWriteRows();
     void mutationWriteSetBudgetFailureIsAtomic_data();
     void mutationWriteSetBudgetFailureIsAtomic();
     void writeAdmissionClaimsWholeSetsAtomically();
@@ -4372,7 +4372,7 @@ void KisPageStoreReferenceTest::metadataCompactRecordsRoundTrip()
     auto footprint = coordinator.footprint();
     QCOMPARE(footprint.pages, quint64(1));
     QCOMPARE(footprint.pageActivities, quint64(0));
-    QCOMPARE(footprint.metadataPageBytes, quint64(192)); // Includes head and funded late-promotion right.
+    QCOMPARE(footprint.metadataPageBytes, quint64(184)); // Includes head and funded late-promotion right.
     QCOMPARE(footprint.metadataPageActivityBytes, quint64(0));
 
     KisPageTransition acquire;
@@ -4483,7 +4483,7 @@ void KisPageStoreReferenceTest::metadataArenaGrowthCausalBaseline()
         const quint64 records = quint64(sample.pages) * quint64(sample.history + 1);
         QCOMPARE(sample.footprint.pages, quint64(sample.pages));
         QCOMPARE(sample.footprint.pageActivities, quint64(0));
-        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(192));
+        QCOMPARE(sample.footprint.metadataPageBytes, quint64(sample.pages) * quint64(184));
         QCOMPARE(sample.footprint.metadataPageActivityBytes, quint64(0));
         QCOMPARE(sample.footprint.versions, records);
         QCOMPARE(sample.footprint.replicas, records);
@@ -11037,7 +11037,7 @@ void KisPageStoreReferenceTest::pageControlClaimsPreserveContentAndOwnership()
     auto claims = admission.beginClaimSet(writes);
     QMutexLocker lock(&mutex);
     QString error;
-    QCOMPARE(admission.claimAll(claims, lock, &error, KisPageWriteAdmission::ClaimOrigin::ManagedRange),
+    QCOMPARE(admission.claimAll(claims, lock, &error),
         KisPageWriteAdmission::Result::Acquired);
     auto *original = metadata.findWriteClaim(pageKey(0));
     QVERIFY(original);
@@ -11045,10 +11045,6 @@ void KisPageStoreReferenceTest::pageControlClaimsPreserveContentAndOwnership()
     QVERIFY(metadata.pageKeys().isEmpty());
     QVERIFY(metadata.registeredPageKeys().empty());
     QVERIFY(metadata.canAddTransientVersion(pageVersion(0, 1), 1));
-    QCOMPARE(admission.conflictLocked(pageKey(0), QThread::currentThreadId()),
-        KisPageWriteAdmission::Conflict::ManagedSameThread);
-    QCOMPARE(admission.conflictLocked(pageKey(0), nullptr),
-        KisPageWriteAdmission::Conflict::ManagedOtherThread);
     lock.unlock();
     const auto initial = initialPageState(pageVersion(0, 1), replica(pageVersion(0, 1), 1, 1, 1));
     QVERIFY(metadataView.registerPage(metadata, initial, &error));
@@ -11075,77 +11071,49 @@ void KisPageStoreReferenceTest::pageControlClaimsPreserveContentAndOwnership()
     QVERIFY(admission.releaseOneLocked(claims, writes.handleAt(1))); // interior chain node
     QVERIFY(admission.releaseOneLocked(claims, writes.handleAt(2))); // chain head
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(1));
-    QVERIFY(admission.claimOne(claims, writes.handleAt(1), lock, &error,
-        KisPageWriteAdmission::ClaimOrigin::LegacyAdapter));
-    QCOMPARE(admission.conflictLocked(pageKey(1), QThread::currentThreadId()),
-        KisPageWriteAdmission::Conflict::LegacySameThread);
-    QCOMPARE(admission.conflictLocked(pageKey(1), nullptr), KisPageWriteAdmission::Conflict::LegacyBorrower);
-    claims.retainClaimsForTerminal();
-    writes = KisMutationWriteSet();
+    QVERIFY(admission.claimOne(claims, writes.handleAt(1), lock, &error));
     auto terminal = std::move(claims);
     terminal.releaseLocked();
+    writes = KisMutationWriteSet();
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(0));
     QCOMPARE(metadata.findWriteClaim(pageKey(0)), original);
     QVERIFY(!original->token && !original->next && !original->previous);
     QCOMPARE(metadata.pageCount(), qsizetype(1));
     QVERIFY(admission.claimDirectLocked(pageKey(0), 1, lock, &error));
-    QCOMPARE(admission.conflictLocked(pageKey(0), QThread::currentThreadId()),
-        KisPageWriteAdmission::Conflict::WriterSameThread);
-    QCOMPARE(admission.conflictLocked(pageKey(0), nullptr), KisPageWriteAdmission::Conflict::WriterOtherThread);
     admission.releaseDirectLocked(pageKey(0), 1);
     QCOMPARE(admission.activeGenericClaimCountLocked(), qsizetype(0));
 }
 
-void KisPageStoreReferenceTest::legacyInspectionRevalidatesOriginalClaim()
+void KisPageStoreReferenceTest::claimRejectsForeignOrContendedRows()
 {
     KisPageMetadataCoordinator metadata, foreignMetadata;
     QVERIFY(metadata.configure(1)); QVERIFY(foreignMetadata.configure(1));
     QMutex mutex, foreignMutex; KisPageWaitCondition changed, foreignChanged;
-    KisPageWriteAdmission admission(metadata, mutex, changed);
-    KisPageWriteAdmission foreign(foreignMetadata, foreignMutex, foreignChanged);
-    KisMutationWriteSet rows, foreignRows;
-    const auto key = pageKey(0), otherKey = pageKey(1);
-    KisPageWriteIntent input; input.key = key;
-    auto &entry = rows.getOrCreate(input); foreignRows.getOrCreate(input);
-    input.key = otherKey; rows.getOrCreate(input);
-    auto claims = admission.beginClaimSet(rows);
-    auto foreignClaims = foreign.beginClaimSet(foreignRows);
-    QString error;
-    QMutexLocker lock(&mutex);
-    const auto cold = admission.inspectLegacyClaimLocked(key, &error); QVERIFY(cold);
-    // Inspection cannot grant permission across actual preparation: a new
-    // control and another writer can appear before this original claim.
-    lock.unlock(); lock.relock();
-    QVERIFY(admission.claimDirectLocked(key, 91, lock, &error));
-    QVERIFY(!admission.claimOne(claims, rows.handleOf(entry), lock, &error,
-        KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &cold));
-    QVERIFY(!admission.inspectLegacyClaimLocked(key, &error));
+    KisPageWriteAdmission admission(metadata, mutex, changed), foreign(foreignMetadata, foreignMutex, foreignChanged);
+    KisMutationWriteSet rows, competingRows;
+    KisPageWriteIntent input; input.key = pageKey(0);
+    auto &entry = rows.getOrCreate(input); competingRows.getOrCreate(input);
+    auto claims = admission.beginClaimSet(rows), competing = admission.beginClaimSet(competingRows);
+    QString error; QMutexLocker lock(&mutex);
+    QVERIFY(admission.claimDirectLocked(input.key, 91, lock, &error));
+    QVERIFY(!admission.claimOne(claims, rows.handleOf(entry), lock, &error));
     QCOMPARE(admission.activeGenericClaimCountLocked(), qsizetype(1));
-    admission.releaseDirectLocked(key, 91);
-    const auto warm = admission.inspectLegacyClaimLocked(key, &error); QVERIFY(warm);
+    admission.releaseDirectLocked(input.key, 91);
     {
         QMutexLocker foreignLock(&foreignMutex);
-        QVERIFY(!foreign.claimOne(foreignClaims, foreignRows.handleAt(0), foreignLock, &error,
-            KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &warm));
-        foreignClaims.releaseLocked();
+        QVERIFY(!foreign.claimOne(claims, rows.handleOf(entry), foreignLock, &error));
     }
-    QVERIFY(!admission.claimOne(claims, rows.handleAt(1), lock, &error,
-        KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &warm));
-    QVERIFY(admission.claimDirectLocked(key, 92, lock, &error));
-    QVERIFY(!admission.claimOne(claims, rows.handleOf(entry), lock, &error,
-        KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &warm));
-    admission.releaseDirectLocked(key, 92);
-    QVERIFY(admission.claimOne(claims, rows.handleOf(entry), lock, &error,
-        KisPageWriteAdmission::ClaimOrigin::LegacyAdapter, &warm));
+    QVERIFY(admission.claimOne(claims, rows.handleOf(entry), lock, &error));
     QVERIFY(admission.ownsEntryLocked(claims, entry));
-    QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(1));
-    QVERIFY(!admission.pageClaimedLocked(otherKey));
+    QVERIFY(!admission.claimOne(competing, competingRows.handleAt(0), lock, &error));
     claims.releaseLocked();
+    QVERIFY(admission.claimOne(competing, competingRows.handleAt(0), lock, &error));
+    competing.releaseLocked();
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(0));
     QCOMPARE(admission.activeGenericClaimCountLocked(), qsizetype(0));
 }
 
-void KisPageStoreReferenceTest::terminalAdmissionOutlivesWriteRows()
+void KisPageStoreReferenceTest::admissionReleasePrecedesWriteRows()
 {
     QFETCH(int, count);
     QMutex mutex;
@@ -11170,21 +11138,21 @@ void KisPageStoreReferenceTest::terminalAdmissionOutlivesWriteRows()
     const auto generic = pageKey(2 * count);
     QVERIFY(admission.claimDirectLocked(generic, 1, lock)); // Separate token domain.
     const auto oldSlot = writes.handleAt(0);
-    claims.retainClaimsForTerminal();
     auto terminal = std::move(claims);
     QVERIFY(!claims.isValid());
-    QVERIFY(terminal.isTerminal());
-    writes = KisMutationWriteSet(); // The terminal owner cannot borrow these rows.
+    QVERIFY(admission.ownsClaimSetLocked(terminal));
+    terminal.releaseLocked(); // No adapter tail retains claims after rows end.
+    writes = KisMutationWriteSet();
     QVERIFY(!admission.claimOne(terminal, oldSlot, lock, &error));
     QVERIFY(!admission.releaseOneLocked(terminal, oldSlot));
     QCOMPARE(admission.claimAll(terminal, lock, &error), KisPageWriteAdmission::Result::Failed);
     QVERIFY(!admission.claimRange(terminal, {}, lock, &error));
     QVERIFY(!admission.ownsClaimSetLocked(terminal));
-    QVERIFY(admission.ownsClaimLocked(terminal, pageKey(0)));
+    QVERIFY(!admission.ownsClaimLocked(terminal, pageKey(0)));
     intent.key = pageKey(0);
     writes.getOrCreate(intent);
     auto next = admission.beginClaimSet(writes);
-    QCOMPARE(admission.claimAll(next, lock, &error), KisPageWriteAdmission::Result::Contended);
+    QVERIFY(!admission.pageClaimedLocked(pageKey(0)));
     terminal.releaseLocked();
     QVERIFY(!terminal.isValid());
     QCOMPARE(admission.activeNativeClaimCountLocked(), qsizetype(count));

@@ -519,13 +519,6 @@ void KisNativeResultProtocol::Impl::settleReleased(Resource *head, bool retirePh
     }
 }
 
-void KisNativeResultProtocol::Impl::reclassifyUnselected(Resource *r) noexcept
-{
-    Resource *head = nullptr;
-    { QMutexLocker lock(&gate); claimReleased(r, head); }
-    settleReleased(head);
-}
-
 void KisNativeResultProtocol::Impl::finishClosing() noexcept
 {
     Resource *released = nullptr;

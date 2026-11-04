@@ -9207,7 +9207,9 @@ void KisPageStoreCpuMutationTest::retirementReleaseBeforeRegistration()
     auto unpin = qScopeGuard([&] { if (!released.exchange(true)) binding->releaseRead(); });
     QVERIFY(f.fill(0x77));
     QTRY_VERIFY(released.load());
-    QCOMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(0));
+    // The callback signal precedes the background pass that consumes its
+    // registration. Observe automatic completion, without manually driving it.
+    QTRY_COMPARE(f.store->sessionStats().pendingRetiredReplicas, qsizetype(0));
     QCOMPARE(f.provider->retireCalls.load(), 3); // Two old pages, one failed pin check.
     f.provider->afterRetire = {};
     QVERIFY(f.store->closeSession());
@@ -11751,8 +11753,11 @@ void KisPageStoreCpuMutationTest::metadataPresenceUsesCanonicalSelector()
     const auto requests = f.store->sessionStats().readRequestsCreated;
     const auto query = [&](const KisPageReadView &view, const QVector<quint8> &expected) {
         present.resize(pages.size());
-        QVERIFY(f.store->resolvePagePresenceInto(
-            {1}, pages, view, present.data(), present.size()));
+        for (qsizetype i = 0; i < pages.size(); ++i) {
+            KisPageVersion version;
+            QVERIFY(f.store->resolvePageVersion({{1}, pages[i]}, view, &version));
+            present[i] = !version.isDefaultPixel();
+        }
         QCOMPARE(present, expected);
         QCOMPARE(f.store->readScopeStatistics().capturedReadViewsCreated, captures);
         QCOMPARE(f.store->sessionStats().readRequestsCreated, requests);
@@ -11783,14 +11788,10 @@ void KisPageStoreCpuMutationTest::metadataPresenceUsesCanonicalSelector()
     query({}, {0, 1, 1}); // an absent page stays absent after changing default
     QCOMPARE(bindings, bindingsAfterCommit);
 
-    present.resize(pages.size());
-    QVERIFY(!f.store->resolvePagePresenceInto(
-        {1}, pages, overlay, present.data(), present.size()));
-    QVERIFY(!f.store->resolvePagePresenceInto({1}, {}, overlay, nullptr, 0));
-    QVERIFY(!f.store->resolvePagePresenceInto(
-        {999}, pages, {}, present.data(), present.size()));
-    QVERIFY(!f.store->resolvePagePresenceInto({1}, pages, {}, nullptr, pages.size()));
-    QVERIFY(f.store->resolvePagePresenceInto({1}, {}, {}, nullptr, 0));
+    KisPageVersion version;
+    QVERIFY(!f.store->resolvePageVersion({{1}, pages[0]}, overlay, &version));
+    QVERIFY(!f.store->resolvePageVersion({{999}, pages[0]}, {}, &version));
+    QVERIFY(!f.store->resolvePageVersion({{1}, pages[0]}, {}, nullptr));
     query({}, {0, 1, 1});
     QVERIFY(f.store->closeSession()); // saved classifications retain no view/pin
     QCOMPARE(present, QVector<quint8>({0, 1, 1}));
@@ -11847,8 +11848,11 @@ void KisPageStoreCpuMutationTest::mutationCapacityReusesOnlyAfterLastBorrow()
     for (int x = 0; x < 16; ++x) pages.append({x, 0});
     const auto begin = [&] {
         if (!declared) return f.begin(tx);
-        auto range = f.store->reserveManagedRange({1}, pages, false, nullptr, &f.error, true);
-        return f.store->beginMutation(tx, std::move(range), nullptr, &f.error);
+        auto scope = f.begin(tx);
+        auto declaration = scope.borrowExecution({1}, pages, &f.error);
+        Q_ASSERT(declaration.isActive());
+        declaration.finish();
+        return scope;
     };
     auto first = begin();
     auto execution = first.borrowExecution({1}, pages); QVERIFY(execution.isActive());

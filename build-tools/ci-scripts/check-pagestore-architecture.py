@@ -1496,7 +1496,7 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
             "static_assert(sizeof(MetadataPageActivityFacts) == 32)",
             "MetadataPageActivityFacts activity",
             "KisPageRetirementRecord *idleCapacity = nullptr",
-            "static_assert(sizeof(MetadataPage) == 192)",
+            "static_assert(sizeof(MetadataPage) == 184)",
             "static_assert(sizeof(MetadataPageActivity) <= 104)",
             "MetadataMap<KisPageKey, MetadataGenericActivity> activities",
             "MetadataMap<KisPageKey, MetadataPage> pages",
@@ -1812,7 +1812,11 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
                          "slot->page.reset()", "coldPages.takeReleasedBlocks()", "entry.setColdPage(page)"):
             if contract not in store_text:
                 errors.append(f"mutation D lost original budgeted workspace/cleanup: {contract}")
-        for retired in ("coldPageIndex", "KisMutationStorage<Page, 2>", "ColdPageBlock",
+        for retired in ("reserveLegacyPage", "reserveLegacyMutationPage", "reserveManagedRange",
+                        "takeTransactionOwnership", "finishOwnedTransaction", "ownsTransaction",
+                        "AdapterChanges", "AdapterDelivery", "selectReadWindow", "resolvePagePresenceInto",
+                        "initialExecutionStorage", "initialExecutionCount",
+                        "coldPageIndex", "KisMutationStorage<Page, 2>", "ColdPageBlock",
                         "takeNativeWriteStorage", "returnNativeWriteStorage", "resetProducer"):
             if retired in store_text:
                 errors.append(f"retired backing-coupled producer storage returned: {retired}")

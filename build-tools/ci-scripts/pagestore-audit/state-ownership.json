@@ -46,40 +46,9 @@
     },
     {
       "creation-paths": [
-        "KisPageMutationSession::takeTransactionOwnership transfers the already-created standalone transaction into its original scope"
-      ],
-      "current-writers": [
-        "KisPageMutationSession::Private ownsTransaction"
-      ],
-      "fact": "standalone transaction terminal responsibility, including refused cancel or abort",
-      "id": "BR1-OWN-MUTATION-OWNED-TRANSACTION",
-      "lock-or-claim": "scope mutex plus Store owner mutex and original transaction; history collector schedules the original intrusive orphan link",
-      "read-only-observers": [
-        "backend finishOwnedTransaction and raw-lease barrier admission"
-      ],
-      "status": "canonical",
-      "target-authoritative-owner": "KisPageMutationSession::Private original scope",
-      "terminal-paths": [
-        "finishOwnedTransaction clears ownership only after accepted commit/abort or facade-gone terminal cleanup",
-        "releaseOrRetain and retryOrphans share cancelAndAbort on the same original scope; no manager callback enters orphan retirement",
-        "borrowed explicit history never takes this ownership; source storage and scope lifetime remain until accepted cancellation/terminal release",
-        "Eligible anonymous Final/AdapterDelivery accepts directly through the common canonical commit input while the sole original session transfers to CommitPreparation under the Store gate. Success relinquishes ownsTransaction only after acceptance; rejection retains original cancellation/abort responsibility."
-      ]
-    },
-    {
-      "creation-paths": [
-        "KisPageStore::acquireWrite",
-        "KisPageMutationSession::beginWriteImpl",
-        "KisPageStore::reserveManagedRange / reserveLegacyPage and the original Session reserveLegacyMutationPage",
-        "generic request node precedes the common write plan; the original active-write control block and transferable index node precede provider resolveAccess, without adding a second writer authority",
-        "native mutation entries and cold resources use stable budgeted recyclable slots; the sole key index and guards validate slot incarnations; original ClaimSet releases successfully cancelled entries before slot erasure, retaining only unfinished debt; detached blocks and final set storage free outside the store gate while original activity keeps the budget owner alive",
-        "Original metadata PageControls own native/generic claims; real cold node allocation is charged outside the Store gate and final whole-request validation precedes installation. Original bound rows retain their stable locations; there is no independent native claim table. Original scope/control storage is charged before activation.",
-        "KisPageMutationSession::borrowExecution prepares charged range/control storage, validates original slots under the structure gate, and binds original stable entry/cold-page references; linked execution lifetime excludes erase/reuse; claimRange revalidates the declared keys through the original write set before installing additional original claims",
-        "KisTransactionData explicitly opts its existing memento into one backend history mutation during quiescent initialization; each declared cursor operation borrows that original session without creating a new transaction or pending-page map",
-        "KisPainter multi-dab jobs use the bounded pixel cursor through the original PaintDevice coordinate adapter; an explicit synchronously borrowed KisTransaction selects its original history session, while the default operation keeps its original terminal guarantee. Immutable dabs and a captured selection are inputs, not writer authorities",
-        "Multi-dab declares the union of actual clipped dab rectangles through the original device wrap/offset adapter; manager-local page geometry is coalesced before compatibility lookup and the original admission/execution owns the distinct targets. Temporary geometry grants no writer authority and does not claim bounding-box gaps.",
-        "The default brush partitions ordinary and mirrored jobs through the PaintDevice cursor coordinate mapping into disjoint mapped storage patches. A job retains ordered dabs across all its source-coordinate clips; the temporary patch index has no write authority, and original operation admission and mirror phase barriers remain responsible for execution.",
-        "Original Frame rows carry their actual execution-borrow occupation under the Frame gate. Binding checks only the requested original rows; successful linking sets occupation and final execution/guard return clears it. Candidate refusal never clears an existing borrower, and initial range activation uses the same linking policy."
+        "KisPageStore::acquireWrite creates the original generic request claim before provider access",
+        "KisPageStore::beginMutation joins an explicit caller-owned transaction; borrowExecution/beginWriteImpl use the same stable metadata PageControl and original write rows",
+        "Cold control growth leaves the Store gate; claimEntries revalidates the actual whole set after growth before installing claims"
       ],
       "current-writers": [
         "KisPageWriteAdmission through KisPageWriteCoordinator"
@@ -93,20 +62,10 @@
       "status": "canonical",
       "target-authoritative-owner": "KisPageWriteAdmission",
       "terminal-paths": [
-        "seal",
-        "cancel",
-        "publishHostWrite",
-        "closeSession",
-        "generic resolve storage rejection restores the original Pending request; preparation exceptions restore the owner gate before releasing admission or cancelling the original private writer",
-        "finishWrite consumes access once; rejected cancellation retains the original active-write record for transaction abort, and close continues to reject live requests, leases or terminal debt",
-        "native storage rejection leaves the original write set and claims available for cancellation; block, directory and index allocation charges return to the original controller only after memory is freed",
-        "claim tokens never wrap; failed preparation preserves previous claims/activity; original scope intrusive orphan links retain rejected cancellation without allocating a replacement owner; scope and control-block memory frees before original budget-owner lifetime release",
-        "KisPageMutationExecution owns only its execution footprint and retains the original session; finish returns a guard-free borrow without sealing, abandonment/cancel records original-scope failure, and an aliasing writable guard keeps the range linked until its final unpin",
-        "resident borrow access and guard return use only the execution-local gate and original binding pin; lifecycle failure is the original atomic scope state, counters fold once at borrow return, and structural growth never invalidates linked entries; no per-access shared diagnostic counter or second page authority",
-        "checkpointForRead refuses live execution or structure-gate contention; successful full segment sealing releases original page claims/storage and folds local counters without ending original session activity; the complete overlay is captured before the same scope can lend again",
-        "Managed cursor/packed adapter delivery seals and ends original transaction activity while retaining the same ClaimSet and sole write set directly in OperationDelivery or the actual legacy lifetime extension. The same original inactive Session holds claims until manager installation finishes; no second writer/transaction is created. Persistent history retains its original active execution through manager refresh and rejects checkpoint until return; failure follows the original cancellation terminal.",
-        "Native cursor/packed original admission covers missing-wrapper/key preparation before pixels and manager installation. Clear and history commit/abort reject outstanding claims; restore checks before preparation and after owner-gate reacquisition. Warm compatibility pages allocate no new wrapper index node. Canonical/adapter publication, Resource/Frame integration and full budget qualification remain original open responsibilities.",
-        "Slot phase reset destroys only original live values and joins the existing live/free chains once. ColdPageSet borrows its containing Frame in the old budget-pointer field; releaseRowResults consumes that Frame write set for successful, cancelled, refused and no-facade exits. Empty capacity transfer preserves the destination Frame pointer. Physical discard releases cold results before destroying rows, with all real charges retained through free. Original directory storage is reused at current logical population rather than clearing historical capacity; no new owner/live index exists."
+        "Generic finishWrite/cancel/close retain original active request and accepted retirement obligations",
+        "Generic Session seal/checkpoint/cancel release original ClaimSet before row storage; explicit transaction remains caller-owned",
+        "Last execution/guard release folds counters and returns original transferable capacity; unresolved live work cannot recycle its identity",
+        "No adapter delivery seal modes, owned anonymous transaction, detached terminal ClaimSet, embedded adapter execution, or second adapter location remain; product CPU operations use the original NativeResult Body instead"
       ]
     },
     {

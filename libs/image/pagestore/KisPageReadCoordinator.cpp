@@ -1046,7 +1046,15 @@ bool KisPageReadCoordinator::releaseCapturedView(
     m_ownerLifetime.ref();
     auto *record = pending.release();
     const bool finished = finishCapturedReleaseLocked(*record, lock);
-    if (!finished && m_backgroundReclamation && !m_automaticWakeupsStopped && !m_lastUseClosing) {
+    if (finished) {
+        // This release may own the last root reference. Drop our local owner
+        // lock before consuming it; no member may be touched afterwards.
+        // A supplied lock belongs to a caller that already retains the root.
+        if (acquired) acquired->unlock();
+        m_releaseLifetime(m_lifetimeContext);
+        return true;
+    }
+    if (m_backgroundReclamation && !m_automaticWakeupsStopped && !m_lastUseClosing) {
         QMutexLocker notificationLock(&m_lastUseWakeContext->mutex);
         m_lastUseWakeContext->cleanupPending = true;
         m_lastUseWakeContext->retry.cancel();
@@ -1064,9 +1072,14 @@ void KisPageReadCoordinator::retryCapturedReleasesLocked(QMutexLocker<QMutex> &o
     for (size_t i = 0; i < attempts && !m_capturedReleaseRetries.empty(); ++i) {
         auto &pending = m_capturedReleaseRetries.front();
         if (pending.processing) return;
-        if (!finishCapturedReleaseLocked(pending, ownerLock))
+        if (!finishCapturedReleaseLocked(pending, ownerLock)) {
             m_capturedReleaseRetries.splice(m_capturedReleaseRetries.end(),
                 m_capturedReleaseRetries, m_capturedReleaseRetries.begin());
+        } else {
+            // The public caller or scheduled pass retains the owner across
+            // this loop. Consume only this completed record's original pin.
+            m_releaseLifetime(m_lifetimeContext);
+        }
     }
 }
 
@@ -1107,7 +1120,7 @@ bool KisPageReadCoordinator::finishCapturedReleaseLocked(
     lock.unlock();
     finished.reset();
     lock.relock();
-    m_releaseLifetime(m_lifetimeContext);
+    // The caller consumes the release pin after its lock/lifetime boundary.
     return true;
 }
 

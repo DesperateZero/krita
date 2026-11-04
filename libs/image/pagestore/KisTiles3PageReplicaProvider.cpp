@@ -196,8 +196,6 @@ public:
     void markDirty() override {}
     bool reusableReadCache() const override { return true; }
     bool readPinned() const override { return m_pinned; }
-    bool matchesVersion(const KisPageVersion &version) const
-    { return m_binding && m_binding->matchesReadIdentity(m_expected, version); }
     bool finish(TileLeaseRelease * = nullptr) override
     {
         if (std::exchange(m_pinned, false)) m_binding->releaseRead();
@@ -217,7 +215,7 @@ public:
     }
     static TileLease prepare(const std::shared_ptr<KisCpuResidentBinding> &binding,
                              const KisReplicaAllocationIdentity &expected,
-                             KisTileData *tile, TileLease reuse, bool pin)
+                             KisTileData *tile, TileLease reuse)
     {
         if (!binding || !expected.isValid() || !tile) return {};
         auto *cache = dynamic_cast<Tiles3TileReadCache *>(reuse.get());
@@ -236,7 +234,7 @@ public:
         cache->m_binding = binding;
         cache->m_expected = expected;
         cache->m_tile = tile;
-        if (pin && cache->repinRead() != ReadPinResult::Ready) return {};
+        if (cache->repinRead() != ReadPinResult::Ready) return {};
         return reuse;
     }
 private:
@@ -1108,14 +1106,6 @@ catch (const std::bad_alloc &)
     return {};
 }
 
-bool KisTiles3PageReplicaProvider::sourceMatchesReadGuard(
-    const std::shared_ptr<const KisPageReplicaSource> &source, const KisCpuReadGuard &guard) const
-{
-    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
-    return input && input->owner == d->sourceOwner &&
-        input->tile == tileDataForCpuReadGuard(guard);
-}
-
 quint64 KisTiles3PageReplicaProvider::capturedSourcePhysicalSlot(
     const std::shared_ptr<const KisPageReplicaSource> &source) const
 {
@@ -1145,14 +1135,7 @@ TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
             !(expected.providerEpoch == d->config.providerEpoch) ||
             allocation == d->allocations.end() || d->providerBinding(allocation) != binding) return {};
     }
-    return Tiles3TileReadCache::prepare(binding, expected, binding->guardedTile(), std::move(reuse), true);
-}
-
-bool KisTiles3PageReplicaProvider::readCacheMatchesVersion(
-    const KisTilePageStoreLease *cache, const KisPageVersion &version) const
-{
-    const auto *read = dynamic_cast<const Tiles3TileReadCache *>(cache);
-    return read && read->matchesVersion(version);
+    return Tiles3TileReadCache::prepare(binding, expected, binding->guardedTile(), std::move(reuse));
 }
 
 TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
@@ -1166,19 +1149,7 @@ TileLease KisTiles3PageReplicaProvider::acquireTileReadCache(
     if (allocation == d->allocations.end() ||
         !allocation->matchesAllocation(found->second.allocation)) return {};
     const KisReplicaAllocationIdentity expected{d->config.provider, d->config.providerEpoch, found->second.allocation};
-    return Tiles3TileReadCache::prepare(d->providerBinding(allocation), expected, allocation->guardedTile(), std::move(reuse), true);
-}
-
-TileLease KisTiles3PageReplicaProvider::prepareTileReadCache(
-    const KisCpuWriteGuard &guard, TileLease reuse) const
-{
-    KisReplicaHandle replica;
-    if (!guard.isValid() || !guard.providerBacking(&replica)) return {};
-    QMutexLocker lock(&d->mutex);
-    const auto allocation = d->findExactAllocation(replica);
-    if (allocation == d->allocations.end()) return {};
-    return Tiles3TileReadCache::prepare(d->providerBinding(allocation), replica.allocationIdentity(),
-                                        allocation->guardedTile(), std::move(reuse), false);
+    return Tiles3TileReadCache::prepare(d->providerBinding(allocation), expected, allocation->guardedTile(), std::move(reuse));
 }
 
 std::shared_ptr<const KisPageReplicaSource> KisTiles3PageReplicaProvider::captureCpuReadSource(

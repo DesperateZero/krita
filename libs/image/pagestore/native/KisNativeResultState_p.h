@@ -260,7 +260,6 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     void runTerminals() noexcept;
     void finishTerminalJob() noexcept;
     void completeTerminal(Resource *) noexcept;
-    void reclassifyUnselected(Resource *) noexcept;
     void claimReleased(Resource *, Resource *&) noexcept;
     void settleReleased(Resource *, bool retirePhysical = true) noexcept;
     void releaseView(View *) noexcept;
