@@ -8,6 +8,7 @@
 
 
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
+#include "pagestore/KisPageStoreDiagnostics_p.h"
 #include <QScopeGuard>
 #include <limits>
 #include <optional>
@@ -295,6 +296,7 @@ QVector<quint8*> KisTiledDataManager::readPlanarBytesBody(QVector<qint32> channe
         planes.append(new quint8[qsizetype(width) * height * channelSize]);
     }
     if (!width || !height) { cleanup.dismiss(); return planes; }
+    KisPageStoreDiagnosticTimer traversal(nullptr, KisPageStoreDiagnosticPhase::ReadPlanarPage);
 
     qint32 dataY = 0;
     qint32 imageY = y;
@@ -321,6 +323,7 @@ QVector<quint8*> KisTiledDataManager::readPlanarBytesBody(QVector<qint32> channe
             const qsizetype dataIdx = dataX + qsizetype(dataY) * width;
             // readPlanarBytes holds the manager read gate for this traversal;
             // the real tile lease pins the currently installed backing.
+            traversal.next(KisPageStoreDiagnosticPhase::ReadPlanarPage, 1);
             KisTileDataWrapper tile(const_cast<KisTiledDataManager *>(this), imageX, imageY, KisTileDataWrapper::READ);
             const quint8 *tileItStart = tile.data();
             KIS_SAFE_ASSERT_RECOVER_RETURN_VALUE(tileItStart, QVector<quint8 *>());

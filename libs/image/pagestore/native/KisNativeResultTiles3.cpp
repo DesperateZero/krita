@@ -83,6 +83,19 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
     if (access == Access::Write) {
         Body *body = iteratorBody(IteratorAccess::Borrow);
         const bool shared = body != nullptr;
+        size_t index = body ? body->rows.size() : 0;
+        bool conflict = false;
+        {
+            QMutexLocker lock(&gate);
+            auto it = pages.find({row, col});
+            if (it != pages.end() && it->second.writer) {
+                if (it->second.writer == body) index = it->second.writerIndex;
+                else conflict = true;
+            }
+        }
+        // A known competing owner has not touched this iterator's result.
+        // Reject before allocating a lease or entering its failure policy.
+        if (conflict) { if (body) finishRaw(body); return {}; }
         auto cancel = qScopeGuard([&] {
             if (!body) return;
             if (shared) { body->failed = true; finishRaw(body); }
@@ -100,12 +113,6 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
             result->writes = true;
             if (!body) { body = checkout(); if (!body) return {}; body->deferredOwner = shared_from_this();
                 body->raw = true; body->thread = QThread::currentThreadId(); }
-            size_t index = body->rows.size();
-            {
-                QMutexLocker lock(&gate);
-                auto it = pages.find({row, col});
-                if (it != pages.end() && it->second.writer == body) index = it->second.writerIndex;
-            }
             if (index == body->rows.size()) {
                 const QRect rect(col * 64, row * 64, 64, 64);
                 if (!bindRows(*body, rect, nullptr, true)) return {};

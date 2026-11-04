@@ -184,8 +184,12 @@ bool KisNativeResultProtocol::readCurrent(quint8 *bytes, const QRect &pixels, qs
     const auto bpp = d->descriptor.format.pixelStride;
     auto *live = d->iteratorBody(Impl::IteratorAccess::Borrow);
     auto releaseLive = qScopeGuard([&] { if (live) Impl::finishRaw(live); });
+    KisPageStoreDiagnosticTimer traversal(nullptr, KisPageStoreDiagnosticPhase::ReadBytesPage);
     for (int y = floorTile(pixels.top()); y <= floorTile(pixels.bottom()); ++y)
         for (int x = floorTile(pixels.left()); x <= floorTile(pixels.right()); ++x) {
+            // Manager read gate is held: observers may signal a writer, but
+            // cannot synchronously wait for its visibility cut.
+            traversal.next(KisPageStoreDiagnosticPhase::ReadBytesPage, 1);
             Impl::Selection selected; KisTileData *pending = nullptr;
             { QMutexLocker lock(&d->gate); if (d->closing) return false;
               auto it = d->pages.find({y, x}); if (it != d->pages.end()) {

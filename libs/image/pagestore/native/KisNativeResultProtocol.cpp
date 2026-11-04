@@ -173,3 +173,8 @@ KisNativeResultProtocol::State KisNativeResultProtocol::state() const
     return out;
 }
 
+KisTilePageStoreBridge &KisNativeResultTestAccess::tiles(KisNativeResultProtocol &p)
+{
+    return *p.d;
+}
+

@@ -136,6 +136,20 @@ void KisNativeResultProtocol::Impl::cancelBody(Body *b) noexcept
     { QMutexLocker lock(&gate); if (b->asyncPending) { b->abandoned = true; return; } }
     if (!b->accepted) {
         finishProducer(*b);
+        KisPageStoreDiagnosticTimer cancellation(nullptr, KisPageStoreDiagnosticPhase::MutationSealCleanup);
+        cancellation.next(KisPageStoreDiagnosticPhase::NativeCancelPrepared, b->rows.size());
+        if (b->raw || b->iterator) {
+            // Exposed raw writes updated the original Tile's backing cache.
+            // Current Selection never changed, so the next acquisition must
+            // resolve it again. Existing nested borrowers keep their bytes.
+            // A failed acquisition may still hold that Tile's swap barrier;
+            // invalidation is only the original atomic fact, never a repin.
+            auto &table = KisNativeResultAdapter::table(adapter);
+            for (const auto &row : b->rows) if (row.target) {
+                auto tile = table.getExistingTileForPreparedUpdate(row.page->key.page.column, row.page->key.page.row);
+                if (tile) tile->m_pageStoreNativeReadReady.storeRelease(0);
+            }
+        }
         {
             QMutexLocker lock(&gate);
             for (auto &row : b->rows) if (auto *r = std::exchange(row.idleCandidate, nullptr)) {
@@ -595,144 +609,162 @@ try {
     }
     KisPageStoreDiagnosticTimer publishing(nullptr, KisPageStoreDiagnosticPhase::WritePublishHost, changed);
     if (!prepareAdapter(b, why)) return false;
-    KisBackingBudgetDelta change;
-    {
-        QMutexLocker lock(&gate);
-        if (epoch == std::numeric_limits<quint64>::max()) return false;
-        preparePlan(b, change);
-    }
-    auto fee = budget.reserveChange(change, why);
-    if (!fee.isValid()) return false;
-    publishing.next(KisPageStoreDiagnosticPhase::NativeAcceptPrepared, changed);
-    if (faults && faults->beforeAccept) faults->beforeAccept();
-    if (faults && faults->rejectAdapter) { error(why, "adapter preparation refused; Ready retained"); return false; }
-#ifdef NR104_INSTALL_AUDIT
-    NativeInstallAudit installAudit;
-#endif
-    QWriteLocker adapterGate(&KisNativeResultAdapter::gate(adapter));
-    {
-        QMutexLocker lock(&gate);
-        if (!samePlan(b)) { COUNT(retried, 1); error(why, "actual final facts changed; Ready retained"); return false; }
-        // Resource order follows canonical PageSlot order. No old Value,
-        // metadata index, proof projection or publication entry is traversed.
-        size_t locked = 0;
-        int targetIndex = 0;
-        const auto unlock = qScopeGuard([&] {
-            for (size_t i = locked; i; --i) if (b.moves[i - 1].target)
-                b.moves[i - 1].resource->binding->m_mutex.unlock();
-        });
-        for (auto &move : b.moves) {
-            ++locked;
-            if (!move.target) continue;
-            auto *r = move.resource;
-            r->binding->m_mutex.lock();
-            if (!KisNativeResultProtocol::validateNative(r->binding.get(), r->handle)
-                || (faults && (faults->rejectAccept || faults->rejectAcceptAt == targetIndex))) {
-                error(why, "actual Resource validation refused; nothing installed"); return false;
-            }
-            ++targetIndex;
-        }
-#ifdef NR104_INSTALL_AUDIT
-        installAudit.begin();
-#endif
-        for (auto &row : b.rows) if (row.changed) {
-            auto &p = *row.page;
-            // Reconsume the actual owner; an equal-epoch capture/release does
-            // not invalidate the already funded class plan.
-            if (auto *v = retentionOwner(p.begin, b.cutEpoch)) {
-                Q_ASSERT(freeEdges);
-                auto *edge = freeEdges; freeEdges = edge->freeNext; --edgeFree;
-                Q_ASSERT(b.edgeBudget && edgeReserved); --b.edgeBudget; --edgeReserved;
-                edge->page = &p; edge->selection = row.before; edge->begin = p.begin; edge->end = b.cutEpoch;
-                p.history.insert(*edge); linkEdge(edge, v);
-                if (row.before.resource) ++row.before.resource->retained;
-                COUNT(retainedEdges, 1);
-            }
-            if (row.before.resource) --row.before.resource->current;
-            if (row.after.resource) ++row.after.resource->current;
-            if (row.ownsTarget) --row.target->pending;
-            p.current = row.after; p.begin = b.cutEpoch;
-        }
-        fee.commit(change);
-        for (const auto &m : b.moves) {
-            if (m.after == Class::RetirementDebt && m.before != m.after) {
-                KisBackingBudgetDelta debt;
-                delta(debt, m.before, m.domain, -qint64(descriptor.minimumByteSize()));
-                delta(debt, Class::RetirementDebt, m.domain, qint64(descriptor.minimumByteSize()));
-                m.resource->debt.commit(debt);
-            }
-            m.resource->charged = m.after;
-            settleTransient(m.resource);
-            if (m.after == Class::IdleCapacity && !m.resource->idle) park(m.resource);
-        }
-        if (currentHistory) {
-            QRect changedBounds;
-            for (const auto &row : b.rows) if (row.changed)
-                changedBounds |= QRect(row.page->key.page.column * 64, row.page->key.page.row * 64, 64, 64);
-            currentHistory->setExtent(currentHistory->extent() | changedBounds);
-        }
-        epoch = b.cutEpoch; b.accepted = true;
-        if (b.defaultTile) {
-            std::swap(descriptor.format.defaultPixel, b.defaultPixel);
-            std::swap(defaultBacking, b.defaultTile); ++defaultRevision;
-        }
-        COUNT(results, changed);
-    }
-    publishing.next(KisPageStoreDiagnosticPhase::NativeSelectionInstalled, changed);
-    // Real adapter work stays inside the manager cut but outside S/B: legacy
-    // Tile read takes its swap barrier before asking this bridge for selection.
-    auto &table = KisNativeResultAdapter::table(adapter);
-    auto &extent = KisNativeResultAdapter::extent(adapter);
-    if (b.defaultTile) {
-        KisNativeResultAdapter::installDefault(adapter, reinterpret_cast<const quint8 *>(descriptor.format.defaultPixel.constData()), defaultBacking);
-        for (auto &tile : b.defaultReaders) tile->invalidatePageStoreReadCache();
-    }
-    for (auto &row : b.rows) if (row.changed) {
-        if (!row.after.resource) {
-            // The exact adapter capability dies after the no-fail cut, in its
-            // original row. Detach atomically with cache extraction so a raw
-            // reader cannot acquire a new bridge lease in between.
-            if (auto *tile = row.location) {
-                QMutexLocker tileLock(&tile->m_swapBarrierLock);
-                tile->m_pageStoreBridge.storeRelease(nullptr);
-                if (!tile->m_lockCounter) row.detachedRead = std::move(tile->m_pageStoreLeases[KisTile::ReadLease]);
-            }
-            if (table.removePreparedTile(row.adapter)) extent.notifyTileRemoved(row.page->key.page.column, row.page->key.page.row);
-            continue;
-        }
-        KisTileSP installed;
-        bool created = false;
-        auto *tile = row.location;
-        if (!tile) { installed = table.installPreparedTile(row.adapter, created); tile = installed.data(); }
-        Q_ASSERT(tile);
+    // A new/released reader can change only the funded retention plan. Keep
+    // the original Ready rows and retry that plan; never replay the producer.
+    // Explicit fault witnesses expose the one-attempt boundary to tests.
+    for (;;) {
+        KisBackingBudgetDelta change;
         {
-            QMutexLocker tileLock(&tile->m_swapBarrierLock);
-            if (tile->m_pageStoreBridge.loadRelaxed() != this || tile->m_pageStoreOldDataView.loadRelaxed()) {
-                Q_ASSERT(!tile->m_lockCounter);
-                row.detachedRead = std::move(tile->m_pageStoreLeases[KisTile::ReadLease]);
-                tile->m_pageStoreOldDataView.storeRelaxed(0);
-                tile->m_pageStoreBridge.storeRelease(this);
-            }
-            tile->m_pageStoreNativeReadReady.storeRelease(0);
+            QMutexLocker lock(&gate);
+            if (epoch == std::numeric_limits<quint64>::max()) return false;
+            preparePlan(b, change);
         }
-        if (created) extent.notifyTileAdded(row.page->key.page.column, row.page->key.page.row);
-#ifdef NR104_CENSUS
-        { QMutexLocker countLock(&gate); COUNT(adapterInstalled, 1); }
-#endif
+        auto fee = budget.reserveChange(change, why);
+        if (!fee.isValid()) return false;
+        publishing.next(KisPageStoreDiagnosticPhase::NativeAcceptPrepared, changed);
+        if (faults && faults->beforeAccept) faults->beforeAccept();
+        if (faults && faults->rejectAdapter) { error(why, "adapter preparation refused; Ready retained"); return false; }
+    #ifdef NR104_INSTALL_AUDIT
+        NativeInstallAudit installAudit;
+    #endif
+        QWriteLocker adapterGate(&KisNativeResultAdapter::gate(adapter));
+        {
+            QMutexLocker lock(&gate);
+            if (!samePlan(b)) {
+                COUNT(retried, 1);
+                bool canReplan = !faults && !closing && !b.failed
+                    && epoch != std::numeric_limits<quint64>::max()
+                    && (!b.history || (b.history->phase != KisNativeHistory::Phase::ClosingAbort
+                        && b.history->phase != KisNativeHistory::Phase::Failed));
+                for (const auto &row : b.rows) if (row.changed)
+                    canReplan &= row.page->writer == &b
+                        && row.page->current.resource == row.before.resource
+                        && row.page->current.generation == row.before.generation;
+                for (const auto &m : b.moves) canReplan &= !m.resource->busy;
+                if (canReplan) continue; // releases S, adapter gate and old fee
+                error(why, "actual final facts changed; Ready retained"); return false;
+            }
+            // Resource order follows canonical PageSlot order. No old Value,
+            // metadata index, proof projection or publication entry is traversed.
+            size_t locked = 0;
+            int targetIndex = 0;
+            const auto unlock = qScopeGuard([&] {
+                for (size_t i = locked; i; --i) if (b.moves[i - 1].target)
+                    b.moves[i - 1].resource->binding->m_mutex.unlock();
+            });
+            for (auto &move : b.moves) {
+                ++locked;
+                if (!move.target) continue;
+                auto *r = move.resource;
+                r->binding->m_mutex.lock();
+                if (!KisNativeResultProtocol::validateNative(r->binding.get(), r->handle)
+                    || (faults && (faults->rejectAccept || faults->rejectAcceptAt == targetIndex))) {
+                    error(why, "actual Resource validation refused; nothing installed"); return false;
+                }
+                ++targetIndex;
+            }
+    #ifdef NR104_INSTALL_AUDIT
+            installAudit.begin();
+    #endif
+            for (auto &row : b.rows) if (row.changed) {
+                auto &p = *row.page;
+                // Reconsume the actual owner; an equal-epoch capture/release does
+                // not invalidate the already funded class plan.
+                if (auto *v = retentionOwner(p.begin, b.cutEpoch)) {
+                    Q_ASSERT(freeEdges);
+                    auto *edge = freeEdges; freeEdges = edge->freeNext; --edgeFree;
+                    Q_ASSERT(b.edgeBudget && edgeReserved); --b.edgeBudget; --edgeReserved;
+                    edge->page = &p; edge->selection = row.before; edge->begin = p.begin; edge->end = b.cutEpoch;
+                    p.history.insert(*edge); linkEdge(edge, v);
+                    if (row.before.resource) ++row.before.resource->retained;
+                    COUNT(retainedEdges, 1);
+                }
+                if (row.before.resource) --row.before.resource->current;
+                if (row.after.resource) ++row.after.resource->current;
+                if (row.ownsTarget) --row.target->pending;
+                p.current = row.after; p.begin = b.cutEpoch;
+            }
+            fee.commit(change);
+            for (const auto &m : b.moves) {
+                if (m.after == Class::RetirementDebt && m.before != m.after) {
+                    KisBackingBudgetDelta debt;
+                    delta(debt, m.before, m.domain, -qint64(descriptor.minimumByteSize()));
+                    delta(debt, Class::RetirementDebt, m.domain, qint64(descriptor.minimumByteSize()));
+                    m.resource->debt.commit(debt);
+                }
+                m.resource->charged = m.after;
+                settleTransient(m.resource);
+                if (m.after == Class::IdleCapacity && !m.resource->idle) park(m.resource);
+            }
+            if (currentHistory) {
+                QRect changedBounds;
+                for (const auto &row : b.rows) if (row.changed)
+                    changedBounds |= QRect(row.page->key.page.column * 64, row.page->key.page.row * 64, 64, 64);
+                currentHistory->setExtent(currentHistory->extent() | changedBounds);
+            }
+            epoch = b.cutEpoch; b.accepted = true;
+            if (b.defaultTile) {
+                std::swap(descriptor.format.defaultPixel, b.defaultPixel);
+                std::swap(defaultBacking, b.defaultTile); ++defaultRevision;
+            }
+            COUNT(results, changed);
+        }
+        publishing.next(KisPageStoreDiagnosticPhase::NativeSelectionInstalled, changed);
+        // Real adapter work stays inside the manager cut but outside S/B: legacy
+        // Tile read takes its swap barrier before asking this bridge for selection.
+        auto &table = KisNativeResultAdapter::table(adapter);
+        auto &extent = KisNativeResultAdapter::extent(adapter);
+        if (b.defaultTile) {
+            KisNativeResultAdapter::installDefault(adapter, reinterpret_cast<const quint8 *>(descriptor.format.defaultPixel.constData()), defaultBacking);
+            for (auto &tile : b.defaultReaders) tile->invalidatePageStoreReadCache();
+        }
+        for (auto &row : b.rows) if (row.changed) {
+            if (!row.after.resource) {
+                // The exact adapter capability dies after the no-fail cut, in its
+                // original row. Detach atomically with cache extraction so a raw
+                // reader cannot acquire a new bridge lease in between.
+                if (auto *tile = row.location) {
+                    QMutexLocker tileLock(&tile->m_swapBarrierLock);
+                    tile->m_pageStoreBridge.storeRelease(nullptr);
+                    if (!tile->m_lockCounter) row.detachedRead = std::move(tile->m_pageStoreLeases[KisTile::ReadLease]);
+                }
+                if (table.removePreparedTile(row.adapter)) extent.notifyTileRemoved(row.page->key.page.column, row.page->key.page.row);
+                continue;
+            }
+            KisTileSP installed;
+            bool created = false;
+            auto *tile = row.location;
+            if (!tile) { installed = table.installPreparedTile(row.adapter, created); tile = installed.data(); }
+            Q_ASSERT(tile);
+            {
+                QMutexLocker tileLock(&tile->m_swapBarrierLock);
+                if (tile->m_pageStoreBridge.loadRelaxed() != this || tile->m_pageStoreOldDataView.loadRelaxed()) {
+                    Q_ASSERT(!tile->m_lockCounter);
+                    row.detachedRead = std::move(tile->m_pageStoreLeases[KisTile::ReadLease]);
+                    tile->m_pageStoreOldDataView.storeRelaxed(0);
+                    tile->m_pageStoreBridge.storeRelease(this);
+                }
+                tile->m_pageStoreNativeReadReady.storeRelease(0);
+            }
+            if (created) extent.notifyTileAdded(row.page->key.page.column, row.page->key.page.row);
+    #ifdef NR104_CENSUS
+            { QMutexLocker countLock(&gate); COUNT(adapterInstalled, 1); }
+    #endif
+        }
+        adapterGate.unlock();
+    #ifdef NR104_INSTALL_AUDIT
+        installAudit.end();
+        std::fprintf(stderr, "NATIVE_INSTALL_AUDIT_OK changed=%zu default=%d restore=%d\n", changed, int(b.defaultTile != nullptr), int(b.restore));
+    #endif
+        publishing.next(KisPageStoreDiagnosticPhase::NativeAdapterInstalled, changed);
+        {
+            QMutexLocker lock(&gate);
+            for (auto &row : b.rows) if (row.page->writer == &b) row.page->writer = nullptr;
+            notifyWriters();
+        }
+        for (const auto &m : b.moves) if (m.after == Class::RetirementDebt) retire(m.resource);
+        return true;
     }
-    adapterGate.unlock();
-#ifdef NR104_INSTALL_AUDIT
-    installAudit.end();
-    std::fprintf(stderr, "NATIVE_INSTALL_AUDIT_OK changed=%zu default=%d restore=%d\n", changed, int(b.defaultTile != nullptr), int(b.restore));
-#endif
-    publishing.next(KisPageStoreDiagnosticPhase::NativeAdapterInstalled, changed);
-    {
-        QMutexLocker lock(&gate);
-        for (auto &row : b.rows) if (row.page->writer == &b) row.page->writer = nullptr;
-        notifyWriters();
-    }
-    for (const auto &m : b.moves) if (m.after == Class::RetirementDebt) retire(m.resource);
-    return true;
 } catch (const std::bad_alloc &) { error(why, "acceptance preparation capacity refused; Ready retained"); return false; }
 
 KisNativeResultProtocol::Prepared::~Prepared() { if (body) owner->cancelBody(body); }

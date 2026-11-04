@@ -172,6 +172,9 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     NativeSelectionInstalled,
     // Clone captured its immutable selection; source manager read lock held.
     NativeCloneCaptured,
+    // Cancelled original producer pins returned; page claims still exclude
+    // competing writes. No tile, manager or native gate is held.
+    NativeCancelPrepared,
     Count
 };
 
