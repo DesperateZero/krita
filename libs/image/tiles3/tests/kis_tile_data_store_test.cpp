@@ -180,7 +180,7 @@ void KisTileDataStoreTest::testLeaks()
 
     const qint32 pixelSize = 1;
     quint8 defaultPixel = 128;
-    KisTiledDataManager *dm = new KisTiledDataManager(pixelSize, &defaultPixel);
+    KisTiledDataManager *dm = new KisTiledDataManager(pixelSize, &defaultPixel, KisTiledDataManager::SelectionAuthority::ExternalProtocol);
 
     KisTileSP tile = dm->getTile(0, 0, true);
     QVERIFY(tile->lockForWrite());
@@ -215,7 +215,10 @@ void KisTileDataStoreTest::testSwapping()
 
     const qint32 pixelSize = 1;
     quint8 defaultPixel = 128;
-    KisTiledDataManager dm(pixelSize, &defaultPixel);
+    // This fixture owns and inspects raw TileData under the store's 1 MiB
+    // limit. Native selection/domain accounting is tested separately with its
+    // own non-payload budget, rather than bypassed through tileData() here.
+    KisTiledDataManager dm(pixelSize, &defaultPixel, KisTiledDataManager::SelectionAuthority::ExternalProtocol);
 
     for(qint32 col = 0; col < 1000; col++) {
         KisTileSP tile = dm.getTile(col, 0, true);

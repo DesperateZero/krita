@@ -613,16 +613,19 @@ bool KisTileDataStore::ensureTileDataLoaded(KisTileData *td)
             return true;
         td->m_swapLock.unlock();
 
-        PreparedResidencyChange prepared = prepareResidencyChange(td, true);
-        if (!prepared.valid)
+        // First make real RAM room, including any required eviction. Asking
+        // the owner for positive RAM credit before this can reject a readable
+        // SSD page while the very next service could release that same credit.
+        // The SSD source remains intact until both admissions and the physical
+        // load succeed; every refusal returns the original RAM reservation.
+        if (!reserveResidentMemory(qint32(td->pixelSize())))
             return false;
-        if (!reserveResidentMemory(qint32(td->pixelSize()))) {
-            prepared.transitions.clear();
-            return false;
-        }
         const auto releaseReservation = qScopeGuard([&] {
             releaseResidentMemoryReservation(qint32(td->pixelSize()));
         });
+        PreparedResidencyChange prepared = prepareResidencyChange(td, true);
+        if (!prepared.valid)
+            return false;
 
         /**
          * The order of this heavy locking is very important.

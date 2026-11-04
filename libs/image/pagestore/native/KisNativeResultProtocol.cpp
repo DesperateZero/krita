@@ -1,6 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "KisNativeResultState_p.h"
 
+const KisNativeResultProtocol &KisNativeResultTestAccess::protocol(const KisTiledDataManager &manager)
+{
+    return *manager.m_nativeResult;
+}
+
 KisNativeResultProtocol &KisNativeResultTestAccess::protocol(KisTiledDataManager &manager)
 {
     Q_ASSERT(manager.m_nativeResult);

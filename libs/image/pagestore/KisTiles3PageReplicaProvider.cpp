@@ -1116,6 +1116,15 @@ bool KisTiles3PageReplicaProvider::sourceMatchesReadGuard(
         input->tile == tileDataForCpuReadGuard(guard);
 }
 
+quint64 KisTiles3PageReplicaProvider::capturedSourcePhysicalSlot(
+    const std::shared_ptr<const KisPageReplicaSource> &source) const
+{
+    const auto input = std::dynamic_pointer_cast<const Tiles3ReplicaSource>(source);
+    QMutexLocker lock(&d->mutex);
+    return input && input->owner == d->sourceOwner
+        ? d->residencyObserver->physicalIdentity(input->tile) : 0;
+}
+
 KisTileData *KisTiles3PageReplicaProvider::tileDataForCpuReadGuard(const KisCpuReadGuard &guard) const
 {
     const auto binding = std::dynamic_pointer_cast<Tiles3ResidentBinding>(guard.m_binding);

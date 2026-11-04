@@ -7249,14 +7249,35 @@ void KisTiledDataManagerTest::testPageStoreWholeTileFillUsesSynchronousAdoption(
     dm.clear(QRect(0,0,128,128),&color);
     QCOMPARE(KisNativeResultTestAccess::state(protocol).physicalResources,filled.physicalResources);
     QCOMPARE(KisNativeResultTestAccess::state(protocol).acceptedEpoch,filled.acceptedEpoch);
+    // A later operation adopts the same physical source at a different page.
+    // Logical generations may multiply; physical registration and its funded
+    // retirement credit must not. This is independent of one-batch aliasing.
+    dm.clear(QRect(128,0,64,64),&color);
+    QCOMPARE(KisNativeResultTestAccess::state(protocol).physicalResources,filled.physicalResources);
+    QCOMPARE(protocol.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,quint64(4096));
     // A shared source is not tied to its first page's logical birth key.
     auto old=protocol.capture();QVERIFY(old);
     dm.writeBytes(&changed,65,65,1,1);
     quint8 byte=0;dm.readBytes(&byte,65,65,1,1);QCOMPARE(byte,changed);
     dm.readBytes(&byte,1,1,1,1);QCOMPARE(byte,color);
     QVERIFY(old.read(&byte,QRect(65,65,1,1),1));QCOMPARE(byte,color);old={};
-    dm.clear(QRect(0,0,128,128),&blank);QCOMPARE(dm.extent(),QRect());
+    dm.clear(QRect(0,0,192,128),&blank);QCOMPARE(dm.extent(),QRect());
     QCOMPARE(KisNativeResultTestAccess::state(protocol).activeResults,quint64(0));
+    // Two cold disjoint results may discover the same uniform source before
+    // either result is visible. Physical birth still has one registration.
+    KisTiledDataManager concurrent(1,&blank);
+    QSemaphore ready,start;
+    bool left=false,right=false;
+    const auto fill=[&](int x,bool &ok){ready.release();start.acquire();KisStrokeJobFailureContext failure(true);
+        concurrent.clear(QRect(x,0,64,64),&color);ok=!failure.failed();};
+    std::thread a([&]{fill(0,left);}),b([&]{fill(64,right);});
+    ready.acquire(2);start.release(2);a.join();b.join();QVERIFY(left);QVERIFY(right);
+    auto &shared=*concurrent.m_nativeResult;
+    QCOMPARE(KisNativeResultTestAccess::state(shared).physicalResources,quint64(1));
+    QCOMPARE(shared.usage().buckets[size_t(KisBackingBudgetClass::RetirementDebt)].reserved.cpuRam,quint64(4096));
+    concurrent.writeBytes(&changed,65,0,1,1);
+    concurrent.readBytes(&byte,1,0,1,1);QCOMPARE(byte,color);
+    concurrent.readBytes(&byte,65,0,1,1);QCOMPARE(byte,changed);
 }
 
 void KisTiledDataManagerTest::testPageStoreBulkNoOpAndBitBltBatching()

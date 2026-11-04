@@ -238,7 +238,9 @@ try {
     QMutexLocker historySequence(&d->historyGate);
     {
         QMutexLocker lock(&d->gate);
-        if (d->currentHistory) return d->currentHistory;
+        if (d->currentHistory) {
+            error(why, "another history owner is already active"); return {};
+        }
         if (d->closing || d->active
             || d->historySequence == std::numeric_limits<quint64>::max()) return {};
     }

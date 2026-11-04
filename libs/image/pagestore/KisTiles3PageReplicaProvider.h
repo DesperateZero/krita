@@ -135,6 +135,9 @@ public:
     std::shared_ptr<const KisPageReplicaSource> captureCompletedTileSource(
         const KisPageAllocationDescriptor &descriptor, KisTileData *tileData,
         QString *error = nullptr);
+    // Existing physical registration of this captured input, or zero. This
+    // observation neither creates a handle nor grants a mutable capability.
+    quint64 capturedSourcePhysicalSlot(const std::shared_ptr<const KisPageReplicaSource> &) const;
     std::shared_ptr<const KisPageReplicaSource> captureCpuReadSource(
         const KisCpuReadGuard &guard, const KisPageAllocationDescriptor &descriptor,
         QString *error = nullptr);

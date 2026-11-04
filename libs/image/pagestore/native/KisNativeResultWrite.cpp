@@ -54,7 +54,12 @@ bool KisNativeResultProtocol::validateNative(KisCpuResidentBinding *b, const Kis
 {
     // Called with B held until the all-D no-fail cut. Immutable layout is not
     // projected out of this same binding merely to compare it with itself.
-    return b && !b->m_retired && !b->m_storageBusy
+    // A concurrent immutable reader may be pinning/unpinning this backing.
+    // Selection installation neither accesses its bytes nor changes storage.
+    // The original current/retained/pending relationship prevents retirement;
+    // actual domain moves are revalidated under S by samePlan(). Treating the
+    // unrelated read pin transition as a failed result rejects legal writers.
+    return b && !b->m_retired
         && b->allocationIdentityLocked() == expected.allocationIdentity()
         && b->matchesVersionLocked(expected.version);
 }
@@ -662,7 +667,12 @@ try {
                 r->binding->m_mutex.lock();
                 if (!KisNativeResultProtocol::validateNative(r->binding.get(), r->handle)
                     || (faults && (faults->rejectAccept || faults->rejectAcceptAt == targetIndex))) {
-                    error(why, "actual Resource validation refused; nothing installed"); return false;
+                    if (why) *why = QStringLiteral("actual Resource validation refused; retired=%1 storageBusy=%2 identity=%3 version=%4 injected=%5; nothing installed")
+                        .arg(r->binding->m_retired).arg(r->binding->m_storageBusy)
+                        .arg(r->binding->allocationIdentityLocked() == r->handle.allocationIdentity())
+                        .arg(r->binding->matchesVersionLocked(r->handle.version))
+                        .arg(bool(faults && (faults->rejectAccept || faults->rejectAcceptAt == targetIndex)));
+                    return false;
                 }
                 ++targetIndex;
             }

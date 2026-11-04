@@ -29,6 +29,7 @@ struct Layout { size_t page, resource, body, row, retentionEdge, view; };
 class KisNativeResultTestAccess {
 public:
     static KRITAIMAGE_EXPORT KisNativeResultProtocol &protocol(KisTiledDataManager &);
+    static KRITAIMAGE_EXPORT const KisNativeResultProtocol &protocol(const KisTiledDataManager &);
     static KRITAIMAGE_EXPORT KisTilePageStoreBridge &tiles(KisNativeResultProtocol &);
     using Faults = KisNativeResultDiagnostics::Faults;
     static auto counts(const KisNativeResultProtocol &p) { return p.counts(); }

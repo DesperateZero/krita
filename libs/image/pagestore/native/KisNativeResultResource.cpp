@@ -134,6 +134,36 @@ KisNativeResultProtocol::Impl::Resource *KisNativeResultProtocol::Impl::fresh(
     Page &page, const KisPageVersion &version, const quint8 *payload, qsizetype stride,
     Resource *before, const QRect &local, QString *why, const std::shared_ptr<const KisPageReplicaSource> &imported)
 {
+    // Immutable adoption can revisit one physical input in different jobs.
+    // Serialize only that physical birth using the original resource-growth
+    // gate. Consume its existing registration before issuing another handle,
+    // fee or retirement credit. Ordinary unique allocations keep their path.
+    QMutexLocker adoption(imported ? &bodyGate : nullptr);
+    bool copyImported = false;
+    if (imported) {
+        const auto slot = provider->capturedSourcePhysicalSlot(imported);
+        QMutexLocker lock(&gate);
+        const auto found = physical.find(slot);
+        if (found != physical.end()) {
+            auto *existing = found->second;
+            if (!existing->busy && !existing->terminal
+                && existing->charged != Class::RetirementDebt
+                && existing->pending != std::numeric_limits<quint32>::max()) {
+                if (existing->idle) {
+                    auto **link = &existing->home->idle;
+                    while (*link && *link != existing) link = &(*link)->nextIdle;
+                    Q_ASSERT(*link == existing); *link = existing->nextIdle;
+                    existing->idle = false; existing->nextIdle = nullptr;
+                }
+                ++existing->pending;
+                return existing;
+            }
+            // A real residency/retirement transition owns that registration.
+            // The captured immutable input remains readable; make independent
+            // storage rather than reviving or duplicating the claimed record.
+            copyImported = true;
+        }
+    }
     const auto limit = budget.maxTransientVersionsPerPage();
     { QMutexLocker lock(&gate); if (page.transient >= limit) { error(why, "page transient-result budget exhausted"); return nullptr; } }
     const auto bytes = qint64(descriptor.minimumByteSize());
@@ -147,7 +177,10 @@ KisNativeResultProtocol::Impl::Resource *KisNativeResultProtocol::Impl::fresh(
         QMutexLocker lock(&gate);
         if (freeResources) { r = freeResources; freeResources = r->nextFree; r->nextFree = nullptr; }
     }
-    if (!r) { QMutexLocker allocation(&bodyGate); resources.emplace_back(); r = &resources.back(); }
+    if (!r) {
+        QMutexLocker allocation(imported ? nullptr : &bodyGate);
+        resources.emplace_back(); r = &resources.back();
+    }
     r->home = &page;
     auto recycle = qScopeGuard([&] {
         if (!r) return;
@@ -160,7 +193,8 @@ KisNativeResultProtocol::Impl::Resource *KisNativeResultProtocol::Impl::fresh(
     KisReplicaOperation made;
     if (imported) {
         made = provider->prepareSynchronousSource(nextOperation(), imported, version, descriptor,
-            KisReplicaSourceUse::ImmutableAlias, KisPagePriority::Interactive);
+            copyImported ? KisReplicaSourceUse::WritableCopy : KisReplicaSourceUse::ImmutableAlias,
+            KisPagePriority::Interactive);
     } else if (payload && local == QRect(0, 0, 64, 64)) {
         const KisCpuPagePayload source{payload, stride, 63 * stride + 64 * descriptor.format.pixelStride};
         made = provider->prepareSynchronousCpuPayload(nextOperation(), version, descriptor, source, KisPagePriority::Interactive);
@@ -200,7 +234,10 @@ KisNativeResultProtocol::Impl::Resource *KisNativeResultProtocol::Impl::fresh(
     // is consumed now and never synthesized again by the warm path.
     auto node = staged.extract(staged.begin()); node.key() = r->physicalSlot;
     {
-        QMutexLocker lock(&gate); physical.insert(std::move(node)); COUNT(fresh, 1);
+        QMutexLocker lock(&gate);
+        if (!physical.insert(std::move(node)).inserted)
+            qFatal("native physical registration was issued twice");
+        COUNT(fresh, 1);
     }
     const auto lease = KisPageLeaseId{nextOperation().value};
     auto access = provider->resolveAccess(lease, nextOperation(), r->handle,

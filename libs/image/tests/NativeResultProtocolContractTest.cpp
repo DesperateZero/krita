@@ -8,6 +8,8 @@
 #include "pagestore/KisPageStoreIteratorReadScope_p.h"
 #include "kis_paint_device_writer.h"
 #include <QBuffer>
+#include <QScopeGuard>
+#include "tiles3/tests/kis_tile_data_store_test_access.h"
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "pagestore/native/KisNativeResultProtocol.h"
 #include "pagestore/native/KisNativeResultDiagnostics_p.h"
@@ -84,7 +86,7 @@ void NativeResultProtocolContractTest::publicContracts() {
         const auto *oldBytes = oldRaw->data();
         auto fixed = m.capturePageStoreReadScope(false); require(fixed && fixed->isValid(), "fixed public selection");
         auto history = m.getMemento(); require(bool(history), "public history");
-        require(m.getMemento() == history, "one history owner");
+        require(!m.getMemento(), "nested transaction cannot acquire the existing owner");
         {
             KisHLineIterator2 writer(&m, -64, 0, 192, 0, 0, true, nullptr);
             for (int x = 0; x < 192; ++x) {
@@ -279,7 +281,8 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
         std::array<KisMementoSP, 4> owners; std::vector<std::thread> threads;
         for (size_t i = 0; i < owners.size(); ++i) threads.emplace_back([&, i] { owners[i] = f.protocol.beginHistory(); });
         for (auto &thread : threads) thread.join();
-        for (const auto &owner : owners) require(owner && owner == owners[0], "concurrent public history returns one owner");
+        require(std::count_if(owners.begin(), owners.end(), [](const auto &owner) { return bool(owner); }) == 1,
+            "exactly one concurrent history caller acquires ownership");
         require(f.protocol.commitHistory(&why), "one concurrent history commit");
         owners = {}; require(f.protocol.close(&why), "concurrent history close"); requireDrained(f.protocol);
     }
@@ -362,6 +365,45 @@ void NativeResultProtocolContractTest::pressureIdentityContracts() {
             after.results-before.results, after.adapterInstalled-before.adapterInstalled);
     }
     std::fprintf(stderr, "NATIVE_PRESSURE_IDENTITY_OK\n");
+}
+
+// Exercise the native protocol and real adapter/swapper while separating the
+// 1 MiB payload ceiling from its explicitly funded process infrastructure.
+static void nativeResidencyPressureContract()
+{
+    const quint8 zero = 0;
+    KisPageStoreProductPolicy policy;
+    require(kisDerivePageStoreProductPolicy(&policy, &why), "native pressure initial funded policy");
+    policy.limits.residentCurrentBytes.cpuRam = 1024 * 1024;
+    policy.limits.activePendingBytes = 1024 * 1024;
+    KisTiledDataManager adapter(1, &zero, KisTiledDataManager::SelectionAuthority::ExternalProtocol);
+    KisNativeResultProtocol protocol(adapter, descriptor(1), policy.limits);
+    KisImageConfig config(false);
+    const auto hard = config.memoryHardLimitPercent(), soft = config.memorySoftLimitPercent();
+    const auto pool = config.memoryPoolLimitPercent();
+    const auto restore = qScopeGuard([&] {
+        config.setMemoryHardLimitPercent(hard); config.setMemorySoftLimitPercent(soft);
+        config.setMemoryPoolLimitPercent(pool); KisTileDataStoreTestAccess::rereadConfig();
+    });
+    config.setMemoryHardLimitPercent(100.0 / KisImageConfig::totalRAM());
+    config.setMemorySoftLimitPercent(0); config.setMemoryPoolLimitPercent(0);
+    KisTileDataStoreTestAccess::rereadConfig();
+    QByteArray page(4096, 0), read(4096, 0);
+    for (int col = 0; col < 1000; ++col) {
+        page.fill(char(col % 255));
+        require(protocol.write(data(page), QRect(col * 64, 0, 64, 64), 64, &why), "native 1000-page low-RAM write");
+    }
+    const auto usage = protocol.usage();
+    const auto current = usage.buckets[size_t(KisBackingBudgetClass::Current)].live;
+    require(current.cpuRam <= 1024 * 1024 && current.ssd > 0,
+        "native current bytes really move from RAM to SSD under the payload ceiling");
+    for (int col = 0; col < 1000; ++col) {
+        require(protocol.readCurrent(reinterpret_cast<quint8 *>(read.data()), QRect(col * 64, 0, 64, 64), 64, &why),
+            "native low-RAM current read restores actual SSD data");
+        require(read == QByteArray(4096, char(col % 255)), "native swapped current pixels");
+    }
+    require(protocol.close(&why), "native pressure close"); requireDrained(protocol);
+    std::fprintf(stderr, "NATIVE_RESIDENCY_1000_PAGES_OK\n");
 }
 
 void NativeResultProtocolContractTest::freshControlContracts() {
@@ -658,6 +700,7 @@ int main(int argc, char **argv) {
         require(failure.failed(), "raw final rejection reaches actual job context"); f.current(f.a);
     }
     kisDrainPageStoreReclamation();
+    nativeResidencyPressureContract();
     NativeResultProtocolContractTest::stoppedRuntimeContract();
     std::fprintf(stderr, "NATIVE104_CONTRACT_OK\n");
 }
