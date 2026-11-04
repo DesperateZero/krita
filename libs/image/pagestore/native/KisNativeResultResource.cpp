@@ -41,9 +41,7 @@ struct KisNativeResultProtocol::Impl::Admission final : KisReplicaBackingDomainA
         Domain source, quint64 revision, Domain target, QString *why) override
     try {
         auto p = owner.lock();
-        if (!p || !(physical.provider == p->provider->providerId())
-            || !(physical.providerEpoch == p->provider->providerEpoch())
-            || bytes != p->descriptor.minimumByteSize() || target == Domain::Unknown || source == target) {
+        if (!p || bytes != p->descriptor.minimumByteSize() || target == Domain::Unknown || source == target) {
 #ifdef NR104_CENSUS
             qWarning("104 domain birth mismatch bytes=%llu expected=%llu", bytes, p ? p->descriptor.minimumByteSize() : 0);
 #endif
@@ -53,7 +51,12 @@ struct KisNativeResultProtocol::Impl::Admission final : KisReplicaBackingDomainA
         {
             QMutexLocker lock(&p->gate);
             auto it = p->physical.find(physical.slot);
-            if (it == p->physical.end() || it->second->busy || it->second->domain != source
+            // Residency callbacks can arrive inside the provider's own copy
+            // service. Consume the original registered identity here; calling
+            // providerId()/providerEpoch() would re-lock that provider mutex.
+            if (it == p->physical.end() || !(it->second->handle.provider == physical.provider)
+                || !(it->second->handle.providerEpoch == physical.providerEpoch)
+                || it->second->busy || it->second->domain != source
                 || it->second->domainRevision != revision) {
 #ifdef NR104_CENSUS
                 qWarning("104 domain claim refused slot=%llu revision=%llu found=%d busy=%d", physical.slot, revision, it != p->physical.end(), it != p->physical.end() && it->second->busy);
@@ -162,7 +165,17 @@ KisNativeResultProtocol::Impl::Resource *KisNativeResultProtocol::Impl::fresh(
         const KisCpuPagePayload source{payload, stride, 63 * stride + 64 * descriptor.format.pixelStride};
         made = provider->prepareSynchronousCpuPayload(nextOperation(), version, descriptor, source, KisPagePriority::Interactive);
     } else if (before) {
-        made = provider->prepareSynchronousWriteCopy(nextOperation(), before->handle, version, descriptor, KisPagePriority::Interactive);
+        if (before->handle.version.key == version.key) {
+            made = provider->prepareSynchronousWriteCopy(nextOperation(), before->handle, version, descriptor, KisPagePriority::Interactive);
+        } else {
+            // A shared immutable Resource may be selected by several logical
+            // pages. Its physical source is valid without pretending its birth
+            // key is the destination key of this new COW result.
+            auto input = provider->captureCompletedTileSource(descriptor, before->tile, why);
+            if (!input) return nullptr;
+            made = provider->prepareSynchronousSource(nextOperation(), input, version, descriptor,
+                KisReplicaSourceUse::WritableCopy, KisPagePriority::Interactive);
+        }
     } else {
         made = provider->prepareWrite(nextOperation(), version, descriptor, Domain::CpuRam,
                                      KisPageWriteMode::DiscardContents, KisPagePriority::Interactive);

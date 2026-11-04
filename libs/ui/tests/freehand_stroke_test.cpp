@@ -34,21 +34,12 @@
 #include "tiles3/kis_tile_data_store.h"
 #include "tiles3/tests/kis_tile_data_store_test_access.h"
 #include "pagestore/KisPageStoreReclamation_p.h"
-#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
+#include "pagestore/native/KisNativeResultDiagnostics_p.h"
 
 #include "testui.h"
 
 #include <atomic>
 #include <memory>
-
-// Reuse the data manager's existing test friendship to observe the actual
-// native owner; the production strategy needs no new inspection API.
-class KisTiledDataManagerTest
-{
-public:
-    static KisPageStore *store(const KisTiledDataManager &manager)
-    { return manager.m_pageStoreBackend->store(); }
-};
 
 namespace {
 
@@ -207,9 +198,8 @@ public:
             ++m_probe->visibleChecks;
             if (pixel.alpha() != 0) ++m_probe->visiblePixels;
             const auto manager = targetDevice()->dataManager();
-            auto *store = KisTiledDataManagerTest::store(*manager);
-            m_probe->nativeOwnerObserved = manager->hasCurrentMemento() &&
-                store->mutationStatistics().sessionsCreated > 0;
+            const auto state = KisNativeResultTestAccess::state(KisNativeResultTestAccess::protocol(*manager));
+            m_probe->nativeOwnerObserved = manager->hasCurrentMemento() && state.physicalResources > 0;
             sampleResidentBytes();
             return;
         }

@@ -162,6 +162,16 @@ enum class KisPageStoreDiagnosticPhase : quint8 {
     RecoverableInstall,
     RecoverableInstalled,
     RecoverableCleanup,
+    // Original native result facts/capacity/fee are funded; no manager/S/B lock
+    // held. An observer may inject pressure or an independent late reader.
+    NativeAcceptPrepared,
+    // Adapter installed and manager unlocked, original page claims still held.
+    NativeAdapterInstalled,
+    // Original selections installed, S/B released, manager write lock held.
+    // Observers may signal readers; never synchronously reenter the manager.
+    NativeSelectionInstalled,
+    // Clone captured its immutable selection; source manager read lock held.
+    NativeCloneCaptured,
     Count
 };
 

@@ -90,6 +90,7 @@ bool KisNativeResultProtocol::close(QString *why)
         {
             QMutexLocker lock(&d->gate); unfinished = d->currentHistory; d->currentHistory = {};
             initiateClose = !d->closing; d->closing = true;
+            d->notifyWriters();
             if (unfinished && unfinished->m_nativeHistory) {
                 unfinished->m_nativeHistory->phase = KisNativeHistory::Phase::ClosingAbort;
                 cancelHistory = !unfinished->m_nativeHistory->workers;

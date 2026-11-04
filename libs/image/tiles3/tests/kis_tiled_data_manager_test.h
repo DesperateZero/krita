@@ -156,6 +156,7 @@ private Q_SLOTS:
     void testPageStorePixelOperationBorrowed();
     void testPageStorePixelOperationConcurrent_data();
     void testPageStorePixelOperationConcurrent();
+    void testNativeRangeWaitIsAtomicAndCloses();
     void testPageStoreAdapterPreparationRefusal_data();
     void testPageStoreAdapterPreparationRefusal();
     void testPageStoreRestoreLateAdmission();

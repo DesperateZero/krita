@@ -337,9 +337,9 @@ public:
 private:
     KisTileHashTable *m_hashTable;
     KisMementoManager *m_mementoManager;
-    // The legacy fallback shares one immutable uniform backing and recognizes
-    // repeated whole-tile fills by identity. Writers still COW because this
-    // reference keeps the backing shared; native PageStore has its own source.
+    // Both selection authorities consume the same immutable uniform input.
+    // This real COW owner also lets repeated whole-tile fills compare identity.
+    KisTileData *acquireUniformTile(const QByteArray &, bool *reused = nullptr);
     KisTileData *m_uniformClearTileData = nullptr;
     QByteArray m_uniformClearPixel;
     QMutex m_uniformClearMutex;

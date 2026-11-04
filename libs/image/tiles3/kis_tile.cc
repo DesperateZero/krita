@@ -361,6 +361,10 @@ bool KisTile::lockForRead() const
                         ++m_lockCounter;
                         return succeeded();
                     }
+                    // A refused RAM pin is a real failure of this acquisition,
+                    // not stale identity. Reissuing selection here would retry
+                    // the same failed I/O and hide failure from the caller.
+                    if (result == KisTilePageStoreLease::ReadPinResult::Unavailable) return false;
                     // Retirement permanently closes this binding. This
                     // wrapper still owns the original immutable/COW storage,
                     // so retain its old pixels without reconnecting current.

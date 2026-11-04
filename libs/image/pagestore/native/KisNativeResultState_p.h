@@ -12,6 +12,7 @@
 #include "KisPixelWriteCursor.h"
 #include <QRegion>
 #include <QThread>
+#include <QWaitCondition>
 #include <boost/range/iterator_range.hpp>
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "KisNativeResultProtocol.h"
@@ -52,6 +53,7 @@ public:
     static quint32 pixelSize(const KisTiledDataManager &m) { return m.pixelSize(); }
     static void bridge(KisTiledDataManager &m, KisTilePageStoreBridge *bridge) { m.m_mementoManager->setPageStoreBridge(bridge); }
     static void installDefault(KisTiledDataManager &m, const quint8 *pixel, KisTileData *tile) { m.installDefaultPixel(pixel, tile); }
+    static KisTileData *uniform(KisTiledDataManager &m, const QByteArray &pixel) { return m.acquireUniformTile(pixel); }
 };
 
 namespace KisNativeResultDetail {
@@ -182,7 +184,9 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     Edge *freeEdges = nullptr;
     Resource *freeResources = nullptr;
     Body *freeBodies = nullptr;
-    Body *defaultWriter = nullptr;
+    Body *surfaceWriter = nullptr;
+    QWaitCondition writersChanged;
+    size_t writerWaiters = 0; // original gate; zero means no notification work
     size_t edgeFree = 0, edgeReserved = 0;
     quint64 epoch = 1, viewSerial = 0, operation = 1;
     quint64 asyncSource = 0;
@@ -217,12 +221,15 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     bool finishHistorySegment(const std::shared_ptr<KisNativeHistory> &, QString *);
     void cancelHistorySegment(const std::shared_ptr<KisNativeHistory> &) noexcept;
     static void finishRaw(void *) noexcept;
-    bool bindRows(Body &, const QRect &, QString *, bool append = false);
+    bool bindRows(Body &, const QRect &, QString *, bool append = false, bool stageOnly = false);
+    bool claimRows(Body &, size_t first, bool wait, QString *);
+    void notifyWriters() { if (writerWaiters) writersChanged.wakeAll(); }
     // Owner-local original bodies can be unlinked by a final foreign-thread
     // release. The atomic head only skips empty lookup; gate protects the list.
     enum class IteratorAccess { Observe, Client, Borrow };
     std::atomic<Body *> iteratorHead{nullptr};
     Body *iteratorBody(IteratorAccess access = IteratorAccess::Observe);
+    bool hasLocalProducer(const QRect &);
     void detachIterator(Body *);
     bool finishIterator(Body *, bool success);
     bool finishRawResult(Body *) noexcept;
@@ -302,7 +309,7 @@ struct KisNativeResultProtocol::Body {
     Vec<KisTileSP> defaultReaders;
     Body *next = nullptr, *iteratorNext = nullptr;
     size_t clients = 0, borrows = 0;
-    bool iterator = false, raw = false;
+    bool iterator = false, raw = false, importing = false;
     std::atomic<bool> revoked{false}, failed{false}, rawDirty{false};
     Qt::HANDLE thread = nullptr;
     std::shared_ptr<Impl> deferredOwner;

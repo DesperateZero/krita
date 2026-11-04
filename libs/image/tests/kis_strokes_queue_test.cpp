@@ -11,7 +11,9 @@
 #include <atomic>
 #include "KisRunnableBasedStrokeStrategy.h"
 #include "KisRunnableStrokeJobData.h"
-#include "pagestore/KisTiledDataManagerPageStoreBackend.h"
+#include "pagestore/native/KisNativeResultDiagnostics_p.h"
+#include "tiles3/kis_tiled_data_manager.h"
+#include "KisPixelWriteCursor.h"
 #include "pagestore/KisPageStore.h"
 
 #include "kistest.h"
@@ -52,13 +54,12 @@ void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs_data()
 void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs()
 {
     QFETCH(int, bpp); QFETCH(bool, barrier); QFETCH(bool, ended);
-    KisTiledDataManagerPageStoreBackend backend;
     const QByteArray initial(bpp, char(0x2a)); QString error;
-    QVERIFY2(backend.configure(bpp, reinterpret_cast<const quint8 *>(initial.constData()), &error), qPrintable(error));
-    auto *store = backend.store(); const auto baseline = store->mutationStatistics();
-    const auto tx = store->beginCurrentTransaction(); auto scope = store->beginMutation(tx);
-    QVERIFY(scope.isActive());
-    KisCapturedReadView frozen;
+    KisTiledDataManager manager(bpp, reinterpret_cast<const quint8 *>(initial.constData()));
+    auto &protocol = KisNativeResultTestAccess::protocol(manager);
+    const auto owner = manager.getMemento(); QVERIFY(owner);
+    QVERIFY(manager.beginStrokeMutation(owner, &error));
+    KisNativeResultProtocol::Snapshot frozen;
     KisStrokesQueue queue; KisUpdaterContext context(2);
     auto *strategy = new CheckpointStrokeStrategy;
     const auto id = queue.startStroke(strategy);
@@ -68,40 +69,44 @@ void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs()
         release.release(4); context.waitForDone();
         if (!id.isNull() && !id.toStrongRef()->isEnded()) queue.endStroke(id);
         for (int i = 0; i < 32 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
-        scope.cancel(); store->abort(tx); frozen = {}; scope = {};
+        manager.tryAbort(owner); frozen = {};
     });
     const auto write = [&](int x, quint8 value) {
-        auto execution = scope.borrowExecution(backend.surface(), {{x, 0}});
-        auto guard = execution.beginWrite({backend.surface(), {x, 0}});
-        if (!guard.isValid()) { ++failures; return; }
-        std::memset(guard.data(), value, size_t(bpp)); guard = {};
-        if (!execution.finish()) ++failures;
+        const auto result = manager.writePageStoreOperation({QRect(x * 64, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+            cursor->moveTo(x * 64, 0); if (!cursor->rawData()) return false;
+            std::memset(cursor->rawData(), value, size_t(bpp)); return true;
+        }, nullptr, owner);
+        if (result != KisPageStoreWriteOperationResult::Succeeded) ++failures;
     };
     strategy->finish = [&] { ++finished; };
     queue.addJob(id, new KisRunnableStrokeJobData([&] {
-        auto execution = scope.borrowExecution(backend.surface(), {{0, 0}});
-        auto guard = execution.beginWrite({backend.surface(), {0, 0}});
-        if (guard.isValid()) std::memset(guard.data(), 0x51, size_t(bpp)); else ++failures;
+        const auto result = manager.writePageStoreOperation({QRect(0, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+        cursor->moveTo(0, 0); if (!cursor->rawData()) return false;
+        std::memset(cursor->rawData(), 0x51, size_t(bpp));
         const bool accepted = strategy->addCheckpointJob(new KisRunnableStrokeJobData([&] {
             if (cuts.fetch_add(1) || after.load()) ++failures;
-            frozen = scope.checkpointForRead();
-            if (!frozen.isValid()) { ++failures; return; }
+            if (!manager.checkpointStrokeMutation(owner)) { ++failures; return; }
+            frozen = protocol.capture();
+            if (!frozen) { ++failures; return; }
             for (int x = 0; x != 5; ++x) {
-                auto read = frozen.readResidentPage({backend.surface(), {x, 0}});
-                if (!read.isValid() || QByteArray(static_cast<const char *>(read.data()), bpp) != QByteArray(bpp, char(0x51 + x)))
+                auto read = frozen.readPage(x, 0);
+                if (!read.data() || QByteArray(reinterpret_cast<const char *>(read.data()), bpp) != QByteArray(bpp, char(0x51 + x)))
                     ++failures;
             }
         }, barrier ? KisStrokeJobData::BARRIER : KisStrokeJobData::SEQUENTIAL));
         if (!accepted) ++failures;
         requested.release(); entered.release(); release.acquire();
-        guard = {}; if (!execution.finish()) ++failures;
+        return true;
+        }, nullptr, owner);
+        if (result != KisPageStoreWriteOperationResult::Succeeded) ++failures;
     }, KisStrokeJobData::CONCURRENT));
     queue.addJob(id, new KisRunnableStrokeJobData([&] {
-        auto execution = scope.borrowExecution(backend.surface(), {{1, 0}});
-        auto guard = execution.beginWrite({backend.surface(), {1, 0}});
-        if (guard.isValid()) std::memset(guard.data(), 0x52, size_t(bpp)); else ++failures;
-        entered.release(); release.acquire(); guard = {};
-        if (!execution.finish()) ++failures;
+        const auto result = manager.writePageStoreOperation({QRect(64, 0, 1, 1)}, [&](KisPixelWriteCursor *cursor) {
+            cursor->moveTo(64, 0); if (!cursor->rawData()) return false;
+            std::memset(cursor->rawData(), 0x52, size_t(bpp));
+            entered.release(); release.acquire(); return true;
+        }, nullptr, owner);
+        if (result != KisPageStoreWriteOperationResult::Succeeded) ++failures;
         // These are produced after the checkpoint request and recurse through
         // the real queue; both must still precede its exact view.
         strategy->addMutatedJob(new KisRunnableStrokeJobData([&] {
@@ -116,10 +121,10 @@ void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs()
     QCOMPARE(cuts.load(), 0); QCOMPARE(finished.load(), 0);
     if (!ended) {
         queue.addJob(id, new KisRunnableStrokeJobData([&] {
-            if (cuts.load() != 1 || !frozen.isValid()) ++failures;
+            if (cuts.load() != 1 || !frozen) ++failures;
             write(0, 0x71); ++after;
-            auto old = frozen.readResidentPage({backend.surface(), {0, 0}});
-            if (!old.isValid() || QByteArray(static_cast<const char *>(old.data()), bpp) != QByteArray(bpp, char(0x51))) ++failures;
+            auto old = frozen.readPage(0, 0);
+            if (!old.data() || QByteArray(reinterpret_cast<const char *>(old.data()), bpp) != QByteArray(bpp, char(0x51))) ++failures;
         }, KisStrokeJobData::CONCURRENT));
         queue.endStroke(id);
     }
@@ -129,14 +134,9 @@ void KisStrokesQueueTest::testCheckpointCapturesAdmittedJobs()
     for (int i = 0; i < 32 && !queue.isEmpty(); ++i) { queue.processQueue(context, false); context.waitForDone(); }
     QVERIFY(queue.isEmpty()); QCOMPARE(failures.load(), 0); QCOMPARE(cuts.load(), 1);
     QCOMPARE(finished.load(), 1); QCOMPARE(after.load(), ended ? 0 : 1);
-    QVERIFY(scope.isActive()); QVERIFY(scope.seal());
-    QVERIFY(store->commit(tx, store->preparedPages(tx)).isValid());
-    const auto stats = store->mutationStatistics();
-    QCOMPARE(stats.operationSessionsCreated - baseline.operationSessionsCreated, quint64(1));
-    QCOMPARE(stats.generationsReserved - baseline.generationsReserved, quint64(ended ? 5 : 6));
-    QCOMPARE(stats.writablePinsAcquired - baseline.writablePinsAcquired, quint64(ended ? 5 : 6));
-    QCOMPARE(stats.writablePinsReleased - baseline.writablePinsReleased, quint64(ended ? 5 : 6));
-    frozen = {}; scope = {}; QVERIFY(store->closeSession());
+    QVERIFY(manager.hasCurrentMemento()); QVERIFY(manager.tryCommit());
+    QCOMPARE(KisNativeResultTestAccess::state(protocol).activeResults, quint64(0));
+    frozen = {}; manager.purgeHistory(owner); QVERIFY(protocol.close());
 }
 
 void KisStrokesQueueTest::testCheckpointCancellation_data()

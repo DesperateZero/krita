@@ -21,6 +21,7 @@ struct KisNativeResultProtocol::Impl::ReadLease final : KisTilePageStoreLease {
             if (pinned) return ReadPinResult::Ready;
             KisCpuResidentReadStatus status;
             pinned = binding->acquireRead(expected.allocationIdentity(), false, &status) != nullptr;
+            if (status == KisCpuResidentReadStatus::InvalidIdentity) return ReadPinResult::Stale;
             if (status == KisCpuResidentReadStatus::Retired) return ReadPinResult::Retired;
             return pinned ? ReadPinResult::Ready : ReadPinResult::Unavailable;
         }
@@ -66,7 +67,8 @@ struct KisNativeResultProtocol::Impl::WriteLease final : KisTilePageStoreLease {
         return fixedPinned ? ReadPinResult::Ready : ReadPinResult::Unavailable;
     }
     bool finish(TileLeaseRelease *afterUnlock = nullptr) override {
-        if (!body) { if (std::exchange(fixedPinned, false)) tile->unblockSwapping(); return true; }
+        if (std::exchange(fixedPinned, false)) tile->unblockSwapping();
+        if (!body) return true;
         auto *b = std::exchange(body, nullptr);
         if (afterUnlock) *afterUnlock = TileLeaseRelease(b, &Impl::finishRaw);
         else Impl::finishRaw(b);
@@ -108,9 +110,19 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
                 const QRect rect(col * 64, row * 64, 64, 64);
                 if (!bindRows(*body, rect, nullptr, true)) return {};
             }
-            if (!body->rows[index].target && !prepareTargets(*body, nullptr,
+            auto &entry = body->rows[index];
+            const bool preparedHere = !entry.target;
+            if (preparedHere && !prepareTargets(*body, nullptr,
                 QRect(col * 64, row * 64, 64, 64), 0, nullptr, nullptr, index, index + 1)) return {};
-            result->owner = shared_from_this(); result->body = body; result->tile = body->rows[index].target->tile;
+            result->tile = entry.target->tile;
+            if (preparedHere) {
+                result->fixedPinned = KisNativeResultProtocol::takeNativePin(entry.writable) != nullptr;
+                entry.pixels = nullptr;
+            } else {
+                result->fixedPinned = result->tile->blockSwapping();
+            }
+            if (!result->fixedPinned) return {};
+            result->owner = shared_from_this(); result->body = body;
             if (!shared) { QMutexLocker lock(&gate); ++body->borrows; }
             body = nullptr;
             return TileLease(result.release());
@@ -123,7 +135,10 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
           if (it != pages.end() && it->second.writer == b) target = b->rows[it->second.writerIndex].target; }
         if (target) {
             auto lease = std::make_unique<WriteLease>();
-            lease->owner = shared_from_this(); lease->body = b; lease->tile = target->tile; lease->writes = false;
+            lease->tile = target->tile; lease->writes = false;
+            lease->fixedPinned = lease->tile->blockSwapping();
+            if (!lease->fixedPinned) return {};
+            lease->owner = shared_from_this(); lease->body = b;
             b = nullptr;
             return TileLease(lease.release());
         }
@@ -133,6 +148,7 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
     KisTileData *tile = nullptr;
     {
         QMutexLocker lock(&gate);
+        if (closing) return {};
         auto it = pages.find({row, col});
         if (it != pages.end() && it->second.current.resource) {
             auto *r = it->second.current.resource;
@@ -190,15 +206,45 @@ bool KisNativeResultProtocol::IteratorSession::isActive() const
 }
 
 std::unique_ptr<KisTiledDataManagerIteratorWriteScope> KisNativeResultProtocol::beginIterator(QString *why)
+{
+    return beginIterator(false, why);
+}
+
+std::unique_ptr<KisTiledDataManagerIteratorWriteScope> KisNativeResultProtocol::beginImport(QString *why)
+{
+    QMutexLocker historySequence(&d->historyGate);
+    {
+        QMutexLocker lock(&d->gate);
+        if (d->active || d->currentHistory || d->closing) {
+            error(why, "import requires an idle surface"); return {};
+        }
+    }
+    // File replacement discards the old image even when decoding fails. The
+    // existing clear cut is explicit; decoding then owns one original Body.
+    if (!clear(why)) return {};
+    return beginIterator(true, why);
+}
+
+std::unique_ptr<KisTiledDataManagerIteratorWriteScope> KisNativeResultProtocol::beginIterator(bool importing, QString *why)
 try {
     auto session = std::make_unique<IteratorSession>(); session->owner = d;
     auto *b = d->iteratorBody(Impl::IteratorAccess::Client);
     session->body = b;
+    if (b && b->importing) {
+        session->body = nullptr; d->finishIterator(b, true);
+        error(why, "import cannot admit an unrelated iterator"); return {};
+    }
     if (b && b->failed) { error(why, "original iterator has failed"); return {}; }
     if (!b) {
         b = d->checkout(); if (!b) return {};
         b->iterator = true; b->thread = QThread::currentThreadId(); b->deferredOwner = d;
         QMutexLocker lock(&d->gate);
+        if (importing) {
+            if (d->active != 1 || d->currentHistory || d->closing) {
+                lock.unlock(); b->deferredOwner.reset(); d->cancelBody(b); return {};
+            }
+            b->importing = true; d->surfaceWriter = b;
+        }
         b->clients = 1;
         b->iteratorNext = d->iteratorHead.load(std::memory_order_relaxed);
         d->iteratorHead.store(b, std::memory_order_release);
@@ -299,6 +345,10 @@ try {
     phase.next(KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, pageCount);
     Prepared p;
     auto *body = d->iteratorBody(Impl::IteratorAccess::Client);
+    if (body && body->importing) {
+        d->finishIterator(body, true);
+        error(why, "import cannot admit an unrelated pixel operation"); return false;
+    }
     if (body && body->failed) {
         d->finishIterator(body, false);
         error(why, "original producer has failed"); return false;
@@ -310,42 +360,74 @@ try {
         if (joined && body) d->finishIterator(body, succeeded);
     });
     QRegion missing = pages;
-    if (joined) {
+    {
         // Reuse the original producer's claims and physical pointers. Only
         // missing page runs append rows; no second operation or translation.
         for (const auto &part : pages) for (int y = part.top(); y <= part.bottom(); ++y)
             for (int x = part.left(); x <= part.right(); ++x) {
                 bool owned;
-                { QMutexLocker lock(&d->gate); auto it = d->pages.find({y, x}); owned = it != d->pages.end() && it->second.writer == body; }
+                { QMutexLocker lock(&d->gate);
+                  auto it = d->pages.find({y, x});
+                  auto *writer = it == d->pages.end() ? nullptr : it->second.writer;
+                  owned = writer && (writer == body || (writer->raw && writer->thread == QThread::currentThreadId() && !writer->revoked)); }
                 if (owned) missing -= QRect(x, y, 1, 1);
             }
     }
+    const size_t firstNew = body->rows.size();
     for (const auto &part : missing) {
         if (!KisTileHashTable::supportsCoordinates(part.left(), part.top()) ||
             !KisTileHashTable::supportsCoordinates(part.right(), part.bottom())) return false;
-        if (!d->bindRows(*body, QRect(part.x() * 64, part.y() * 64, part.width() * 64, part.height() * 64), why, true)) return false;
+        if (!d->bindRows(*body, QRect(part.x() * 64, part.y() * 64, part.width() * 64, part.height() * 64), why, true, true)) return false;
     }
+    if (!d->claimRows(*body, firstNew, !joined, why)) return false;
     class Cursor final : public KisPixelWriteCursor {
     public:
         Impl &owner; Body &body; const QRegion &declared; QString *why;
-        Body::Row *row = nullptr; qint32 px = 0, py = 0; bool failed = false;
+        Impl::Page *page = nullptr; KisTileData *pinned = nullptr; Body *borrowed = nullptr;
+        qint32 px = 0, py = 0; bool failed = false;
         Cursor(Impl &o, Body &b, const QRegion &r, QString *w) : owner(o), body(b), declared(r), why(w) {}
+        void release() {
+            if (pinned) std::exchange(pinned, nullptr)->unblockSwapping();
+            if (borrowed) Impl::finishRaw(std::exchange(borrowed, nullptr));
+        }
+        ~Cursor() override { release(); }
         void moveTo(qint32 x, qint32 y) override {
-            px = x; py = y; row = nullptr;
+            release();
+            px = x; py = y; page = nullptr;
             if (!declared.contains(QPoint(x, y))) { failed = true; return; }
             QMutexLocker lock(&owner.gate);
             auto it = owner.pages.find({floorTile(y), floorTile(x)});
-            if (it == owner.pages.end() || it->second.writer != &body) { failed = true; return; }
-            row = &body.rows[it->second.writerIndex];
+            if (it == owner.pages.end() || !it->second.writer) { failed = true; return; }
+            auto *writer = it->second.writer;
+            if (writer != &body) {
+                if (!writer->raw || writer->thread != QThread::currentThreadId() || writer->failed || writer->revoked) {
+                    failed = true; return;
+                }
+                borrowed = writer; ++borrowed->borrows;
+            }
+            page = &it->second;
         }
         quint8 *rawData() override {
-            if (!row || failed || body.failed) return nullptr;
-            if (!row->target) {
+            if (!page || failed || body.failed || (borrowed && borrowed->failed)) return nullptr;
+            // A nested public producer may append to the same original Body.
+            // The Page and its row index remain stable across vector growth.
+            auto *producer = borrowed ? borrowed : &body;
+            auto *row = &producer->rows[page->writerIndex];
+            const bool preparedHere = !row->target;
+            if (preparedHere) {
                 const auto index = size_t(row - body.rows.data());
                 const QRect rect(row->page->key.page.column * 64, row->page->key.page.row * 64, 64, 64);
                 if (!owner.prepareTargets(body, nullptr, rect, 0, nullptr, why, index, index + 1)) { failed = true; return nullptr; }
             }
-            return row->pixels + (py - row->page->key.page.row * 64) * 64 * owner.descriptor.format.pixelStride
+            if (!pinned) {
+                if (preparedHere) {
+                    if (!KisNativeResultProtocol::takeNativePin(row->writable)) { failed = true; return nullptr; }
+                    row->pixels = nullptr;
+                } else if (!row->target->tile->blockSwapping()) { failed = true; return nullptr; }
+                pinned = row->target->tile;
+            }
+            if (borrowed) borrowed->rawDirty = true;
+            return pinned->data() + (py - row->page->key.page.row * 64) * 64 * owner.descriptor.format.pixelStride
                 + (px - row->page->key.page.column * 64) * owner.descriptor.format.pixelStride;
         }
         qint32 numContiguousColumns(qint32 x) const override { return 64 - (x - floorTile(x) * 64); }
@@ -356,6 +438,7 @@ try {
     } cursor(*d, *body, pixels, why);
     phase.next(KisPageStoreDiagnosticPhase::PixelOperationBody, 1);
     if (!operation(&cursor) || cursor.failed) { error(why, "native pixel producer failed"); return false; }
+    cursor.release();
     phase.next(KisPageStoreDiagnosticPhase::PixelOperationFinish, pageCount);
     if (joined) {
         body->rawDirty = true;

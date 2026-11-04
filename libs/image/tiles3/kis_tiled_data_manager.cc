@@ -380,7 +380,9 @@ bool KisTiledDataManager::write(KisPaintDeviceWriter &store)
 }
 bool KisTiledDataManager::read(QIODevice *stream) try
 {
-    clear();
+    auto nativeImport = m_nativeResult ? m_nativeResult->beginImport() : nullptr;
+    if (m_nativeResult && !nativeImport) return false;
+    if (!m_nativeResult) clear();
 
     // The original batch owns decoding and cancellation. Its final resources
     // outlive the manager gate; no undo result escapes this file import.
@@ -413,12 +415,10 @@ bool KisTiledDataManager::read(QIODevice *stream) try
     if (m_nativeResult) {
         // The decoder's real tile locks append to the original new-protocol
         // write set. One all-D cut follows successful decoding of every tile.
-        auto scope = m_nativeResult->beginIterator();
-        if (!scope) return false;
         for (quint32 i = 0; i < numTiles; ++i)
             if (!compressor->readTile(stream, this)) return false;
         locker.unlock();
-        return scope->finish();
+        return nativeImport->finish();
     }
     if (!getMementoLocked()) {
         return false;
@@ -582,12 +582,31 @@ quint8* KisTiledDataManager::duplicatePixel(qint32 num, const quint8 *pixel)
     return dstBuf;
 }
 
+KisTileData *KisTiledDataManager::acquireUniformTile(const QByteArray &pixel, bool *reused)
+{
+    QMutexLocker lock(&m_uniformClearMutex);
+    const bool hit = m_uniformClearTileData && m_uniformClearPixel == pixel;
+    if (reused) *reused = hit;
+    if (!hit) {
+        auto *tile = KisTileDataStore::instance()->createDefaultTileData(
+            m_pixelSize, reinterpret_cast<const quint8 *>(pixel.constData()));
+        if (!tile) return nullptr;
+        tile->acquire();
+        if (m_uniformClearTileData) m_uniformClearTileData->release();
+        m_uniformClearTileData = tile;
+        m_uniformClearPixel = pixel;
+    }
+    // The caller owns its source independently of later cache replacement.
+    m_uniformClearTileData->acquire();
+    return m_uniformClearTileData;
+}
+
 void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
 {
     if (m_nativeResult) {
         if (KisStrokeJobFailureContext::currentJobHasFailed()) return;
         QString failure;
-        if (!m_nativeResult->fill(clearRect, QByteArray(reinterpret_cast<const char *>(clearPixel), m_pixelSize), &failure))
+        if (!m_nativeResult->fill(clearRect, clearPixel ? QByteArray(reinterpret_cast<const char *>(clearPixel), m_pixelSize) : QByteArray{}, &failure))
             KisStrokeJobFailureContext::reportFailure(failure);
         return;
     }
@@ -643,29 +662,10 @@ void KisTiledDataManager::clear(QRect clearRect, const quint8 *clearPixel)
         clearRect.height() >= KisTileData::HEIGHT) {
         const QByteArray clearPixelBytes(
             reinterpret_cast<const char *>(clearPixel), pixelSize);
-        {
-            QMutexLocker uniformLocker(&m_uniformClearMutex);
-            reusesUniformClearBacking = m_uniformClearTileData &&
-                m_uniformClearPixel == clearPixelBytes;
-            if (reusesUniformClearBacking) {
-                td = m_uniformClearTileData;
-            } else {
-                td = KisTileDataStore::instance()->createDefaultTileData(
-                    pixelSize, clearPixel);
-                if (!td) {
-                    delete[] clearPixelData;
-                    return;
-                }
-                if (m_uniformClearTileData) {
-                    m_uniformClearTileData->release();
-                }
-                m_uniformClearTileData = td;
-                m_uniformClearTileData->acquire();
-                m_uniformClearPixel = clearPixelBytes;
-            }
-            // Hold the selected backing independently of the cache. Another
-            // clear may replace the cache entry as soon as this lock drops.
-            td->acquire();
+        td = acquireUniformTile(clearPixelBytes, &reusesUniformClearBacking);
+        if (!td) {
+            delete[] clearPixelData;
+            return;
         }
     }
 

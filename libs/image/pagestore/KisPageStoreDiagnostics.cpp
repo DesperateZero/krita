@@ -95,7 +95,8 @@ const char *KisPageStoreDiagnosticRecorder::phaseName(KisPageStoreDiagnosticPhas
         "packed_write_capture", "packed_write_compare", "packed_write_prepare", "packed_write_copy", "packed_write_release",
         "mutation_payload_copy",
         "recoverable_prepare", "recoverable_prepared", "recoverable_install",
-        "recoverable_installed", "recoverable_cleanup"
+        "recoverable_installed", "recoverable_cleanup",
+        "native_accept_prepared", "native_adapter_installed", "native_selection_installed", "native_clone_captured"
     };
     static_assert(sizeof(names) / sizeof(names[0]) ==
                   size_t(KisPageStoreDiagnosticPhase::Count));

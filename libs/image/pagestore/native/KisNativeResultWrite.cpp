@@ -37,6 +37,19 @@ KisCpuWriteBindingReservation KisNativeResultProtocol::claimNative(
     return result;
 }
 
+void *KisNativeResultProtocol::takeNativePin(KisCpuWriteBindingReservation &reservation)
+{
+    // Native results use Tiles3 storage. Transfer its already acquired physical
+    // pin to the actual byte borrower; the original reservation still excludes
+    // competing writers/retirement but no longer implies RAM residency.
+    auto *binding = reservation.m_binding.get();
+    if (!binding) return nullptr;
+    QMutexLocker lock(&binding->m_mutex);
+    Q_ASSERT(binding->m_writeState == KisCpuResidentBinding::WriteState::Reserved
+             && !binding->m_storageBusy);
+    return std::exchange(binding->m_data, nullptr);
+}
+
 bool KisNativeResultProtocol::validateNative(KisCpuResidentBinding *b, const KisReplicaHandle &expected)
 {
     // Called with B held until the all-D no-fail cut. Immutable layout is not
@@ -88,13 +101,14 @@ KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::checkout()
 {
     {
         QMutexLocker lock(&gate);
-        if (closing || defaultWriter) return nullptr;
+        if (closing || surfaceWriter) return nullptr;
         ++active;
-        if (auto *b = freeBodies) { freeBodies = b->next; b->next = nullptr; return b; }
+        if (auto *b = freeBodies) { freeBodies = b->next; b->next = nullptr; b->thread = QThread::currentThreadId(); return b; }
     }
     try {
         QMutexLocker allocation(&bodyGate);
         bodies.emplace_back(&budget);
+        bodies.back().thread = QThread::currentThreadId();
         return &bodies.back();
     } catch (...) { QMutexLocker lock(&gate); --active; throw; }
 }
@@ -104,14 +118,14 @@ void KisNativeResultProtocol::Impl::returnBody(Body *b) noexcept
     // Candidate destruction can release real adapter/GC storage; never do it
     // under S or the manager gate.
     Q_ASSERT(!b->clients && !b->borrows);
-    b->iterator = b->raw = b->revoked = false; b->thread = nullptr; b->iteratorNext = nullptr;
+    b->iterator = b->raw = b->importing = b->revoked = false; b->thread = nullptr; b->iteratorNext = nullptr;
     b->rows.clear(); b->moves.clear(); b->defaultReaders.clear(); b->history.reset();
     if (b->defaultTile) { b->defaultTile->deref(); b->defaultTile = nullptr; }
     b->defaultPixel.clear();
     b->ready = b->accepted = b->restore = b->rawDirty = false;
     b->asyncPending = b->abandoned = b->failed = b->adapterReady = false;
     QMutexLocker lock(&gate);
-    if (defaultWriter == b) defaultWriter = nullptr;
+    if (surfaceWriter == b) surfaceWriter = nullptr;
     Q_ASSERT(edgeReserved >= b->edgeBudget);
     edgeReserved -= std::exchange(b->edgeBudget, 0);
     b->next = freeBodies; freeBodies = b; --active;
@@ -140,6 +154,7 @@ void KisNativeResultProtocol::Impl::cancelBody(Body *b) noexcept
         settleReleased(released);
         QMutexLocker lock(&gate);
         for (auto &row : b->rows) if (row.page && row.page->writer == b) row.page->writer = nullptr;
+        notifyWriters();
         COUNT(cancelled, 1);
     }
     returnBody(b);
@@ -178,6 +193,23 @@ void KisNativeResultProtocol::Impl::detachIterator(Body *b)
     if (*link) *link = b->iteratorNext;
     b->iteratorNext = nullptr;
     iteratorHead.store(head, std::memory_order_release);
+}
+
+bool KisNativeResultProtocol::Impl::hasLocalProducer(const QRect &rect)
+{
+    if (iteratorBody()) return true;
+    QMutexLocker lock(&gate);
+    if (!active) return false;
+    const auto thread = QThread::currentThreadId();
+    const int left = floorTile(rect.left()), right = floorTile(rect.right());
+    const int bottom = floorTile(rect.bottom());
+    for (auto it = pages.lower_bound({floorTile(rect.top()), left});
+         it != pages.end() && it->first.first <= bottom; ++it) {
+        if (it->first.second < left || it->first.second > right) continue;
+        auto *writer = it->second.writer;
+        if (writer && writer->raw && writer->thread == thread && !writer->revoked) return true;
+    }
+    return false;
 }
 
 bool KisNativeResultProtocol::Impl::finishRawResult(Body *body) noexcept
@@ -247,7 +279,7 @@ bool KisNativeResultProtocol::Impl::finishIterator(Body *b, bool success)
     return finishRawResult(b);
 }
 
-bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString *why, bool append)
+bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString *why, bool append, bool stageOnly)
 {
     const QRect tiles(QPoint(floorTile(rect.left()), floorTile(rect.top())),
                       QPoint(floorTile(rect.right()), floorTile(rect.bottom())));
@@ -256,7 +288,9 @@ bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString
         || !KisTileHashTable::supportsCoordinates(tiles.left(), tiles.top())
         || !KisTileHashTable::supportsCoordinates(tiles.right(), tiles.bottom())) return false;
     const size_t first = append ? b.rows.size() : 0;
-    b.rows.resize(first + size_t(total)); b.moves.reserve(b.rows.size() * 2);
+    b.rows.resize(first + size_t(total));
+    if (b.moves.capacity() < b.rows.size() * 2)
+        b.moves.reserve(std::max(b.rows.size() * 2, b.moves.capacity() * 2));
     Pages staged(std::less<Key>{}, pages.get_allocator());
     {
         QMutexLocker lock(&gate);
@@ -280,12 +314,42 @@ bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString
         for (int y = tiles.top(); y <= tiles.bottom(); ++y) for (int x = tiles.left(); x <= tiles.right(); ++x, ++at) {
             auto &row = b.rows[at];
             if (!row.page) row.page = &pages.find({y, x})->second;
-            if (row.page->writer) { error(why, "same-page writer conflict"); return false; }
-            row.page->writer = &b; row.page->writerIndex = at; row.before = row.page->current;
             row.local = rect.intersected(QRect(x * 64, y * 64, 64, 64)).translated(-x * 64, -y * 64);
         }
     }
-    return true;
+    return stageOnly || claimRows(b, first, false, why);
+}
+
+bool KisNativeResultProtocol::Impl::claimRows(Body &b, size_t first, bool wait, QString *why)
+{
+    KisPageStoreDiagnosticTimer admission(nullptr, KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, b.rows.size() - first);
+    QMutexLocker lock(&gate);
+    bool announced = false;
+    for (;;) {
+        if (closing || b.failed) { error(why, "result admission closed"); return false; }
+        size_t at = first;
+        for (; at < b.rows.size(); ++at) {
+            auto &row = b.rows[at];
+            if (row.page->writer) break;
+            row.page->writer = &b; row.page->writerIndex = at; row.before = row.page->current;
+        }
+        if (at == b.rows.size()) return true;
+        auto *conflict = b.rows[at].page->writer;
+        // No partial new range survives a wait. The normal path still writes
+        // each claim once; only a real conflict pays rollback/re-admission.
+        for (size_t undo = first; undo < at; ++undo) b.rows[undo].page->writer = nullptr;
+        if (!wait || conflict->thread == QThread::currentThreadId()) {
+            error(why, "same-page writer conflict"); return false;
+        }
+        if (!announced) {
+            lock.unlock(); admission.next(KisPageStoreDiagnosticPhase::PixelOperationRangeWait, 1);
+            lock.relock(); announced = true;
+            continue; // observer may have released the actual conflicting row
+        }
+        ++writerWaiters;
+        writersChanged.wait(&gate);
+        --writerWaiters;
+    }
 }
 
 bool KisNativeResultProtocol::Impl::prepareAdapter(Body &b, QString *why)
@@ -397,7 +461,9 @@ bool KisNativeResultProtocol::Impl::prepareTargets(Body &b, const quint8 *data,
         }
     }
     size_t made = 0;
+    KisPageStoreDiagnosticTimer targetPhase(nullptr, KisPageStoreDiagnosticPhase::PackedWritePrepare);
     for (auto &row : boost::make_iterator_range(b.rows.begin() + first, b.rows.begin() + last)) if (row.changed && !row.remove && !row.selectionOnly) {
+        targetPhase.next(KisPageStoreDiagnosticPhase::PackedWritePrepare, 1);
         const auto local = row.local;
         const auto *payload = payloadFor(row);
         auto *source = row.before.resource;
@@ -524,6 +590,7 @@ try {
     if (!changed && !b.defaultTile) {
         QMutexLocker lock(&gate);
         for (auto &r : b.rows) if (r.page->writer == &b) r.page->writer = nullptr;
+        notifyWriters();
         b.accepted = true; return true;
     }
     KisPageStoreDiagnosticTimer publishing(nullptr, KisPageStoreDiagnosticPhase::WritePublishHost, changed);
@@ -536,6 +603,7 @@ try {
     }
     auto fee = budget.reserveChange(change, why);
     if (!fee.isValid()) return false;
+    publishing.next(KisPageStoreDiagnosticPhase::NativeAcceptPrepared, changed);
     if (faults && faults->beforeAccept) faults->beforeAccept();
     if (faults && faults->rejectAdapter) { error(why, "adapter preparation refused; Ready retained"); return false; }
 #ifdef NR104_INSTALL_AUDIT
@@ -610,6 +678,7 @@ try {
         }
         COUNT(results, changed);
     }
+    publishing.next(KisPageStoreDiagnosticPhase::NativeSelectionInstalled, changed);
     // Real adapter work stays inside the manager cut but outside S/B: legacy
     // Tile read takes its swap barrier before asking this bridge for selection.
     auto &table = KisNativeResultAdapter::table(adapter);
@@ -656,9 +725,11 @@ try {
     installAudit.end();
     std::fprintf(stderr, "NATIVE_INSTALL_AUDIT_OK changed=%zu default=%d restore=%d\n", changed, int(b.defaultTile != nullptr), int(b.restore));
 #endif
+    publishing.next(KisPageStoreDiagnosticPhase::NativeAdapterInstalled, changed);
     {
         QMutexLocker lock(&gate);
         for (auto &row : b.rows) if (row.page->writer == &b) row.page->writer = nullptr;
+        notifyWriters();
     }
     for (const auto &m : b.moves) if (m.after == Class::RetirementDebt) retire(m.resource);
     return true;
@@ -677,12 +748,15 @@ KisNativeResultProtocol::Prepared &KisNativeResultProtocol::Prepared::operator=(
 }
 
 KisNativeResultProtocol::Prepared KisNativeResultProtocol::prepareWrite(
-    const quint8 *bytes, const QRect &pixels, qsizetype stride, QString *why, const Faults *faults)
+    const quint8 *bytes, const QRect &pixels, qsizetype stride, QString *why, const Faults *faults, bool wait)
 try {
     if (!bytes) { error(why, "null packed input"); return {}; }
     Prepared result;
     result.owner = d; result.body = d->checkout();
-    if (!result.body || !d->prepareTargets(*result.body, bytes, pixels, stride, faults, why)) return {};
+    if (!result.body || !bounds(bytes, pixels, stride, d->descriptor.format.pixelStride)
+        || !d->bindRows(*result.body, pixels, why, false, true)
+        || !d->claimRows(*result.body, 0, wait, why)
+        || !d->prepareTargets(*result.body, bytes, pixels, stride, faults, why)) return {};
     return result;
 } catch (const std::bad_alloc &) { error(why, "real managed storage admission refused"); return {}; }
 
@@ -756,7 +830,7 @@ void KisNativeResultProtocol::cancel(Prepared &p) noexcept
 
 bool KisNativeResultProtocol::write(const quint8 *bytes, const QRect &pixels, qsizetype stride,
                                   QString *why, const Faults *faults)
-{ auto prepared = prepareWrite(bytes, pixels, stride, why, faults); return prepared && accept(prepared, why, faults); }
+{ auto prepared = prepareWrite(bytes, pixels, stride, why, faults, true); return prepared && accept(prepared, why, faults); }
 
 
 KisNativeResultProtocol::Prepared KisNativeResultProtocol::prepareWrite(
@@ -772,5 +846,19 @@ bool KisNativeResultProtocol::accept(Prepared &body, QString *why)
 
 bool KisNativeResultProtocol::write(const quint8 *bytes, const QRect &rect, qsizetype stride, QString *why)
 {
+    if (!bounds(bytes, rect, stride, d->descriptor.format.pixelStride)) {
+        error(why, "invalid packed input"); return false;
+    }
+    if (d->hasLocalProducer(rect)) {
+        const int bpp = d->descriptor.format.pixelStride;
+        return mutate(rect, [&](qint32 col, qint32 row, quint8 *target, quint32 targetStride, const QRect &local) {
+            const auto *source = bytes + (qint64(row) * 64 + local.y() - rect.y()) * stride
+                + (qint64(col) * 64 + local.x() - rect.x()) * bpp;
+            for (int y = 0; y < local.height(); ++y)
+                std::memcpy(target + (local.y() + y) * targetStride + local.x() * bpp,
+                            source + y * stride, size_t(local.width() * bpp));
+            return true;
+        }, false, {}, why);
+    }
     return write(bytes, rect, stride, why, nullptr);
 }

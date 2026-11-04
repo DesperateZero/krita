@@ -186,18 +186,23 @@ bool KisNativeResultProtocol::readCurrent(quint8 *bytes, const QRect &pixels, qs
     auto releaseLive = qScopeGuard([&] { if (live) Impl::finishRaw(live); });
     for (int y = floorTile(pixels.top()); y <= floorTile(pixels.bottom()); ++y)
         for (int x = floorTile(pixels.left()); x <= floorTile(pixels.right()); ++x) {
-            Impl::Selection selected; const quint8 *pending = nullptr;
+            Impl::Selection selected; KisTileData *pending = nullptr;
             { QMutexLocker lock(&d->gate); if (d->closing) return false;
               auto it = d->pages.find({y, x}); if (it != d->pages.end()) {
                   selected = it->second.current;
-                  if (live && it->second.writer == live) pending = live->rows[it->second.writerIndex].pixels;
+                  if (live && it->second.writer == live) {
+                      auto *target = live->rows[it->second.writerIndex].target;
+                      if (target) pending = target->tile;
+                  }
               } }
 
             const QRect hit = pixels.intersected(QRect(x * 64, y * 64, 64, 64));
             if (pending) {
+                if (!pending->blockSwapping()) return false;
+                const auto unpin = qScopeGuard([&] { pending->unblockSwapping(); });
                 for (int row = 0; row < hit.height(); ++row)
                     std::memcpy(bytes + qint64(hit.y() - pixels.y() + row) * stride + (hit.x() - pixels.x()) * bpp,
-                        pending + ((hit.y() - y * 64 + row) * 64 + hit.x() - x * 64) * bpp, hit.width() * bpp);
+                        pending->data() + ((hit.y() - y * 64 + row) * 64 + hit.x() - x * 64) * bpp, hit.width() * bpp);
                 continue;
             }
             if (!d->readSelection(selected, bytes + qint64(hit.y() - pixels.y()) * stride + (hit.x() - pixels.x()) * bpp,

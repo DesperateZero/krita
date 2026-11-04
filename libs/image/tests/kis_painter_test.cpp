@@ -244,14 +244,6 @@ void KisPainterTest::testFixedCursor()
     else { QVERIFY(owner.tryCommit(&undo)); undo.undo(); QCOMPARE(bytes(actual), before); undo.redo(); QVERIFY(sameFixedPixels(bytes(actual), expected, bpp)); }
 }
 
-// Explicit experimental authority: old private-seal event counts are not
-// evidence about NativeResult's direct visible acceptance.
-static bool nativeResultAuthority() { return true; }
-static KisPageStoreDiagnosticPhase resultAcceptancePhase() {
-    return nativeResultAuthority() ? KisPageStoreDiagnosticPhase::WritePublishHost
-        : KisPageStoreDiagnosticPhase::MutationSealPrivatePublish;
-}
-
 void KisPainterTest::testFixedCursorReuse_data()
 {
     QTest::addColumn<int>("repeats"); for (int n : {1, 10, 1000}) QTest::newRow(qPrintable(QString::number(n))) << n;
@@ -267,7 +259,7 @@ void KisPainterTest::testFixedCursorReuse()
     KisStrokeJobFailureContext failure(true); KisPageStoreDiagnosticRecorder recorder(true);
     const auto count = [&](auto phase) { return recorder.metrics()[size_t(phase)].intervals; };
     for (int i = 0; i < repeats; ++i) painter.bltFixed(0, 0, source, -7, 9, 128, 1);
-    QVERIFY(!failure.failed()); QCOMPARE(count(KisPageStoreDiagnosticPhase::WriteProviderPrepare), quint64(nativeResultAuthority() && repeats > 1 ? 4 : 2));
+    QVERIFY(!failure.failed()); QCOMPARE(count(KisPageStoreDiagnosticPhase::WriteProviderPrepare), quint64(2));
     QCOMPARE(count(KisPageStoreDiagnosticPhase::PixelOperationBody), quint64(repeats));
     QCOMPARE(count(KisPageStoreDiagnosticPhase::MutationSealInputs), quint64(0));
     QVERIFY(owner.checkpointStrokeMutation());
@@ -851,8 +843,8 @@ void KisPainterTest::testMultiDabReuse()
     for (int i = 1; i < repeats; ++i) painter.bltFixed(QRect(0, 0, 66, 1), {first, second});
     QVERIFY(!failure.failed());
     QCOMPARE(intervals(KisPageStoreDiagnosticPhase::PixelOperationBody), quint64(repeats));
-    QCOMPARE(intervals(resultAcceptancePhase()), quint64(nativeResultAuthority() ? repeats : 0));
-    QCOMPARE(intervals(KisPageStoreDiagnosticPhase::WriteProviderPrepare), nativeResultAuthority() && repeats > 1 ? preparations * 2 : preparations);
+    QCOMPARE(intervals(KisPageStoreDiagnosticPhase::WritePublishHost), quint64(0));
+    QCOMPARE(intervals(KisPageStoreDiagnosticPhase::WriteProviderPrepare), preparations);
     QVERIFY(owner.checkpointStrokeMutation());
     auto old = dev->createRandomConstAccessorNG();
     painter.bltFixed(QRect(0, 0, 66, 1), {first, second}); QVERIFY(!failure.failed());
@@ -1312,8 +1304,8 @@ void KisPainterTest::testPageStoreBitBltWriteOperation()
     KisPainter painter(dst); painter.setCompositeOpId(COMPOSITE_COPY);
     painter.bitBlt(target, src, source); painter.end();
     QCOMPARE(bodyObserved, !borrowed); QVERIFY(hidden);
-    const auto seals = recorder.metrics()[size_t(resultAcceptancePhase())].intervals;
-    QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::PixelOperationBody)].intervals, quint64(borrowed && !nativeResultAuthority() ? 0 : 1));
+    const auto seals = recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::WritePublishHost)].intervals;
+    QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::PixelOperationBody)].intervals, quint64(1));
     if (!borrowed) QCOMPARE(seals, quint64(1));
     else {
         // The compatibility copy joins the accessor's single native mutation.
@@ -1323,7 +1315,7 @@ void KisPainterTest::testPageStoreBitBltWriteOperation()
         QCOMPARE(external->rawData(), pointer);
         external.clear();
         QCOMPARE(recorder.metrics()[size_t(
-                     resultAcceptancePhase())].intervals,
+                     KisPageStoreDiagnosticPhase::WritePublishHost)].intervals,
                  quint64(1));
     }
     QByteArray expected(storage.width() * storage.height(), char(initial));
@@ -1429,7 +1421,7 @@ void KisPainterTest::testBitBltAfterClear()
     if (scenario == "dense" || scenario == "partial" || scenario == "history") {
         QVERIFY(bodyObserved);
         QVERIFY(finishObserved); // also observe after initialized/painted bytes, before publication
-        QCOMPARE(recorder.metrics()[size_t(resultAcceptancePhase())].intervals, quint64(1));
+        QCOMPARE(recorder.metrics()[size_t(KisPageStoreDiagnosticPhase::WritePublishHost)].intervals, quint64(1));
         fixed->moveTo(clear.x(), clear.y());
         QCOMPARE(QByteArray(reinterpret_cast<const char *>(fixed->rawDataConst()), cs->pixelSize()), oldPixel);
     }
