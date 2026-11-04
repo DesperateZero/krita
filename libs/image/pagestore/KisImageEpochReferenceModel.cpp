@@ -727,29 +727,6 @@ bool KisImageEpochRootSnapshot::forEachPage(
     return accepted;
 }
 
-QVector<KisLogicalPageId> KisImageEpochRootSnapshot::allocatedPages(
-    KisSurfaceId surface, KisPageKeyStorage &additions, KisPageKeyStorage &removals) const
-{
-    if (!isValid()) return {};
-    // Inputs are the selected publication owner's unique, disjoint keys for
-    // this surface. Only D keys need sorting; visit the ordered root directly
-    // into the caller's full output, without exporting N versions or keys.
-    std::sort(additions.begin(), additions.end(), pageKeyLess);
-    std::sort(removals.begin(), removals.end(), pageKeyLess);
-    QVector<KisLogicalPageId> pages;
-    pages.reserve(pageCount() + qsizetype(additions.size()));
-    auto added = additions.cbegin(), removed = removals.cbegin();
-    appendPageRoot(m_pageRoot, [&](const KisPageVersion &version) {
-        if (!(version.key.surface == surface)) return;
-        while (added != additions.cend() && pageKeyLess(*added, version.key)) pages.append((added++)->page);
-        while (removed != removals.cend() && pageKeyLess(*removed, version.key)) ++removed;
-        if (removed != removals.cend() && *removed == version.key) return;
-        pages.append(version.key.page);
-        if (added != additions.cend() && *added == version.key) ++added;
-    });
-    while (added != additions.cend()) pages.append((added++)->page);
-    return pages;
-}
 
 qsizetype KisImageEpochRootSnapshot::pageCount() const
 {
@@ -778,55 +755,17 @@ bool KisImageEpochRootSnapshot::containsPage(const KisPageKey &key, KisPageVersi
 
 KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshot() const
 {
-    return snapshotWithChanges(nullptr, 0, nullptr, 0, nullptr, 0);
-}
-
-KisImageEpochSnapshot KisImageEpochRootSnapshot::snapshotWithChanges(
-    KisPageViewValue *const *values, size_t versionCount,
-    const KisPageKey *removals, size_t removalCount,
-    const KisSurfaceEpochState *changedSurfaces, size_t changedSurfaceCount) const
-{
     KisImageEpochSnapshot result;
     result.epoch = m_epoch;
     result.graphRevision = m_graphRevision;
     result.defaultPixelRevision = m_defaultPixelRevision;
     result.extentRevision = m_extentRevision;
     result.propertyRevision = m_propertyRevision;
-    if (!versionCount && !removalCount) {
-        result.manifest = manifest();
-    } else {
-        // Count and emit from the same immutable inputs. This pays two linear
-        // tree walks instead of an N+D capacity bound, repeated searches, or
-        // another N-entry directory. Each version is copied only on emission.
-        const auto merge = [&](const auto &append) {
-            size_t added = 0, removed = 0;
-            appendPageRoot(m_pageRoot, [&](const KisPageVersion &base) {
-                while (added < versionCount && pageKeyLess(values[added]->version.key, base.key)) append(values[added++]->version);
-                while (removed < removalCount && pageKeyLess(removals[removed], base.key)) ++removed;
-                if (added < versionCount && values[added]->version.key == base.key) append(values[added++]->version);
-                else if (removed == removalCount || !(removals[removed] == base.key)) append(base);
-            });
-            while (added < versionCount) append(values[added++]->version);
-        };
-        qsizetype count = 0;
-        merge([&](const KisPageVersion &) {
-            if (count == std::numeric_limits<qsizetype>::max()) throw std::bad_alloc();
-            ++count;
-        });
-        result.manifest.reserve(count);
-        if (count) merge([&](const KisPageVersion &version) { result.manifest.append(version); });
-    }
+    result.manifest = manifest();
     result.surfaces = surfaces();
-    size_t changed = 0;
-    if (changedSurfaceCount) for (auto &surface : result.surfaces) {
-        if (changed == changedSurfaceCount || !(changedSurfaces[changed].surface == surface.surface)) continue;
-        surface = changedSurfaces[changed++];
-        result.defaultPixelRevision = qMax(result.defaultPixelRevision, surface.defaultPixelRevision);
-        result.extentRevision = qMax(result.extentRevision, surface.extentRevision);
-    }
-    Q_ASSERT(changed == changedSurfaceCount); // Staging only replaces existing surfaces.
     return result;
 }
+
 
 KisImageEpochRootSnapshot::ResolutionKind
 KisImageEpochRootSnapshot::resolveVersion(const KisPageKey &key, KisPageVersion *version, KisPageViewValue **selected) const
@@ -1620,31 +1559,31 @@ KisImageEpochCommitResult KisImageEpochReferenceModel::commit(const KisPageTrans
 
 KisImageEpochReferenceModel::PreparedCommit
 KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
-                                          bool retainAfter, KisSurfaceId derivedExtentSurface)
+                                          bool retainAfter)
 {
-    return prepareCommitImpl<std::nullptr_t>(transaction, nullptr, failure, retainAfter, derivedExtentSurface);
+    return prepareCommitImpl<std::nullptr_t>(transaction, nullptr, failure, retainAfter);
 }
 
 KisImageEpochReferenceModel::PreparedCommit
 KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction,
     const KisPageOperationPublication &publication, KisImageEpochCommitResult *failure,
-    bool retainAfter, KisSurfaceId derivedExtentSurface)
+    bool retainAfter)
 {
-    return prepareCommitImpl(transaction, &publication, failure, retainAfter, derivedExtentSurface);
+    return prepareCommitImpl(transaction, &publication, failure, retainAfter);
 }
 
 KisImageEpochReferenceModel::PreparedCommit
 KisImageEpochReferenceModel::prepareCommit(const KisPageTransaction &transaction,
     const KisPagePublicationDelta &publication, KisImageEpochCommitResult *failure,
-    bool retainAfter, KisSurfaceId derivedExtentSurface)
+    bool retainAfter)
 {
-    return prepareCommitImpl(transaction, &publication, failure, retainAfter, derivedExtentSurface);
+    return prepareCommitImpl(transaction, &publication, failure, retainAfter);
 }
 
 template<class Publication>
 KisImageEpochReferenceModel::PreparedCommit
 KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transaction, const Publication *publication,
-    KisImageEpochCommitResult *failure, bool retainAfter, KisSurfaceId derivedExtentSurface) try
+    KisImageEpochCommitResult *failure, bool retainAfter) try
 {
     constexpr bool borrowed = !std::is_same_v<Publication, std::nullptr_t>;
     KisImageEpochCommitResult localFailure;
@@ -1729,12 +1668,6 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
         for (const KisSurfaceEpochChange &change : surfaceChanges) {
             KisSurfaceEpochState currentState;
             const bool found = current.surfaceState(change.before.surface, &currentState);
-            if (found && change.before.surface == derivedExtentSurface) {
-                // Derived bounds are an output of the combined page tree. They
-                // cannot make otherwise disjoint page transactions conflict.
-                currentState.contentExtent = change.before.contentExtent;
-                currentState.extentRevision = change.before.extentRevision;
-            }
             if (!found || !(currentState == change.before)) {
                 result.status = KisImageEpochCommitStatus::Conflict;
                 result.error = QStringLiteral("surface metadata changed after the transaction base epoch");
@@ -1809,36 +1742,6 @@ KisImageEpochReferenceModel::prepareCommitImpl(const KisPageTransaction &transac
         *surface = change.after;
         root.m_defaultPixelRevision = qMax(root.m_defaultPixelRevision, change.after.defaultPixelRevision);
         root.m_extentRevision = qMax(root.m_extentRevision, surface->extentRevision);
-    }
-    if (derivedExtentSurface.isValid()) {
-        KisSurfaceEpochState state, currentState;
-        QRect extent;
-        if (!current.surfaceState(derivedExtentSurface, &currentState) ||
-            !root.surfaceState(derivedExtentSurface, &state) ||
-            !root.contentExtentAfterPages(derivedExtentSurface, state.logicalPageExtent,
-                                         nullptr, 0, nullptr, 0, &extent)) {
-            result.error = QStringLiteral("derived committed extent exceeds QRect range");
-            return {};
-        }
-        auto derived = state;
-        derived.contentExtent = extent;
-        derived.extentRevision = qMax(state.extentRevision, currentState.extentRevision);
-        if (extent != currentState.contentExtent) {
-            if (currentState.extentRevision == std::numeric_limits<quint64>::max()) {
-                result.error = QStringLiteral("derived committed extent revision exhausted");
-                return {};
-            }
-            derived.extentRevision = qMax(derived.extentRevision, currentState.extentRevision + 1);
-        }
-        if (!(derived == state)) {
-            prepareSurfaces();
-            auto surface = std::find_if(surfaces->begin(), surfaces->end(), [&](const auto &value) {
-                return value.surface == derivedExtentSurface;
-            });
-            Q_ASSERT(surface != surfaces->end());
-            *surface = derived;
-            root.m_extentRevision = qMax(root.m_extentRevision, derived.extentRevision);
-        }
     }
     // The original root and complete input were validated; replacement keeps
     // each existing surface identity, and publication identities were guarded.

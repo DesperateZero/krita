@@ -235,7 +235,6 @@ public:
         // Keep the owner gate from the latest surface preparation through
         // acceptance. A late capacity conflict drops it for one conservative
         // reprepare, then rechecks the original inputs and surface before install.
-        bool prepareSurfaceLocked(QString *error, bool *storageRefused = nullptr);
         bool tryAcceptLocked(QMutexLocker<QMutex> &ownerLock, QString *error, bool *storageRefused = nullptr);
         bool acceptsCanonical() const;
         bool tryAcceptCanonicalLocked(const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock);
@@ -280,9 +279,6 @@ public:
             size_t proofInsertions = 0;
             size_t removalInsertions = 0;
             KisPageMetadataCoordinator::PreparedPublication metadata;
-            KisSurfaceEpochChange surfaceChange;
-            qsizetype surfaceIndex = -1;
-            bool surfacePrepared = false;
             bool prepared = false;
             bool installed = false;
             bool canonical = false;
@@ -333,7 +329,6 @@ public:
     bool resolveSurfaceLocked(KisSurfaceId surface, const KisPageReadView &view, KisSurfaceEpochState *state) const;
     bool resolveVersionLocked(const KisPageKey &key, const KisPageReadView &view, KisPageVersion *version) const;
     KRITAIMAGE_EXPORT bool prepareDefaultRevisionsLocked(const KisPageSnapshotArray<KisSurfaceEpochState> &surfaces, QString *error);
-    KRITAIMAGE_EXPORT bool configureDerivedExtentLocked(KisSurfaceId surface);
 
     bool stageSurfaceMetadataLocked(const KisPageTransaction &transaction,
                                     const KisSurfaceEpochState &after,
@@ -347,9 +342,6 @@ public:
                                 QString *error,
                                 QMutexLocker<QMutex> &ownerLock);
     KisPreparedPageSet preparedPagesLocked(const KisPageTransaction &transaction) const;
-    bool transactionDirtyExtentLocked(const KisPageTransaction &, KisSurfaceId, QRect *extent) const;
-    bool captureAllocatedPageInputsLocked(KisSurfaceId surface, const KisPageTransaction &transaction,
-        KisImageEpochRootSnapshot *root, KisPageKeyStorage *additions, KisPageKeyStorage *removals) const;
     KisImageEpochCommitTicket commitLocked(const KisPageTransaction &transaction,
                                            const KisPreparedPageSet &preparedPages,
                                            KisRetainedImageEpochSnapshot *retainedAfter,
@@ -473,7 +465,6 @@ private:
         std::less<quint64>, KisMutationStorageAllocator<std::pair<const quint64, std::shared_ptr<KisPagePublicationDelta>>>>;
     TransactionMap m_preparedTransactions;
     // Immutable Tiles3 surface policy, not a second extent or page registry.
-    KisSurfaceId m_derivedExtentSurface;
     using DefaultRevisionMap = std::map<quint64, quint64, std::less<quint64>,
         KisMutationStorageAllocator<std::pair<const quint64, quint64>>>;
     DefaultRevisionMap m_defaultRevisionHighWater;

@@ -13,8 +13,7 @@
       "read-only-observers": [
         "KisPagePublicationCoordinator",
         "KisPageMutationSession",
-        "KisPageStore operational capability maps",
-        "KisTiledDataManagerPageStoreBackend compatibility transaction group"
+        "KisPageStore operational capability maps"
       ],
       "status": "canonical",
       "target-authoritative-owner": "KisImageEpochReferenceModel",
@@ -27,30 +26,22 @@
     },
     {
       "creation-paths": [
-        "beginFrameSession creates/adopts the one original MutationSession for both managed operations and real legacy boundaries.",
-        "Managed pixel, fill/copy, remove/clear, trim and standalone writable-page operations keep that original Session directly. OperationFrame has a borrowed intrusive ordered stack admission index; no ordinary shared legacy control, batch facade or paid thread node is created.",
-        "Only a real legacy key admitted by the SAME original Session creates a legacy client extension and transfers that Session. Raw/getTile within managed operations checks its claim before allocating the shared control/thread index; standalone known-key raw and writable-page callers reserve the one inert Frame before transaction activation. Explicit unknown-key public batches and iterators retain their original transaction boundary."
+        "KisNativeResultProtocol::Impl::checkout and original iterator list"
       ],
       "current-writers": [
-        "Original MutationSession owns pixels/claims/transaction/cancel/orphan/capacity. OperationFrame only owns stack adapter admission; WriteBatch::Private owns actual legacy clients/leases/provisional adapter tokens."
+        "KisNativeResultProtocol::Impl"
       ],
-      "fact": "legacy adapter clients, raw-lease barrier membership and per-thread batch slot",
+      "fact": "public raw/iterator clients borrow one original result; no compatibility transaction group remains",
       "id": "BR1-OWN-COMPAT-TRANSACTION-GROUP",
-      "lock-or-claim": "backend registry gate protects the intrusive ordered active-operation index and real legacy thread slots; leaseMutex protects real legacy pointers/client return. Original Frame claim and cancellation are distinct from adapter client membership.",
+      "lock-or-claim": "Original gate and Page.writer; real history owner enforced at checkout; Tile borrow lifetime separate from result visibility",
       "read-only-observers": [
-        "tile lock bridge",
-        "writable iterator and operation scopes"
+        "KisTile raw ABI",
+        "KisBaseIterator"
       ],
       "status": "canonical",
-      "target-authoritative-owner": "Original Session with borrowed active admission and optional real legacy lifetime extension",
+      "target-authoritative-owner": "KisNativeResultProtocol::Body",
       "terminal-paths": [
-        "OperationDelivery directly moves the accepted original Session; real promoted legacy extensions alone retain their shared tail. Final delivery follows destruction of caller adapter candidates.",
-        "All actual adapters/clients consume the same original Session. No batch transaction copy survives; compatibility reads the immutable original Frame identity.",
-        "completeAdapters consumes original cache invalidation/provisional rollback before manager responsibility leaves the real legacy extension.",
-        "A failed managed operation with escaped legacy pointers retains the same Session and actual thread slot through final foreign-thread unlock; no new orphan queue or operation owner is created.",
-        "clear/history and nested native admission observe both borrowed live managed links and real legacy slots. Completed delivery retains the original page claims even after stack/legacy discovery ends.",
-        "trim uses one native guard for every partial page and finishes its original execution; generic lease bookkeeping, tile wrapper lookup and raw-markDirty return are deleted from this managed route.",
-        "LegacyInspection borrows original owner/key/PageControl only through one synchronous admission; it is not authority. Final claim revalidates actual token after unlocked preparation, an existing original row consumes its stored claim, and terminal return walks only its original claim chain. No extra refusal transaction, scope or extension is created for a known conflicting key."
+        "finishIterator/finishRawResult consumes original outcome after real last client and borrow; cancelBody invalidates original touched Tile readiness; no old generic mutation owner"
       ]
     },
     {
@@ -93,12 +84,11 @@
       "current-writers": [
         "KisPageWriteAdmission through KisPageWriteCoordinator"
       ],
-      "fact": "page writer admission",
+      "fact": "Generic PageStore API writer admission (ordinary CPU manager uses NativeResult Body)",
       "id": "BR1-OWN-WRITER-ADMISSION",
       "lock-or-claim": "store owner mutex and KisPageWriteAdmission::ClaimSet",
       "read-only-observers": [
-        "providers",
-        "legacy tile bridge"
+        "generic PageStore producers and providers"
       ],
       "status": "canonical",
       "target-authoritative-owner": "KisPageWriteAdmission",
@@ -113,11 +103,7 @@
         "claim tokens never wrap; failed preparation preserves previous claims/activity; original scope intrusive orphan links retain rejected cancellation without allocating a replacement owner; scope and control-block memory frees before original budget-owner lifetime release",
         "KisPageMutationExecution owns only its execution footprint and retains the original session; finish returns a guard-free borrow without sealing, abandonment/cancel records original-scope failure, and an aliasing writable guard keeps the range linked until its final unpin",
         "resident borrow access and guard return use only the execution-local gate and original binding pin; lifecycle failure is the original atomic scope state, counters fold once at borrow return, and structural growth never invalidates linked entries; no per-access shared diagnostic counter or second page authority",
-        "Ordinary execution preflight prepares only entries without admitted pending backing. A linked BoundEntry with its original Page reuses that same writer reservation without an extra preserve-content guard, pixel pin or materialization; the actual callback guard still re-pins/restores. Cold preparation pins, untouched-page cancellation and real capacity refusal retain their original owners",
         "checkpointForRead refuses live execution or structure-gate contention; successful full segment sealing releases original page claims/storage and folds local counters without ending original session activity; the complete overlay is captured before the same scope can lend again",
-        "The original history owner validates memento and device/frame/time/LoD context; checkpoint freezes and invalidates old compatibility caches; Closing rejects new borrows while accepted work finishes, seal/commit retries or cancel/abort terminate the original scope; destruction of an unfinished opted-in transaction cancels",
-        "Canonical history commit derives legacy memento dirty bounds from the same complete prepared-page/removal delta before default pruning, and publishes them under the original backend gate only after commit accepts. Original transaction undo/redo invalidates projection through that memento; no current-extent fallback, duplicate touched-key ledger, new stage or manual display refresh is introduced",
-        "Multi-dab destination and mask pointer failures stop before the composite kernel, return native failure through the original execution and report through the existing stroke job error bridge; the caller retains transaction lifetime and orders page-overlapping jobs. Composite lookup is operation-local, never a parallel write to the painter cache",
         "Managed cursor/packed adapter delivery seals and ends original transaction activity while retaining the same ClaimSet and sole write set directly in OperationDelivery or the actual legacy lifetime extension. The same original inactive Session holds claims until manager installation finishes; no second writer/transaction is created. Persistent history retains its original active execution through manager refresh and rejects checkpoint until return; failure follows the original cancellation terminal.",
         "Native cursor/packed original admission covers missing-wrapper/key preparation before pixels and manager installation. Clear and history commit/abort reject outstanding claims; restore checks before preparation and after owner-gate reacquisition. Warm compatibility pages allocate no new wrapper index node. Canonical/adapter publication, Resource/Frame integration and full budget qualification remain original open responsibilities.",
         "Slot phase reset destroys only original live values and joins the existing live/free chains once. ColdPageSet borrows its containing Frame in the old budget-pointer field; releaseRowResults consumes that Frame write set for successful, cancelled, refused and no-facade exits. Empty capacity transfer preserves the destination Frame pointer. Physical discard releases cold results before destroying rows, with all real charges retained through free. Original directory storage is reused at current logical population rather than clearing historical capacity; no new owner/live index exists."
@@ -774,7 +760,8 @@
     },
     {
       "creation-paths": [
-        "checkout with actual client scope and source row positions"
+        "Original checkout validates store close, whole-surface owner and exact explicit history owner under same gate; original Body storage reused",
+        "Standalone producers claim actual page set; history jobs use original pending rows and merge at real checkpoint; no duplicate owner or generic bridge"
       ],
       "current-writers": [
         "KisNativeResultProtocol::Body"
@@ -788,7 +775,9 @@
       "status": "canonical",
       "target-authoritative-owner": "KisNativeResultProtocol::Body",
       "terminal-paths": [
-        "finishRawResult/accept/cancel; no old mutation/publication conversion"
+        "finishRawResult/finishIterator/accept/cancel and actual history checkpoint/commit/abort consume same original rows",
+        "Original surfaceWriter excludes new keys during restore/trim/clear census; original Ready retry does not replay producer",
+        "Failure and cancellation invalidate private Tile ready bits; real last client/borrow completes once"
       ]
     },
     {

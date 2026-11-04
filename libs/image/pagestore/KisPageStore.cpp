@@ -3296,7 +3296,6 @@ bool KisPageMutationSession::sealImpl(SealMode mode, QString *error, KisCaptured
     phase.next(Phase::MutationSealPublishOwnerWait, pageWork);
     lock.relock();
     phase.next(Phase::MutationSealSurfacePrepare, pageWork);
-    if (success && hasOverlay && !overlay.prepareSurfaceLocked(&failure, &storageRefused)) success = false;
     phase.next(Phase::MutationSealInstall, pageWork);
     validateClaims(owner->operational && owner->writeCoordinator.transactionHasSession(d->transaction.id));
     const bool acceptsCanonical = success && hasOverlay && overlay.acceptsCanonical();
@@ -3581,26 +3580,6 @@ KisImageEpochId KisCapturedReadView::epoch() const
     return d ? (d->nativeRange ? d->rangeEpoch : d->root.epoch()) : KisImageEpochId{};
 }
 
-KisImageEpochSnapshot KisPageStore::snapshotForClone(const KisCapturedReadView &view, QString *error) const
-try
-{
-    KisPageStoreDiagnosticTimer phase(this, KisPageStoreDiagnosticPhase::CopyPrepare);
-    if (!view.d || view.d->owner != d.data() || view.d->exactVersion.isValid() || !view.d->range.isEmpty()) {
-        KisPageStoreDetail::setError(error, QStringLiteral("clone requires this store's complete captured view"));
-        return {};
-    }
-    phase.next(KisPageStoreDiagnosticPhase::ManifestExport, quint64(view.d->root.pageCount()));
-    const auto &delta = *view.d;
-    auto result = view.d->root.snapshotWithChanges(delta.values.data(), delta.values.size(),
-        delta.removedPages.data(), delta.removedPages.size(), delta.stagedSurfaces.data(), delta.stagedSurfaces.size());
-    KisPageStoreDetail::setError(error, {});
-    return result;
-}
-catch (const std::bad_alloc &)
-{
-    KisPageStoreDetail::setError(error, QStringLiteral("clone snapshot storage is unavailable"));
-    return {};
-}
 
 bool KisCapturedReadView::resolvePageVersion(const KisPageKey &key, KisPageVersion *version) const
 {
@@ -4301,12 +4280,6 @@ bool KisPageStore::configure(const KisImageEpochSnapshot &initialEpoch,
     return true;
 }
 
-bool KisPageStore::configureDerivedPageExtent(KisSurfaceId surface)
-{
-    QMutexLocker locker(&d->mutex);
-    return d->completions && !d->operational && !d->closed && !d->closing
-        && d->publicationCoordinator.configureDerivedExtentLocked(surface);
-}
 
 bool KisPageStore::registerReplicaProvider(const std::shared_ptr<KisPageReplicaProvider> &provider)
 {
@@ -4648,14 +4621,6 @@ bool KisPageStore::resolvePageVersion(const KisPageKey &key, const KisPageReadVi
     return d->publicationCoordinator.resolveVersionLocked(key, view, version);
 }
 
-bool KisPageStore::resolveTileReadIdentity(const KisPageKey &key, const KisPageReadView &view,
-                                         KisPageVersion *version, KisSurfaceEpochState *state) const
-{
-    QMutexLocker locker(&d->mutex);
-    return d->operational && !d->closing && !d->closed &&
-        d->publicationCoordinator.resolveVersionLocked(key, view, version) &&
-        (!version->isDefaultPixel() || d->publicationCoordinator.resolveSurfaceLocked(key.surface, view, state));
-}
 
 bool KisPageStore::resolvePagePresenceInto(KisSurfaceId surface,
                                           const QVector<KisLogicalPageId> &pages,
@@ -5539,7 +5504,7 @@ KisCompletionTicket KisPageStore::finishWrite(KisWriteLease lease, const KisComp
         lock.relock();
     }
     if (success) {
-        success = overlay.prepareSurfaceLocked(nullptr) && overlay.tryAcceptLocked(lock, nullptr);
+        success = overlay.tryAcceptLocked(lock, nullptr);
         if (success) proof = {};
     }
     lock.unlock();
@@ -5629,20 +5594,6 @@ bool KisPageStore::stagePageRemovalIfUnchanged(const KisPageTransaction &transac
     return d->publicationCoordinator.stagePageRemovalLocked(transaction, observed, error, locker);
 }
 
-QVector<KisLogicalPageId> KisPageStore::allocatedPages(
-    KisSurfaceId surface, const KisPageTransaction &transaction) const
-{
-    // Structural metadata only: the immutable root keeps its nodes alive;
-    // enumerating keys does not pin pixels or issue a retained epoch token.
-    KisImageEpochRootSnapshot root;
-    const auto storage = KisMutationStorageAllocator<KisPageKey>::retained(&d->backingBudget);
-    KisPageKeyStorage additions(storage), removals(storage);
-    QMutexLocker locker(&d->mutex);
-    if (!d->publicationCoordinator.captureAllocatedPageInputsLocked(surface, transaction, &root, &additions, &removals))
-        return {};
-    locker.unlock();
-    return root.allocatedPages(surface, additions, removals);
-}
 
 KisPreparedPageSet KisPageStore::preparedPages(const KisPageTransaction &transaction) const
 {
@@ -5650,11 +5601,6 @@ KisPreparedPageSet KisPageStore::preparedPages(const KisPageTransaction &transac
     return d->publicationCoordinator.preparedPagesLocked(transaction);
 }
 
-bool KisPageStore::transactionDirtyExtent(const KisPageTransaction &transaction, KisSurfaceId surface, QRect *extent) const
-{
-    QMutexLocker lock(&d->mutex);
-    return d->publicationCoordinator.transactionDirtyExtentLocked(transaction, surface, extent);
-}
 
 KisImageEpochCommitTicket KisPageStore::commit(const KisPageTransaction &transaction,
                                                const KisPreparedPageSet &preparedPages,

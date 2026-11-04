@@ -61,12 +61,30 @@ try {
 } catch (const std::bad_alloc &) { error(why, "snapshot capacity refused"); return {}; }
 
 bool KisNativeResultProtocol::restore(const Snapshot &s, QString *why)
+{
+    return restore(s, {}, why);
+}
+
+bool KisNativeResultProtocol::restore(const Snapshot &s, const KisMementoSP &historyOwner, QString *why)
 try {
     if (!s.d || s.d->owner != d || s.d->explicitItems) return false;
-    Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
+    Prepared p; p.owner = d;
+    p.body = d->checkout(historyOwner ? historyOwner->m_nativeHistory.get() : nullptr);
+    if (!p.body) return false;
     auto &b = *p.body; b.restore = true;
     size_t size;
-    { QMutexLocker lock(&d->gate); size = d->pages.size(); }
+    {
+        QMutexLocker lock(&d->gate);
+        // Restore selects the whole surface, including absence. Page claims
+        // alone cannot exclude a new key after this census. Use the original
+        // surface owner until this result is accepted or cancelled; existing
+        // producers must finish first, while readers remain independent.
+        if (d->active != 1 || d->surfaceWriter || d->closing) {
+            error(why, "restore conflicts with active result work"); return false;
+        }
+        d->surfaceWriter = &b;
+        size = d->pages.size();
+    }
     b.rows.resize(size); b.moves.reserve(2 * size);
     {
         QMutexLocker lock(&d->gate);
@@ -276,7 +294,7 @@ bool KisNativeResultProtocol::abortHistory(const KisMementoSP &current, QString 
       current->m_nativeHistory->phase = KisNativeHistory::Phase::ClosingAbort;
       if (current->m_nativeHistory->workers || d->active != current->m_nativeHistory->pendingCount) return false; }
     d->cancelHistorySegment(current->m_nativeHistory);
-    if (!current->m_nativeHistory || !restore(current->m_nativeHistory->before, why)) return false;
+    if (!current->m_nativeHistory || !restore(current->m_nativeHistory->before, current, why)) return false;
     { QMutexLocker lock(&d->gate); d->currentHistory = {}; }
     auto mutableCurrent = current; mutableCurrent->m_nativeHistory.reset();
     return true;

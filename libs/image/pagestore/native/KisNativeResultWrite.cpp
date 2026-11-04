@@ -97,11 +97,13 @@ void KisNativeResultProtocol::Impl::ensureEdges(size_t n)
     }
 }
 
-KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::checkout()
+KisNativeResultProtocol::Body *KisNativeResultProtocol::Impl::checkout(const KisNativeHistory *historyOwner)
 {
     {
         QMutexLocker lock(&gate);
         if (closing || surfaceWriter) return nullptr;
+        if (currentHistory && currentHistory->m_nativeHistory->phase != KisNativeHistory::Phase::None
+            && currentHistory->m_nativeHistory.get() != historyOwner) return nullptr;
         ++active;
         if (auto *b = freeBodies) { freeBodies = b->next; b->next = nullptr; b->thread = QThread::currentThreadId(); return b; }
     }
@@ -334,7 +336,7 @@ bool KisNativeResultProtocol::Impl::bindRows(Body &b, const QRect &rect, QString
     return stageOnly || claimRows(b, first, false, why);
 }
 
-bool KisNativeResultProtocol::Impl::claimRows(Body &b, size_t first, bool wait, QString *why)
+bool KisNativeResultProtocol::Impl::claimRows(Body &b, size_t first, bool wait, QString *why, bool *waited)
 {
     KisPageStoreDiagnosticTimer admission(nullptr, KisPageStoreDiagnosticPhase::PixelOperationRangePrepare, b.rows.size() - first);
     QMutexLocker lock(&gate);
@@ -356,6 +358,7 @@ bool KisNativeResultProtocol::Impl::claimRows(Body &b, size_t first, bool wait, 
             error(why, "same-page writer conflict"); return false;
         }
         if (!announced) {
+            if (waited) *waited = true;
             lock.unlock(); admission.next(KisPageStoreDiagnosticPhase::PixelOperationRangeWait, 1);
             lock.relock(); announced = true;
             continue; // observer may have released the actual conflicting row

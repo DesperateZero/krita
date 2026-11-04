@@ -2477,10 +2477,8 @@ void KisPageStoreCpuMutationTest::capturedCutStorageRefusalAndLifetime()
     auto laterGuard = later.readResidentPage(key(1)); QVERIFY(laterGuard.isValid());
     QCOMPARE(QByteArray(static_cast<const char *>(laterGuard.data()), 4), QByteArray(4, char(0x75)));
     laterGuard = {}; later = {};
-    const auto exported = f.store->snapshotForClone(captured, &f.error);
     KisPageVersion original; QVERIFY(captured.resolvePageVersion(key(), &original));
-    QCOMPARE(exported.manifest.size(), qsizetype(1));
-    QCOMPARE(exported.manifest.first(), original);
+    QCOMPARE(original.key,key());
     QVERIFY(f.store->abort(tx)); f.store.reset();
     auto physicalGuard = captured.readResidentPage(key()); QVERIFY(physicalGuard.isValid());
     captured = {};
@@ -7393,9 +7391,6 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
         },
         +[](void *) { return true; },
         +[](void *, KisPageTransactionId, KisPageReadCleanup &) { return true; });
-    f.operational = false;
-    QVERIFY(publication->configureDerivedExtentLocked({1}));
-    f.operational = true;
     const auto tx = f.epochs.beginTransaction({1}, &f.error);
     QVERIFY(tx.isValid());
     KisSurfaceEpochState surface;
@@ -7458,7 +7453,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QCOMPARE(state->removalInsertions.load(), size_t(0));
     QVERIFY(state->removals.empty());
     QVERIFY(f.live() < beforeCancellation);
-    QVERIFY(a.prepare(&f.error)); QVERIFY(a.prepareSurfaceLocked(&f.error));
+    QVERIFY(a.prepare(&f.error));
     void *filler = nullptr;
     size_t fillerBytes = 0;
     const auto fill = [&] {
@@ -7474,7 +7469,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QVERIFY2(a.tryAcceptLocked(lock, &f.error), qPrintable(f.error));
     lock.unlock(); a.finishUnlocked(lock); lock.relock();
     QVERIFY(!a.isValid());
-    QVERIFY(b.prepare(&f.error)); QVERIFY(b.prepareSurfaceLocked(&f.error));
+    QVERIFY(b.prepare(&f.error));
     QVERIFY2(b.tryAcceptLocked(lock, &f.error), qPrintable(f.error));
     lock.unlock(); b.finishUnlocked(lock); lock.relock();
     QVERIFY(!b.isValid());
@@ -7498,24 +7493,14 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QVERIFY2(removal.isValid(), qPrintable(f.error));
     lock.unlock(); const bool prepared = removal.prepare(&f.error); lock.relock();
     QVERIFY2(prepared, qPrintable(f.error));
-    if (refusal == 1) {
-        fill();
-        QVERIFY(!removal.prepareSurfaceLocked(&f.error));
-        QCOMPARE(state->proofs.size(), size_t(2));
-        for (const auto &proof : proofs) {
-            QVERIFY(f.owner.ownsPreparedPageProof(proof));
-            KisPageMetadataCoordinator::VersionInfo selected;
-            QVERIFY(f.metadata.versionSnapshot(proof.authority.version, &selected));
-            QCOMPARE(selected.publication, KisPagePublicationState::Prepared);
-            QCOMPARE(selected.preparedBy, tx.id);
-        }
-        freeFiller(); // The same candidate may retry before its acceptance.
-    }
+    // The removed CPU-derived extent mode has no producer. A prepared
+    // generic removal needs no synthetic surface allocation/retry phase.
+    // Keep the second pressure cut as a no-allocation acceptance witness.
+    if(refusal==1){fill();QCOMPARE(state->proofs.size(),size_t(2));freeFiller();}
     // A rejected candidate can outlive its facade: it borrows proofs but owns
     // real storage. Accepted preparation is now consumed by common finish.
     auto tail = publication->preparePagePublicationLocked(tx, removals.data(), removals.size(), &f.error);
     QVERIFY(tail.isValid());
-    QVERIFY2(removal.prepareSurfaceLocked(&f.error), qPrintable(f.error));
     fill();
     QVERIFY2(removal.tryAcceptLocked(lock, &f.error), qPrintable(f.error));
     const auto beforeCollection = f.budget.usage().backpressureCount;
@@ -7531,7 +7516,7 @@ void KisPageStoreCpuMutationTest::overlayStorageAtCapacity()
     QVERIFY(state->proofs.empty());
     QCOMPARE(state->removals.size(), size_t(1));
     QVERIFY(state->removals.count(key()));
-    QCOMPARE(state->surfaceChanges.front().after.contentExtent, QRect());
+    QVERIFY(state->surfaceChanges.empty());
     for (const auto &proof : proofs) QVERIFY(!f.owner.ownsPreparedPageProof(proof));
     for (const auto &proof : proofs) {
         KisPageMetadataCoordinator::VersionInfo historical;
@@ -10081,7 +10066,7 @@ void KisPageStoreCpuMutationTest::nativeDetachmentIndependentOfBudgetClass()
         if (!candidate.prepare(&f.error)) return false;
         gate.relock();
         KisPageMetadataCoordinator::DeferredPublicationCleanup cleanup;
-        if (!candidate.prepareSurfaceLocked(&f.error) || !candidate.tryAcceptLocked(gate, &f.error)) return false;
+        if (!candidate.tryAcceptLocked(gate, &f.error)) return false;
         gate.unlock(); candidate.finishUnlocked(gate);
         return true;
     };

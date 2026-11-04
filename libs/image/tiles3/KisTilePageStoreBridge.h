@@ -20,7 +20,9 @@ using TileLeaseRelease = std::unique_ptr<void, void (*)(void *)>;
 class KisTilePageStoreLease
 {
 public:
-    enum class ReadPinResult { Ready, Unavailable, Stale, Retired };
+    // Reselect means the caller has a different logical capability (for
+    // example its own pending producer), not a failed pin or stale identity.
+    enum class ReadPinResult { Ready, Unavailable, Stale, Retired, Reselect };
     virtual ~KisTilePageStoreLease() = default;
     virtual KisTileData *tileData() const = 0;
     virtual bool writable() const = 0;

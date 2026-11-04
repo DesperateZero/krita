@@ -289,7 +289,7 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::acceptsCanonical
 bool KisPagePublicationCoordinator::KisPreparedPagePublication::tryAcceptCanonicalLocked(
     const KisPageStore *diagnosticOwner, QMutexLocker<QMutex> &ownerLock)
 {
-    if (!acceptsCanonical() || !data->prepared || !data->surfacePrepared) return false;
+    if (!acceptsCanonical() || !data->prepared) return false;
     auto &owner = *data->owner;
     if (!owner.hasActiveTransactionLocked(data->transaction)
         || owner.isPreparingCommitLocked(data->transaction.id)
@@ -300,8 +300,8 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::tryAcceptCanonic
         removals += change.replacement.removal && change.removalWasInBase;
     }
     const KisPageOperationPublication input{{data->changes, proofs}, {data->changes, removals},
-        {&data->surfaceChange, size_t(data->surfaceChange.after.surface.isValid())}};
-    if (!proofs && !removals && !input.surfaceChanges.size()) {
+        {}};
+    if (!proofs && !removals) {
         data->installed = owner.m_epochs.abort(data->transaction);
     } else {
         data->installed = owner.commitInputLocked(data->transaction, input, nullptr, diagnosticOwner, ownerLock).isValid();
@@ -346,123 +346,17 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::tryAcceptLocked(
         const auto relock = qScopeGuard([&] { ownerLock.relock(); });
         // Preserve original ordering and positions while surface and source
         // retention are revalidated against the same result.
-        data->surfacePrepared = false;
         prepared = data->owner->m_metadata.revalidateAcceptance(data->metadata, error);
         if (storageRefused) *storageRefused = data->metadata.wasStorageRefused();
     }
-    return prepared && prepareSurfaceLocked(error, storageRefused) && installOverlayLocked(error);
+    return prepared && installOverlayLocked(error);
 }
 
-bool KisPagePublicationCoordinator::KisPreparedPagePublication::prepareSurfaceLocked(
-    QString *error, bool *storageRefused)
-{
-    if (storageRefused) *storageRefused = false;
-    if (!isValid() || !data->prepared || data->surfacePrepared) {
-        KisPageStoreDetail::setError(error, QStringLiteral("overlay surface preparation is invalid"));
-        return false;
-    }
-    auto &owner = *data->owner;
-    const auto surface = owner.m_derivedExtentSurface;
-    if (!surface.isValid()) {
-        data->surfacePrepared = true;
-        KisPageStoreDetail::setError(error, {});
-        return true;
-    }
-    try {
-        const auto overlay = KisPageReadView::transactionOverlay(data->transaction.id);
-        KisSurfaceEpochState current;
-        if (!owner.resolveSurfaceLocked(surface, overlay, &current)) return false;
-        const auto base = owner.m_epochs.root(data->transaction.baseEpoch);
-        QRect extent = current.contentExtent;
-        if (std::any_of(data->changes.cbegin(), data->changes.cend(), [&](const auto &change) {
-            return change.replacement.key().surface == surface && change.replacement.removal;
-        })) {
-            // Derive from the same base + overlay used by captured readers.
-            // Persistent subtree bounds avoid exporting the document manifest.
-            const auto storage = data->ownedChanges.get_allocator();
-            std::vector<KisPageKey, KisMutationStorageAllocator<KisPageKey>> removals(storage), additions(storage);
-            removals.reserve((data->state ? data->state->removals.size() : 0) + data->changes.size());
-            additions.reserve((data->state ? data->state->proofs.size() : 0) + data->changes.size());
-            if (data->state) {
-                for (const auto &key : data->state->removals) removals.push_back(key);
-                for (const auto &proof : data->state->proofs) {
-                    const auto changed = data->findChange(proof.first);
-                    if (!changed || !changed->replacement.removal) additions.push_back(proof.first);
-                }
-            }
-            for (const auto &change : data->changes) {
-                if (change.replacement.removal) removals.push_back(change.replacement.key());
-                else additions.push_back(change.replacement.key());
-            }
-            std::sort(removals.begin(), removals.end(), overlayKeyLess);
-            removals.erase(std::unique(removals.begin(), removals.end()), removals.end());
-            if (!base.contentExtentAfterPages(surface, current.logicalPageExtent,
-                removals.data(), removals.size(), additions.data(), additions.size(), &extent)) {
-                KisPageStoreDetail::setError(error, QStringLiteral("derived surface extent exceeds QRect range"));
-                return false;
-            }
-        } else {
-            // Normal brush publication extends only by this segment's keys.
-            // Include a sibling's already installed extent, not a stale copy
-            // captured before provider/metadata preparation released owner.
-            for (const auto &change : data->changes) {
-                const auto &key = change.replacement.key();
-                if (!(key.surface == surface) || change.replacement.removal) continue;
-                qint64 left = qint64(key.page.column) * current.logicalPageExtent.width();
-                qint64 top = qint64(key.page.row) * current.logicalPageExtent.height();
-                qint64 right = left + current.logicalPageExtent.width() - 1;
-                qint64 bottom = top + current.logicalPageExtent.height() - 1;
-                if (!extent.isEmpty()) {
-                    left = qMin(left, qint64(extent.left()));
-                    top = qMin(top, qint64(extent.top()));
-                    right = qMax(right, qint64(extent.right()));
-                    bottom = qMax(bottom, qint64(extent.bottom()));
-                }
-                const qint64 limit = std::numeric_limits<int>::max();
-                if (left < std::numeric_limits<int>::min() || top < std::numeric_limits<int>::min()
-                    || right > limit || bottom > limit || right - left + 1 > limit || bottom - top + 1 > limit) {
-                    KisPageStoreDetail::setError(error, QStringLiteral("derived surface extent exceeds QRect range"));
-                    return false;
-                }
-                extent = QRect(int(left), int(top), int(right - left + 1), int(bottom - top + 1));
-            }
-        }
-        if (extent != current.contentExtent) {
-            if (current.extentRevision == std::numeric_limits<quint64>::max()) {
-                KisPageStoreDetail::setError(error, QStringLiteral("surface extent revision exhausted"));
-                return false;
-            }
-            KisSurfaceEpochChange change;
-            if (!base.surfaceState(surface, &change.before)) return false;
-            change.after = current;
-            change.after.contentExtent = extent;
-            ++change.after.extentRevision;
-            if (!change.isValid()) {
-                KisPageStoreDetail::setError(error, QStringLiteral("derived surface revision is invalid"));
-                return false;
-            }
-            if (data->state) {
-                auto &changes = data->state->surfaceChanges;
-                for (size_t i = 0; i < changes.size(); ++i)
-                    if (changes.at(i).after.surface == surface) { data->surfaceIndex = qsizetype(i); break; }
-                if (data->surfaceIndex < 0) changes.reserve(changes.size() + 1);
-            }
-            data->surfaceChange = std::move(change);
-        }
-        data->surfacePrepared = true;
-        KisPageStoreDetail::setError(error, {});
-        return true;
-    } catch (const std::bad_alloc &) {
-        if (storageRefused) *storageRefused = true;
-        KisPageStoreDetail::setError(error, QStringLiteral("overlay surface storage preparation was refused"));
-        return false;
-    }
-}
 
 bool KisPagePublicationCoordinator::KisPreparedPagePublication::
     installOverlayLocked(QString *error)
 {
-    if (!isValid() || data->canonical || !data->prepared || !data->surfacePrepared) {
+    if (!isValid() || data->canonical || !data->prepared) {
         KisPageStoreDetail::setError(
             error, QStringLiteral("overlay update cannot be installed"));
         return false;
@@ -512,10 +406,6 @@ bool KisPagePublicationCoordinator::KisPreparedPagePublication::
                 std::move(data->metadata), data->transaction, error)) return false;
         acceptSelection<true>(state.proofs, data->changes);
         acceptSelection<false>(state.removals, data->changes);
-        if (data->surfaceChange.after.surface.isValid()) {
-            if (data->surfaceIndex >= 0) state.surfaceChanges[data->surfaceIndex] = data->surfaceChange;
-            else state.surfaceChanges.push_back(data->surfaceChange);
-        }
         return true;
     };
     auto install = [&] {
@@ -699,14 +589,6 @@ KisPagePublicationCoordinator::KisPagePublicationCoordinator(
     Q_ASSERT(m_prepareAbort);
 }
 
-bool KisPagePublicationCoordinator::configureDerivedExtentLocked(KisSurfaceId surface)
-{
-    KisSurfaceEpochState state;
-    if (m_operational || m_derivedExtentSurface.isValid() || !surface.isValid()
-        || !m_epochs.surfaceState(surface, {}, &state)) return false;
-    m_derivedExtentSurface = surface;
-    return true;
-}
 
 bool KisPagePublicationCoordinator::resolveSurfaceLocked(KisSurfaceId surface,
                                                          const KisPageReadView &view,
@@ -955,7 +837,7 @@ bool KisPagePublicationCoordinator::stagePageRemovalLocked(const KisPageTransact
         KisPageStoreDetail::setError(error, QStringLiteral("conditional page removal changed during preparation"));
         return false;
     }
-    if (!update.prepareSurfaceLocked(error) || !update.tryAcceptLocked(ownerLock, error)) return false;
+    if (!update.tryAcceptLocked(ownerLock, error)) return false;
     ownerLock.unlock();
     update.finishUnlocked(ownerLock);
     ownerLock.relock();
@@ -975,61 +857,7 @@ KisPreparedPageSet KisPagePublicationCoordinator::preparedPagesLocked(const KisP
     return result.isValid() ? result : KisPreparedPageSet();
 }
 
-bool KisPagePublicationCoordinator::transactionDirtyExtentLocked(
-    const KisPageTransaction &transaction, KisSurfaceId surface, QRect *extent) const
-{
-    if (!extent || !hasActiveTransactionLocked(transaction)) return false;
-    KisSurfaceEpochState state;
-    if (!resolveSurfaceLocked(surface, KisPageReadView::transactionOverlay(transaction.id), &state)) return false;
-    qint64 left = std::numeric_limits<qint32>::max(), top = left;
-    qint64 right = std::numeric_limits<qint32>::min(), bottom = right;
-    bool changed = false;
-    const auto include = [&](const KisPageKey &key) {
-        if (!(key.surface == surface)) return;
-        changed = true;
-        left = qMin(left, qint64(key.page.column)); right = qMax(right, qint64(key.page.column));
-        top = qMin(top, qint64(key.page.row)); bottom = qMax(bottom, qint64(key.page.row));
-    };
-    const auto found = m_preparedTransactions.find(transaction.id.value);
-    if (found != m_preparedTransactions.cend()) {
-        for (const auto &entry : found->second->proofs) include(entry.first);
-        for (const auto &key : found->second->removals) include(key);
-    }
-    if (!changed) { *extent = {}; return true; }
-    left *= state.logicalPageExtent.width(); right = (right + 1) * state.logicalPageExtent.width() - 1;
-    top *= state.logicalPageExtent.height(); bottom = (bottom + 1) * state.logicalPageExtent.height() - 1;
-    if (left < std::numeric_limits<qint32>::min() || top < std::numeric_limits<qint32>::min() ||
-        right > std::numeric_limits<qint32>::max() || bottom > std::numeric_limits<qint32>::max() ||
-        right - left >= std::numeric_limits<qint32>::max() || bottom - top >= std::numeric_limits<qint32>::max()) return false;
-    *extent = QRect(QPoint(qint32(left), qint32(top)), QPoint(qint32(right), qint32(bottom)));
-    return true;
-}
 
-bool KisPagePublicationCoordinator::captureAllocatedPageInputsLocked(
-    KisSurfaceId surface, const KisPageTransaction &transaction, KisImageEpochRootSnapshot *root,
-    KisPageKeyStorage *additions, KisPageKeyStorage *removals) const
-{
-    if (!m_operational || !surface.isValid()) return false;
-    if (!transaction.isValid()) {
-        *root = m_epochs.captureCommittedRoot();
-        return root->isValid();
-    }
-    if (!hasActiveTransactionLocked(transaction)) return false;
-    *root = m_epochs.root(transaction.baseEpoch);
-    const auto found = m_preparedTransactions.find(transaction.id.value);
-    if (found != m_preparedTransactions.cend()) {
-        // One owner cut; export only keys needed by this full enumeration.
-        // No proof/provider/surface facts or pixel retention are required.
-        const auto &delta = *found->second;
-        additions->reserve(delta.proofs.size());
-        removals->reserve(delta.removals.size());
-        for (const auto &entry : delta.proofs)
-            if (entry.first.surface == surface) additions->push_back(entry.first);
-        for (const auto &key : delta.removals)
-            if (key.surface == surface) removals->push_back(key);
-    }
-    return root->isValid();
-}
 
 KisImageEpochCommitTicket KisPagePublicationCoordinator::commitLocked(const KisPageTransaction &transaction,
                                                                       const KisPreparedPageSet &preparedPages,
@@ -1249,7 +1077,7 @@ KisImageEpochCommitTicket KisPagePublicationCoordinator::commitInputLocked(
         diagnostic.next(Phase::CommitEpochPrepare, pageWork);
         KisImageEpochCommitResult candidateFailure;
         auto &rootCandidate = preparedCommit.epoch;
-        rootCandidate = m_epochs.prepareCommit(transaction, owned, &candidateFailure, bool(retainedAfter), m_derivedExtentSurface);
+        rootCandidate = m_epochs.prepareCommit(transaction, owned, &candidateFailure, bool(retainedAfter));
         diagnostic.next(Phase::CommitTransitionPreflight, publicationTransitionCount);
         auto &publication = preparedCommit.metadata;
         if (repair && repairBase == currentRoot.epoch() && !changesSurfaceDefault) {

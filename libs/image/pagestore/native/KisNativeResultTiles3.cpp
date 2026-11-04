@@ -19,6 +19,7 @@ struct KisNativeResultProtocol::Impl::ReadLease final : KisTilePageStoreLease {
         bool readPinned() const override { return pinned; }
         ReadPinResult repinRead() override {
             if (pinned) return ReadPinResult::Ready;
+            if (owner->iteratorBody()) return ReadPinResult::Reselect;
             KisCpuResidentReadStatus status;
             pinned = binding->acquireRead(expected.allocationIdentity(), false, &status) != nullptr;
             if (status == KisCpuResidentReadStatus::InvalidIdentity) return ReadPinResult::Stale;
@@ -41,6 +42,7 @@ struct KisNativeResultProtocol::Impl::DefaultLease final : KisTilePageStoreLease
     bool reusableReadCache() const override { return true; }
     bool readPinned() const override { return pinned; }
     ReadPinResult repinRead() override {
+        if (owner->iteratorBody()) return ReadPinResult::Reselect;
         { QMutexLocker lock(&owner->gate); if (revision != owner->defaultRevision) return ReadPinResult::Stale; }
         if (!pinned) pinned = tile->blockSwapping();
         return pinned ? ReadPinResult::Ready : ReadPinResult::Unavailable;
@@ -166,7 +168,10 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
         auto result = std::make_unique<DefaultLease>(); result->owner = shared_from_this();
         { QMutexLocker lock(&gate);
           result->tile = defaultBacking; result->tile->ref(); result->revision = defaultRevision; }
-        return result->repinRead() == KisTilePageStoreLease::ReadPinResult::Ready ? TileLease(result.release()) : TileLease{};
+        // Selection above has already resolved this caller's producer. Initial
+        // pinning consumes that fact; only a dormant cache needs re-selection.
+        result->pinned = result->tile->blockSwapping();
+        return result->pinned ? TileLease(result.release()) : TileLease{};
     }
     std::unique_ptr<ReadLease> result;
     if (cache && *cache) {
@@ -176,7 +181,8 @@ TileLease KisNativeResultProtocol::Impl::acquireTile(qint32 col, qint32 row, Acc
     }
     if (!result) result = std::make_unique<ReadLease>();
     result->owner = shared_from_this(); result->binding = std::move(binding); result->expected = expected; result->tile = tile;
-    return result->repinRead() == KisTilePageStoreLease::ReadPinResult::Ready ? TileLease(result.release()) : TileLease{};
+    result->pinned = result->binding->acquireRead(expected.allocationIdentity(), false) != nullptr;
+    return result->pinned ? TileLease(result.release()) : TileLease{};
 }
 
 std::shared_ptr<const KisPageStoreIteratorReadScope> KisNativeResultProtocol::captureIteratorScope(
@@ -529,7 +535,7 @@ try {
     }
     for (const auto *row : rows) missing -= QRect(row->page->key.page.column, row->page->key.page.row, 1, 1);
     if (!missing.isEmpty()) {
-        freshRows.owner = owner; freshRows.body = owner->checkout();
+        freshRows.owner = owner; freshRows.body = owner->checkout(history.get());
         if (!freshRows.body) return false;
         auto *body = freshRows.body;
         for (const auto &part : missing)

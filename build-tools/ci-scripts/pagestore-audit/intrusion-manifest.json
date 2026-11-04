@@ -20,13 +20,13 @@
       "path": "libs/image/tiles3/kis_tile.h",
       "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
       "replacement-type": "fixed source-bound read/write capabilities",
-      "runtime-counter": "existing:Store capability snapshots plus nested tile lifetime tests",
+      "runtime-counter": "static-only: source-bound native state and exact nested-lifetime tests",
       "static-callers": [
         "KisTile::lockForRead",
         "KisTile::lockForWrite",
         "KisTile::unlockForRead",
         "KisTile::unlockForWrite",
-        "KisTiledDataManagerPageStoreBackend::selectCurrentReadTile"
+        "KisNativeResultProtocol::selectReadTile"
       ],
       "status": "quarantined",
       "symbols": [
@@ -37,7 +37,7 @@
         "m_pageStoreBridge",
         "m_pageStoreLeases"
       ],
-      "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator adapters"
+      "target-owner": "KisNativeResultProtocol original selected read/write lease"
     },
     {
       "category": "compatibility-intrusion",
@@ -54,10 +54,11 @@
       "path": "libs/image/tiles3/kis_tile.cc",
       "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
       "replacement-type": "operation-scoped read/write guard",
-      "runtime-counter": "static-only: four source-bound refresh callers plus Store request/materialization snapshots",
+      "runtime-counter": "static-only: original selection/cache/borrow contract tests",
       "static-callers": [
         "KisTiledDataManager::getTile",
-        "KisTiledDataManager::refreshPageStorePages"
+        "KisNativeResultProtocol::Impl::acceptBody",
+        "KisNativeResultProtocol::Impl::cancelBody"
       ],
       "status": "quarantined",
       "symbols": [
@@ -65,7 +66,7 @@
         "ensurePageStoreWriteAccess",
         "setPageStoreBridge"
       ],
-      "target-owner": "KisTiledDataManagerPageStoreBackend narrow adapter"
+      "target-owner": "KisNativeResultProtocol original Body and Tile leases"
     },
     {
       "category": "compatibility-intrusion",
@@ -83,7 +84,7 @@
       "path": "libs/image/tiles3/KisTilePageStoreBridge.h",
       "remove-after": "R4/M8 all legacy tile callers migrated",
       "replacement-type": "KisCpuReadGuard or KisCpuWriteGuard",
-      "runtime-counter": "static-only: lease RAII terminals plus Store active read/write capability snapshots",
+      "runtime-counter": "static-only: original pins, body activity and final-release behavior",
       "static-callers": [
         "KisTile::ensurePageStoreWriteAccess",
         "KisTile::lockForRead"
@@ -94,15 +95,14 @@
         "KisTilePageStoreBridge",
         "acquireTile"
       ],
-      "target-owner": "KisPageReadCoordinator and KisPageWriteCoordinator"
+      "target-owner": "KisNativeResultProtocol::Impl original Resource and Body"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "KisTiledDataManager",
+      "current-owner": "KisTiledDataManager public ABI; KisNativeResultProtocol owns selection and work",
       "facts-owned": [
-        "compatibility-index-extent-delivery",
-        "default-adapter-backing-lifetime",
-        "legacy-operation-routing"
+        "public-ABI-routing",
+        "adapter-index-and-extent"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreHistoryClearStagesAbsence",
@@ -115,9 +115,9 @@
       ],
       "id": "BR1-PS-DM-ROUTING-004",
       "path": "libs/image/tiles3/kis_tiled_data_manager.cc",
-      "remove-after": "R4/M8 backend becomes semantic-only adapter",
-      "replacement-type": "operation-local prepared compatibility delivery under the original manager gate; canonical authority remains in PageStore",
-      "runtime-counter": "existing:KisPageStoreSessionStats",
+      "remove-after": "Keep only real public raw/external boundaries while those callers exist",
+      "replacement-type": "direct native original-row operations; no generic CPU transaction bridge",
+      "runtime-counter": "static-only: native state and actual diagnostics; final whole net price separate",
       "static-callers": [
         "KisTiledDataManager::writeBytes",
         "KisTiledDataManager::readBytes",
@@ -128,20 +128,20 @@
         "KisTiledDataManager::restoreHistory",
         "KisTiledDataManager::read"
       ],
-      "status": "inventoried",
+      "status": "callers-migrated",
       "symbols": [
-        "m_pageStoreBackend",
-        "PreparedTileUpdates",
+        "m_nativeResult",
         "capturePageStoreReadScope",
         "writePageStoreOperation"
       ],
-      "target-owner": "KisPageStore facade and store-private coordinators"
+      "target-owner": "KisNativeResultProtocol"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "original operation node borrows the managed Frame or retained adapter body; canonical page admission remains in the original Session",
+      "current-owner": "original Body/Page claim and history owner",
       "facts-owned": [
-        "transaction-lifetime"
+        "operation-admission",
+        "page-writer"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent",
@@ -149,29 +149,29 @@
         "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ADMISSION-005",
-      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "Discovery remains while public adapter nesting/barrier consumers exist; retired weak registry has no remaining consumers.",
-      "replacement-type": "one intrusive operation index with same-node promotion and nonzero retained acquisition",
-      "runtime-counter": "existing:KisPageStoreSessionStats writePageClaimChecks/writePageClaimConflicts/activeCpuWritePages",
+      "path": "libs/image/pagestore/native/KisNativeResultWrite.cpp",
+      "remove-after": "Old backend removed; retain actual producer exclusion",
+      "replacement-type": "one original claim per page; actual foreign conflicts rollback partial claims and wait",
+      "runtime-counter": "existing: native state activeResults; original range wait phase",
       "static-callers": [
-        "OperationFrame::begin",
-        "OperationFrame::legacyForPage",
-        "beginMutationBatch",
-        "detachFromBackend"
+        "KisNativeResultProtocol::prepareWrite",
+        "KisNativeResultProtocol::pixelOperation",
+        "KisNativeResultProtocol::historyPixelOperation"
       ],
       "status": "callers-migrated",
       "symbols": [
-        "operations"
+        "checkout",
+        "claimRows",
+        "writerWaiters"
       ],
-      "target-owner": "original operation, with no paid weak registry node or second transaction"
+      "target-owner": "KisNativeResultProtocol::Impl"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "original adapter body retained by actual clients/leases; anonymous raw lease registry only for barrier membership",
+      "current-owner": "original Body raw/iterator clients and borrows",
       "facts-owned": [
-        "legacy-client-lifetime",
-        "legacy-unlock",
-        "raw-lease-barrier-membership"
+        "real-client-lifetime",
+        "outcome"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
@@ -181,28 +181,28 @@
         "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ANON-006",
-      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "R4/M8 public tile raw-pointer ABI migrated",
-      "replacement-type": "original body reference returned after tile barrier; original Session owns terminal cancellation",
-      "runtime-counter": "existing:KisPageStoreSessionStats activeTransactions/activeCpuWritePages/committedTransactions",
+      "path": "libs/image/pagestore/native/KisNativeResultTiles3.cpp",
+      "remove-after": "Old backend removed; public raw ABI still requires real borrowed lifetime",
+      "replacement-type": "final original client/borrow consumes original outcome; no anonymous transaction registry",
+      "runtime-counter": "static-only: exact failure/cancel/final-release tests and original state",
       "static-callers": [
-        "writableTransaction",
-        "registerAnonymousLease",
-        "cancelAnonymousLeasesForBarrier"
+        "KisTile::lockForRead",
+        "KisTile::lockForWrite",
+        "KisTile::unlockForWrite"
       ],
       "status": "callers-migrated",
       "symbols": [
-        "anonymousLeases",
-        "operations",
-        "KisTiledDataManagerPageStoreLease"
+        "finishRaw",
+        "finishIterator",
+        "acquireTile"
       ],
-      "target-owner": "original batch and mutation scope, each for its own lifetime fact"
+      "target-owner": "KisNativeResultProtocol::Impl"
     },
     {
       "category": "compatibility-intrusion",
-      "current-owner": "original adapter body with live iterator clients and embedded references, discovered through the single operation index",
+      "current-owner": "original Body iterator client scope",
       "facts-owned": [
-        "iterator-write-scope"
+        "iterator-client-lifetime"
       ],
       "failure-tests": [
         "KisTiledDataManagerTest::testIteratorNestedWriteScope",
@@ -210,21 +210,21 @@
         "KisTiledDataManagerTest::testPageStoreFinalAdapterCannotRevive"
       ],
       "id": "BR1-PS-BACKEND-ITERATOR-007",
-      "path": "libs/image/pagestore/KisTiledDataManagerPageStoreBackend.cpp",
-      "remove-after": "R4/M8 iterator adapter migrated",
-      "replacement-type": "same original mutation client scope; non-owning discovery cannot revive terminal bodies",
-      "runtime-counter": "existing:KisPageMutationStatistics sessionsCreated/pagesSealed plus nested iterator scope tests",
+      "path": "libs/image/pagestore/native/KisNativeResultTiles3.cpp",
+      "remove-after": "Old backend removed; actual raw/iterator ABI retained",
+      "replacement-type": "owner-local original Body discovery and actual last-client/borrow completion",
+      "runtime-counter": "static-only: actual nested iterator, parked cache and cross-thread release tests",
       "static-callers": [
         "KisTiledDataManager::beginIteratorWriteScope",
         "KisBaseIterator"
       ],
       "status": "callers-migrated",
       "symbols": [
-        "operations",
+        "iteratorBody",
         "clients",
-        "beginIteratorMutationScope"
+        "beginIterator"
       ],
-      "target-owner": "KisPageMutationSession adapter handle"
+      "target-owner": "KisNativeResultProtocol::Impl"
     },
     {
       "category": "canonical",

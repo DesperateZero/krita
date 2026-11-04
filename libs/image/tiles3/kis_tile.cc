@@ -115,11 +115,16 @@ bool KisTile::releasePageStoreLeasesLocked(TileLeaseRelease &afterUnlock) const
     if (m_lockCounter != 0) return true;
     auto &read = m_pageStoreLeases[ReadLease];
     if (read) {
+        // An original producer's private read is valid only for this borrow.
+        // Finishing it may leave the producer parked, not published. The next
+        // caller must select its own current/private view before reusing bytes.
+        if (!read->reusableReadCache()) m_pageStoreNativeReadReady.storeRelease(0);
         KIS_SAFE_ASSERT_RECOVER_NOOP(read->finish(&afterUnlock));
         if (!read->reusableReadCache()) read = read->takeReadCache();
     }
     auto &write = m_pageStoreLeases[WriteLease];
     if (write) {
+        m_pageStoreNativeReadReady.storeRelease(0);
         KIS_SAFE_ASSERT_RECOVER_NOOP(write->finish(&afterUnlock));
         if (write->reusableReadCache()) read = std::move(write);
         else { read = write->takeReadCache(); write.reset(); }
@@ -355,8 +360,9 @@ bool KisTile::lockForRead() const
             if (m_pageStoreNativeReadReady.loadRelaxed()) {
                 auto &cache = m_pageStoreLeases[ReadLease];
                 if (cache) {
+                    using ReadPinResult = KisTilePageStoreLease::ReadPinResult;
                     const auto result = cache->repinRead();
-                    if (result == KisTilePageStoreLease::ReadPinResult::Ready) {
+                    if (result == ReadPinResult::Ready) {
                         Q_ASSERT(cache->tileData() == m_tileData);
                         ++m_lockCounter;
                         return succeeded();
@@ -364,27 +370,31 @@ bool KisTile::lockForRead() const
                     // A refused RAM pin is a real failure of this acquisition,
                     // not stale identity. Reissuing selection here would retry
                     // the same failed I/O and hide failure from the caller.
-                    if (result == KisTilePageStoreLease::ReadPinResult::Unavailable) return false;
+                    if (result == ReadPinResult::Unavailable) return false;
                     // Retirement permanently closes this binding. This
                     // wrapper still owns the original immutable/COW storage,
                     // so retain its old pixels without reconnecting current.
                     // An identity mismatch is different: never read a retagged
                     // backing through this cache. Idle-reference migration
                     // must replace this ownership before removing that ref.
-                    if (result != KisTilePageStoreLease::ReadPinResult::Retired) {
+                    if (result == ReadPinResult::Reselect) {
+                        m_pageStoreNativeReadReady.storeRelease(0);
+                    } else if (result != ReadPinResult::Retired) {
                         auto borrow = acquirePageStoreLease(false, false);
                         if (!borrow || borrow->tileData() != m_tileData) return false;
                         cache = std::move(borrow);
                         ++m_lockCounter;
                         return succeeded();
+                    } else {
+                        cache.reset();
                     }
-                    cache.reset();
                 }
-                if (!m_tileData->blockSwapping())
-                    return false;
-                ++m_lockCounter;
-                Q_ASSERT(m_tileData->data());
-                return succeeded();
+                if (m_pageStoreNativeReadReady.loadRelaxed()) {
+                    if (!m_tileData->blockSwapping()) return false;
+                    ++m_lockCounter;
+                    Q_ASSERT(m_tileData->data());
+                    return succeeded();
+                }
             }
             TileLease lease = acquirePageStoreLease(false);
             if (!lease || !lease->tileData())

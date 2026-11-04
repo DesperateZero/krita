@@ -140,24 +140,28 @@ try {
 
 bool KisNativeResultProtocol::clear(QString *why)
 try {
+    Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
+    auto &b = *p.body;
     {
         QMutexLocker bodies(&d->bodyGate);
         QMutexLocker lock(&d->gate);
-        for (auto &item : d->pages) if (auto *writer = item.second.writer)
-            if ((!writer->iterator && !writer->raw) || writer->thread != QThread::currentThreadId()) {
+        size_t registered = 0;
+        for (auto &body : d->bodies) if (body.thread) {
+            ++registered;
+            if (&body != &b && ((!body.iterator && !body.raw) || body.thread != QThread::currentThreadId())) {
                 error(why, "clear conflicts with explicit or foreign result work"); return false;
             }
-        for (auto &body : d->bodies) if (body.iterator && body.clients) {
-            if (body.thread != QThread::currentThreadId()) { error(why, "clear conflicts with foreign iterator"); return false; }
         }
+        // A checkout may have reserved active before acquiring bodyGate to
+        // construct its Body. It too must finish before a whole-surface cut.
+        if (registered != d->active) { error(why, "clear conflicts with result admission"); return false; }
+        d->surfaceWriter = &b;
         for (auto &body : d->bodies) if (body.iterator && body.clients) body.failed = body.revoked = true;
         for (auto &item : d->pages) if (auto *writer = item.second.writer) {
             writer->failed = writer->revoked = true; item.second.writer = nullptr;
         }
         d->notifyWriters();
     }
-    Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
-    auto &b = *p.body;
     size_t size;
     { QMutexLocker lock(&d->gate); size = d->pages.size(); }
     b.rows.resize(size); b.moves.reserve(2 * size);
@@ -269,6 +273,38 @@ bool KisNativeResultProtocol::copyFrom(const Snapshot &source, const QRect &rect
     return copyFrom(source, rect, nullptr, why);
 }
 
+bool KisNativeResultProtocol::copyExternal(KisTiledDataManager &source, const QRect &rect,
+                                          bool oldData, QString *why)
+try {
+    Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
+    auto &b = *p.body;
+    if (!d->bindRows(b, rect, why)) return false;
+    const auto bpp = d->descriptor.format.pixelStride;
+    const bool sameDefault = std::memcmp(source.defaultPixel(), d->descriptor.format.defaultPixel.constData(), bpp) == 0;
+    for (size_t index = 0; index < b.rows.size(); ++index) {
+        auto &row = b.rows[index]; const auto key = row.page->key.page;
+        bool present = false;
+        auto tile = oldData ? source.getOldTile(key.column, key.row, present)
+                            : source.getReadOnlyTileLazy(key.column, key.row, present);
+        if (!tile || !tile->lockForRead()) { error(why, "external source pin refused"); return false; }
+        const auto unpin = qScopeGuard([&] { tile->unlockForRead(); });
+        const bool full = row.local == QRect(0, 0, 64, 64);
+        // Absence is an input fact, not a full default pixel result followed
+        // by a second purge transaction. The original row carries it to cut.
+        row.remove = full && !present && sameDefault;
+        row.selectionOnly = row.remove && !row.before.resource;
+        row.discard = full;
+        const QRect target(key.column * 64, key.row * 64, 64, 64);
+        if (!d->prepareTargets(b, nullptr, target, 0, nullptr, why, index, index + 1)) return false;
+        if (!row.pixels) continue;
+        const auto *pixels = tile->data(); if (!pixels) return false;
+        for (int y = row.local.top(); y <= row.local.bottom(); ++y)
+            std::memcpy(row.pixels + (y * 64 + row.local.x()) * bpp,
+                pixels + (y * 64 + row.local.x()) * bpp, row.local.width() * bpp);
+    }
+    d->finishProducer(b); return accept(p, why);
+} catch (const std::bad_alloc &) { error(why, "external source copy storage refused"); return false; }
+
 bool KisNativeResultProtocol::copyFrom(const Snapshot &source, const QRect &requested,
     KisTiledDataManager *liveSource, QString *why)
 try {
@@ -302,7 +338,21 @@ try {
     }
     if (rect.isEmpty()) return true;
     Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
-    auto &b = *p.body; if (!d->bindRows(b, rect, why)) return false;
+    auto &b = *p.body;
+    bool waited = false;
+    if (!d->bindRows(b, rect, why, false, true) || !d->claimRows(b, 0, true, why, &waited)) return false;
+    if (waited && rect != requested) {
+        // The selected source is immutable. A competing destination producer
+        // can expand the affected range while we wait. Never omit its new
+        // pages using the earlier sparse-range calculation.
+        QMutexLocker lock(&d->gate);
+        for (const auto &item : d->pages) if (item.second.current.resource) {
+            const QRect hit = requested.intersected(QRect(item.first.second * 64, item.first.first * 64, 64, 64));
+            if (!hit.isEmpty() && !rect.contains(hit)) {
+                error(why, "copy destination range changed while waiting"); return false;
+            }
+        }
+    }
     const auto bpp = d->descriptor.format.pixelStride;
     using Imported = std::map<KisTileData *, Impl::Resource *, std::less<KisTileData *>,
         Alloc<std::pair<KisTileData *const, Impl::Resource *>>>;
@@ -396,7 +446,14 @@ try {
     Prepared p; p.owner = d; p.body = d->checkout(); if (!p.body) return false;
     auto &b = *p.body;
     size_t size;
-    { QMutexLocker lock(&d->gate); size = d->pages.size(); }
+    {
+        QMutexLocker lock(&d->gate);
+        if (d->active != 1 || d->surfaceWriter || d->closing) {
+            error(why, "trim conflicts with active result work"); return false;
+        }
+        d->surfaceWriter = &b;
+        size = d->pages.size();
+    }
     b.rows.resize(size); b.moves.reserve(2 * size);
     {
         QMutexLocker lock(&d->gate); if (size != d->pages.size()) return false;

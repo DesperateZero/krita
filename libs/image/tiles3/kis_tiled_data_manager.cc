@@ -803,17 +803,7 @@ void KisTiledDataManager::bitBltImpl(KisTiledDataManager *srcDM, const QRect &re
         } else {
             // A real external source boundary, not a route through the old
             // destination private/seal/publication pipeline.
-            copied = m_nativeResult->mutate(rect, [&](qint32 col, qint32 row, quint8 *pixels, quint32 stride, const QRect &local) {
-                bool present;
-                auto tile = useOldSrcData ? srcDM->getOldTile(col, row, present) : srcDM->getReadOnlyTileLazy(col, row, present);
-                if (!tile || !tile->lockForRead()) return false;
-                const auto unpin = qScopeGuard([&] { tile->unlockForRead(); });
-                const auto *source = tile->data(); if (!source) return false;
-                for (int y = local.top(); y <= local.bottom(); ++y)
-                    std::memcpy(pixels + y * stride + local.x() * m_pixelSize,
-                        source + (y * 64 + local.x()) * m_pixelSize, local.width() * m_pixelSize);
-                return true;
-            }, true, {}, &error);
+            copied = m_nativeResult->copyExternal(*srcDM, rect, useOldSrcData, &error);
         }
         if (!copied) KisStrokeJobFailureContext::reportFailure(error);
         return;

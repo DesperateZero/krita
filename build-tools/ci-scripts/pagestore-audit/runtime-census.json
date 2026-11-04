@@ -9,13 +9,13 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "KisTile owns at most one exact read and one writable source-bound capability in fixed slots. Cache validity, pre-exposure write intent, native-pin handoff, read-first/write-first nesting, history, cancellation, and terminal release have direct behavior tests.",
+      "evidence": "Real read/write lease slots and pin ownership; dormant read cache reselects iterator context, private caches invalidate on final borrow/cancel.",
       "id": "legacy-tile-leases",
       "manifest-entries": [
         "BR1-PS-TILE-STATE-001",
         "BR1-PS-TILE-LEASE-003"
       ],
-      "metrics-source": "source-bound reverse callgraph, Store capability snapshots, and nested tile lifetime tests",
+      "metrics-source": "Native original state and actual diagnostic phases; source-bound graph and exact contract tests, not disabled NR104_CENSUS counters",
       "representative-tests": [
         "KisTiledDataManagerTest::testPageStoreNestedTileCapabilityLifetime",
         "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter"
@@ -31,13 +31,13 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "All four old raw rectangular refresh callers have migrated to original prepared delivery or batch D/B cancellation. Public read selection and cache reuse remain live; no late whole-rectangle capture/resolve recovery remains. Source-bound graph and behavior evidence qualify these routes, not zero-free or net performance.",
+      "evidence": "All ordinary manager consumers use native original rows. ExternalProtocol is a real source boundary; source absence goes directly to original result row. No old CPU bridge or separate delivery.",
       "id": "tile-refresh-and-manager-routing",
       "manifest-entries": [
         "BR1-PS-TILE-BRIDGE-002",
         "BR1-PS-DM-ROUTING-004"
       ],
-      "metrics-source": "source-bound reverse callgraph and KisPageStoreSessionStats",
+      "metrics-source": "Native original state and actual diagnostic phases; source-bound graph and exact contract tests, not disabled NR104_CENSUS counters",
       "representative-tests": [
         "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
         "KisTiledDataManagerTest::testPageStoreResidentReadReusesNativeGuard",
@@ -49,63 +49,23 @@
     {
       "dimensions": {
         "fallback": [],
-        "live": [
-          "KisPageStoreSessionStats.activeControlWritePages",
-          "KisPageStoreSessionStats.activeCpuWritePages"
-        ],
+        "live": [],
         "operation": [],
-        "page": [
-          "KisPageMutationStatistics.generationsReserved"
-        ],
-        "peak": [
-          "KisPageMutationStatistics.maximumPinnedPagesPerExecution"
-        ],
-        "terminal": [
-          "KisPageMutationStatistics.pagesSealed",
-          "KisPageMutationStatistics.pagesCancelled"
-        ]
+        "page": [],
+        "peak": [],
+        "terminal": []
       },
-      "evidence": "Legacy and operation-wide backend reservations enter the canonical KisPageWriteAdmission owner. Store and mutation snapshots expose claim probes/conflicts, live claims, generations, pins, and terminal seal/cancel without a backend shadow census.",
+      "evidence": "Original Page.writer and Body checkout enforce explicit history owner and all-range admission; actual foreign wait reselects before image and copy range.",
       "id": "backend-writer-admission",
       "manifest-entries": [
         "BR1-PS-BACKEND-ADMISSION-005"
       ],
-      "metrics-source": "KisPageStoreSessionStats and KisPageMutationStatistics",
+      "metrics-source": "Native original state and actual diagnostic phases; source-bound graph and exact contract tests, not disabled NR104_CENSUS counters",
       "representative-tests": [
         "KisTiledDataManagerTest::testPageStoreCompatibilityBehavior",
         "KisTiledDataManagerTest::testPageStorePixelOperationConcurrent"
       ],
-      "status": "existing"
-    },
-    {
-      "dimensions": {
-        "fallback": [],
-        "live": [
-          "KisPageStoreSessionStats.activeTransactions",
-          "KisPageStoreSessionStats.preparedPageProofs"
-        ],
-        "operation": [
-          "KisPageStoreSessionStats.committedTransactions"
-        ],
-        "page": [],
-        "peak": [],
-        "terminal": [
-          "KisPageStoreSessionStats.committedTransactions"
-        ]
-      },
-      "evidence": "Independent standalone operations own independent transactions in their original mutation scope. Explicit iterator/history scopes still group their real clients. The backend anonymous lease list is only raw barrier membership, not an anonymous transaction cohort. Refused physical cancellation and owned abort stay in the original scope/orphan until the existing automatic retry accepts them; finished facades cannot retain idle responsibility.",
-      "id": "anonymous-compatibility-transactions",
-      "manifest-entries": [
-        "BR1-PS-BACKEND-ANON-006"
-      ],
-      "metrics-source": "KisPageStoreSessionStats",
-      "representative-tests": [
-        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
-        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
-        "KisTiledDataManagerTest::testPageStoreOwnedCancellationUnderPressure",
-        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease"
-      ],
-      "status": "existing"
+      "status": "static-only"
     },
     {
       "dimensions": {
@@ -116,14 +76,37 @@
         "peak": [],
         "terminal": []
       },
-      "evidence": "Writable iterators on one thread share the backend native mutation client scope; the last client seals after tile guards end. Nested lifetime, failure, fixed-view, live-write, and cross-thread final-destruction tests cover the boundary.",
+      "evidence": "Old anonymous operation/transaction registry deleted. Existing raw/iterator clients use the original Body and finish on actual last return, including foreign thread and failure.",
+      "id": "anonymous-compatibility-transactions",
+      "manifest-entries": [
+        "BR1-PS-BACKEND-ANON-006"
+      ],
+      "metrics-source": "Native original state and actual diagnostic phases; source-bound graph and exact contract tests, not disabled NR104_CENSUS counters",
+      "representative-tests": [
+        "KisTiledDataManagerTest::testPageStoreCancelledPrivateClient",
+        "KisTiledDataManagerTest::testPageStoreClearBarrierCancelsLegacyWriter",
+        "KisTiledDataManagerTest::testPageStoreOwnedCancellationUnderPressure",
+        "KisTiledDataManagerTest::testPageStoreFinishedFacadeWithNativeLease"
+      ],
+      "status": "static-only"
+    },
+    {
+      "dimensions": {
+        "fallback": [],
+        "live": [],
+        "operation": [],
+        "page": [],
+        "peak": [],
+        "terminal": []
+      },
+      "evidence": "Original owner-local iterator Body list serves nested clients; terminal detaches same body, exact read/write/cancel behavior retained.",
       "id": "iterator-compatibility-boundaries",
       "manifest-entries": [
         "BR1-PS-BACKEND-ITERATOR-007",
         "BR1-PS-ITERATOR-BASE-012",
         "BR1-PS-ACCESSOR-RANDOM-013"
       ],
-      "metrics-source": "KisPageMutationStatistics, source-bound reverse callgraph, and iterator behavior tests",
+      "metrics-source": "Native original state and actual diagnostic phases; source-bound graph and exact contract tests, not disabled NR104_CENSUS counters",
       "representative-tests": [
         "KisTiledDataManagerTest::testIteratorNestedWriteScope",
         "KisTiledDataManagerTest::testPageStoreIteratorFixedView"

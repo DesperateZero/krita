@@ -80,19 +80,12 @@ private:
     // facts obtained by the same lookup. Public resolve keeps its bool API.
     enum class ResolutionKind { Missing, Default, Explicit };
     ResolutionKind resolveVersion(const KisPageKey &, KisPageVersion *, KisPageViewValue **selected = nullptr) const;
-    // Only a retained capture supplies these sorted immutable inputs. Export
-    // directly into one exact-sized manifest; no intermediate root/delta copy.
-    KisImageEpochSnapshot snapshotWithChanges(KisPageViewValue *const *values, size_t versionCount,
-        const KisPageKey *removals, size_t removalCount,
-        const KisSurfaceEpochState *surfaces, size_t surfaceCount) const;
     size_t surfaceCount() const;
     const KisSurfaceEpochState &surfaceAt(size_t index) const;
     // Append the actual current->target version difference into the original
     // publication candidate. Shared immutable subtrees need no page visits.
     bool appendRestoreTargets(const KisImageEpochRootSnapshot &current,
         std::vector<KisPageVersion, KisMutationStorageAllocator<KisPageVersion>> *output) const;
-    QVector<KisLogicalPageId> allocatedPages(KisSurfaceId surface,
-        KisPageKeyStorage &additions, KisPageKeyStorage &removals) const;
     // Original publication owner supplies sorted removal keys and prepared
     // addition keys. No storage allocation occurs in this bounds query.
     bool contentExtentAfterPages(KisSurfaceId surface, QSize pageExtent,
@@ -289,16 +282,16 @@ private:
     bool prepareImpl(KisPageTransactionId transaction, const Proofs &proofs,
                      const Surfaces &surfaces, const Removals &removals, QString *error);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction, KisImageEpochCommitResult *failure,
-                                 bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+                                 bool retainAfter = false);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction,
         const struct KisPageOperationPublication &publication, KisImageEpochCommitResult *failure,
-        bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+        bool retainAfter = false);
     PreparedCommit prepareCommit(const KisPageTransaction &transaction,
         const KisPagePublicationDelta &publication, KisImageEpochCommitResult *failure,
-        bool retainAfter = false, KisSurfaceId derivedExtentSurface = {});
+        bool retainAfter = false);
     template<class Publication>
     PreparedCommit prepareCommitImpl(const KisPageTransaction &, const Publication *,
-        KisImageEpochCommitResult *, bool retainAfter, KisSurfaceId derivedExtentSurface);
+        KisImageEpochCommitResult *, bool retainAfter);
     using InstallMetadataFunction = bool (*)(void *, KisImageEpochId);
     bool installReservedRoot(PreparedRootReservation &candidate, void *context,
                              InstallMetadataFunction installMetadata,

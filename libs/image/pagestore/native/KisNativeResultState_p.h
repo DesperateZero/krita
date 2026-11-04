@@ -213,7 +213,7 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     KisPageOperationId nextOperation() { QMutexLocker lock(&gate);
         return operation == std::numeric_limits<quint64>::max() ? KisPageOperationId{} : KisPageOperationId{++operation}; }
     void ensureEdges(size_t n);
-    Body *checkout();
+    Body *checkout(const KisNativeHistory *historyOwner = nullptr);
     void returnBody(Body *) noexcept;
     void cancelBody(Body *) noexcept;
     void finishProducer(Body &) noexcept;
@@ -222,7 +222,7 @@ struct KisNativeResultProtocol::Impl : std::enable_shared_from_this<Impl>, KisTi
     void cancelHistorySegment(const std::shared_ptr<KisNativeHistory> &) noexcept;
     static void finishRaw(void *) noexcept;
     bool bindRows(Body &, const QRect &, QString *, bool append = false, bool stageOnly = false);
-    bool claimRows(Body &, size_t first, bool wait, QString *);
+    bool claimRows(Body &, size_t first, bool wait, QString *, bool *waited = nullptr);
     void notifyWriters() { if (writerWaiters) writersChanged.wakeAll(); }
     // Owner-local original bodies can be unlinked by a final foreign-thread
     // release. The atomic head only skips empty lookup; gate protects the list.

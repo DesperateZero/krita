@@ -1275,17 +1275,19 @@ def validate_ratchet(baseline: dict[str, Any], manifest: dict[str, Any]) -> list
         retry_begin = restore_text.find("for (;;) {")
         if retry_begin < 0 or "appendRestoreTargets(" in restore_text[retry_begin:]:
             errors.append("restore regenerates its immutable root difference inside metadata retries")
-        adapter_text = code_only((REPOSITORY_ROOT / "libs/image/tiles3/kis_tiled_data_manager.cc").read_text(encoding="utf-8"))
-        restore_install = adapter_text.find("const KisPageRestorationChanges &changes)", adapter_text.find("void installLocked("))
-        restore_install_end = adapter_text.find("void installReconciled(", restore_install)
-        if restore_install < 0 or restore_install_end < 0:
-            errors.append("restore direct-location installation boundary is missing")
-        else:
-            install = adapter_text[restore_install:restore_install_end]
-            if "changes.location(i)" not in install or "static_cast<KisTile *>(changes.location(i))" not in install:
-                errors.append("restore installation does not consume its original warm location")
-            if "borrowTileForPreparedUpdate" in install or "targets[i]" in install:
-                errors.append("restore installation re-resolves a prepared warm tile")
+        # The old manager PreparedTileUpdates restore callback is deleted.
+        # Native restore uses the same original-row adapter installation as
+        # every result; enforce location consumption at the real cut.
+        native = code_only(native_protocol_source())
+        start = native.find("publishing.next(KisPageStoreDiagnosticPhase::NativeSelectionInstalled")
+        end = native.find("publishing.next(KisPageStoreDiagnosticPhase::NativeAdapterInstalled", start)
+        install = native[start:end]
+        if start < 0 or end < 0 or "auto *tile = row.location;" not in install:
+            errors.append("native install lost original warm location")
+        if "table.installPreparedTile(row.adapter, created)" not in install:
+            errors.append("native install lost original cold adapter preparation")
+        if "getExistingTile" in install or "borrowTileForPreparedUpdate" in install:
+            errors.append("native install re-resolves a prepared warm tile")
         ledger_text = "\n".join(code_only((REPOSITORY_ROOT / "libs/image/pagestore" / name).read_text(encoding="utf-8"))
             for name in ("KisPageOwnerLedger.h", "KisPageOwnerLedger.cpp", "KisPageRetirementRecord_p.h"))
         for contract in ("acceptProjectedChanges", "acceptRetirementDebt", "acceptPreparedBackingChanges",

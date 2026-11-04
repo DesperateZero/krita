@@ -176,9 +176,11 @@ public:
     KisPageBackingUsage usage() const;
 
 private:
+    bool restore(const Snapshot &, const KisMementoSP &historyOwner, QString *);
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope> beginImport(QString *error = nullptr);
     std::unique_ptr<KisTiledDataManagerIteratorWriteScope> beginIterator(bool importing, QString *error);
     bool copyFrom(const Snapshot &, const QRect &, KisTiledDataManager *liveSource, QString *);
+    bool copyExternal(KisTiledDataManager &, const QRect &, bool oldData, QString *);
     bool historyPixelOperation(const QVector<QRect> &, const std::function<bool(KisPixelWriteCursor *)> &,
                                const KisMementoSP &, QString *);
     // Fault injection and internal census are accessible only to contract tests.
